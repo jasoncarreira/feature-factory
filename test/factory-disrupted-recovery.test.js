@@ -396,7 +396,7 @@ describe("factory disrupted run recovery", () => {
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
       writeJson(join(fixture.runDir, evidenceRef), { subject: "backend", attempt: 1, status: "pass", review_ready: true, head_sha: head });
       writeJson(join(fixture.runDir, reviewRef), {
-        subject: "backend", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
+        subject: "backend", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent", late_discovery_strike: false,
         remaining_fix_count: 1, required_fixes: ["missed category"],
         ownership_ratification: { schema_version: 1, paths: [] },
         remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "nonconvergent", scope_effect: "in-lane", likely_paths: ["README.md"], fix_owner: "backend" }] },
@@ -412,6 +412,7 @@ describe("factory disrupted run recovery", () => {
         ratified_paths: [],
         verdict: "REJECT",
         convergence: "nonconvergent",
+        late_discovery_strike: false,
         remaining_fix_count: 1,
       };
       const run = readJson(join(fixture.runDir, "run.json"));
@@ -541,12 +542,12 @@ function modernReviewedSlice(runDir, id, reviewedCommit, { status = "review", me
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   writeJson(join(runDir, evidenceRef), { subject: id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
   writeJson(join(runDir, reviewRef), {
-    subject: id, attempt: 1, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging",
+    subject: id, attempt: 1, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false,
     remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] },
   });
   const evidenceHash = fileHash(join(runDir, evidenceRef));
   const reviewHash = fileHash(join(runDir, reviewRef));
-  const history = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 };
+  const history = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 };
   return {
     id, stack: "backend", depends_on: [], declared_paths: [`${id}.txt`], effective_paths: [`${id}.txt`], status, attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash,
     review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, attempt_reviews: [history],

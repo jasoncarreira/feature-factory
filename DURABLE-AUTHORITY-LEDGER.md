@@ -102,7 +102,7 @@ boundary; they are not cryptographic authentication.
 |---|---|---|
 | Slice id/stack/dependencies, status, branch/worktree, attempt, evidence/review refs, successor `evidence_hash`/`review_hash`/`reviewed_commit`, blocked reason, and exact merge commit | `RETAIN` | Retain in `run.json.slices[]` through checked `factory slice-status` and `factory slice-merged`; the successor triple is all-or-none only for review/merged. |
 | Test/reproduction evidence exact bytes and binding: subject, attempt, status, `review_ready`, command bytes, exact result, observed head, and exact `changed_paths` where applicable | `RETAIN` | Retain the evidence ref/hash at the slice or repair transition. Commands and results are evidence bytes, not summaries. |
-| Independent review exact bytes and binding: subject, attempt, verdict, required fixes, review ref/hash, and exact reviewed commit where the subject has code bytes | `RETAIN` | Retain at the review transition; a later merge must consume the same review bytes and reviewed commit. |
+| Independent review exact bytes and binding: subject, attempt, verdict, convergence, required `late_discovery_strike`, remaining fix count, required fixes, review ref/hash, and exact reviewed commit where the subject has code bytes | `RETAIN` | Retain at the review transition and in append-only `attempt_reviews`; a later retry, merge, nonconvergence terminalization, or integration-amendment consumer must consume the same review bytes, reviewed commit, and strike marker. |
 | Required closed review `invariant_family_ledger` schema v1, including complete family/artifact dispositions, checked receipt refs/hashes, typed probe/result, reviewed commit, and unresolved findings | `RETAIN` | Retain inside the existing exact review bytes/hash. Every delivery-envelope review attempt contains exactly one current disposition per family. Slice-review publication/history/merge re-observe each exact completed execution claim and receipt; APPROVE requires every outcome pass and no unresolved findings. |
 | Checked verification-artifact execution claim and receipt | `RETAIN` | Before spawn, `factory artifact-execute` create-publishes a nonce-bound active claim binding run/slice/attempt/plan/HEAD/artifact/program/argv. New refs use fixed-width SHA-256 base64url encodings of exact UTF-8 slice/artifact identities instead of raw path segments; closed records retain original identity. Completion create-publishes the receipt and closes that exact claim with status plus receipt hash. Active/unknown, unclaimed, wrong-nonce, stale, concurrent, or replay-divergent evidence is fail-closed and cannot authorize review. |
 | Candidate commit/tree, slice branch/worktree HEAD and cleanliness, merge parents/base, and changed-path/object set | `REOBSERVE` | Query Git at review recording and merge. Merge requires ordered parents `P1,R`, unique full base `B`, equal NUL-safe no-renames path sets `B..R`/`P1..M`, and equal per-path absence or mode/type/object identity. |
@@ -245,8 +245,8 @@ authority class.
 - Persisted legacy records keep their original schema. Readers validate and consume
   them under the schema/version that wrote them; there is no eager rewrite, field
   stripping, synthetic backfill, or reinterpretation of missing successor fields.
-- Slice review and merged rows have no compatibility upgrade: legacy or incomplete
-  current bindings/history reject without mutation. Exact dual-panel verdict replays
+- Slice review and merged rows have no compatibility upgrade: legacy, marker-less, or
+  incomplete current bindings/history reject without mutation. Exact dual-panel verdict replays
   remain the narrow reviewed-code successor exception and may atomically add only their
   complete hash/head tuples after current bytes, Git identities, attempts, subjects,
   refs, and cleanliness prove the binding. Partial tuples, mismatched replays, and all

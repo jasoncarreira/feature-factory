@@ -561,7 +561,7 @@ const CONTINUATION_EXTERNAL = Object.freeze({
 });
 const SLICE_EXTERNAL = Object.freeze({
   evidence: { ref: "evidence/backend.json", bytes: `{"subject":"backend","attempt":1,"status":"pass","review_ready":true,"head_sha":"${SHA_B}"}\n` },
-  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"APPROVE","convergence":"converging","remaining_fix_count":0,"required_fixes":[],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[]},"reviewed_commit":"${SHA_B}"}\n` },
+  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"APPROVE","convergence":"converging","late_discovery_strike":false,"remaining_fix_count":0,"required_fixes":[],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[]},"reviewed_commit":"${SHA_B}"}\n` },
 });
 const SLICE_DISPATCH_CLAIM_REF = `dispatch/${createHash("sha256").update(`catalog-run\0backend\0${1}`, "utf8").digest("hex")}.json`;
 const SLICE_DISPATCH_CLOSURE_REF = `${SLICE_DISPATCH_CLAIM_REF.slice(0, -5)}.closed.json`;
@@ -583,12 +583,12 @@ const SLICE_DISPATCH_EXTERNAL = Object.freeze({
 });
 const SLICE_NONCONVERGENCE_EXTERNAL = Object.freeze({
   evidence: SLICE_EXTERNAL.evidence,
-  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"REJECT","convergence":"nonconvergent","remaining_fix_count":1,"required_fixes":["replace missed category"],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[{"required_fix_index":0,"classification":"nonconvergent","scope_effect":"in-lane","likely_paths":["src/backend.js"],"fix_owner":"backend"}]},"reviewed_commit":"${SHA_B}"}\n` },
+  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"REJECT","convergence":"nonconvergent","late_discovery_strike":false,"remaining_fix_count":1,"required_fixes":["replace missed category"],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[{"required_fix_index":0,"classification":"nonconvergent","scope_effect":"in-lane","likely_paths":["src/backend.js"],"fix_owner":"backend"}]},"reviewed_commit":"${SHA_B}"}\n` },
   ...SLICE_DISPATCH_EXTERNAL,
 });
 const SLICE_BLOCKED_EXTERNAL = Object.freeze({
   evidence: SLICE_EXTERNAL.evidence,
-  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"REJECT","convergence":"converging","remaining_fix_count":1,"required_fixes":["apply narrow correction"],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[{"required_fix_index":0,"classification":"narrow-correction","scope_effect":"in-lane","likely_paths":["src/backend.js"],"fix_owner":"backend"}]},"reviewed_commit":"${SHA_B}"}\n` },
+  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"REJECT","convergence":"converging","late_discovery_strike":false,"remaining_fix_count":1,"required_fixes":["apply narrow correction"],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[{"required_fix_index":0,"classification":"narrow-correction","scope_effect":"in-lane","likely_paths":["src/backend.js"],"fix_owner":"backend"}]},"reviewed_commit":"${SHA_B}"}\n` },
   ...SLICE_DISPATCH_EXTERNAL,
 });
 const PANEL_EXTERNAL = Object.freeze({
@@ -682,52 +682,52 @@ const AMENDMENT_CATALOG = buildAmendmentCatalogFixtures();
 // These literals are accepted only after reviewing renderDurableAuthorityOracleReviewSnapshot
 // output for each row. Keeping the three digests adjacent makes that review auditable.
 const AMENDMENT_ORACLE_DIGESTS = Object.freeze([
-  ["amendment-reported", "72f84e95c47764a35789f1f3d361a227b92294f04b11df8f900af720a988862a", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "6ae28d9dea4ff336430d6dd415ce40856efa890daf898f9d1bd9e33ef62a7eb0"],
-  ["amendment-building-attempt-1", "b971922162c98ecee24dcf8da20eef96f5bcf18efc342c728abf860ab520105c", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "3b8157f11c0d5117bb131f7c60cb12bdca547a67b0b37363b8fb592e587a52c1"],
-  ["amendment-building-attempt-2", "44ab119d2bb2cd82e015e77d93b7d05ae032c8e14bbee30e2da0322eb4d900d4", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "8c9ad2ca160070c7960ebf2f98e48617a01613c91cca36323388f6fe18ccb793"],
-  ["amendment-reviewed-approve-attempt-1", "df43b894f5e890396203432be9b4ff6b1afee64d2be960a48f63dad3eeb919da", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "25fbd305cf7a05233378487596088f8d9f625792f3c63324b5d2e7eef94476b3"],
-  ["amendment-reviewed-reject-attempt-1", "d94c48d8763985953e316975d40ef429060861d6b0baba6a90fb0d53fa27e05a", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "d510357f89c7170a8ab2aaedab453c88acdd17c8ce1c73df19de339f24178872"],
-  ["amendment-reviewed-approve-attempt-2", "40755dfde68ccb4dc910a9c6777203e6c845b566fb04cfb81dc6c5581d9200e6", "bafa5d6e8793b5ac5bfe5c41a7cbd0c5be5e98c56bc37df50b62eeea59984e3d", "97be0f7b4f81bf3d3148c21ebcdd3e7c166acba099ab871636a5cc441db38289"],
-  ["amendment-reviewed-reject-attempt-2", "0d50e07c3deb2062406e25b7b829e56f40eb583df685f6825fdc1f9a0a16c0b2", "bafa5d6e8793b5ac5bfe5c41a7cbd0c5be5e98c56bc37df50b62eeea59984e3d", "1572fd3c6a746a2a4b67bb32ff4206dba2a13a9a05a25943537afa276821005c"],
-  ["amendment-integrated", "dc3151614c752462c15a8a855f275e6637319935a3d1f39094a1d3c5b6758270", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "a41b47b8b8ea67c398c6f88ca9f43c35e3710868f7777de52a5df08ac5c0b5a0"],
-  ["amendment-verified", "96cf3ae5b8ae4eea0c01d4a0a15264e6d2b83b450e2d48db7b7fa4862a740d03", "e21dbda8b174ec99e9c987082320d56304f358d441483c23ddfaae91534a8904", "c54a542fa86d003447ef220e8ffa61cb50497bbab00e9a0601f560af5fce6527"],
-  ["amendment-merged", "fb8402a85b8548c673f477e7f2da9f6b8086f04d2a6de060fe071328e022bf1f", "e21dbda8b174ec99e9c987082320d56304f358d441483c23ddfaae91534a8904", "607a3364dbacd053084c9d5f15a3a66b9b1d0867d3028e17b1f7a719fe91e0c6"],
-  ["amendment-blocked-from-reported", "4d74be9ba37312399b3ca6f68c6cd7956a7a5f6e2e0550193a43ac910495f57c", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "5344efefaa2443c0baee1c1591c1b8b3f70520d2a22b2856c11f355dce48b91b"],
-  ["amendment-blocked-from-building", "02626cd74aab2adedb11bec6848671dfee54e2e88a4afea658becdddeacf87a6", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "eae61a8e84be05fda49bf8384d5f2332e8ca6a813ddd18f529b169407dcc831c"],
-  ["amendment-blocked-from-reviewed-approve", "e186a313c4af3c6041d707d4afa481e345bf4ca1f17e4827885220bd7e0eae7c", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "ec1fd6e84d1f437b7fd6533b54bc1617fb11769de8489b01b13396534c1f85ec"],
-  ["amendment-blocked-from-reviewed-reject", "4f5b56910591673cdfca1d9ab66c69bb8fc6a589766ea6c46f817812b4dbf859", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "87f4d38d86c2ea4d61b7fd54bb67fc0f2712fb4c98ff47b6487b49aa8a2fad4a"],
-  ["amendment-blocked-from-integrated", "d2bf4da74798f635a260fbd31192fdcc68ae5320b58e617a6d810e8c6d47befa", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "0afbd0dbbf1980033796bc0c08ed95ae32a1a3ba8a134199ea7c5d41d5c8d683"],
-  ["amendment-blocked-from-verified", "0f81a493ec366301d0144ff8ff142ea17a0f1bedd32e128c39b73659d06c7e03", "e21dbda8b174ec99e9c987082320d56304f358d441483c23ddfaae91534a8904", "449ae2afd9630de96bf89880566a2e032bf1f3bd7d71967ba8e7834a1fdf41a8"],
-  ["amendment-report-claim-active", "67ba8d12568fe57d7a1a178ead8c127ffcb87a7558b3e8c3c57fc1ea920265ad", "f7591d94dcc72d7c550873c4d559bf9f5567840a6397505b3c2c5acd93973e63", "9c4e617948b080f9d6a2bb0100bef3f0462279c14f877f79bf9db43fc3ec468b"],
-  ["amendment-report-claim-completed-pass", "98ddb247c43471a159aff3a3e6310bfa2d422b4fc03a1e8380647ee5cd038c52", "8640d1ba3e74b68bf4336d592484bafa68bf5feec0bb0e4347d7a5de0265f69c", "2a50235d71524991e6c88edb3895e712490c23a244e8f522f915949437cd7a23"],
-  ["amendment-report-claim-completed-fail", "301f6524204a2b7e97157018d961467eeef89a0159bc34c1e55582c84bfe7564", "8640d1ba3e74b68bf4336d592484bafa68bf5feec0bb0e4347d7a5de0265f69c", "f4fb04644c6c39c61c252ed6a78d1dd534527d94f7d8f2ad648316807f8ca286"],
-  ["amendment-report-claim-unknown-process-outcome-indeterminate", "c53a1bae3840087d6a81f1f23e9f1f08710a744ba8b43cfd41fb727917e5b628", "d13c737aec1cc55239c2e2eeca59401bf76b861b3e689e7ba6c03bd6eee8dc33", "ae8146715fe1da149b149f87dbfa7ac4a549ace7da6ea88a2f563008f5dd9c6a"],
-  ["amendment-report-claim-unknown-authority-changed", "1cd048f123e335c9e393b15e74053da033488a67952eda71a341c61cce73990b", "78524e5a41d6d47973a5c290dd20ff15884018f10b8715b48c22dc547f025d93", "661e12140eb0843e0001540f3078133a3b36134268382203c25fb3ccfc6dfa26"],
-  ["amendment-report-claim-unknown-receipt-publication-indeterminate", "9cf85a6d3d36d0fc6e8f2ed55fd4aa787899b15b6b1fd7a3732a7f371ede183c", "bb4dc5d868455e2fe488cb0331ff4c494e1af84a7dd1c33a6603f7b02418db37", "1aae057ab7f50841ace47f8a44ed905e32de1914b7e0552d4706da489f65b9f6"],
-  ["amendment-verify-claim-active", "d79504a00c81b0fcb19cd9faf4fc97b3b8d66a6164014bc802152e9453fdc56c", "ecec94c733ceb29d0ab34163c161d566704415493f33e54b189b310b67227b18", "727e750837ad68384bc0f13df7f0f52ac3027dc2e4c9d740a4b57f4ef54c7e97"],
-  ["amendment-verify-claim-completed-pass", "e99fbaff732ef2c1be79dfeaf3bd6b9604dbc2cd1e831ecdf575328ce18a8e68", "7e21eeb2ead2098769e0e49ac10a2c42f946284bbe8a6811533841a6e5c45fe3", "a21d9643336475b79902d346d6667da4b2ad95ace182279371bd10b5404b33d2"],
-  ["amendment-verify-claim-completed-fail", "dd0bddc9dd6688c89edfaf1c8fb0f6ff4838f4efdee9e5da27c9563db45f9107", "7e21eeb2ead2098769e0e49ac10a2c42f946284bbe8a6811533841a6e5c45fe3", "e37518b27a8a0bc2ec218e84813f9b8f8d453e2162ace1af7876cbeac44f027a"],
-  ["amendment-verify-claim-unknown-process-outcome-indeterminate", "a8ddefb49e4db25b32b34b0760af85a0cfe3b06a26a21abf1bcccffe4c880d57", "1c53cea6b9f2d2425005c924b6d22589c438ae4f1957ddb1be9352dd5abc3087", "599b43a20c6586c45119e0002a2d661920ffe338e6495b863e3d75bdd0f8b157"],
-  ["amendment-verify-claim-unknown-authority-changed", "52677a42a3ddcf79c474d6f3b9d74b9ad1e65ef1529785ccee0f07e65f3ff6eb", "f09bbb85cde78ab2f9a5923da939e2e9a894ba6ebae05c26aec06b22a526920d", "fb6c192cfeb6978a5fdde5d0cf83e59738bb760e24c73a7fbd3d3c0af628039f"],
-  ["amendment-verify-claim-unknown-receipt-publication-indeterminate", "1e65159599c7c6ab46872f3ebbbb66f49f1a92ef2a4aa68610926794914dd72b", "082b741f9c64a4a2e62c5f3ae71cda135cb007ade705a47ff78a3c496f48c9be", "b0e5fcd0396a4bce8534e0b9b36f64ceb30eac20e4fdcd0a7e1f9cfb3d6cf33d"],
-  ["amendment-report-receipt-pass", "c9b065e6f8d2108e39084d5b674378ea2741840b1f769e1f9ed91586a3711307", "550c02cdc9722e545633c183da80eab0a420dc1adc1d1a964f2f79cb41ccf26f", "e8b9d70f580fd9eb0358cef0056f830e025019a9936cf58c6b3ee46d104ab56f"],
-  ["amendment-report-receipt-nonzero-exit", "35ebcc1ffcb133271e08fe7bbc18a27aeb6f40b8ba6a38534dfeda147803c1a3", "20258fa0daadb0c989c08f63fd2f5a057d5b10a1fa0931e45a687845cc887cd3", "07ecc0819b74a29022d9e8ed62e2095d376b8098ce36a83ddf865743ccd5e5e2"],
-  ["amendment-report-receipt-signal", "9ec5596bd2f0cac71254c900a137d0cec955381a675bf36275653a057c9dbc6f", "ef340366dc25784d964873a90a23152f21c1455891b253528938051c84971f4f", "569e799feaaef716d9963fe143bff61c4b8a91f23e11482d9490f43a39a41eaf"],
-  ["amendment-report-receipt-launch-error", "b802a5d7baa86da5c1e2cbb358c40bd8424e018dd017ac3251252b687d241420", "df64bc870f176e07107870ae30b7820800bb4e1d6fffdeb0350f125da585bd49", "41fccbbd1e1887ca27eb5b78914dfde2e9d51aa639259b2e79e9f40d26aa28bd"],
-  ["amendment-report-receipt-timeout", "3eaf4e1011d39660c00c418f1c9d1dab355eaf7419b95657319634f80abd1654", "16b575e226578e0c0b5ed3c67a506d116c16f84a77b1563e0bb4a513971c8178", "1a89890e764faaedde6982cffd8505eaf6be2ce3a99c974609014bb59a1d5697"],
-  ["amendment-report-receipt-output-limit", "ca313ab065685d857d2d2c845bbd4122bd9633cb4e29cd751d74683d16c271c4", "a2f2a0722d164b97d0fd0ed545bc503e88227e68975565774c78f2ddfd52fbb7", "e20f3b32c90c13df7624d489f90f436b231cbc2965acf695bab7f1f49c5ac5fd"],
-  ["amendment-verify-receipt-pass", "9b10519aeb3c9f8ad6cbd7b4b6e450a8f7af0db0baf3f192e13435fe07d8ea25", "19c6ea360800631b124bf581debae778fbc7c1ef60e0ebb226e5fba4850bdc3b", "17e0df5f43e3a4eda55ab7c40368823e7caae86f080f615a87d777e1633ce319"],
-  ["amendment-verify-receipt-nonzero-exit", "955fc09f2a17ad19f71bbfe836cf7f69364a870b5e11face5c9a037f8198c934", "7fc5de859af42f3dfe9cf24eacb45806b1ef489b72267656619b14e72f239685", "c69302e259a72b827ac45a521bc20b84d76e88659930056a04b0c8f55a0a1d57"],
-  ["amendment-verify-receipt-signal", "7965d31baae268be4f18a4fda7d09abd9d2124afad00762ae7e6d6c8e8b9ae92", "d9eca6bd7e7c25bd5b344103eb6cd6e7786075b1f874196bd01c24d7a4f1a0ea", "7645f67745b9ea112bd996d6b6b9234eda2bc74d1b886260c1db9ae696d3710e"],
-  ["amendment-verify-receipt-launch-error", "2b0609680456bbb0717f1a2ddabeaa1859cc5491e40b2d2ad2acd9d27a3da34b", "ec875584a48c3624edaf6ce7653a3c0de04e34d9e228fd85c5c4db390663a8f1", "3689789ed88eac0be0508347128d89ba3cb5ba4683d394ba48835458be76be23"],
-  ["amendment-verify-receipt-timeout", "ef567c3bc02a366caa225ed01b7a188e0df729ff772263089246d93ee35b9448", "5f9eb8570773d3636f2c453b9bd5fda151ab9c44f2707e4d68ecfe76db37ca1e", "4125631cec61f680ebc926a01b313de2b6e4ee91831ada63640c34a145465d2a"],
-  ["amendment-verify-receipt-output-limit", "f3ad7294f7a0090ae7d21144d97015cc8104078e0aa57b3ee32cf2154fe1aff8", "ebace15d1efb94794690b9375ab8d04b97136ee6e98fd4f6f0c59f4a7ec9e88d", "1d768291c7f603e7e10b3a6356b52b724220f2bed4beaecfe7a6f175c4747a9e"],
-  ["amendment-review-approve", "184ac9dca646ef0c118591823f201941cd8cb10605f6273240229ea5461304e3", "3a1b3cf38797f0efbe5c338d877217f9b51a7647b8d9adf6f30c5d42aa4c1521", "312a5f71b91b4457320d38b9eacc359eb89370fda4a1582b32fda1241753d752"],
-  ["amendment-review-reject", "64db18d741af8b12e109500b88e1fd0d1c7d7899f2709b09f315a5cf6eb11049", "c1b9c3a012c3c7ea17883e50e754622149a3b3e3489e51433f2375a6a2484d2e", "c866a01be3f3422d177913db89f696c23de5254affaaa016fef99ee116ce8042"],
-  ["amendment-dispatch-binding-active", "63e6fa1048d2bd22f7d171423f8d4d7d67aa1e24a3be6aeec9861f8dc0695809", "1b61945953cf69a384c86fa91094d57265507cdf29854f4730959579970dfce0", "42afa37d066616d841604ad72906ee39bed51e4cb3c613f855ab775118d72088"],
-  ["amendment-dispatch-binding-closed", "837f459b358032633d7ea61b11fd5802db7ab6b68d4843431c397aa233f0668f", "a5ab37a3e402a9f0d55fc780d97d7dbc29a45f6561bee7447762f225ab9d8868", "a113431bf0133932306125059a8d4c4207aa27da491c2103149639b263c5b8b9"],
-  ["amendment-dispatch-claim", "0af89dbed2e1ed6de891cb824682b81f359917a9dd31d672db4ce0d226920791", "b5efc2ee8d3b9c3c38918686b8923ec9e937dbed48568baafdf731bbbfc69bde", "44ffe630cd4cf4092b7014eb5f68ab871d90f39a95704a4ac521246666906177"],
-  ["amendment-dispatch-closure", "9dacf9a9b67c28a8bc9382bd1d7cd2869609455c44b56d63043a3601d9a57c19", "f1cd4bf2fc19d8e52edc4acaa5005f839e9fd529a8197fb347edcace6380ece2", "89b35d1f2a40896b358c2753e9a140845957cf2e24be65dae73ef9daf6851221"],
+  ["amendment-reported", "f2e567378f7b512bb048f4d0a10c0a68a25b2bae4070701f00cc8e461a3bcc00", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "d1d641315132bc91e32a46c84aaaf087685164704ae5e9e1e059386647c5f171"],
+  ["amendment-building-attempt-1", "07f59d567a7ecd572167bb8911e330cc2dbfdf2d724ccb6672d35788a236847c", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "4b37208eb15db262443a17dda966c0159b372ecfc2d7049420924f9f815aff9c"],
+  ["amendment-building-attempt-2", "86801c19a361bd508c1acf9ad78f7afc29108648a68f05f7e60ada5ef8233ab0", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "af8201a61e7857cd018c4d6a5faf9ca9853fdaa5329341350686d16f4f99c0e3"],
+  ["amendment-reviewed-approve-attempt-1", "02107e308bd08ee02f16343d4af22be1e93964f5e286a0686b139c2a5f7048ee", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "d3c89da34071a39ab578d1cbffe0423dfea9e860854657368f06f53e3c4c04c6"],
+  ["amendment-reviewed-reject-attempt-1", "da814772cd67a39b2cc914318398458da45d74d6aee8ce49d2a37d01325880e3", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "fe1d10f8bb3f5538c3b45f7ef56636e5d19ebe1a9e2f80a1f887d86cac8693e6"],
+  ["amendment-reviewed-approve-attempt-2", "0c5713c6c88f6d9fa4982f953a339031b631f3d264bf3db44a11aefd66819f44", "bafa5d6e8793b5ac5bfe5c41a7cbd0c5be5e98c56bc37df50b62eeea59984e3d", "16de10fcb61ebeaf5f87be2e3e3e2abd30a59326a634e1123937f7cd580e041f"],
+  ["amendment-reviewed-reject-attempt-2", "9f312747a1086bd2c76ca063796422bc71ed38a637a500b3cc6ee7f7b7f55f5f", "bafa5d6e8793b5ac5bfe5c41a7cbd0c5be5e98c56bc37df50b62eeea59984e3d", "75870130df88ee7adde8008c73d39760d1d3e197427802a3f9e0c9cc3150dd93"],
+  ["amendment-integrated", "bb5a8eb0f2424e2a6b9d67f3022cbbca22bd0e38a0121b6ca3b6742799b46f20", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "6ca78fb895f9db2c034960e84cb0ca5a0dfbb6a190f18aaaeb51752d3aeb55ac"],
+  ["amendment-verified", "f0b893fa235e20c7c3a8f213789c115bbcea541233b99ecf5d32b94f898c89bf", "e21dbda8b174ec99e9c987082320d56304f358d441483c23ddfaae91534a8904", "5d95a822bd366baecf5beb5b70e84cd9c7f6a1c0c9a1d31591571e0734d315eb"],
+  ["amendment-merged", "cf4f62216e01eac271289d097ffe002a0b158d334861c29d092c16d99cfb25c4", "e21dbda8b174ec99e9c987082320d56304f358d441483c23ddfaae91534a8904", "18ca951179cb03c9de667945d797d9704fe26793980503ecb01983e31d9257e5"],
+  ["amendment-blocked-from-reported", "7d949dce8af0b86e9a524af1e1df602d510e5e389703a8da09339e878e4e61ae", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "c43eabfe841a9303c8308748317886d9287d6e34057b0f24bdedfb30a31c5749"],
+  ["amendment-blocked-from-building", "10229f98d37ccc598b4dae37bb5dd19a83c096591c41f7cde77bfa7e3f1bc946", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "33abde46eb9d90fce7232179172d0a96ea57000ec5d51f228ccd9e0ed0b14e65"],
+  ["amendment-blocked-from-reviewed-approve", "75f51a5d5318a815c4d1cb98889f1888dca6d42c2f04567a54acc13175da0f75", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "dabb20af15a2c0bb2412cf4cc324700c28de6f7e0673dfb4ff0ecf77ff0c4689"],
+  ["amendment-blocked-from-reviewed-reject", "d99dbf79b6e66ac7d956b9a90f52bf107c8c6ff1a5319c62a01db6d333a6b439", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "a37a127b6046001d3bdfa164db90372dd6743a8f69d4d3f1daba153988e4bb55"],
+  ["amendment-blocked-from-integrated", "26099ed07c0293a9ce2362c80388b6b85274c54e52c67495f93fbba97ca878fb", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "17e7c228e8ae6688a39e4fa352a38a13a0172ae9cc79654ed9d904e38cc096c8"],
+  ["amendment-blocked-from-verified", "f8176931a7e6e287756242aa68fc0aa94ed462c6e17a31a21bdd2cb18c5ece61", "e21dbda8b174ec99e9c987082320d56304f358d441483c23ddfaae91534a8904", "c143e0542cbb87294a00876fa1f09d3997c2bd6556bd9e2995a3361333d633c6"],
+  ["amendment-report-claim-active", "66d66dadae878f69dbaa70423ed8449bf8e041bc98ff4b6362666b6c058eef62", "f7591d94dcc72d7c550873c4d559bf9f5567840a6397505b3c2c5acd93973e63", "a76e9c2e8cdbc57ea0203b5fd30e4b44b40ef2c494088e89e04426f1caf5fabd"],
+  ["amendment-report-claim-completed-pass", "a16a2200497ae7ca062939700c95b37b3c932b8e63c9138c0ec34684de7cf5c8", "8640d1ba3e74b68bf4336d592484bafa68bf5feec0bb0e4347d7a5de0265f69c", "088d658cf32b88ee4cf1e60434494025b35320b60cfb465ca7a0e560db4acb5e"],
+  ["amendment-report-claim-completed-fail", "89277e0030238ecde96b6668d5205023c84be7ab387dfd578cfaaa62f4747ab4", "8640d1ba3e74b68bf4336d592484bafa68bf5feec0bb0e4347d7a5de0265f69c", "6245bf31e86e2d9fc3c336ae33c9e7feb903def962c27e0fdfbab2ebb5a84881"],
+  ["amendment-report-claim-unknown-process-outcome-indeterminate", "7e9452afdfc9c857a94e2f5ce5a406d9587a47fea08f1a4755c422a50414e79f", "d13c737aec1cc55239c2e2eeca59401bf76b861b3e689e7ba6c03bd6eee8dc33", "ab83795d24aa728c68a7975831c432f8325d27226f343493a411589d9c5f38c2"],
+  ["amendment-report-claim-unknown-authority-changed", "3ccd93aa4d609bd3065d5c08fb1c36b24c25768134e7e8608edf8ba9e85c1700", "78524e5a41d6d47973a5c290dd20ff15884018f10b8715b48c22dc547f025d93", "3a14668d53ff5266eab1b35632d6cf6f700d7b02cdd03249a085ef56843dc9df"],
+  ["amendment-report-claim-unknown-receipt-publication-indeterminate", "c4d8d770ea4aeb09bca4bbaa731cd14187ee73d1f678e7af9c0c44e1e83b4ad2", "bb4dc5d868455e2fe488cb0331ff4c494e1af84a7dd1c33a6603f7b02418db37", "acf69486213a83d94e5d39ffad8800c12a5888e27206a84153fd26d6523af1f5"],
+  ["amendment-verify-claim-active", "258b2fd82803e5e3c1f904d0ac76c9c4b38e135d733052d7fb94940f0baa27ac", "ecec94c733ceb29d0ab34163c161d566704415493f33e54b189b310b67227b18", "50aeaa83cc22d9f026817c12f6659ea7ce5f0407d9d354053b879b0c2004f6f3"],
+  ["amendment-verify-claim-completed-pass", "8b1572e70ed1c089f792c05a6309c31e1c772f31f240ff161f5cf388fae861c8", "7e21eeb2ead2098769e0e49ac10a2c42f946284bbe8a6811533841a6e5c45fe3", "bd1560167788ab138a8107ed8550477fdbbc4d4bfb1812d684147eb78881cc06"],
+  ["amendment-verify-claim-completed-fail", "9289c066185c676045aec73b070481a865451cdfb43bd4a77bd25e127e836e4c", "7e21eeb2ead2098769e0e49ac10a2c42f946284bbe8a6811533841a6e5c45fe3", "13f8bfb27c1a7a7c652533537ea94b78173bdc4a693440cfcdd81f2bebeff153"],
+  ["amendment-verify-claim-unknown-process-outcome-indeterminate", "05d1f9206acc640028151dfb2165bfe94c39044d88d66a4dc0409a34069b05c7", "1c53cea6b9f2d2425005c924b6d22589c438ae4f1957ddb1be9352dd5abc3087", "5c4182a9126bfa9728b6297e041fe3d4793e3ea1e4efaf5bc15631fa9b455397"],
+  ["amendment-verify-claim-unknown-authority-changed", "f7c8c0cd67ea365e6719c19041902d33d2b38ab9dae741d7e0c0aa822b0d71d5", "f09bbb85cde78ab2f9a5923da939e2e9a894ba6ebae05c26aec06b22a526920d", "6ffc100f936c468112a1863315084295c2c717a4fdaf2cbbfe84e57203925905"],
+  ["amendment-verify-claim-unknown-receipt-publication-indeterminate", "d425a449d7e6fe8aee45d941a16fc48becbd337803337a628d46f5980e214830", "082b741f9c64a4a2e62c5f3ae71cda135cb007ade705a47ff78a3c496f48c9be", "b8d60b1c8b3954337ac49d1f7dc1114d2e0913e27c7c13ae57b625aa91264de7"],
+  ["amendment-report-receipt-pass", "f0b3a1dd824f7b5683655c39f926ba89ecc337106b784ee82a141709217fd9b3", "550c02cdc9722e545633c183da80eab0a420dc1adc1d1a964f2f79cb41ccf26f", "e7a4035462952289013bb689b92cd4bc2335f2d25374b878bd6a4fb28acceb7e"],
+  ["amendment-report-receipt-nonzero-exit", "64e8aab9c1eb6a1877d6439cef2f9fb53e9f645e7c5cd20ddf7fb437998babd6", "20258fa0daadb0c989c08f63fd2f5a057d5b10a1fa0931e45a687845cc887cd3", "4165e17146d6643fb3877f9e9a7f0e59f58565c50b8172c96da0c7b1001929b5"],
+  ["amendment-report-receipt-signal", "9515da3cc328723faefe9ca76a00be441be6c7e46f54a5175e99c43f370237c9", "ef340366dc25784d964873a90a23152f21c1455891b253528938051c84971f4f", "41807ab1cf67e7c0d5913f1cdfdbeb639920aba0d9b38b6c5fd5770246e7cd73"],
+  ["amendment-report-receipt-launch-error", "4ca824286ce812e9291ed00775698c8bbcd469c8314c1443900c348601eb390f", "df64bc870f176e07107870ae30b7820800bb4e1d6fffdeb0350f125da585bd49", "ba465db6c9bbca6e81eb04d847b144de8192fbcb496c3cffcc8d6a640cd44e51"],
+  ["amendment-report-receipt-timeout", "a47ad66914e8a80bad3128997db115efde2c15bf4467fceb8cf63f8566f11fd2", "16b575e226578e0c0b5ed3c67a506d116c16f84a77b1563e0bb4a513971c8178", "259fd00996ca864a21ef0cf3530cce7029595b5051af13be607688fdfe2cea7d"],
+  ["amendment-report-receipt-output-limit", "31d230c2e72aa23b83458e9ea4fb5553e1a9928f96434a66d37a28dd89bcee13", "a2f2a0722d164b97d0fd0ed545bc503e88227e68975565774c78f2ddfd52fbb7", "9efa5feac1e33e3951a4f25f3e082c56ed9f201671564b0bc35d68fb536d0e0a"],
+  ["amendment-verify-receipt-pass", "948d6b00798a8d0e5f0acad655777fa4456cd7ec8a1173fbdeb8037579caef83", "19c6ea360800631b124bf581debae778fbc7c1ef60e0ebb226e5fba4850bdc3b", "149ee190ac05d7c1272902a852ab068de6b379a4f61aa23fec24b13701b60ff7"],
+  ["amendment-verify-receipt-nonzero-exit", "46bd91a289b4953578d69ab06e60e486326f22a5166d679e98685622ad13fcdc", "7fc5de859af42f3dfe9cf24eacb45806b1ef489b72267656619b14e72f239685", "24513b48f0b3122e5eac718557d36632c9eb6a4edbf4bf7b84766d3e0f871cba"],
+  ["amendment-verify-receipt-signal", "b294805247cb5a7903b60f17848217ca56957bb46b3240221d0ece9bb5aaf9b3", "d9eca6bd7e7c25bd5b344103eb6cd6e7786075b1f874196bd01c24d7a4f1a0ea", "6370a4098cd8d5c06d3ac75249edaf38e43849efe9bc3eaa8df5ac4cd9d330fb"],
+  ["amendment-verify-receipt-launch-error", "b4267a5caf0f7ee6af5126e61618222bbe33f4145fa9d7b9e93ef24d29bac6f5", "ec875584a48c3624edaf6ce7653a3c0de04e34d9e228fd85c5c4db390663a8f1", "889a292a6c514f44303ab25352665bd13634f67dfe65d7dd72aff436efba6b0f"],
+  ["amendment-verify-receipt-timeout", "a637f9d2d6d4fb097042c922d4a61597dc506b03239f1962fb9378bbf5d26a3e", "5f9eb8570773d3636f2c453b9bd5fda151ab9c44f2707e4d68ecfe76db37ca1e", "65044ab474cf5d1219dd208b9e623b50ee42eb357f2901736bbb27f87b091705"],
+  ["amendment-verify-receipt-output-limit", "d533e6794c427487f873cd964a858b8663c3727e6603bdef16057ae1a93ebe66", "ebace15d1efb94794690b9375ab8d04b97136ee6e98fd4f6f0c59f4a7ec9e88d", "127456b4d40bef9c5a078f12083d5802394bba15bd181434699e088992aaffcf"],
+  ["amendment-review-approve", "f7bf97adf59ced3042ab5a2bdf21322b362ab82dee4dcf30d38efd8eabf203f0", "3a1b3cf38797f0efbe5c338d877217f9b51a7647b8d9adf6f30c5d42aa4c1521", "ff7a09d527769a71ad4bf45640e9e02d1d6ea96992d6f843bf0c5e3b7d52bb94"],
+  ["amendment-review-reject", "b9415b49699f1bca44923477eaa562c94d7da2e0147500757f9bddc8c505c617", "c1b9c3a012c3c7ea17883e50e754622149a3b3e3489e51433f2375a6a2484d2e", "d2f4a8f97d21acd4bcb0428dbdd14e447e7876fdcd9119eaaa190b92670c2b85"],
+  ["amendment-dispatch-binding-active", "a0bf0001fa0cf2450074e109a4711b1f3d96985fc985c879eb2ba99380089509", "5991be6b8f984f0a48140e5dfd2371711ac828f3b4eeb711d6f300e10f053817", "eed707b82166d3b6bab75258803be5f57d2533f6d8d29b9e38291dda490344fe"],
+  ["amendment-dispatch-binding-closed", "1b185bff8cfdee4c151685135bce9f18f82a56ab12321f74e40fe1912790bb90", "805350ba8beff76307dbfe11c78710338661182e302e5e4781465fb7505c422c", "4e79afd5e8939706954e96a1bcd82715cf8659ed308fb9f42e1683b9638cf5ac"],
+  ["amendment-dispatch-claim", "1007c5572f98d7bf9c51ffd8190b16596934418912bd021873182b70a3a550b9", "b5efc2ee8d3b9c3c38918686b8923ec9e937dbed48568baafdf731bbbfc69bde", "95268884aea6496aa642a64ca421da810d97d1f24c9e7520bce19be28e53d26f"],
+  ["amendment-dispatch-closure", "69e00caafc0228e91ee290bee350edf92e30e6a4eea030d411b10ff2e4bddc25", "f1cd4bf2fc19d8e52edc4acaa5005f839e9fd529a8197fb347edcace6380ece2", "d6995a50df7674e59cd0fce0cee2f7b070b945205e2eada00923927366b82f9f"],
 ]);
 
 export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
@@ -1175,7 +1175,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["terminal-result-completed", "624dd6c0050e64037c95aca7904c9841656bd09684c3d8548b05e15601ba094c"],
   ["terminal-result-blocked", "681845bd946f1cb11d6f2d0a528946365756a79f2ce284179856360e3d9b631e"],
   ["terminal-result-blocked-checkpoint-routing", "cb7bb5cb412088a8be48b834477260fc58a5d1ecdf43a7fb580a8a9c8ae8a4dd"],
-  ["terminal-result-blocked-nonconvergence", "d97091392350f02165c01705c4aa4ba2f92e5727325622c9eade4d5cdc0021f6"],
+  ["terminal-result-blocked-nonconvergence", "1b119c91d1ead2e56f7fe0a4dd87f843a8b625a81130fdeac64f590ef50f90f1"],
   ["terminal-result-partial", "6726223fbe9f4850a9d6815d78ccf5b5fbbdfdebcd6bf5c7611ace16569b9705"],
   ["terminal-result-needs-human", "8b7d4e6f6533c6072da2e83300c1f2503055905c0bcf5d69a54a91196f6c2eef"],
   ["gate-pending", "fed011780d644435b702f54dec1207d1b9d1a9990ce61c617c1a716c76ada680"],
@@ -1203,7 +1203,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-output-limit", "091ea91f8b1f6e56b31a71e085ec28c246738addcb5cf2dab841799db9fa5ee0"],
   ["slice-pending", "8d4bbec759c17fb00ead204f403603e1185b430f21f0306f9bb240f7f79d4ec1"],
   ["slice-running", "9144cf9afff4ee300711b783015cb338985c1bee73e42b5596ba53ad89bf1a64"],
-  ["slice-review", "31ee1398f017b2b3582a57fe89207c2cd525f2d1a727413eb423ecc9129cf198"],
+  ["slice-review", "ae319993929a22cc824eadcb09bf7abbf7a95d4e814e54d44e2dd6eed10a3721"],
   ["review-invariant-family-ledger-v1", "a12af40d7f3010b6650891769239049f3a1c7da1f4e066b1139c67feed4f22db"],
   ["verification-artifact-claim-active", "90ef74da538c20ea12d27f7eca2d98462444bbbe44feb01eef03ce94f0cfd22a"],
   ["verification-artifact-claim-completed-pass", "5d12d5fc7c6593f5c16270eaf1487d60c41b0240b1ce0f389bed7624d3f53b2d"],
@@ -1212,9 +1212,9 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["verification-artifact-claim-unknown-receipt", "8923106490d25f0d3d4f4e461ba1ef370c8ac47d53844aabd5d50c9857e9c18b"],
   ["verification-artifact-execution-receipt-pass", "501cbf3c84c9264108289c4f8222a5523179f725875531c028d9c19ecad896fe"],
   ["verification-artifact-execution-receipt-fail", "11fee9930a501c2bddfe56a40eb539fe13559aaaad4e22712f8525a0cc043bcb"],
-  ["slice-merged", "62a09eb29bc9d54e60cf7cbfff28b61d88a0ab7ca965ebea1034c876ebff83f4"],
-  ["slice-blocked-ordinary", "418be098f27cb3ab81e543de6fb174d894667a67fb6cc838f532001213442a09"],
-  ["slice-blocked", "444dc0846d2323bbb5b4efad25247c5e10a03db0f6fc255828903fdab77e0408"],
+  ["slice-merged", "a92aff127c2a340e4a925fab9e0a083e0f54e664ca315c148d77ee7eb3da1a81"],
+  ["slice-blocked-ordinary", "ace9300f4383ecf9b15556fb58345aa4c981b03ef2a62d436a2b29acbf97ef3c"],
+  ["slice-blocked", "76bede870d7e85a8529c5191aa0405dacc2150bded0bab5411c654c004a8e336"],
   ["validator-verdict-binding", "ce1205fb84feece303f45e9841916d68fe26431d3117636aecc4b0cdccc79e14"],
   ["security-verdict-binding", "81cbb46158b44646aabf50e0152b80d5ed6dc423826337bf45fe6be7c24e5995"],
   ["steering-boundary", "efff0777e2943f002136ce1a38aad484c5d7ab7143e07eb5b93e2475c497ca55"],
@@ -1333,7 +1333,7 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["terminal-result-completed", "8156685012bdcf0072fc38331dd34c2ee2f0ac59c94d14418a0cadc3f92b84be"],
   ["terminal-result-blocked", "9e2aac2293e6a2aa0ff69725ec484565d1ba598e4f921be01c44267eaab6d231"],
   ["terminal-result-blocked-checkpoint-routing", "2c8c39a212248223cbc907dac170f95ab50fdd34afa8a867f25fe1e3bc2fff89"],
-  ["terminal-result-blocked-nonconvergence", "484c993240b44861d7d71c96e40fcf4008241b506d9b8f08105352beec069b1b"],
+  ["terminal-result-blocked-nonconvergence", "ced0d4f02aac844c1b226f371cd76f04ba4e616179c7ada1105d5f6c63fde7ab"],
   ["terminal-result-partial", "c7c56d99562df246e6e5219fb7ca002924103fea7be86bc2cab1b8c04eada6f6"],
   ["terminal-result-needs-human", "f10e0e1b566924c9b223e63b30426d6004b3210b0be12d884c63ec42310af5b9"],
   ["gate-pending", "9af58fac48dd996f8f66431b251cae4ec56e5ed1bdd956a903beb70de3ab504e"],
@@ -1361,7 +1361,7 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-output-limit", "5d67fdbbcb0e50d8597c747e30d41c3217b13c5f18f511e43d0914b05cfc2895"],
   ["slice-pending", "63b63efe898da669ae80a855536c52a7f00a0009a0465a2ec6cee66477b11f50"],
   ["slice-running", "fc42986c22298a35eab703ba8490a9607de4e6a1a1b40259ed8f8ed67f38bb6c"],
-  ["slice-review", "be1f4758931acd95be6370f8ec72768c98075115ec366cb61593b8af3c2b7b27"],
+  ["slice-review", "9f3c77e866b5987bfa102140e14c09abda335b82886e293384bcddefabe2af88"],
   ["review-invariant-family-ledger-v1", "c63d47a42fc7e6f72beb10013c9c9fbb6c3288c94961d93a2962838d11bffe7b"],
   ["verification-artifact-claim-active", "b5fd7830a00455f012fd9952e7467f43fd7c08f6ed6fa1b4bc4cc6c6dddc8d73"],
   ["verification-artifact-claim-completed-pass", "e293a8272cf22526036b7e175c127c034748b91596e62c30a288d8537d48be19"],
@@ -1370,9 +1370,9 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["verification-artifact-claim-unknown-receipt", "d4dc5df0dd8af5699ea698cec80767f893c4da1ca2a7a28249e2133bb68bb6af"],
   ["verification-artifact-execution-receipt-pass", "eb56cc7de822f9a1eb8dae7dc42f1e5aaa335250947fdbc8c9a0e6e53e2cf01a"],
   ["verification-artifact-execution-receipt-fail", "66186bd360945295d591cc8f2bd012485062b297553b9f3d2244dcf15675be5c"],
-  ["slice-merged", "bc067a305523a09268e8c43146d24453d63478eafcc908ba1f42f6ae7c1ec9bd"],
-  ["slice-blocked-ordinary", "e1f9cdbd982cc83b739cf310cde2c86e0412f8d52c41d8bea5f286bf9c6257a5"],
-  ["slice-blocked", "8ab00ecb2e88b1f556ec26e9c1b482fc9baa4c678630c8af14c9e8dd9f881ec4"],
+  ["slice-merged", "87e840a2ecb570c87c604c7f5fa24e06568905ded5e03e964639dd61b5f1e579"],
+  ["slice-blocked-ordinary", "31e9a613be88e8b2821d1bd88a6d82bf6884a3001074c807175eb91e2988a1f1"],
+  ["slice-blocked", "745738f57c24027e1a41fbf0a2e5c85a1a743ccee174797496ff5a08b5b15d4b"],
   ["validator-verdict-binding", "d5663f22b888f878625141430a2602863730f8ab122a815359dd545d876b49cb"],
   ["security-verdict-binding", "88c89ebb14e5f14121dc022da8f0c73dc1e5e9639d570337edcfb09cef5c17d7"],
   ["steering-boundary", "7842e29ee7d10b4465db99127739e4b602479aff47b848a5c7bb9d2e30ecf732"],
@@ -1495,7 +1495,7 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["terminal-result-completed", "67cc3ac4f4bc522a7e48be30ea4b1cdfcba2016a309ba99224197641cfcb059e"],
   ["terminal-result-blocked", "2e50300aa3e14e8fd6c935f3dae3fa44dd388c6ff386091ecbc28109f82ad855"],
   ["terminal-result-blocked-checkpoint-routing", "a1c5882e705ada277f6703c4186686e182dd57334c467579fe64b30ab7493a6c"],
-  ["terminal-result-blocked-nonconvergence", "55003f673d92a1b474b02aafdc90b72853ce9f376934878d49307509fe122233"],
+  ["terminal-result-blocked-nonconvergence", "d103c2ca471cda13f1f010cb5ef51ad15ebb12960e8776b62fc9b3568b123f31"],
   ["terminal-result-partial", "b5808744bc1ae0146a9a59e9814be3d58712a04c0cfbaf6f5d1858ab698c7746"],
   ["terminal-result-needs-human", "4c5aee988d94853ac78432435d4b65f7ebe8720dfa0652b6c9eeb8ee30bd0581"],
   ["gate-pending", "802c580efe10eaa5728775d05bb1f088c4831455b3763763b9daf3885c6442f4"],
@@ -1523,7 +1523,7 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-output-limit", "63b89f33f3ebc6a7795136f0dd99eec4d0b5c6615ad4236a8b77bf341699f88e"],
   ["slice-pending", "0f66b96672a90c960a5cff760325c7e63a9a69dd95f19207406de97959afa113"],
   ["slice-running", "ccf77d9effc8e1ea2f3e668ea0c2f323c875fb14dfbafc120fb65d5c956c5d4c"],
-  ["slice-review", "476e15a3d85cca54a6de25390f2b257193d6b4c6cecba3d61f6b9d1fba857473"],
+  ["slice-review", "e2b04184fee064abab12827bd7ed2f9cacc80b671fef9524aaf1533fc6e69836"],
   ["review-invariant-family-ledger-v1", "a60883d9ddac368dec467214c17c39a2f855b60ca2d69838a5c8f09e58c99c8a"],
   ["verification-artifact-claim-active", "e64df439ff98307ad58a5b12a2dbf8d485684aeb230c9a55d69f458160e22d7b"],
   ["verification-artifact-claim-completed-pass", "8575174cfc4a4e8b84071db0136aa0dbf9be7f771fbc1911ef7cdd791eb335f5"],
@@ -1532,9 +1532,9 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["verification-artifact-claim-unknown-receipt", "1d12d4c61007d202cf0a083b4cf006e97a04afd5a5eedf32bf965efeb3ead91b"],
   ["verification-artifact-execution-receipt-pass", "c50cefb3c0c86b0ffa28a2ae05203d8662554b0480b22a83a23ec8131d3d0451"],
   ["verification-artifact-execution-receipt-fail", "9bfcdaba7778238809bcd51fa148b7360516cd3730606cc4f3eeebd993a8d852"],
-  ["slice-merged", "cbbcd6ae81fdaaec991b8772046a8a531793de57b39f509161eddbb1be7d4eb5"],
-  ["slice-blocked-ordinary", "426ad8598809921d61f100574ad347696798402bef54b0fb99c6f5bc61020794"],
-  ["slice-blocked", "c1965daf56e03ea648cfa05f0c4fe6447d158b3318d06d9110182f0b267fcf68"],
+  ["slice-merged", "071d7624f6ac5d954ba74d403a795c16055c0b454dbf7f67728753e7e58075b4"],
+  ["slice-blocked-ordinary", "a194a4b95b518a9135d4726277520e3baa5c8399ccd408eb991fac2d515839cd"],
+  ["slice-blocked", "ba543529dac064e1f63239efbc8a2d4f168246b0f56a1d337def9b1f5204f90d"],
   ["validator-verdict-binding", "22c22e8e118609a58e29101a6f6a89dacc8ddfddcc92974c810fe4b51cc5fdc9"],
   ["security-verdict-binding", "56e34d4427dc76cb46caee5a002856e4e97ef2dc870543fc489a750e384e6d99"],
   ["steering-boundary", "b3477a6967254d04f869b97b8d15d00ddb952673f00807ebec41f05afdbdacfc"],
@@ -2172,6 +2172,7 @@ function nonconvergenceTerminalResultEntry() {
     ratified_paths: [],
     verdict: "REJECT",
     convergence: "nonconvergent",
+    late_discovery_strike: false,
     remaining_fix_count: 1,
     dispatch_claim_ref: SLICE_NONCONVERGENCE_EXTERNAL.claim.ref,
     dispatch_claim_hash: hashBytes(SLICE_NONCONVERGENCE_EXTERNAL.claim.bytes),
@@ -2213,6 +2214,8 @@ function nonconvergenceTerminalResultEntry() {
     targets: [
       ...externalSidecarTargets("evidence", ["nonconvergence", "source_review", "evidence_ref"], ["nonconvergence", "source_review", "evidence_hash"]),
       ...externalSidecarTargets("review", ["nonconvergence", "source_review", "review_ref"], ["nonconvergence", "source_review", "review_hash"]),
+      target("missing-key", ["nonconvergence", "source_review", "late_discovery_strike"], "required late-discovery strike marker"),
+      target("wrong-type", ["nonconvergence", "source_review", "late_discovery_strike"], "boolean late-discovery strike marker"),
       drift(["nonconvergence"], "kind", "terminal source kind"),
       stale(["nonconvergence", "source_review", "attempt"], 0),
       cross(["nonconvergence", "slice_id"], "frontend"),
@@ -2627,6 +2630,7 @@ function sliceEntry(id, variant) {
       ratified_paths: [],
       verdict: blocked ? "REJECT" : "APPROVE",
       convergence: variant === "blocked" ? "nonconvergent" : "converging",
+      late_discovery_strike: false,
       remaining_fix_count: blocked ? 1 : 0,
       dispatch_claim_ref: reviewSources.claim.ref,
       dispatch_claim_hash: hashBytes(reviewSources.claim.bytes),
@@ -2655,6 +2659,9 @@ function sliceEntry(id, variant) {
     targets.push(
       ...externalSidecarTargets("evidence", evidenceRefPath, evidenceHashPath),
       ...externalSidecarTargets("review", reviewRefPath, reviewHashPath),
+      target("missing-key", ["attempt_reviews", 0, "late_discovery_strike"], "required late-discovery strike marker"),
+      target("wrong-type", ["attempt_reviews", 0, "late_discovery_strike"], "boolean late-discovery strike marker"),
+      stale(["attempt_reviews", 0, "late_discovery_strike"], true, "invalid strike timing or sidecar mismatch"),
       drift(["attempt_reviews", 0], "verdict", "attempt review result"),
       stale(["attempt_reviews", 0, "attempt"], 0, "stale attempt review"),
       cross(["attempt_reviews", 0, "reviewed_commit"], SHA_C, "cross-bound reviewed head"),
@@ -3304,10 +3311,10 @@ export function createRepairCatalogBaseline(record) {
   if (record?.authorityClassId !== "pr79-merged-slice-repair") throw new TypeError("repair fixture requires a registered PR79 repair record");
   if (canonicalJson(record.canonicalPath) !== canonicalJson(["merged_slice_repair"])) throw new TypeError(`${record.id} must bind run.json.merged_slice_repair`);
   const ownerEvidence = { ref: "evidence/owner.json", bytes: `{"subject":"owner","attempt":1,"status":"pass","review_ready":true,"head_sha":"${SHA_A}"}\n` };
-  const ownerReview = { ref: "reviews/owner.json", bytes: `{"subject":"owner","attempt":1,"verdict":"APPROVE","convergence":"converging","remaining_fix_count":0,"required_fixes":[],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[]},"reviewed_commit":"${SHA_A}"}\n` };
+  const ownerReview = { ref: "reviews/owner.json", bytes: `{"subject":"owner","attempt":1,"verdict":"APPROVE","convergence":"converging","late_discovery_strike":false,"remaining_fix_count":0,"required_fixes":[],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[]},"reviewed_commit":"${SHA_A}"}\n` };
   const ownerEvidenceHash = hashBytes(ownerEvidence.bytes);
   const ownerReviewHash = hashBytes(ownerReview.bytes);
-  const ownerAttemptReview = { attempt: 1, evidence_ref: ownerEvidence.ref, evidence_hash: ownerEvidenceHash, review_ref: ownerReview.ref, review_hash: ownerReviewHash, reviewed_commit: SHA_A, diff_base_commit: SHA_A, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 };
+  const ownerAttemptReview = { attempt: 1, evidence_ref: ownerEvidence.ref, evidence_hash: ownerEvidenceHash, review_ref: ownerReview.ref, review_hash: ownerReviewHash, reviewed_commit: SHA_A, diff_base_commit: SHA_A, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 };
   const run = {
     schema_version: 1,
     run_id: "repair-catalog-run",
@@ -3679,11 +3686,11 @@ function exactFacts(source) {
 
 function buildAmendmentCatalogFixtures() {
   const ownerEvidence = externalJson("evidence/catalog-amendment-owner.json", { subject: "owner", attempt: 1, status: "pass", review_ready: true, head_sha: SHA_B });
-  const ownerReview = externalJson("reviews/catalog-amendment-owner.json", { subject: "owner", attempt: 1, verdict: "APPROVE", reviewed_commit: SHA_B, required_fixes: [] });
+  const ownerReview = externalJson("reviews/catalog-amendment-owner.json", { subject: "owner", attempt: 1, verdict: "APPROVE", reviewed_commit: SHA_B, late_discovery_strike: false, required_fixes: [] });
   const ownerAttemptReview = {
     attempt: 1, evidence_ref: ownerEvidence.ref, evidence_hash: hashBytes(ownerEvidence.bytes), review_ref: ownerReview.ref,
     review_hash: hashBytes(ownerReview.bytes), reviewed_commit: SHA_B, diff_base_commit: SHA_A, ratified_paths: [], verdict: "APPROVE",
-    convergence: "converging", remaining_fix_count: 0,
+    convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
   };
   const admission = {
     baseline_ref: "refs/heads/catalog-feature", baseline_commit: SHA_A, baseline_tree: SHA_B, worktree: "/tmp/catalog-feature",

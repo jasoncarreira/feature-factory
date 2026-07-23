@@ -1112,13 +1112,13 @@ function installRatifiedApiOwnership(fixture, ratifiedPath, reviewedCommit) {
   const reviewRef = "reviews/api-slice.json";
   writeJson(join(fixture.runDir, evidenceRef), { subject: "api", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
   writeJson(join(fixture.runDir, reviewRef), {
-    subject: "api", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], reviewed_commit: reviewedCommit,
+    subject: "api", attempt: 1, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0, required_fixes: [], reviewed_commit: reviewedCommit,
     ownership_ratification: { schema_version: 1, paths: [ratifiedPath] }, remediation_context: { schema_version: 2, fixes: [] },
   });
   const evidenceHash = fileHash(join(fixture.runDir, evidenceRef));
   const reviewHash = fileHash(join(fixture.runDir, reviewRef));
   const attemptReview = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit,
-    diff_base_commit: reviewedCommit, ratified_paths: [ratifiedPath], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 };
+    diff_base_commit: reviewedCommit, ratified_paths: [ratifiedPath], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 };
   updateRunFile(fixture, (run) => {
     const api = run.slices.find((slice) => slice.id === "api");
     Object.assign(api, { declared_paths: ["src/api.js"], effective_paths: ["src/api.js", ratifiedPath], status: "merged", attempts: 1, attempt_reviews: [attemptReview],
@@ -1184,12 +1184,12 @@ function createRunStatePanelFixture(runId, { overlap = false, renameSource = fal
     const evidenceRef = `evidence/${planned.id}.json`;
     const reviewRef = `reviews/${planned.id}.json`;
     writeJson(join(runDir, evidenceRef), { subject: planned.id, attempt: 1, status: "pass", review_ready: true, head_sha: head });
-    writeJson(join(runDir, reviewRef), { subject: planned.id, attempt: 1, reviewed_commit: head, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: ratifiedPaths }, remediation_context: { schema_version: 2, fixes: [] } });
+    writeJson(join(runDir, reviewRef), { subject: planned.id, attempt: 1, reviewed_commit: head, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: ratifiedPaths }, remediation_context: { schema_version: 2, fixes: [] } });
     const evidenceHash = fileHash(join(runDir, evidenceRef));
     const reviewHash = fileHash(join(runDir, reviewRef));
     const effectivePaths = [...planned.paths, ...ratifiedPaths];
     return { id: planned.id, stack: planned.stack, depends_on: [], declared_paths: [...planned.paths], effective_paths: effectivePaths, status: "merged", attempts: 1,
-      attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, diff_base_commit: head, ratified_paths: ratifiedPaths, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+      attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, diff_base_commit: head, ratified_paths: ratifiedPaths, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 }],
       evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, merge_commit: head };
   });
   const reportRef = "artifacts/validation-report.md";

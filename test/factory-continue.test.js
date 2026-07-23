@@ -1755,7 +1755,7 @@ describe("continuation planning-artifact reuse", () => {
 
       updateRun(fixture, (run) => { run.slices[1].review_ref = reviewRef; run.terminal_result = exactTerminalResult; });
       writeJson(join(fixture.runDir, reviewRef), {
-        subject: "B", attempt: 2, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
+        subject: "B", attempt: 2, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent", late_discovery_strike: false,
         remaining_fix_count: 1, required_fixes: ["rewritten after terminalization"],
         ownership_ratification: { schema_version: 1, paths: [] },
         remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "nonconvergent", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
@@ -1766,7 +1766,7 @@ describe("continuation planning-artifact reuse", () => {
       );
       writeJson(join(fixture.runDir, reviewRef), currentReview);
       writeJson(join(fixture.runDir, priorReviewRef), {
-        subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
+        subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging", late_discovery_strike: false,
         remaining_fix_count: 1, required_fixes: ["rewritten earlier history"],
         ownership_ratification: { schema_version: 1, paths: [] },
         remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
@@ -3268,14 +3268,14 @@ function configureNonconvergentRoute(fixture) {
   const priorReviewRef = "reviews/B.attempt-1.json";
   writeJson(join(fixture.runDir, priorEvidenceRef), { subject: "B", attempt: 1, status: "pass", review_ready: true, head_sha: head });
   writeJson(join(fixture.runDir, priorReviewRef), {
-    subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
+    subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging", late_discovery_strike: false,
     remaining_fix_count: 1, required_fixes: ["first correction"],
     ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
   });
   writeJson(join(fixture.runDir, evidenceRef), { subject: "B", attempt: 2, status: "pass", review_ready: true, head_sha: head });
   const currentReview = {
-    subject: "B", attempt: 2, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
+    subject: "B", attempt: 2, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent", late_discovery_strike: false,
     remaining_fix_count: 1, required_fixes: ["replace the missed category"],
     ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "nonconvergent", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
@@ -3292,6 +3292,7 @@ function configureNonconvergentRoute(fixture) {
     ratified_paths: [],
     verdict: "REJECT",
     convergence: "converging",
+    late_discovery_strike: false,
     remaining_fix_count: 1,
   };
   const sourceReview = {
@@ -3305,6 +3306,7 @@ function configureNonconvergentRoute(fixture) {
     ratified_paths: [],
     verdict: "REJECT",
     convergence: "nonconvergent",
+    late_discovery_strike: false,
     remaining_fix_count: 1,
   };
   updateRun(fixture, (run) => {
@@ -3329,7 +3331,7 @@ function configureConvergingSliceRoute(fixture) {
   const reviewRef = "reviews/B.attempt-1.json";
   writeJson(join(fixture.runDir, evidenceRef), { subject: "B", attempt: 1, status: "pass", review_ready: true, head_sha: head });
   writeJson(join(fixture.runDir, reviewRef), {
-    subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
+    subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging", late_discovery_strike: false,
     remaining_fix_count: 1, required_fixes: ["apply the selected correction"],
     ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
@@ -3345,6 +3347,7 @@ function configureConvergingSliceRoute(fixture) {
     ratified_paths: [],
     verdict: "REJECT",
     convergence: "converging",
+    late_discovery_strike: false,
     remaining_fix_count: 1,
   };
   updateRun(fixture, (run) => {
@@ -3432,14 +3435,14 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
     const evidenceHash = hashFile(join(runDir, evidenceRef));
     const familyEvidence = writeFamilyReceipt(runDir, runId, plan, planned.id, 1, reviewedCommits[planned.id], familyEvidenceRef);
     writeJson(join(runDir, reviewRef), {
-      subject: planned.id, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+      subject: planned.id, attempt: 1, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
       required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommits[planned.id],
       invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: planned.id, reviewedCommit: reviewedCommits[planned.id], evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
     });
     const reviewHash = hashFile(join(runDir, reviewRef));
     const attemptReview = {
       attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
-      reviewed_commit: reviewedCommits[planned.id], diff_base_commit: baseCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+      reviewed_commit: reviewedCommits[planned.id], diff_base_commit: baseCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
     };
     return {
       id: planned.id, stack: planned.stack, depends_on: planned.depends_on, declared_paths: [...planned.paths], effective_paths: [...planned.paths], status: "merged", attempts: 1,
@@ -3622,7 +3625,7 @@ async function createConflictCarryForwardFixture(runId) {
   const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
   const familyEvidence = writeFamilyReceipt(fixture.runDir, runId, plan, sliceId, 1, reviewedCommit, familyEvidenceRef);
   writeJson(join(fixture.runDir, reviewRef), {
-    subject: sliceId, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [],
+    subject: sliceId, attempt: 1, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0, required_fixes: [],
     ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
     invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId, reviewedCommit, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
   });
@@ -3659,7 +3662,7 @@ async function createConflictCarryForwardFixture(runId) {
       dispatch_closure_ref: closureRef, dispatch_closure_hash: closureHash,
       attempt_reviews: [{
         attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
-        reviewed_commit: reviewedCommit, diff_base_commit: fixture.baseCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+        reviewed_commit: reviewedCommit, diff_base_commit: fixture.baseCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
         dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash, dispatch_closure_ref: closureRef, dispatch_closure_hash: closureHash,
       }],
     };
@@ -3717,7 +3720,7 @@ function configureMultiAttemptAcceptedSlice(fixture, id) {
   const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
   const attemptOneFamily = writeFamilyReceipt(fixture.runDir, fixture.runId, plan, id, 1, reviewedCommit, attemptOne.familyEvidenceRef);
   writeJson(join(fixture.runDir, attemptOne.reviewRef), {
-    subject: id, attempt: 1, verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
+    subject: id, attempt: 1, verdict: "REJECT", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 1,
     required_fixes: ["complete the first correction"],
     ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: [`${id}.txt`], fix_owner: id }] },
@@ -3728,7 +3731,7 @@ function configureMultiAttemptAcceptedSlice(fixture, id) {
   const attemptTwoEvidenceHash = hashFile(join(fixture.runDir, attemptTwo.evidenceRef));
   const attemptTwoFamily = writeFamilyReceipt(fixture.runDir, fixture.runId, plan, id, 2, reviewedCommit, attemptTwo.familyEvidenceRef);
   writeJson(join(fixture.runDir, attemptTwo.reviewRef), {
-    subject: id, attempt: 2, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+    subject: id, attempt: 2, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
     required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
     invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: id, reviewedCommit, evidenceRef: attemptTwo.familyEvidenceRef, evidenceHash: attemptTwoFamily.hash }),
   });
@@ -3736,12 +3739,12 @@ function configureMultiAttemptAcceptedSlice(fixture, id) {
     {
       attempt: 1, evidence_ref: attemptOne.evidenceRef, evidence_hash: hashFile(join(fixture.runDir, attemptOne.evidenceRef)),
       review_ref: attemptOne.reviewRef, review_hash: hashFile(join(fixture.runDir, attemptOne.reviewRef)), reviewed_commit: reviewedCommit,
-      diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
+      diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "REJECT", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 1,
     },
     {
       attempt: 2, evidence_ref: attemptTwo.evidenceRef, evidence_hash: attemptTwoEvidenceHash,
       review_ref: attemptTwo.reviewRef, review_hash: hashFile(join(fixture.runDir, attemptTwo.reviewRef)), reviewed_commit: reviewedCommit,
-      diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+      diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
     },
   ];
   Object.assign(slice, {
@@ -3769,7 +3772,7 @@ function writeMergedSliceFixture(runDir, id, reviewedCommit) {
   const runId = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).run_id;
   const familyEvidence = writeFamilyReceipt(runDir, runId, plan, id, 1, reviewedCommit, familyEvidenceRef);
   writeJson(join(runDir, reviewRef), {
-    subject: id, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+    subject: id, attempt: 1, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
     required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
     invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: id, reviewedCommit, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
   });
@@ -3777,7 +3780,7 @@ function writeMergedSliceFixture(runDir, id, reviewedCommit) {
   return {
     status: "merged", attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
     reviewed_commit: reviewedCommit, merge_commit: reviewedCommit,
-    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 }],
   };
 }
 

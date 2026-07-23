@@ -445,7 +445,7 @@ After B1.3 allocation, B1.4 stages a complete child outside run discovery, valid
 
 #### Slice review one-strike policy
 
-New slice reviews receive one review-process strike before terminal nonconvergence. A consequential first-pass category discovered on attempt 2 is hash-bound as `late_discovery_strike: true`, remains converging, and consumes normal attempt 3; it never creates attempt 4. A rejected final attempt takes the existing checked nonconvergence carry-forward route. Persisted older sidecars without the marker remain readable.
+Every slice review requires boolean `late_discovery_strike`. A consequential first-pass category discovered on attempt 2 is hash-bound as `true`, remains converging, and consumes normal attempt 3; it never creates attempt 4. Genuine implementation nonconvergence with the marker `false` may terminalize on any attempt, while every rejected final attempt must be nonconvergent. Marker-less sidecars and history are invalid current records and fail closed.
 
 ### Choosing continuation, rebaseline, or recovery
 

@@ -585,9 +585,9 @@ Legacy slice review/merged rows reject without mutation. Review publication and 
 
 ### Slice Review One-Strike Policy
 
-Every newly emitted slice review carries boolean `late_discovery_strike`. Set it false for APPROVE and ordinary REJECT reviews. When attempt 2 discovers the first consequential category that the reviewer should have reported on attempt 1, set it true, keep the review converging, and classify fixes by their actual remediation shape. The checked publisher permits that strike only once and only while normal attempt 3 remains. Existing persisted sidecars without the field remain read-compatible and are never backfilled.
+Every slice review carries required boolean `late_discovery_strike`; marker-less sidecars and history reject fail-closed and are re-seeded rather than upgraded. Set it false for APPROVE, ordinary REJECT, and genuine implementation nonconvergence. When attempt 2 discovers the first consequential category that the reviewer should have reported on attempt 1, set it true, keep the review converging, and classify fixes by their actual remediation shape. The checked publisher permits that strike only once and only while normal attempt 3 remains.
 
-The strike changes only premature slice-review nonconvergence. A first attempt-2 reviewer miss receives normal attempt 3 instead of terminalizing. If attempt 3 is still REJECT, it must be `nonconvergent` and follows the existing checked carry-forward route; there is no attempt 4. Spec, decomposition, and test-verifier nonconvergence rules are unchanged, and ownership, contract-change, sibling-owner, security, and feasibility routing still fail closed before slice retry.
+The strike changes only a slice reviewer's own attempt-2 first-pass miss, which receives normal attempt 3 instead of terminalizing. A non-strike review may still declare genuine implementation nonconvergence on any attempt. If attempt 3 is REJECT, it must be `nonconvergent` and follows the existing checked carry-forward route; there is no attempt 4. Spec, decomposition, and test-verifier nonconvergence rules are unchanged, and ownership, contract-change, sibling-owner, security, and feasibility routing still fail closed before slice retry.
 
 ### Generic Integration Amendment
 

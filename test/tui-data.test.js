@@ -437,7 +437,7 @@ describe("TUI factory scanner", () => {
       slices: [{ id: "backend", declared_paths: ["backend.txt"], effective_paths: ["backend.txt"], status: "merged", attempts: 1,
         evidence_ref: "evidence/backend.json", evidence_hash: `sha256:${"1".repeat(64)}`,
         review_ref: "reviews/backend.json", review_hash: `sha256:${"2".repeat(64)}`, reviewed_commit: "3".repeat(40), merge_commit: "4".repeat(40),
-        attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/backend.json", evidence_hash: `sha256:${"1".repeat(64)}`, review_ref: "reviews/backend.json", review_hash: `sha256:${"2".repeat(64)}`, reviewed_commit: "3".repeat(40), diff_base_commit: "3".repeat(40), ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }] }],
+        attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/backend.json", evidence_hash: `sha256:${"1".repeat(64)}`, review_ref: "reviews/backend.json", review_hash: `sha256:${"2".repeat(64)}`, reviewed_commit: "3".repeat(40), diff_base_commit: "3".repeat(40), ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 }] }],
     });
     writeRun(repo, "security-run", {
       status: "running",
@@ -779,7 +779,7 @@ function tuiSliceAuthority(id, status, attempt) {
   const reviewHash = `sha256:${"b".repeat(64)}`;
   const reviewedCommit = "c".repeat(40);
   return {
-    attempt_reviews: [{ attempt, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+    attempt_reviews: [{ attempt, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 }],
     evidence_ref: evidenceRef,
     evidence_hash: evidenceHash,
     review_ref: reviewRef,
