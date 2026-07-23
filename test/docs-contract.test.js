@@ -1983,15 +1983,17 @@ describe("non-destructive disrupted-worktree recovery docs contract", () => {
 });
 
 describe("remediation context reuse docs contract", () => {
-  it("documents checked compaction continuation and explicit orphan reconciliation", () => {
-    const command = /slice-dispatch-reconcile <run-id> <slice-id> <attempt> --authorize-callback-returned-without-closure --json/iu;
+  it("documents checked compaction continuation and provenance-neutral candidate adoption", () => {
+    const command = /slice-dispatch-adopt <run-id> <slice-id> <attempt> --json/iu;
     for (const [name, text] of documentEntries({ SKILL, README, SPEC, SCHEMA })) {
       assert.match(text, /OpenCode compaction/iu, `${name} must document compaction continuation`);
       assert.match(text, /model-authored (?:compaction )?summary[\s\S]*(?:non-authoritative|progress data)/iu, `${name} must keep summaries non-authoritative`);
       assert.match(text, /plugin-owned system/iu, `${name} must require plugin-owned system authority`);
-      assert.match(text, command, `${name} must document the exact reconciliation command`);
-      assert.match(text, /checked-slice-builder-dispatch-reconciliation/u, `${name} must name distinct reconciliation authority`);
+      assert.match(text, command, `${name} must document the exact adoption command`);
+      assert.match(text, /checked-slice-builder-dispatch-adoption/u, `${name} must name distinct candidate adoption authority`);
       assert.match(text, /new clean descendant HEAD/iu, `${name} must require a new clean descendant HEAD`);
+      assert.match(text, /no operator or callback provenance|asserts no operator or callback provenance|attests no operator or callback provenance/iu, `${name} must disclaim operator and callback provenance`);
+      assert.match(text, /no evidence, test, review, ownership, acceptance, or merge authority|never replaces observed evidence, focused tests, independent review, ownership ratification, or exact-HEAD merge checks/iu, `${name} must preserve downstream authority`);
     }
     for (const [name, text] of documentEntries({ BACKEND_BUILDER_PROMPT, FRONTEND_BUILDER_PROMPT })) {
       assert.match(text, /PLUGIN_CANONICAL_COMPACTION_CONTINUATION_DIRECTIVE/u, `${name} must recognize canonical continuation`);

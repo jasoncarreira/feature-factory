@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import plugin, { createPendingCallbackStore, createSessionCorrelationProbe, mergeFactoryPermission, parseFrontmatter, parseSpecialBuilderDispatchMarker, specialTaskTelemetryAttributes } from "../src/plugin.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadValue } from "../src/feature-command-payload.js";
-import { completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, reconcileSliceBuilderTaskDispatch, transitionIntegrationAmendment, transitionPanelVerdicts } from "../src/run-state.js";
+import { adoptSliceBuilderTaskDispatchCandidate, completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionIntegrationAmendment, transitionPanelVerdicts } from "../src/run-state.js";
 import { buildContinuation, cleanupRun, recoverDisruptedRun, resumeFactory } from "../src/factory.js";
 import { integrationAmendmentId, validateRun } from "../src/validate.js";
 import { hashValue } from "../src/refs.js";
@@ -340,7 +340,7 @@ describe("checked slice builder Task dispatch", () => {
     }
   });
 
-  it("records explicit operator reconciliation as distinct completion authority and rejects a late callback", async () => {
+  it("records candidate adoption as distinct completion authority and rejects a late callback", async () => {
     const fixture = createBuilderDispatchFixture();
     try {
       const instance = await plugin({ directory: fixture.repo });
@@ -352,25 +352,23 @@ describe("checked slice builder Task dispatch", () => {
       git(fixture.repo, ["add", "src/reconciled.js"]);
       git(fixture.repo, ["commit", "-m", "reconciled build"]);
 
-      const reconciled = await reconcileSliceBuilderTaskDispatch(fixture.repo, {
+      const adopted = await adoptSliceBuilderTaskDispatchCandidate(fixture.repo, {
         run_id: "run",
         slice_id: "slice",
         attempt: 1,
-        authorization: "operator-authorized-callback-returned-without-closure",
       });
-      assert.equal(reconciled.updated, true);
-      assert.equal(reconciled.reconciliation.completion_kind, "operator-reconciliation");
+      assert.equal(adopted.updated, true);
+      assert.equal(adopted.adoption.completion_kind, "candidate-adoption");
       const run = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
       const authority = JSON.parse(readFileSync(join(fixture.runDir, run.slices[0].dispatch_closure_ref), "utf8"));
-      assert.equal(authority.kind, "checked-slice-builder-dispatch-reconciliation");
+      assert.equal(authority.kind, "checked-slice-builder-dispatch-adoption");
       assert.equal(Object.hasOwn(authority, "completion_token"), false);
-      assert.equal((await reconcileSliceBuilderTaskDispatch(fixture.repo, {
+      assert.equal((await adoptSliceBuilderTaskDispatchCandidate(fixture.repo, {
         run_id: "run", slice_id: "slice", attempt: 1,
-        authorization: "operator-authorized-callback-returned-without-closure",
       })).updated, false);
       await assert.rejects(
         instance["tool.execute.after"]({ ...identity, args: task.args }, { title: "task", output: "late", metadata: { sessionID: "builder" } }),
-        /already resolved by operator reconciliation/u,
+        /already resolved by candidate adoption/u,
       );
       assert.equal(validateRun(JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"))).slices[0].dispatch_closure_hash, run.slices[0].dispatch_closure_hash);
     } finally {

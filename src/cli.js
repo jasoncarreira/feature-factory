@@ -11,7 +11,7 @@ import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
-import { reconcileSliceBuilderTaskDispatch, transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { adoptSliceBuilderTaskDispatchCandidate, transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { validateRun } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
@@ -92,7 +92,7 @@ Commands:
   factory slices-probe <run-id> --from plan/slices.json [--json]
   factory slices-seed <run-id> --from plan/slices.json [--boundary-token TOKEN]
   factory slice-status <run-id> <slice-id> <running|review|blocked> [--branch REF] [--worktree PATH] [--attempts N] [--evidence-ref REF] [--review-ref REF] [--reason TEXT]
-  factory slice-dispatch-reconcile <run-id> <slice-id> <attempt> --authorize-callback-returned-without-closure --json
+  factory slice-dispatch-adopt <run-id> <slice-id> <attempt> --json
   factory repair <run-id> <reported|repairing|review|merged|blocked> [retained legacy: blocked, previously-attempted, or branch-only consumer]
   factory step <run-id> <agent> <running|accepted|rejected|blocked> [--artifact-ref REF] [--evidence-ref REF] [--review-ref REF] [--attempts N]
   factory verdicts <run-id> --validator GO|GO-WITH-NITS|NO-GO --report artifacts/validation-report.md --security PASS|BLOCK --review-ref reviews/security-reviewer.json
@@ -199,7 +199,7 @@ async function factory(args, dependencies = {}) {
   if (sub === "answer") return answer(rest);
   if (sub === "test-execute") return testExecute(rest, dependencies);
   if (sub === "artifact-execute") return artifactExecute(rest, dependencies);
-  if (sub === "slice-dispatch-reconcile") return sliceDispatchReconcile(rest, dependencies);
+  if (sub === "slice-dispatch-adopt") return sliceDispatchAdopt(rest, dependencies);
   if (sub === "amendment") return amendment(rest, dependencies);
   if (sub === "cost-report") return costReport(rest);
   if (sub === "cleanup" && rest.some((argument) => argument === "--all" || argument === "--digest" || argument.startsWith("--all=") || argument.startsWith("--digest="))) return cleanupSweep(rest);
@@ -299,26 +299,23 @@ async function factory(args, dependencies = {}) {
   process.exitCode = 1;
 }
 
-async function sliceDispatchReconcile(args, dependencies = {}) {
-  const authorizationFlag = "--authorize-callback-returned-without-closure";
-  if (args.length !== 5 || args.filter((value) => value === "--json").length !== 1
-    || args.filter((value) => value === authorizationFlag).length !== 1) {
-    throw staticCliError(`factory slice-dispatch-reconcile requires exactly <run-id> <slice-id> <attempt> ${authorizationFlag} --json`);
+async function sliceDispatchAdopt(args, dependencies = {}) {
+  if (args.length !== 4 || args.filter((value) => value === "--json").length !== 1) {
+    throw staticCliError("factory slice-dispatch-adopt requires exactly <run-id> <slice-id> <attempt> --json");
   }
-  const positional = args.filter((value) => value !== "--json" && value !== authorizationFlag);
+  const positional = args.filter((value) => value !== "--json");
   const [runId, sliceId, attemptValue] = positional;
   const attempt = Number(attemptValue);
   if (positional.length !== 3 || !stringValue(runId) || !stringValue(sliceId)
     || !Number.isInteger(attempt) || attempt < 1 || attempt > 3) {
-    throw staticCliError(`factory slice-dispatch-reconcile requires exactly <run-id> <slice-id> <attempt> ${authorizationFlag} --json`);
+    throw staticCliError("factory slice-dispatch-adopt requires exactly <run-id> <slice-id> <attempt> --json");
   }
-  const opts = { cwd: process.cwd(), json: true, ...(dependencies.sliceDispatchReconciliationOptions || {}) };
+  const opts = { cwd: process.cwd(), json: true, ...(dependencies.sliceDispatchAdoptionOptions || {}) };
   resolveRunDir(runId, opts);
-  const result = await reconcileSliceBuilderTaskDispatch(opts.repoRoot, {
+  const result = await adoptSliceBuilderTaskDispatchCandidate(opts.repoRoot, {
     run_id: runId,
     slice_id: sliceId,
     attempt,
-    authorization: "operator-authorized-callback-returned-without-closure",
   }, opts);
   print(result, opts);
   return result;
