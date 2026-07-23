@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { lstat, mkdir, open, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { appendCostAttributionEntry } from "./cost-attribution.js";
 import { git, repoRoot } from "./git.js";
 import { probeLegacyBooleanLiveness } from "./hardening/process-verification.js";
@@ -16,6 +16,10 @@ import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
 import { isPrivilegedControlPlanePath, privilegedControlPlanePathReason } from "./privileged-path-policy.js";
+import { acquireLaunchFence, BASE_ADVANCE_LAUNCH_FENCE_OWNER_KIND, inspectLaunchClaim, inspectProcessEvidence, releaseLaunchFence } from "./process-evidence.js";
+import { withCanonicalOriginMain } from "./canonical-origin/index.js";
+import { BASE_ADVANCE_ERROR_CODES, evaluateBaseAdvanceState } from "./base-advance/state-model.js";
+import { assertCanonicalTarget, assertRunDurableFilesEqual, assertRunWorktreePath, fastForwardBaseWorktree, observeBaseAdvanceGitState, snapshotRunDurableFiles } from "./base-advance-transition/git-state.js";
 import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
 import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
 import { validateAdmissionExtensionResult, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
@@ -474,6 +478,418 @@ export function assertRunJsonWriterAllowed(run, label, options = {}) {
 export async function transitionRunJson(runDir, mutator, options = {}) {
   if (typeof mutator !== "function") throw new Error("transitionRunJson requires a mutator");
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, mutator, options), options);
+}
+
+export async function transitionRunBaseAdvance(runDir, options = {}) {
+  const hooks = isRecord(options.baseAdvanceHooks) ? options.baseAdvanceHooks : {};
+  try {
+    return await withRunJsonLock(runDir, async () => {
+      let fence;
+      try {
+        fence = acquireLaunchFence(runDir, BASE_ADVANCE_LAUNCH_FENCE_OWNER_KIND, options.launchFenceOptions || {});
+      } catch (error) {
+        throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.lockContended, "base-advance launch fence could not be acquired", error);
+      }
+      if (!fence.acquired) throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.lockContended, "base-advance launch fence is held");
+
+      try {
+        await hooks.afterLaunchFenceAcquired?.({ fence: cloneJson(fence) });
+        let current;
+        try {
+          current = await readRunJson(runDir);
+        } catch (error) {
+          throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.runInvalid, "run.json is invalid", error);
+        }
+        const repository = resolve(options.repoRoot || repoRoot(runDir, { noCache: true }));
+        assertBaseAdvanceBaseRef(current);
+        const durableSnapshot = snapshotBaseAdvanceDurableFiles(runDir, options);
+        const eligibility = observeBaseAdvanceEligibility(runDir, current, options);
+        assertBaseAdvanceAllowed(eligibility);
+
+        return await withCanonicalOriginMain(repository, current.base_commit, async (origin) => {
+          const target = origin.commit;
+          let observed = observeBaseAdvanceGitState(repository, current, target, options);
+          assertRunWorktreePath(repository, observed.worktree);
+          const ancestry = target === current.base_commit ? "equal" : "ancestor";
+          const decision = evaluateBaseAdvanceState({ ...eligibility, ancestry, crash_point: observed.crash_point });
+          assertBaseAdvanceAllowed(decision);
+
+          if (decision.action === "fast-forward-and-bind") {
+            assertCanonicalTarget(repository, target, options);
+            await hooks.beforeGit?.({ run: cloneJson(current), target });
+            fastForwardBaseWorktree(observed, options);
+            await hooks.afterGit?.({ run: cloneJson(current), target });
+          }
+
+          observed = observeBaseAdvanceGitState(repository, current, target, options);
+          if (observed.branch_head !== target || !["git-advanced-unbound", "bound-current"].includes(observed.crash_point)) {
+            throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.gitStateInvalid, "post-advance Git identity is not the canonical target");
+          }
+          assertCanonicalTarget(repository, target, options);
+          assertRunDurableFilesEqual(snapshotBaseAdvanceDurableFiles(runDir, options), durableSnapshot);
+          const beforePublication = await readRunJson(runDir);
+          if (!sameJson(beforePublication, current)) throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "run state changed before base publication");
+          assertBaseAdvanceAllowed(observeBaseAdvanceEligibility(runDir, beforePublication, options));
+
+          if (decision.action === "replay") {
+            await hooks.beforeFinalVerification?.({ run: cloneJson(current), target, replayed: true });
+            assertBaseAdvanceFinalState(runDir, repository, current, target, durableSnapshot, options, false);
+            return baseAdvanceSuccess(current, target, "already-current", false, true);
+          }
+
+          const next = validateRun({ ...cloneJson(current), base_commit: target, updated_at: timestamp(options.now) });
+          await hooks.beforeBind?.({ run: cloneJson(current), target });
+          try {
+            await writeProtectedRunJson(runDir, next, { ...options, atomicWriteHooks: options.baseAdvanceAtomicWriteHooks }, async () => {
+              const latest = await readRunJson(runDir);
+              if (!sameJson(latest, current)) throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "run state changed before base publication");
+              assertBaseAdvanceAllowed(observeBaseAdvanceEligibility(runDir, latest, options));
+              assertRunDurableFilesEqual(snapshotBaseAdvanceDurableFiles(runDir, options), durableSnapshot);
+              const latestGit = observeBaseAdvanceGitState(repository, latest, target, options);
+              if (latestGit.crash_point !== "git-advanced-unbound") {
+                throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.gitStateInvalid, "Git identity changed before base publication");
+              }
+              assertCanonicalTarget(repository, target, options);
+            });
+          } catch (error) {
+            const checkedFailure = findBaseAdvanceFailure(error);
+            if (checkedFailure) throw checkedFailure;
+            throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.publishFailed, "base manifest publication failed", error);
+          }
+          await hooks.afterBind?.({ run: cloneJson(next), target });
+          await hooks.beforeFinalVerification?.({ run: cloneJson(next), target, replayed: false });
+          assertBaseAdvanceFinalState(runDir, repository, next, target, durableSnapshot, options, true);
+          return baseAdvanceSuccess(current, target, "advanced", true, false);
+        }, options.canonicalOriginOptions || {});
+      } finally {
+        if (!releaseLaunchFence(fence)) {
+          throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.lockContended, "base-advance launch fence release could not be verified");
+        }
+        await hooks.afterLaunchFenceReleased?.();
+      }
+    }, options);
+  } catch (error) {
+    if (error?.code === "RUN_JSON_LOCK_CONTENDED" || /run\.json lock/u.test(String(error?.message || ""))) {
+      throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.lockContended, "run.json lock is contended", error);
+    }
+    if (String(error?.code || "").startsWith("BASE_ADVANCE_")) throw error;
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.failed, "base advancement failed", error);
+  }
+}
+
+function observeBaseAdvanceEligibility(runDir, run, options) {
+  assertBaseAdvanceManifestEligibility(run);
+  let ordinaryDispatch = "absent";
+  let specialDispatch = "absent";
+  let amendmentInventory;
+  try {
+    ordinaryDispatch = observeBaseAdvanceOrdinaryDispatchAuthority(runDir, run);
+    specialDispatch = observeBaseAdvanceSpecialDispatchAuthority(runDir, run);
+    amendmentInventory = inspectIntegrationAmendmentInventory(runDir, run);
+    if (!run.integration_amendment && amendmentInventory.classification === "all-absent") observeIntegrationAmendmentWriterAuthority(runDir, run);
+    if (run.integration_amendment?.status === "merged") observeIntegrationAmendmentWriterAuthority(runDir, run);
+    assertBaseAdvanceBoundRefsCurrent(runDir, run);
+    if ((run.steps || []).some((step) => step?.agent === "work-decomposer" && step.status === "accepted")) {
+      observeAcceptedDecompositionAuthority(runDir, run, { requireApprovingReview: true });
+    }
+  } catch (error) {
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.runInvalid, "run authority is invalid", error);
+  }
+
+  const heartbeat = classifyBaseAdvanceHeartbeat(runDir, run, options);
+  const processState = classifyBaseAdvanceProcess(runDir, run, options);
+  const launchClaim = inspectLaunchClaim(runDir, { ...(options.launchClaimOptions || {}), runId: run.run_id });
+  const sliceStatuses = new Set((run.slices || []).map((slice) => slice?.status));
+  const steering = run.steering;
+  const postPr = classifyBaseAdvancePostPr(run.post_pr);
+  const testClaim = uniqueTestVerifierStep(run)?.execution_claim;
+  const repair = run.merged_slice_repair;
+  const amendment = run.integration_amendment;
+
+  return {
+    run_kind: run.continuation || run.checkpoint_source || run.checkpoint_progress ? "non-ordinary" : "ordinary",
+    run_status: run.status === "running" ? (run.terminal_result == null ? "running-no-terminal" : "running-with-terminal") : run.status,
+    continuation_checkpoint: run.continuation?.schema_version === 1 ? "continuation-v1"
+      : run.continuation?.schema_version === 2 ? "continuation-v2"
+        : run.checkpoint_source ? "checkpoint-child"
+          : run.checkpoint_progress ? "checkpoint-parent" : "absent",
+    steering_queue: isRecord(steering?.pending) ? "pending" : isRecord(steering?.uncheckpointed) ? "uncheckpointed" : "empty",
+    steering_boundary: isRecord(steering?.boundary) ? "current" : "absent",
+    steering_action: isRecord(steering?.action_claim) || steering?.last_action?.outcome === "started" ? "active"
+      : isRecord(steering?.last_action) ? "historical-settled" : "absent",
+    steering_fence: isRecord(steering?.pr_fence) ? "current" : "absent",
+    pr_authority: stringValue(run.pr_url) ? "pr-url" : isRecord(run.post_pr?.pr_operation) ? "operation"
+      : isRecord(steering?.pr_fence) ? "fence" : run.terminal_result != null ? "terminal" : "absent",
+    post_pr: postPr,
+    slices: sliceStatuses.has("merged") ? "merged" : sliceStatuses.has("blocked") ? "blocked"
+      : sliceStatuses.size === 0 ? "empty" : sliceStatuses.size === 1 ? [...sliceStatuses][0] : "mixed-active",
+    ordinary_dispatch: ordinaryDispatch,
+    test_execution: isRecord(testClaim) && testClaim.state === "active" ? "active"
+      : isRecord(testClaim) && testClaim.state === "unknown" ? "unknown"
+        : isRecord(testClaim) ? "settled-historical" : "absent",
+    special_dispatch: specialDispatch,
+    amendment: classifyBaseAdvanceAmendment(amendment, amendmentInventory),
+    repair: !repair ? "absent" : repair.status === "merged" ? "fully-merged-resolved" : repair.status,
+    panels: isRecord(run.validator) && isRecord(run.security_review) ? "both"
+      : isRecord(run.validator) ? "validator" : isRecord(run.security_review) ? "security" : "absent",
+    heartbeat,
+    process: processState,
+    launch_claim: launchClaim.missing ? "absent" : launchClaim.ok && launchClaim.owner_status === "live" ? "live"
+      : launchClaim.ok && launchClaim.owner_status === "indeterminate" ? "indeterminate"
+        : launchClaim.ok ? "stale-unreconciled" : "malformed",
+    run_lock: "acquired",
+    launch_fence: "acquired-base-advance",
+    git_identity: "registered-clean-attached",
+    origin: "exact-stable",
+    ancestry: "ancestor",
+    crash_point: "old-eligible",
+  };
+}
+
+function assertBaseAdvanceManifestEligibility(run) {
+  if (run.continuation || run.checkpoint_source || run.checkpoint_progress) {
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "continuation and checkpoint runs cannot advance their base");
+  }
+  if (run.status !== "running" || run.terminal_result != null) throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "run is not active");
+  if (stringValue(run.pr_url) || isRecord(run.post_pr?.pr_operation) || isRecord(run.steering?.pr_fence)) {
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "run already has PR authority");
+  }
+  if (classifyBaseAdvancePostPr(run.post_pr) === "active") throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "post-PR state is active");
+  if (isRecord(run.steering?.pending) || isRecord(run.steering?.uncheckpointed) || isRecord(run.steering?.boundary)
+    || isRecord(run.steering?.action_claim) || run.steering?.last_action?.outcome === "started") {
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "steering authority is active");
+  }
+  if ((run.slices || []).some((slice) => ["merged", "blocked"].includes(slice?.status))) {
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "run has a merged or blocked slice");
+  }
+  const testClaim = uniqueTestVerifierStep(run)?.execution_claim;
+  if (isRecord(testClaim) && ["active", "unknown"].includes(testClaim.state)) {
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "checked test execution is active or unknown");
+  }
+  if (run.special_builder_dispatch) throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "special builder authority is unconsumed");
+  if (run.integration_amendment && run.integration_amendment.status !== "merged") {
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "integration amendment authority is unresolved");
+  }
+  if (run.merged_slice_repair && run.merged_slice_repair.status !== "merged") {
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "merged-slice repair authority is unresolved");
+  }
+  if (isRecord(run.validator) || isRecord(run.security_review)) throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "panel authority already exists");
+}
+
+function observeBaseAdvanceSpecialDispatchAuthority(runDir, run) {
+  const dispatchDir = join(runDir, "dispatch");
+  if (!existsSync(dispatchDir)) {
+    if (run.special_builder_dispatch) throw new Error("bound special dispatch directory is missing");
+    return "absent";
+  }
+  const names = readdirSync(dispatchDir);
+  let classification = "absent";
+  for (const name of names.filter((entry) => entry.endsWith(".special.json"))) {
+    const observed = observeSpecialDispatchClaim(runDir, `dispatch/${name}`);
+    if (observed.claim.run_id !== run.run_id) throw new Error("special dispatch is cross-bound");
+    if (!existsSync(resolve(runDir, observed.claim.closure_ref))) {
+      classification = "active";
+      continue;
+    }
+    const closed = observeClosedSpecialDispatch(runDir, observed);
+    const binding = run.special_builder_dispatch;
+    if (binding?.claim_ref === observed.ref) {
+      if (binding.claim_hash !== observed.hash || binding.closure_ref !== closed.closure_ref
+        || binding.closure_hash !== closed.closure_hash || binding.completion_head !== closed.completion_head) {
+        throw new Error("special dispatch binding is stale");
+      }
+      classification = "closed-unconsumed";
+    } else if (classification === "absent") classification = "consumed-historical";
+  }
+  if (run.special_builder_dispatch && classification === "absent") throw new Error("bound special dispatch is missing");
+  return classification;
+}
+
+function classifyBaseAdvanceAmendment(amendment, inventory) {
+  if (!amendment) {
+    if (inventory.classification === "all-absent" || ["completed-pass-receipt-no-manifest", "completed-diagnostic-receipt-no-manifest"].includes(inventory.classification)) {
+      return inventory.classification === "all-absent" ? "absent" : "settled-no-manifest";
+    }
+    if (inventory.classification === "active-claim-only") return "active";
+    if (inventory.classification === "unknown-claim-optional-bound-receipt") return "unknown";
+    return "unconsumed";
+  }
+  if (amendment.status === "merged") return "fully-merged-resolved";
+  if (amendment.status === "blocked") return "blocked";
+  if (["active", "unknown"].includes(inventory.verification_effect?.state)) return inventory.verification_effect.state;
+  return "active";
+}
+
+function classifyBaseAdvanceHeartbeat(runDir, run, options) {
+  const path = join(runDir, HEARTBEAT_FILE);
+  if (!existsSync(path)) return "missing";
+  let heartbeat;
+  try {
+    heartbeat = validateHeartbeatState(JSON.parse(readFileSync(path, "utf8")));
+  } catch (error) {
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.runInvalid, "heartbeat evidence is invalid", error);
+  }
+  if (heartbeat.run_id !== run.run_id) throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.runInvalid, "heartbeat evidence is cross-bound");
+  if (heartbeat.pid === null) return "pid-null";
+  const liveness = inspectHeartbeatLiveness(heartbeat, options);
+  if (liveness.status === "indeterminate") return "indeterminate";
+  if (liveness.status === "live") return "live-matching";
+  return "inactive";
+}
+
+function classifyBaseAdvanceProcess(runDir, run, options) {
+  const observed = inspectProcessEvidence(runDir, { ...(options.processEvidenceOptions || {}), runId: run.run_id });
+  if (observed.missing) return "missing";
+  if (!observed.ok) throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.runInvalid, "process evidence is invalid");
+  if (observed.evidence.state === "exited") return "exited-matching";
+  if (observed.evidence.state === "running" && observed.verification?.status === "live-and-matching") return "live-matching";
+  if (observed.evidence.state === "running") return "running";
+  return observed.evidence.state;
+}
+
+function classifyBaseAdvancePostPr(postPr) {
+  if (postPr == null || postPr.policy?.enabled !== true) return "disabled";
+  const pristine = postPr.phase === "awaiting-pr" && postPr.attempt === 0 && postPr.observation === null
+    && postPr.remediation === null && Array.isArray(postPr.evidence_refs) && postPr.evidence_refs.length === 0
+    && postPr.continuation_review === null && postPr.terminal_fact === null && postPr.pr_operation === null;
+  return pristine ? "pristine-awaiting-pr" : "active";
+}
+
+function observeBaseAdvanceOrdinaryDispatchAuthority(runDir, run) {
+  const slices = Array.isArray(run.slices) ? run.slices : [];
+  const dispatchDir = join(runDir, "dispatch");
+  const expectedNames = new Set();
+  let classification = "absent";
+  for (const slice of slices) {
+    assertSliceAttemptHistoryCurrent(runDir, slice.id, slice);
+    const currentAttempt = Number.isInteger(slice.attempts) ? slice.attempts : 0;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const claimName = sliceDispatchClaimName(run.run_id, slice.id, attempt);
+      const closureName = `${claimName.slice(0, -5)}.closed.json`;
+      expectedNames.add(claimName);
+      expectedNames.add(closureName);
+      const claimPath = join(dispatchDir, claimName);
+      const closurePath = join(dispatchDir, closureName);
+      const hasClaim = existsSync(claimPath);
+      const hasClosure = existsSync(closurePath);
+      if (hasClosure && !hasClaim) throw new Error(`slice '${slice.id}' attempt ${attempt} closure has no claim`);
+      const historical = attempt === currentAttempt ? null : (slice.attempt_reviews || []).find((entry) => entry?.attempt === attempt);
+      const binding = attempt === currentAttempt ? slice : historical;
+      const bound = SLICE_DISPATCH_BINDING_KEYS.every((key) => binding?.[key] !== undefined);
+      if (!hasClaim) {
+        if (bound) throw new Error(`slice '${slice.id}' attempt ${attempt} bound claim is missing`);
+        continue;
+      }
+      if (attempt > currentAttempt) throw new Error(`slice '${slice.id}' has a future dispatch claim`);
+      const boundSlice = bound ? { ...slice, dispatch_required: true, ...pickBinding(binding, SLICE_DISPATCH_BINDING_KEYS) } : slice;
+      const observed = observeSliceDispatchClaim(runDir, run.run_id, boundSlice, attempt, { requireRunBinding: bound });
+      if (hasClosure) observeClosedSliceDispatch(runDir, observed, { slice: boundSlice, requireRunBinding: bound });
+      if (attempt < currentAttempt && (!bound || !hasClosure)) throw new Error(`slice '${slice.id}' historical dispatch is unresolved`);
+      classification = attempt === currentAttempt && !hasClosure ? "active-current-attempt" : "closed";
+    }
+  }
+  if (existsSync(dispatchDir)) {
+    assertNoSymlinkPath(runDir, dispatchDir, "slice builder dispatch directory");
+    for (const name of readdirSync(dispatchDir)) {
+      if (expectedNames.has(name) || name.endsWith(".special.json") || name.endsWith(".special.closed.json")
+        || name.endsWith(".amendment-review.json") || name.endsWith(".amendment-review.closed.json")) continue;
+      throw new Error(`unknown dispatch sidecar '${name}'`);
+    }
+  }
+  return classification;
+}
+
+function assertBaseAdvanceBoundRefsCurrent(runDir, run) {
+  visit(run);
+  function visit(value) {
+    if (Array.isArray(value)) {
+      for (const entry of value) visit(entry);
+      return;
+    }
+    if (!isRecord(value)) return;
+    for (const [key, ref] of Object.entries(value)) {
+      if (key.endsWith("_ref") && typeof ref === "string") {
+        const hashKey = `${key.slice(0, -4)}_hash`;
+        if (typeof value[hashKey] === "string" && ref.includes("/")) {
+          const path = resolve(runDir, ref);
+          const rel = relative(resolve(runDir), path);
+          if (!rel || rel === ".." || rel.startsWith("../") || isAbsolute(rel)) throw new Error(`bound ref '${ref}' escapes the run directory`);
+          assertNoSymlinkPath(runDir, path, `bound ref '${ref}'`);
+          if (!existsSync(path) || !lstatSync(path).isFile() || hashFile(path, { mode: "raw" }) !== value[hashKey]) {
+            throw new Error(`bound ref '${ref}' bytes are stale`);
+          }
+        }
+      }
+      visit(ref);
+    }
+  }
+}
+
+function assertBaseAdvanceBaseRef(run) {
+  if (run.base_ref !== "main") throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "base advancement supports only canonical main");
+}
+
+function assertBaseAdvanceAllowed(observationOrDecision) {
+  const decision = typeof observationOrDecision?.eligible === "boolean"
+    ? observationOrDecision
+    : evaluateBaseAdvanceState(observationOrDecision);
+  if (decision.eligible) return decision;
+  throw baseAdvanceFailure(decision.code || BASE_ADVANCE_ERROR_CODES.runInvalid,
+    `base advancement rejected ${decision.dimension}:${decision.variant}`);
+}
+
+function snapshotBaseAdvanceDurableFiles(runDir, options) {
+  return snapshotRunDurableFiles(runDir, options.baseAdvanceDurableFileSystem || {});
+}
+
+function assertBaseAdvanceFinalState(runDir, repository, expectedRun, target, durableSnapshot, options, publicationComplete) {
+  try {
+    const stored = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+    if (!sameJson(stored, expectedRun) || stored.base_commit !== target) {
+      throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.publishFailed, "published base manifest does not equal the checked target");
+    }
+    const gitState = observeBaseAdvanceGitState(repository, stored, target, options);
+    if (gitState.crash_point !== "bound-current") {
+      throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.gitStateInvalid, "final Git identity is not current");
+    }
+    assertCanonicalTarget(repository, target, options);
+    assertRunDurableFilesEqual(snapshotBaseAdvanceDurableFiles(runDir, options), durableSnapshot);
+  } catch (error) {
+    if (publicationComplete) {
+      throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.publishFailed, "final base publication verification failed");
+    }
+    if (String(error?.code || "").startsWith("BASE_ADVANCE_")) throw error;
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.runInvalid, "final base replay verification failed");
+  }
+}
+
+function baseAdvanceSuccess(previous, target, disposition, updated, replayed) {
+  return {
+    ok: true,
+    operation: "active-run-base-advance",
+    run_id: previous.run_id,
+    disposition,
+    updated,
+    replayed,
+    base_ref: previous.base_ref,
+    previous_base_commit: previous.base_commit,
+    base_commit: target,
+    branch: previous.branch,
+    worktree: previous.worktree,
+  };
+}
+
+function baseAdvanceFailure(code, message, cause) {
+  const error = new Error(message, cause ? { cause } : undefined);
+  error.code = code;
+  return error;
+}
+
+function findBaseAdvanceFailure(error) {
+  for (let current = error; current; current = current.cause) {
+    if (String(current?.code || "").startsWith("BASE_ADVANCE_")) return current;
+  }
+  return null;
 }
 
 export async function transitionGateDecision(runDir, gateName, gate, options = {}) {
