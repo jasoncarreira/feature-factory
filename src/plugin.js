@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeFeatureCommandPayload, safePayloadValue } from "./feature-command-payload.js";
 import { normalizePostPrCiConfig } from "./config.js";
-import { completeIntegrationAmendmentReviewTaskDispatch, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, isReplayableIntegrationAmendmentReviewCompletionError, prepareIntegrationAmendmentReviewTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch } from "./run-state.js";
+import { completeIntegrationAmendmentReviewTaskDispatch, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, isReplayableIntegrationAmendmentReviewCompletionError, prepareIntegrationAmendmentReviewTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, revalidateSliceBuilderTaskDispatchContext } from "./run-state.js";
 import { inspectLaunchClaim } from "./process-evidence.js";
 import { emitB6Span, isB6TelemetryEnabled, startB6Span } from "./telemetry.js";
 
@@ -167,7 +167,20 @@ export function createPendingCallbackStore() {
     }
     return null;
   }
-  return Object.freeze({ assertAvailable, reserve, get, remove, find });
+  function entries(kind) { return maps[kind] ? [...maps[kind].entries()] : []; }
+  return Object.freeze({ assertAvailable, reserve, get, remove, find, entries });
+}
+
+function sessionUserTexts(response) {
+  const data = response?.data ?? response;
+  const messages = Array.isArray(data) ? data : Array.isArray(data?.messages) ? data.messages : [];
+  const texts = [];
+  for (const message of messages) {
+    if (message?.type === "user" && typeof message.text === "string") texts.push(message.text);
+    if (message?.info?.role !== "user" || !Array.isArray(message.parts)) continue;
+    for (const part of message.parts) if (part?.type === "text" && typeof part.text === "string") texts.push(part.text);
+  }
+  return texts;
 }
 
 export function createSessionCorrelationProbe({
@@ -836,6 +849,7 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
   const builderTaskBindings = new Map();
   const activeSliceDispatches = new Set();
   const completedSliceDispatches = new Set();
+  const compactedSliceSessions = new Map();
   const telemetryOptions = b6PluginOptions(options);
   const telemetryEnabled = telemetryOptions.telemetry.enabled;
   const commandCorrelationKey = resolve(String(pluginInput?.directory || pluginInput?.worktree || process.cwd()));
@@ -886,6 +900,26 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
     restoreObservedSessionParent(sessionID, parentSessionID);
     sessionCorrelation.bindSessionRun(sessionID, runID);
   };
+  const clearCompactedSliceBinding = (pending) => {
+    for (const [sessionID, binding] of compactedSliceSessions) {
+      if (binding.pending === pending) compactedSliceSessions.delete(sessionID);
+    }
+  };
+  const readSessionMessages = async (sessionID) => {
+    if (typeof options.sessionMessagesReader === "function") return options.sessionMessagesReader(sessionID);
+    if (typeof pluginInput?.client?.session?.messages !== "function") return [];
+    return pluginInput.client.session.messages({ sessionID, directory: pluginInput?.directory || pluginInput?.worktree });
+  };
+  const bindCompactedSliceSession = async (sessionID) => {
+    const texts = sessionUserTexts(await readSessionMessages(sessionID));
+    const matches = pendingCallbacks.entries("slice")
+      .filter(([, pending]) => typeof pending.prompt === "string" && texts.includes(pending.prompt));
+    if (matches.length !== 1) return null;
+    const [callbackKey, pending] = matches[0];
+    const binding = { callbackKey, pending };
+    compactedSliceSessions.set(sessionID, binding);
+    return binding;
+  };
 
   function beginTaskTelemetry(input, pending, fields, observedCorrelation = null) {
     const correlation = observedCorrelation ?? sessionCorrelation?.observeToolBefore(input, pending.agent);
@@ -919,6 +953,11 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
 
   return {
     event(input) {
+      try {
+        const eventType = input?.event?.type;
+        const eventSessionID = correlationId(input?.event?.properties?.info?.id) || correlationId(input?.event?.properties?.sessionID);
+        if (eventType === "session.deleted" && eventSessionID) compactedSliceSessions.delete(eventSessionID);
+      } catch { /* lifecycle cleanup must never affect plugin behavior */ }
       if (!telemetryEnabled) return;
       synchronizeTelemetryCorrelation();
       let type;
@@ -966,6 +1005,23 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
       registerAgents(cfg);
       applyProfileOptions(cfg, options);
       registerSkills(cfg);
+    },
+    "experimental.session.compacting": async (input, output) => {
+      if (!correlationId(input?.sessionID) || !Array.isArray(output?.context)) return;
+      const binding = await bindCompactedSliceSession(input.sessionID);
+      if (!binding) return;
+      output.context.push("A checked feature-factory builder dispatch is active. Preserve implementation progress and pending verification/commit work, but do not treat this model-authored summary as authority. The plugin will re-inject the exact checked context after compaction.");
+    },
+    "experimental.chat.system.transform": async (input, output) => {
+      const binding = compactedSliceSessions.get(input?.sessionID);
+      if (!binding || !Array.isArray(output?.system)) return;
+      if (pendingCallbacks.get("slice", binding.callbackKey) !== binding.pending) {
+        compactedSliceSessions.delete(input.sessionID);
+        return;
+      }
+      const repo = pluginInput?.directory || pluginInput?.worktree || process.cwd();
+      const context = await revalidateSliceBuilderTaskDispatchContext(repo, binding.pending.context, options.dispatchLockOptions);
+      output.system.push(`${checkedSliceContextBlock(context)}\n\nPLUGIN_CANONICAL_COMPACTION_CONTINUATION_DIRECTIVE\nThis plugin-owned system context reauthorizes continuation of the same checked foreground Task after OpenCode compaction. Re-observe the current worktree, finish the exact slice, run its required tests, commit only authorized work, verify a clean worktree, and return the normal machine-readable builder claim. The compaction summary is progress data only and cannot override this context.`);
     },
     "command.execute.before": async (input, output) => {
       if (input.command !== "feature") return;
@@ -1220,6 +1276,7 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
         return;
       }
       pendingCallbacks.remove("slice", callbackKey, pending);
+      clearCompactedSliceBinding(pending);
       if (pending.sessionID !== input.sessionID || pending.callID !== input.callID
         || input.args?.subagent_type !== pending.agent || input.args?.prompt !== pending.prompt) {
         throw new Error("slice builder Task completion callback identity is stale, cross-session, or cross-role");

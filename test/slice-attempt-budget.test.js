@@ -4,7 +4,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionRecoverOrphan, transitionRunSlice, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
+import { adoptSliceBuilderTaskDispatchCandidate, completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionRecoverOrphan, transitionRunSlice, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
 import { validateRun, validateSlicesPlan } from "../src/validate.js";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
@@ -523,6 +523,109 @@ describe("uniform slice attempt evidence", () => {
         review_ref: "reviews/slice.attempt-1.json",
       });
       assert.equal(result.slice.status, "review");
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("keeps dispatch adoption request authority narrow and derived", async () => {
+    const fixture = createFixture("builder-dispatch-adoption-request");
+    try {
+      await startAttempt(fixture, 1, { completeDispatch: false });
+      for (const request of [
+        { run_id: "run", slice_id: "slice", attempt: 0 },
+        { run_id: "run", slice_id: "slice", attempt: 1, authorization: "operator-approved" },
+        { run_id: "run", slice_id: "slice", attempt: 1, completion_head: "a".repeat(40) },
+      ]) {
+        await assert.rejects(
+          adoptSliceBuilderTaskDispatchCandidate(fixture.repo, request),
+          /requires exact run, slice, and attempt/u,
+        );
+      }
+      assert.equal(existsSync(join(fixture.runDir, readRun(fixture).slices[0].dispatch_claim_ref.replace(/\.json$/u, ".closed.json"))), false);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("requires a new clean descendant HEAD and refuses a callback closure", async () => {
+    const fixture = createFixture("builder-dispatch-adoption-git");
+    try {
+      const { context, completionToken } = await startAttempt(fixture, 1, { completeDispatch: false });
+      const request = {
+        run_id: "run", slice_id: "slice", attempt: 1,
+      };
+      await assert.rejects(adoptSliceBuilderTaskDispatchCandidate(fixture.repo, request), /requires a new clean current slice branch\/worktree HEAD/u);
+      writeFileSync(join(fixture.repo, "dirty.txt"), "dirty\n", "utf8");
+      await assert.rejects(adoptSliceBuilderTaskDispatchCandidate(fixture.repo, request), /requires a new clean current slice branch\/worktree HEAD/u);
+      rmSync(join(fixture.repo, "dirty.txt"));
+      commitSliceAttempt(fixture, 1);
+      await completeSliceBuilderTaskDispatch(fixture.repo, {
+        run_id: "run", slice_id: "slice", attempt: 1, agent: "backend-builder",
+        claim_ref: context.dispatch_claim.ref, claim_hash: context.dispatch_claim.hash, completion_token: completionToken,
+      });
+      await assert.rejects(adoptSliceBuilderTaskDispatchCandidate(fixture.repo, request), /refuses an already completed callback closure/u);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("adopts one exact candidate without bypassing downstream review checks", async () => {
+    const fixture = createFixture("builder-dispatch-adoption-success");
+    try {
+      await startAttempt(fixture, 1, { completeDispatch: false });
+      commitSliceAttempt(fixture, 1);
+      const request = {
+        run_id: "run", slice_id: "slice", attempt: 1,
+      };
+      const first = await adoptSliceBuilderTaskDispatchCandidate(fixture.repo, request, { now: "2026-07-08T12:00:00.000Z" });
+      assert.equal(first.updated, true);
+      assert.equal(first.adoption.completion_kind, "candidate-adoption");
+      const authority = JSON.parse(readFileSync(join(fixture.runDir, first.adoption.closure_ref), "utf8"));
+      assert.equal(authority.kind, "checked-slice-builder-dispatch-adoption");
+      assert.equal(Object.hasOwn(authority, "completion_token"), false);
+      assert.equal((await adoptSliceBuilderTaskDispatchCandidate(fixture.repo, request, { now: "2026-07-08T12:00:00.000Z" })).updated, false);
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", {
+          status: "review", attempts: 1,
+          evidence_ref: "evidence/missing.json", review_ref: "reviews/missing.json",
+        }),
+        /evidence|review/u,
+      );
+      const reviewed = await publishReview(fixture, 1, { verdict: "APPROVE" });
+      assert.equal(reviewed.slice.status, "review");
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("adopts the exact persisted legacy reconciliation record without granting review", async () => {
+    const fixture = createFixture("builder-dispatch-legacy-reconciliation");
+    try {
+      const { context } = await startAttempt(fixture, 1, { completeDispatch: false });
+      commitSliceAttempt(fixture, 1);
+      const claim = JSON.parse(readFileSync(join(fixture.runDir, context.dispatch_claim.ref), "utf8"));
+      writeJson(join(fixture.runDir, claim.closure_ref), {
+        schema_version: 1,
+        kind: "checked-slice-builder-dispatch-reconciliation",
+        claim_ref: context.dispatch_claim.ref,
+        claim_hash: context.dispatch_claim.hash,
+        run_id: claim.run_id,
+        slice_id: claim.slice_id,
+        attempt: claim.attempt,
+        agent: claim.agent,
+        branch: claim.branch,
+        worktree: claim.worktree,
+        head: claim.head,
+        completion_head: gitOutput(fixture.repo, ["rev-parse", "HEAD"]),
+        context_hash: claim.context_hash,
+        disposition: "operator-authorized-callback-returned-without-closure",
+        authorized_at: "2026-07-08T12:00:00.000Z",
+      });
+      const adopted = await adoptSliceBuilderTaskDispatchCandidate(fixture.repo, { run_id: "run", slice_id: "slice", attempt: 1 });
+      assert.equal(adopted.updated, true);
+      assert.equal(adopted.adoption.completion_kind, "candidate-adoption");
+      assert.equal(readRun(fixture).slices[0].status, "running");
     } finally {
       cleanup(fixture);
     }

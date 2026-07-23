@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import plugin, { createPendingCallbackStore, createSessionCorrelationProbe, mergeFactoryPermission, parseFrontmatter, parseSpecialBuilderDispatchMarker, specialTaskTelemetryAttributes } from "../src/plugin.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadValue } from "../src/feature-command-payload.js";
-import { completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionIntegrationAmendment, transitionPanelVerdicts } from "../src/run-state.js";
+import { adoptSliceBuilderTaskDispatchCandidate, completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionIntegrationAmendment, transitionPanelVerdicts } from "../src/run-state.js";
 import { buildContinuation, cleanupRun, recoverDisruptedRun, resumeFactory } from "../src/factory.js";
 import { integrationAmendmentId, validateRun } from "../src/validate.js";
 import { hashValue } from "../src/refs.js";
@@ -282,6 +282,95 @@ describe("checked slice builder Task dispatch", () => {
         instance["tool.execute.before"]({ tool: "task", sessionID: "session", callID: "duplicate" }, { args: { subagent_type: "backend-builder", prompt: builderPrompt(2), task_id: "task-1" } }),
         /stale|already active or completed/u,
       );
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("reinjects exact checked authority after compaction and preserves normal callback completion", async () => {
+    const fixture = createBuilderDispatchFixture();
+    let sessionMessages = [];
+    try {
+      const instance = await plugin({ directory: fixture.repo }, { sessionMessagesReader: async () => sessionMessages });
+      const task = { args: { subagent_type: "backend-builder", prompt: builderPrompt(1) } };
+      const identity = { tool: "task", sessionID: "parent-session", callID: "compacted-build" };
+      await instance["tool.execute.before"](identity, task);
+      sessionMessages = [{ type: "user", text: task.args.prompt }];
+
+      mkdirSync(join(fixture.repo, "src"), { recursive: true });
+      writeFileSync(join(fixture.repo, "src", "compacted.js"), "export const compacted = true;\n", "utf8");
+      const compacting = { context: [] };
+      await instance["experimental.session.compacting"]({ sessionID: "builder-child" }, compacting);
+      assert.equal(compacting.context.length, 1);
+      assert.match(compacting.context[0], /plugin will re-inject the exact checked context/u);
+
+      const system = { system: [] };
+      await instance["experimental.chat.system.transform"]({ sessionID: "builder-child", model: {} }, system);
+      assert.equal(system.system.length, 1);
+      assert.match(system.system[0], /^PLUGIN_CHECKED_SLICE_CONTEXT_START\ntrust: plugin-observed-authority/mu);
+      assert.match(system.system[0], /PLUGIN_CANONICAL_COMPACTION_CONTINUATION_DIRECTIVE/u);
+      assert.doesNotMatch(system.system[0], /completion_token/u);
+
+      git(fixture.repo, ["add", "src/compacted.js"]);
+      git(fixture.repo, ["commit", "-m", "compacted build"]);
+      await instance["tool.execute.after"]({ ...identity, args: task.args }, { title: "task", output: "complete", metadata: { sessionID: "builder-child" } });
+      const run = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+      assert.equal(typeof run.slices[0].dispatch_closure_hash, "string");
+      const closure = JSON.parse(readFileSync(join(fixture.runDir, run.slices[0].dispatch_closure_ref), "utf8"));
+      assert.equal(closure.kind, "checked-slice-builder-dispatch-closure");
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("does not guess compaction authority when the child session lacks one exact dispatch prompt", async () => {
+    const fixture = createBuilderDispatchFixture();
+    try {
+      const instance = await plugin({ directory: fixture.repo }, { sessionMessagesReader: async () => [{ type: "user", text: "unrelated" }] });
+      const task = { args: { subagent_type: "backend-builder", prompt: builderPrompt(1) } };
+      await instance["tool.execute.before"]({ tool: "task", sessionID: "parent", callID: "call" }, task);
+      const compacting = { context: [] };
+      await instance["experimental.session.compacting"]({ sessionID: "unknown-child" }, compacting);
+      const system = { system: [] };
+      await instance["experimental.chat.system.transform"]({ sessionID: "unknown-child", model: {} }, system);
+      assert.deepEqual(compacting.context, []);
+      assert.deepEqual(system.system, []);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("records candidate adoption as distinct completion authority and rejects a late callback", async () => {
+    const fixture = createBuilderDispatchFixture();
+    try {
+      const instance = await plugin({ directory: fixture.repo });
+      const task = { args: { subagent_type: "backend-builder", prompt: builderPrompt(1) } };
+      const identity = { tool: "task", sessionID: "parent", callID: "orphan" };
+      await instance["tool.execute.before"](identity, task);
+      mkdirSync(join(fixture.repo, "src"), { recursive: true });
+      writeFileSync(join(fixture.repo, "src", "reconciled.js"), "export const reconciled = true;\n", "utf8");
+      git(fixture.repo, ["add", "src/reconciled.js"]);
+      git(fixture.repo, ["commit", "-m", "reconciled build"]);
+
+      const adopted = await adoptSliceBuilderTaskDispatchCandidate(fixture.repo, {
+        run_id: "run",
+        slice_id: "slice",
+        attempt: 1,
+      });
+      assert.equal(adopted.updated, true);
+      assert.equal(adopted.adoption.completion_kind, "candidate-adoption");
+      const run = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+      const authority = JSON.parse(readFileSync(join(fixture.runDir, run.slices[0].dispatch_closure_ref), "utf8"));
+      assert.equal(authority.kind, "checked-slice-builder-dispatch-adoption");
+      assert.equal(Object.hasOwn(authority, "completion_token"), false);
+      assert.equal((await adoptSliceBuilderTaskDispatchCandidate(fixture.repo, {
+        run_id: "run", slice_id: "slice", attempt: 1,
+      })).updated, false);
+      await assert.rejects(
+        instance["tool.execute.after"]({ ...identity, args: task.args }, { title: "task", output: "late", metadata: { sessionID: "builder" } }),
+        /already resolved by candidate adoption/u,
+      );
+      assert.equal(validateRun(JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"))).slices[0].dispatch_closure_hash, run.slices[0].dispatch_closure_hash);
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
     }
