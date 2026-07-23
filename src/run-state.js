@@ -6637,6 +6637,7 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
       if (!existing || existing.claim_ref !== observed.ref || existing.claim_hash !== observed.hash) throw new Error("slice builder Task completion conflicts with an existing closure");
     }
     const closed = observeClosedSliceDispatch(runDir, observed);
+    if (closed.completion_kind !== "callback") throw new Error("slice builder Task completion was already resolved by operator reconciliation");
     if (closed.completion_head !== completionHead) throw new Error("slice builder Task completion conflicts with a closure for another HEAD");
     const next = cloneJson(run);
     const nextSlice = next.slices.find((candidate) => candidate?.id === slice.id);
@@ -6669,6 +6670,168 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
       throw error;
     }
     return observeClosedSliceDispatchIfClaimed(runDir, run.run_id, nextSlice, { required: true });
+  }, options);
+}
+
+export async function revalidateSliceBuilderTaskDispatchContext(repoInput, context, options = {}) {
+  if (!isRecord(context) || context.schema_version !== 1 || context.kind !== "checked-slice-builder-task-dispatch"
+    || !isRecord(context.run) || !stringValue(context.run.id) || !isRecord(context.slice)
+    || !stringValue(context.slice.id) || !Number.isInteger(context.slice.attempt) || !isRecord(context.dispatch_claim)) {
+    throw new Error("slice builder compaction continuation requires exact checked dispatch context");
+  }
+  const repository = repoRoot(repoInput);
+  const factoryRoot = directFactoryRoot(repository);
+  const runDir = resolve(factoryRoot, context.run.id);
+  if (dirname(runDir) !== factoryRoot) throw new Error("slice builder compaction continuation run_id must identify one direct factory run");
+  return withRunJsonLock(runDir, async () => {
+    const run = await readRunJson(runDir);
+    if (run.status !== "running" || run.run_id !== context.run.id) throw new Error("slice builder compaction continuation requires the exact running run");
+    const slice = (run.slices || []).find((candidate) => candidate?.id === context.slice.id);
+    if (!slice || slice.status !== "running" || slice.attempts !== context.slice.attempt
+      || slice.stack !== context.slice.stack || slice.branch !== context.slice.branch || slice.worktree !== context.slice.worktree) {
+      throw new Error("slice builder compaction continuation requires the exact current running slice attempt");
+    }
+    const observed = observeSliceDispatchClaim(runDir, run.run_id, slice, slice.attempts, { requireRunBinding: true });
+    if (!observed || context.dispatch_claim.ref !== observed.ref || context.dispatch_claim.hash !== observed.hash
+      || context.dispatch_claim.closure_ref !== observed.claim.closure_ref || context.dispatch_claim.head !== observed.claim.head) {
+      throw new Error("slice builder compaction continuation claim binding is stale");
+    }
+    if (existsSync(resolve(runDir, observed.claim.closure_ref))) throw new Error("slice builder compaction continuation is already completed");
+    const originalContext = cloneJson(context);
+    delete originalContext.dispatch_claim;
+    if (hashValue(originalContext) !== observed.claim.context_hash) throw new Error("slice builder compaction continuation context hash is stale");
+
+    const branch = git(repository, ["rev-parse", "--verify", `refs/heads/${slice.branch}^{commit}`]);
+    const head = branch.ok ? branch.stdout.trim() : "";
+    const worktree = resolve(repository, slice.worktree);
+    const identity = checkWorktreeIdentity(repository, worktree, { branch: slice.branch, head });
+    if (!/^[0-9a-f]{40}$/u.test(head) || !identity.ok
+      || !git(repository, ["merge-base", "--is-ancestor", observed.claim.head, head]).ok) {
+      throw new Error("slice builder compaction continuation Git authority is stale");
+    }
+    const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
+    if (decomposition.plan_hash !== context.plan?.hash || decomposition.review_ref !== context.plan?.review_ref
+      || decomposition.review_hash !== context.plan?.review_hash) {
+      throw new Error("slice builder compaction continuation plan authority is stale");
+    }
+    for (const input of context.authorized_inputs || []) {
+      if (hashFile(resolveArtifactRef(runDir, input.ref).path) !== input.hash
+        || hashFile(resolveReviewRef(runDir, input.review_ref).path) !== input.review_hash) {
+        throw new Error(`slice builder compaction continuation input '${input.ref}' is stale`);
+      }
+    }
+    assertSliceAttemptHistoryCurrent(runDir, slice.id, slice);
+    assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
+    return cloneJson(context);
+  }, options);
+}
+
+export async function reconcileSliceBuilderTaskDispatch(repoInput, request, options = {}) {
+  if (!isRecord(request)) throw new Error("slice builder dispatch reconciliation request must be an object");
+  const allowed = new Set(["run_id", "slice_id", "attempt", "authorization"]);
+  const extra = Object.keys(request).filter((key) => !allowed.has(key));
+  if (extra.length || !stringValue(request.run_id) || !SAFE_TASK_DISPATCH_ID_PATTERN.test(request.run_id)
+    || request.run_id.includes("..") || request.run_id.endsWith(".lock") || !stringValue(request.slice_id)
+    || !Number.isInteger(request.attempt) || request.attempt < 1 || request.attempt > 3
+    || request.authorization !== "operator-authorized-callback-returned-without-closure") {
+    throw new Error("slice builder dispatch reconciliation requires exact run, slice, attempt, and operator authorization");
+  }
+  const repository = repoRoot(repoInput);
+  const factoryRoot = directFactoryRoot(repository);
+  const runDir = resolve(factoryRoot, request.run_id);
+  if (dirname(runDir) !== factoryRoot) throw new Error("slice builder dispatch reconciliation run_id must identify one direct factory run");
+  return withRunJsonLock(runDir, async () => {
+    const run = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
+    if (run.status !== "running" || run.run_id !== request.run_id) throw new Error("slice builder dispatch reconciliation requires the exact running run");
+    const slice = (run.slices || []).find((candidate) => candidate?.id === request.slice_id);
+    if (!slice || slice.status !== "running" || slice.attempts !== request.attempt) {
+      throw new Error("slice builder dispatch reconciliation requires the exact current running slice attempt");
+    }
+    const observed = observeSliceDispatchClaim(runDir, run.run_id, slice, slice.attempts, { requireRunBinding: true });
+    if (!observed) throw new Error("slice builder dispatch reconciliation requires the exact bound claim");
+    const completionPath = resolve(runDir, observed.claim.closure_ref);
+    if (existsSync(completionPath)) {
+      const existing = observeClosedSliceDispatch(runDir, observed);
+      if (existing.completion_kind !== "operator-reconciliation") {
+        throw new Error("slice builder dispatch reconciliation refuses an already completed callback closure");
+      }
+      const bound = slice.dispatch_closure_ref === existing.closure_ref && slice.dispatch_closure_hash === existing.closure_hash;
+      if (bound) return { updated: false, status: run.status, reconciliation: existing, run };
+      if (slice.dispatch_closure_ref !== undefined || slice.dispatch_closure_hash !== undefined) {
+        throw new Error("slice builder dispatch reconciliation completion binding is stale");
+      }
+    }
+
+    const branch = git(repository, ["rev-parse", "--verify", `refs/heads/${slice.branch}^{commit}`]);
+    const completionHead = branch.ok ? branch.stdout.trim() : "";
+    const worktree = resolve(repository, slice.worktree);
+    const identity = checkWorktreeIdentity(repository, worktree, { branch: slice.branch, head: completionHead });
+    const cleanliness = git(worktree, gitCleanlinessArgs());
+    if (!/^[0-9a-f]{40}$/u.test(completionHead) || completionHead === observed.claim.head || !identity.ok
+      || !cleanliness.ok || cleanliness.stdout !== "") {
+      throw new Error("slice builder dispatch reconciliation requires a new clean current slice branch/worktree HEAD");
+    }
+    if (!git(repository, ["merge-base", "--is-ancestor", observed.claim.head, completionHead]).ok) {
+      throw new Error("slice builder dispatch reconciliation HEAD must descend from the dispatch claim HEAD");
+    }
+    const reconciliation = {
+      schema_version: 1,
+      kind: "checked-slice-builder-dispatch-reconciliation",
+      claim_ref: observed.ref,
+      claim_hash: observed.hash,
+      run_id: observed.claim.run_id,
+      slice_id: observed.claim.slice_id,
+      attempt: observed.claim.attempt,
+      agent: observed.claim.agent,
+      branch: observed.claim.branch,
+      worktree: observed.claim.worktree,
+      head: observed.claim.head,
+      completion_head: completionHead,
+      context_hash: observed.claim.context_hash,
+      disposition: request.authorization,
+      authorized_at: timestamp(options.now),
+    };
+    const publication = await publishDispatchRecord(runDir, observed.claim.closure_ref, reconciliation, {
+      hooks: options.sliceDispatchReconciliationAtomicWriteHooks,
+      allowExisting: true,
+    });
+    const closed = observeClosedSliceDispatch(runDir, observed);
+    if (closed.completion_kind === "callback") {
+      throw new Error("slice builder dispatch reconciliation refuses an already completed callback closure");
+    }
+    if (closed.completion_head !== completionHead) {
+      throw new Error("slice builder dispatch reconciliation publication is stale");
+    }
+    const next = cloneJson(run);
+    const nextSlice = next.slices.find((candidate) => candidate?.id === slice.id);
+    nextSlice.dispatch_closure_ref = closed.closure_ref;
+    nextSlice.dispatch_closure_hash = closed.closure_hash;
+    next.updated_at = timestamp(options.now);
+    const assertReconciliationAuthority = () => {
+      const currentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+      if (!sameJson(currentRun, run)) throw new Error("slice builder dispatch reconciliation run authority changed before binding");
+      const currentClaim = observeSliceDispatchClaim(runDir, run.run_id, slice, slice.attempts, { requireRunBinding: true });
+      const currentClosed = observeClosedSliceDispatch(runDir, currentClaim);
+      const currentBranch = git(repository, ["rev-parse", "--verify", `refs/heads/${slice.branch}^{commit}`]);
+      const currentIdentity = checkWorktreeIdentity(repository, worktree, { branch: slice.branch, head: completionHead });
+      const currentCleanliness = git(worktree, gitCleanlinessArgs());
+      if (!sameJson(currentClosed, closed) || currentBranch.stdout.trim() !== completionHead || !currentIdentity.ok
+        || !currentCleanliness.ok || currentCleanliness.stdout !== "") {
+        throw new Error("slice builder dispatch reconciliation authority changed before binding");
+      }
+    };
+    try {
+      assertReconciliationAuthority();
+      await writeSemanticRunJson(runDir, validateRun(next), options, v2Authority, assertReconciliationAuthority);
+    } catch (error) {
+      await removeOwnedFailedDispatchPublication(runDir, observed.claim.closure_ref, publication, (current) => {
+        const currentSlice = current.slices?.find((candidate) => candidate?.id === slice.id);
+        return currentSlice?.dispatch_closure_ref === closed.closure_ref && currentSlice?.dispatch_closure_hash === closed.closure_hash;
+      });
+      throw error;
+    }
+    return { updated: true, status: next.status, reconciliation: closed, run: next };
   }, options);
 }
 
@@ -7072,14 +7235,29 @@ function observeClosedSliceDispatch(runDir, observed, options = {}) {
   for (const key of ["run_id", "slice_id", "attempt", "agent", "branch", "worktree", "head", "context_hash"]) {
     if (closure[key] !== observed.claim[key]) throw new Error("slice builder dispatch closure identity is invalid");
   }
-  if (closure.schema_version !== 1 || closure.kind !== "checked-slice-builder-dispatch-closure"
+  const commonKeys = ["schema_version", "kind", "claim_ref", "claim_hash", "run_id", "slice_id", "attempt", "agent", "branch", "worktree", "head", "completion_head", "context_hash"];
+  const callbackKeys = new Set([...commonKeys, "completion_token", "returned_at"]);
+  const reconciliationKeys = new Set([...commonKeys, "disposition", "authorized_at"]);
+  const callback = closure.kind === "checked-slice-builder-dispatch-closure";
+  const reconciliation = closure.kind === "checked-slice-builder-dispatch-reconciliation";
+  if (closure.schema_version !== 1 || ![callback, reconciliation].some(Boolean)
+    || !sameStringSet(new Set(Object.keys(closure)), callback ? callbackKeys : reconciliationKeys)
     || closure.claim_ref !== observed.ref || closure.claim_hash !== observed.hash
     || !/^[0-9a-f]{40}$/u.test(closure.completion_head || "")
-    || !stringValue(closure.completion_token) || sha256Bytes(Buffer.from(closure.completion_token, "utf8")) !== observed.claim.completion_token_hash
-    || !Number.isFinite(Date.parse(closure.returned_at || ""))) {
-    throw new Error("slice builder dispatch closure binding is invalid");
+    || callback && (!stringValue(closure.completion_token) || sha256Bytes(Buffer.from(closure.completion_token, "utf8")) !== observed.claim.completion_token_hash
+      || !Number.isFinite(Date.parse(closure.returned_at || "")))
+    || reconciliation && (closure.disposition !== "operator-authorized-callback-returned-without-closure"
+      || !Number.isFinite(Date.parse(closure.authorized_at || "")))) {
+    throw new Error("slice builder dispatch completion binding is invalid");
   }
-  const result = { claim_ref: observed.ref, claim_hash: observed.hash, closure_ref: observed.claim.closure_ref, closure_hash: sha256Bytes(bytes), completion_head: closure.completion_head };
+  const result = {
+    claim_ref: observed.ref,
+    claim_hash: observed.hash,
+    closure_ref: observed.claim.closure_ref,
+    closure_hash: sha256Bytes(bytes),
+    completion_head: closure.completion_head,
+    completion_kind: callback ? "callback" : "operator-reconciliation",
+  };
   if (options.requireRunBinding === true && (options.slice?.dispatch_closure_ref !== result.closure_ref || options.slice?.dispatch_closure_hash !== result.closure_hash)) {
     throw new Error("slice builder dispatch closure is not bound by current run state");
   }

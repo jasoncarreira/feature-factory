@@ -59,6 +59,30 @@ describe("cli write surface", () => {
     } finally { rmSync(repo, { recursive: true, force: true }); }
   });
 
+  it("exposes only the explicit JSON slice dispatch reconciliation grammar", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-dispatch-reconcile-grammar-"));
+    try {
+      initGitRepo(repo);
+      const flag = "--authorize-callback-returned-without-closure";
+      for (const args of [
+        ["factory", "slice-dispatch-reconcile", RUN_ID, "slice", "1", "--json"],
+        ["factory", "slice-dispatch-reconcile", RUN_ID, "slice", "1", flag],
+        ["factory", "slice-dispatch-reconcile", RUN_ID, "slice", "1", flag, flag, "--json"],
+        ["factory", "slice-dispatch-reconcile", RUN_ID, "slice", "1", flag, "--json", "--completion-head", "a".repeat(40)],
+        ["factory", "slice-dispatch-reconcile", RUN_ID, "slice", "4", flag, "--json"],
+      ]) {
+        const proc = spawnSync(process.execPath, [CLI, ...args], {
+          cwd: repo,
+          encoding: "utf8",
+          env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+        });
+        assert.equal(proc.status, 1, args.join(" "));
+        assert.match(proc.stderr, /requires exactly <run-id> <slice-id> <attempt>/u, args.join(" "));
+        assert.equal(existsSync(join(repo, ".opencode", "factory")), false, args.join(" "));
+      }
+    } finally { rmSync(repo, { recursive: true, force: true }); }
+  });
+
   it("passes a named start run id as driver config", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-start-run-id-"));
     try {

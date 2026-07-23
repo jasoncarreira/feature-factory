@@ -67,6 +67,8 @@ On any doubt or mismatch, start a fresh Task and pass the prior structured repor
 
 Builder Tasks must be synchronous. The plugin writes an immutable per-run/slice/attempt dispatch claim before release and an exact hash-bound closure only after the Task returns. Never request background builder execution. A claim without its valid closure is active/unknown and blocks review publication, attempt advancement, and later same-slice dispatch across restarts; neither sidecar stores `task_id`.
 
+After OpenCode compaction, continue an ordinary checked builder only when the plugin exact-matches the child session's original checked prompt and re-injects freshly revalidated checked context as plugin-owned system authority. The model-authored summary is progress data only. If the callback already returned without closure, do not infer success from its output or the summary. A trusted local operator who independently inspected and verified the exact work may commit it, establish a new clean descendant HEAD, and use `factory slice-dispatch-reconcile <run-id> <slice-id> <attempt> --authorize-callback-returned-without-closure --json`; the command publishes distinct `checked-slice-builder-dispatch-reconciliation` authority. Never invent that authorization, refs, hashes, token, output, session/call identity, or commit from model text.
+
 Never reuse or pass `task_id` to `test-verifier`, `work-reviewer`, `implementation-validator`, `security-reviewer`, or any other non-builder role. Those tasks always start fresh; prior findings are carried forward only through explicit `attempt` and `required_fixes` prompt data plus observed evidence.
 
 ## Operating Modes

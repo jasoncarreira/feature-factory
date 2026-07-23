@@ -4,7 +4,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionRecoverOrphan, transitionRunSlice, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
+import { completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, reconcileSliceBuilderTaskDispatch, transitionRecoverOrphan, transitionRunSlice, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
 import { validateRun, validateSlicesPlan } from "../src/validate.js";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
@@ -523,6 +523,72 @@ describe("uniform slice attempt evidence", () => {
         review_ref: "reviews/slice.attempt-1.json",
       });
       assert.equal(result.slice.status, "review");
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("requires explicit narrow operator authority for dispatch reconciliation", async () => {
+    const fixture = createFixture("builder-dispatch-reconciliation-authority");
+    try {
+      await startAttempt(fixture, 1, { completeDispatch: false });
+      for (const request of [
+        { run_id: "run", slice_id: "slice", attempt: 1 },
+        { run_id: "run", slice_id: "slice", attempt: 1, authorization: "operator-approved" },
+        { run_id: "run", slice_id: "slice", attempt: 1, authorization: "operator-authorized-callback-returned-without-closure", completion_head: "a".repeat(40) },
+      ]) {
+        await assert.rejects(
+          reconcileSliceBuilderTaskDispatch(fixture.repo, request),
+          /requires exact run, slice, attempt, and operator authorization/u,
+        );
+      }
+      assert.equal(existsSync(join(fixture.runDir, readRun(fixture).slices[0].dispatch_claim_ref.replace(/\.json$/u, ".closed.json"))), false);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("requires a new clean descendant HEAD and refuses a callback closure", async () => {
+    const fixture = createFixture("builder-dispatch-reconciliation-git");
+    try {
+      const { context, completionToken } = await startAttempt(fixture, 1, { completeDispatch: false });
+      const request = {
+        run_id: "run", slice_id: "slice", attempt: 1,
+        authorization: "operator-authorized-callback-returned-without-closure",
+      };
+      await assert.rejects(reconcileSliceBuilderTaskDispatch(fixture.repo, request), /requires a new clean current slice branch\/worktree HEAD/u);
+      writeFileSync(join(fixture.repo, "dirty.txt"), "dirty\n", "utf8");
+      await assert.rejects(reconcileSliceBuilderTaskDispatch(fixture.repo, request), /requires a new clean current slice branch\/worktree HEAD/u);
+      rmSync(join(fixture.repo, "dirty.txt"));
+      commitSliceAttempt(fixture, 1);
+      await completeSliceBuilderTaskDispatch(fixture.repo, {
+        run_id: "run", slice_id: "slice", attempt: 1, agent: "backend-builder",
+        claim_ref: context.dispatch_claim.ref, claim_hash: context.dispatch_claim.hash, completion_token: completionToken,
+      });
+      await assert.rejects(reconcileSliceBuilderTaskDispatch(fixture.repo, request), /refuses an already completed callback closure/u);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("binds one exact operator reconciliation and preserves downstream review checks", async () => {
+    const fixture = createFixture("builder-dispatch-reconciliation-success");
+    try {
+      await startAttempt(fixture, 1, { completeDispatch: false });
+      commitSliceAttempt(fixture, 1);
+      const request = {
+        run_id: "run", slice_id: "slice", attempt: 1,
+        authorization: "operator-authorized-callback-returned-without-closure",
+      };
+      const first = await reconcileSliceBuilderTaskDispatch(fixture.repo, request, { now: "2026-07-08T12:00:00.000Z" });
+      assert.equal(first.updated, true);
+      assert.equal(first.reconciliation.completion_kind, "operator-reconciliation");
+      const authority = JSON.parse(readFileSync(join(fixture.runDir, first.reconciliation.closure_ref), "utf8"));
+      assert.equal(authority.kind, "checked-slice-builder-dispatch-reconciliation");
+      assert.equal(Object.hasOwn(authority, "completion_token"), false);
+      assert.equal((await reconcileSliceBuilderTaskDispatch(fixture.repo, request, { now: "2026-07-08T12:00:00.000Z" })).updated, false);
+      const reviewed = await publishReview(fixture, 1, { verdict: "APPROVE" });
+      assert.equal(reviewed.slice.status, "review");
     } finally {
       cleanup(fixture);
     }
