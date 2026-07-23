@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { hashValue } from "../src/refs.js";
 import { transitionRunBaseAdvance, transitionRunJson } from "../src/run-state.js";
-import { createBaseAdvanceTransitionFixture, git, output } from "./helpers/base-advance-transition/fixture.js";
+import {
+  captureRepresentativeAuthorityInventory,
+  createBaseAdvanceTransitionFixture,
+  git,
+  installRepresentativeAuthorityInventory,
+  output,
+  writeJson,
+} from "./helpers/base-advance-transition/fixture.js";
 
 const LATER = "2026-07-23T12:30:00.000Z";
 
@@ -121,29 +129,168 @@ describe("checked active-run base advancement", () => {
     }
   });
 
-  it("preserves representative sidecars, candidate refs, commits, worktree files, and manifest history", async () => {
+  it("classifies fresh and stale live heartbeats as active, dead as inactive, and indeterminate as invalid", async () => {
+    const rejected = [
+      ["stale-live", "2026-07-23T11:00:00.000Z", () => true, "BASE_ADVANCE_INELIGIBLE"],
+      ["fresh-live", LATER, () => true, "BASE_ADVANCE_INELIGIBLE"],
+      ["indeterminate", LATER, () => null, "BASE_ADVANCE_RUN_INVALID"],
+    ];
+    for (const [name, lastTickAt, processAliveFn, code] of rejected) {
+      const fixture = createBaseAdvanceTransitionFixture(name);
+      try {
+        fixture.advance();
+        writeHeartbeat(fixture, lastTickAt);
+        const manifest = readFileSync(join(fixture.runDir, "run.json"));
+        const integrationHead = output(fixture.worktree, ["rev-parse", "HEAD"]);
+        await assert.rejects(transitionRunBaseAdvance(fixture.runDir, { now: LATER, processAliveFn }), (error) => error.code === code);
+        assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), manifest, `${name} manifest`);
+        assert.equal(output(fixture.worktree, ["rev-parse", "HEAD"]), integrationHead, `${name} integration head`);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+
+    const dead = createBaseAdvanceTransitionFixture("dead-heartbeat");
+    try {
+      const target = dead.advance();
+      writeHeartbeat(dead, LATER);
+      const result = await transitionRunBaseAdvance(dead.runDir, { now: LATER, processAliveFn: () => false });
+      assert.deepEqual(result, success(dead.run, target, "advanced", true, false));
+      assert.equal(dead.readRun().base_commit, target);
+      assert.equal(output(dead.worktree, ["rev-parse", "HEAD"]), target);
+    } finally {
+      dead.cleanup();
+    }
+  });
+
+  it("preserves the complete representative authority inventory and admits settled steering history", async () => {
     const fixture = createBaseAdvanceTransitionFixture("preserve");
     try {
+      const inventory = installRepresentativeAuthorityInventory(fixture);
       const target = fixture.advance();
-      const candidate = `${fixture.runId}-candidate`;
-      const candidateWorktree = join(fixture.repo, ".opencode", "worktrees", candidate);
-      git(fixture.repo, ["worktree", "add", "-b", candidate, candidateWorktree, fixture.base]);
-      writeFileSync(join(candidateWorktree, "candidate.txt"), "candidate bytes\n");
-      const candidateStatus = output(candidateWorktree, ["status", "--porcelain=v1", "--untracked-files=all"]);
-      const candidateHead = output(fixture.repo, ["rev-parse", `refs/heads/${candidate}`]);
-      mkdirSync(join(fixture.runDir, "artifacts"));
-      writeFileSync(join(fixture.runDir, "artifacts", "story.md"), "accepted story\n");
       const beforeRun = fixture.readRun();
-      const sidecar = readFileSync(join(fixture.runDir, "artifacts", "story.md"));
+      const beforeInventory = captureRepresentativeAuthorityInventory(fixture, inventory);
+      assert.deepEqual(Object.keys(beforeInventory.run_files), inventory.protectedRunPaths);
+      assert.deepEqual(Object.keys(beforeInventory.candidate.files), inventory.candidateFiles);
+      assert.equal(beforeRun.steering.last_action.outcome, "closed");
+      assert.equal(beforeRun.steering.history[0].event, "acknowledged");
       const result = await transitionRunBaseAdvance(fixture.runDir, { now: LATER });
+      const afterRun = fixture.readRun();
       assert.equal(result.base_commit, target);
-      assert.deepEqual(readFileSync(join(fixture.runDir, "artifacts", "story.md")), sidecar);
-      assert.equal(output(fixture.repo, ["rev-parse", `refs/heads/${candidate}`]), candidateHead);
-      assert.equal(output(candidateWorktree, ["status", "--porcelain=v1", "--untracked-files=all"]), candidateStatus);
-      assert.equal(readFileSync(join(candidateWorktree, "candidate.txt"), "utf8"), "candidate bytes\n");
-      assert.deepEqual(omitMutable(fixture.readRun()), omitMutable(beforeRun));
+      assert.deepEqual(captureRepresentativeAuthorityInventory(fixture, inventory), beforeInventory);
+      assert.deepEqual(afterRun, { ...beforeRun, base_commit: target, updated_at: LATER });
+      assert.deepEqual(omitMutable(afterRun), omitMutable(beforeRun));
     } finally {
       fixture.cleanup();
+    }
+  });
+
+  it("classifies uncoded durable reads, dependency Git diagnostics, and proven pre-publication changes without leaking details", async () => {
+    for (const method of ["readdirSync", "lstatSync", "openSync", "fstatSync", "readFileSync"]) {
+      const fixture = createBaseAdvanceTransitionFixture(`durable-${method}`);
+      try {
+        fixture.advance();
+        writeFileSync(join(fixture.runDir, "sidecar.txt"), "PRIVATE-SIDECAR-CONTENTS\n");
+        const manifest = readFileSync(join(fixture.runDir, "run.json"));
+        const sentinel = `SENTINEL-${method}`;
+        await assert.rejects(transitionRunBaseAdvance(fixture.runDir, {
+          baseAdvanceDurableFileSystem: {
+            [method]() { throw new Error(`${sentinel} ${fixture.runDir}/private PRIVATE-SIDECAR-CONTENTS\n    at private-stack`); },
+          },
+        }), (error) => {
+          assert.equal(error.code, "BASE_ADVANCE_RUN_INVALID");
+          assertTerminalSafe(error, sentinel, fixture);
+          return true;
+        });
+        assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), manifest);
+        assert.equal(output(fixture.worktree, ["rev-parse", "HEAD"]), fixture.base);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+
+    const gitFailure = createBaseAdvanceTransitionFixture("git-diagnostic");
+    try {
+      gitFailure.advance();
+      const sentinel = "SENTINEL-GIT-STDERR";
+      await assert.rejects(transitionRunBaseAdvance(gitFailure.runDir, {
+        gitOptions: selectiveGitFailure(() => true, ["worktree", "list", "--porcelain"], sentinel, gitFailure),
+      }), (error) => {
+        assert.equal(error.code, "BASE_ADVANCE_GIT_STATE_INVALID");
+        assertTerminalSafe(error, sentinel, gitFailure);
+        return true;
+      });
+      assert.equal(gitFailure.readRun().base_commit, gitFailure.base);
+      assert.equal(output(gitFailure.worktree, ["rev-parse", "HEAD"]), gitFailure.base);
+    } finally {
+      gitFailure.cleanup();
+    }
+
+    const changed = createBaseAdvanceTransitionFixture("pre-publication-change");
+    try {
+      const target = changed.advance();
+      const sidecar = join(changed.runDir, "settled.log");
+      writeFileSync(sidecar, "before\n");
+      await assert.rejects(transitionRunBaseAdvance(changed.runDir, {
+        baseAdvanceHooks: { beforeBind: () => writeFileSync(sidecar, "after\n") },
+      }), (error) => error.code === "BASE_ADVANCE_INELIGIBLE");
+      assert.equal(changed.readRun().base_commit, changed.base);
+      assert.equal(output(changed.worktree, ["rev-parse", "HEAD"]), target);
+    } finally {
+      changed.cleanup();
+    }
+  });
+
+  it("maps every final post-publication read, snapshot, Git, origin, and mismatch failure to publish-failed", async () => {
+    const cases = [
+      ["snapshot", (fixture) => {
+        let fail = false;
+        return {
+          baseAdvanceHooks: { beforeFinalVerification: () => { fail = true; } },
+          baseAdvanceDurableFileSystem: {
+            readdirSync(path) {
+              if (fail) throw new Error(`SENTINEL-snapshot ${fixture.runDir}/private PRIVATE-SIDECAR-CONTENTS\n    at private-stack`);
+              return readdirSync(path);
+            },
+          },
+        };
+      }],
+      ["read", (fixture) => ({
+        baseAdvanceHooks: { beforeFinalVerification: () => writeFileSync(join(fixture.runDir, "run.json"), "PRIVATE-SIDECAR-CONTENTS {") },
+      })],
+      ["git", (fixture) => {
+        let fail = false;
+        return {
+          baseAdvanceHooks: { beforeFinalVerification: () => { fail = true; } },
+          gitOptions: selectiveGitFailure(() => fail, ["worktree", "list", "--porcelain"], "SENTINEL-git", fixture),
+        };
+      }],
+      ["origin", (fixture) => {
+        let fail = false;
+        return {
+          baseAdvanceHooks: { beforeFinalVerification: () => { fail = true; } },
+          gitOptions: selectiveGitFailure(() => fail, ["ls-remote", "--exit-code", "--refs", "origin", "refs/heads/main"], "SENTINEL-origin", fixture),
+        };
+      }],
+      ["mismatch", (fixture) => ({
+        baseAdvanceHooks: {
+          beforeFinalVerification: () => fixture.writeRun({ ...fixture.readRun(), heartbeat_at: LATER }),
+        },
+      })],
+    ];
+    for (const [name, options] of cases) {
+      const fixture = createBaseAdvanceTransitionFixture(`post-publication-${name}`);
+      try {
+        fixture.advance();
+        await assert.rejects(transitionRunBaseAdvance(fixture.runDir, { now: LATER, ...options(fixture) }), (error) => {
+          assert.equal(error.code, "BASE_ADVANCE_PUBLISH_FAILED", name);
+          assert.equal(error.message, "final base publication verification failed", name);
+          assertTerminalSafe(error, `SENTINEL-${name}`, fixture);
+          return true;
+        });
+      } finally {
+        fixture.cleanup();
+      }
     }
   });
 
@@ -210,4 +357,33 @@ function causalMessages(error) {
   const messages = [];
   for (let current = error; current; current = current.cause) messages.push(current.message);
   return messages;
+}
+
+function writeHeartbeat(fixture, lastTickAt) {
+  writeJson(join(fixture.runDir, "heartbeat.json"), {
+    schema_version: 1, run_id: fixture.runId, phase: "running", pid: 4242, interval_ms: 30_000, last_tick_at: lastTickAt,
+  });
+}
+
+function selectiveGitFailure(active, expectedArgs, sentinel, fixture) {
+  return {
+    spawnSync(file, args, options) {
+      if (active() && args.length === expectedArgs.length && args.every((arg, index) => arg === expectedArgs[index])) {
+        return {
+          status: 2,
+          stdout: "",
+          stderr: `${sentinel} ${fixture.runDir}/private PRIVATE-SIDECAR-CONTENTS\n    at private-stack`,
+        };
+      }
+      return spawnSync(file, args, options);
+    },
+  };
+}
+
+function assertTerminalSafe(error, sentinel, fixture) {
+  const outward = JSON.stringify({ code: error.code, message: error.message });
+  assert.equal(outward.includes(sentinel), false);
+  assert.equal(outward.includes(fixture.root), false);
+  assert.equal(outward.includes("PRIVATE-SIDECAR-CONTENTS"), false);
+  assert.equal(outward.includes("private-stack"), false);
 }

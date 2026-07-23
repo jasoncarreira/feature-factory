@@ -502,7 +502,7 @@ export async function transitionRunBaseAdvance(runDir, options = {}) {
         }
         const repository = resolve(options.repoRoot || repoRoot(runDir, { noCache: true }));
         assertBaseAdvanceBaseRef(current);
-        const durableSnapshot = snapshotRunDurableFiles(runDir);
+        const durableSnapshot = snapshotBaseAdvanceDurableFiles(runDir, options);
         const eligibility = observeBaseAdvanceEligibility(runDir, current, options);
         assertBaseAdvanceAllowed(eligibility);
 
@@ -526,14 +526,14 @@ export async function transitionRunBaseAdvance(runDir, options = {}) {
             throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.gitStateInvalid, "post-advance Git identity is not the canonical target");
           }
           assertCanonicalTarget(repository, target, options);
-          assertRunDurableFilesEqual(snapshotRunDurableFiles(runDir), durableSnapshot);
+          assertRunDurableFilesEqual(snapshotBaseAdvanceDurableFiles(runDir, options), durableSnapshot);
           const beforePublication = await readRunJson(runDir);
           if (!sameJson(beforePublication, current)) throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "run state changed before base publication");
           assertBaseAdvanceAllowed(observeBaseAdvanceEligibility(runDir, beforePublication, options));
 
           if (decision.action === "replay") {
             await hooks.beforeFinalVerification?.({ run: cloneJson(current), target, replayed: true });
-            assertBaseAdvanceFinalState(runDir, repository, current, target, durableSnapshot, options);
+            assertBaseAdvanceFinalState(runDir, repository, current, target, durableSnapshot, options, false);
             return baseAdvanceSuccess(current, target, "already-current", false, true);
           }
 
@@ -544,7 +544,7 @@ export async function transitionRunBaseAdvance(runDir, options = {}) {
               const latest = await readRunJson(runDir);
               if (!sameJson(latest, current)) throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.ineligible, "run state changed before base publication");
               assertBaseAdvanceAllowed(observeBaseAdvanceEligibility(runDir, latest, options));
-              assertRunDurableFilesEqual(snapshotRunDurableFiles(runDir), durableSnapshot);
+              assertRunDurableFilesEqual(snapshotBaseAdvanceDurableFiles(runDir, options), durableSnapshot);
               const latestGit = observeBaseAdvanceGitState(repository, latest, target, options);
               if (latestGit.crash_point !== "git-advanced-unbound") {
                 throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.gitStateInvalid, "Git identity changed before base publication");
@@ -558,7 +558,7 @@ export async function transitionRunBaseAdvance(runDir, options = {}) {
           }
           await hooks.afterBind?.({ run: cloneJson(next), target });
           await hooks.beforeFinalVerification?.({ run: cloneJson(next), target, replayed: false });
-          assertBaseAdvanceFinalState(runDir, repository, next, target, durableSnapshot, options);
+          assertBaseAdvanceFinalState(runDir, repository, next, target, durableSnapshot, options, true);
           return baseAdvanceSuccess(current, target, "advanced", true, false);
         }, options.canonicalOriginOptions || {});
       } finally {
@@ -733,7 +733,7 @@ function classifyBaseAdvanceHeartbeat(runDir, run, options) {
   if (heartbeat.pid === null) return "pid-null";
   const liveness = inspectHeartbeatLiveness(heartbeat, options);
   if (liveness.status === "indeterminate") return "indeterminate";
-  if (liveness.fresh) return "live-matching";
+  if (liveness.status === "live") return "live-matching";
   return "inactive";
 }
 
@@ -838,20 +838,29 @@ function assertBaseAdvanceAllowed(observationOrDecision) {
     `base advancement rejected ${decision.dimension}:${decision.variant}`);
 }
 
-function assertBaseAdvanceFinalState(runDir, repository, expectedRun, target, durableSnapshot, options) {
-  let stored;
+function snapshotBaseAdvanceDurableFiles(runDir, options) {
+  return snapshotRunDurableFiles(runDir, options.baseAdvanceDurableFileSystem || {});
+}
+
+function assertBaseAdvanceFinalState(runDir, repository, expectedRun, target, durableSnapshot, options, publicationComplete) {
   try {
-    stored = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+    const stored = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+    if (!sameJson(stored, expectedRun) || stored.base_commit !== target) {
+      throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.publishFailed, "published base manifest does not equal the checked target");
+    }
+    const gitState = observeBaseAdvanceGitState(repository, stored, target, options);
+    if (gitState.crash_point !== "bound-current") {
+      throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.gitStateInvalid, "final Git identity is not current");
+    }
+    assertCanonicalTarget(repository, target, options);
+    assertRunDurableFilesEqual(snapshotBaseAdvanceDurableFiles(runDir, options), durableSnapshot);
   } catch (error) {
-    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.publishFailed, "published base manifest is invalid", error);
+    if (publicationComplete) {
+      throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.publishFailed, "final base publication verification failed");
+    }
+    if (String(error?.code || "").startsWith("BASE_ADVANCE_")) throw error;
+    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.runInvalid, "final base replay verification failed");
   }
-  if (!sameJson(stored, expectedRun) || stored.base_commit !== target) {
-    throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.publishFailed, "published base manifest does not equal the checked target");
-  }
-  const gitState = observeBaseAdvanceGitState(repository, stored, target, options);
-  if (gitState.crash_point !== "bound-current") throw baseAdvanceFailure(BASE_ADVANCE_ERROR_CODES.gitStateInvalid, "final Git identity is not current");
-  assertCanonicalTarget(repository, target, options);
-  assertRunDurableFilesEqual(snapshotRunDurableFiles(runDir), durableSnapshot);
 }
 
 function baseAdvanceSuccess(previous, target, disposition, updated, replayed) {

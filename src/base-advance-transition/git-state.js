@@ -4,6 +4,7 @@ import { git } from "../git.js";
 import { observeRegisteredWorktree } from "../worktrees.js";
 
 const FULL_COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
+const DURABLE_FILE_SYSTEM = Object.freeze({ closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync });
 
 export function observeBaseAdvanceGitState(repository, run, target, options = {}) {
   const branch = requireString(run.branch, "run.branch");
@@ -17,7 +18,7 @@ export function observeBaseAdvanceGitState(repository, run, target, options = {}
     worktreeIdentity = observeRegisteredWorktree(repository, worktree, { branch, head: branchHead }, options.gitOptions);
   } catch (error) {
     if (error?.code === "BASE_ADVANCE_GIT_STATE_INVALID") throw error;
-    throw gitStateFailure(error?.message || "registered worktree identity is invalid");
+    throw gitStateFailure("registered worktree identity is invalid");
   }
   const manifest = requireCommit(run.base_commit, "run.base_commit");
   const observedTarget = requireCommit(target, "canonical target");
@@ -56,30 +57,36 @@ export function assertCanonicalTarget(repository, target, options = {}) {
   return expected;
 }
 
-export function snapshotRunDurableFiles(runDir) {
+export function snapshotRunDurableFiles(runDir, fileSystemOverrides = {}) {
   const root = resolve(runDir);
   const rows = [];
-  walk(root, "", rows);
-  return rows;
+  const fileSystem = { ...DURABLE_FILE_SYSTEM, ...fileSystemOverrides };
+  try {
+    walk(root, "", rows, fileSystem);
+    return rows;
+  } catch (error) {
+    if (String(error?.code || "").startsWith("BASE_ADVANCE_")) throw error;
+    throw codedFailure("BASE_ADVANCE_RUN_INVALID", "run sidecar inventory could not be verified");
+  }
 }
 
-function walk(root, relativePath, rows) {
+function walk(root, relativePath, rows, fileSystem) {
   const directory = relativePath ? join(root, relativePath) : root;
-  for (const name of readdirSync(directory).sort()) {
+  for (const name of fileSystem.readdirSync(directory).sort()) {
     const childRelative = relativePath ? `${relativePath}/${name}` : name;
     if (childRelative === "run.json" || /^\.run\.json\..+\.tmp$/u.test(childRelative)
       || childRelative === "run-json.lock" || childRelative.startsWith("run-json.lock/")
       || childRelative.startsWith(".run-json.lock-")) continue;
     const path = join(root, childRelative);
-    const entry = lstatSync(path);
-    if (entry.isSymbolicLink()) throw codedFailure("BASE_ADVANCE_RUN_INVALID", `run sidecar '${childRelative}' must not be a symlink`);
+    const entry = fileSystem.lstatSync(path);
+    if (entry.isSymbolicLink()) throw codedFailure("BASE_ADVANCE_RUN_INVALID", "run sidecar must not be a symlink");
     if (entry.isDirectory()) {
       rows.push({ path: `${childRelative}/`, type: "directory" });
-      walk(root, childRelative, rows);
+      walk(root, childRelative, rows, fileSystem);
       continue;
     }
-    if (!entry.isFile()) throw codedFailure("BASE_ADVANCE_RUN_INVALID", `run sidecar '${childRelative}' must be a regular file`);
-    rows.push({ path: childRelative, type: "file", bytes: readRegularNoFollow(path).toString("base64") });
+    if (!entry.isFile()) throw codedFailure("BASE_ADVANCE_RUN_INVALID", "run sidecar must be a regular file");
+    rows.push({ path: childRelative, type: "file", bytes: readRegularNoFollow(path, fileSystem).toString("base64") });
   }
 }
 
@@ -96,14 +103,14 @@ export function assertRunWorktreePath(repository, worktree) {
   if (!rel || rel === ".." || rel.startsWith("../") || isAbsolute(rel)) throw gitStateFailure("run worktree is outside the factory worktree root");
 }
 
-function readRegularNoFollow(path) {
+function readRegularNoFollow(path, fileSystem) {
   let descriptor;
   try {
-    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
-    if (!fstatSync(descriptor).isFile()) throw codedFailure("BASE_ADVANCE_RUN_INVALID", "run sidecar must be a regular file");
-    return readFileSync(descriptor);
+    descriptor = fileSystem.openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    if (!fileSystem.fstatSync(descriptor).isFile()) throw codedFailure("BASE_ADVANCE_RUN_INVALID", "run sidecar must be a regular file");
+    return fileSystem.readFileSync(descriptor);
   } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
+    if (descriptor !== undefined) fileSystem.closeSync(descriptor);
   }
 }
 
