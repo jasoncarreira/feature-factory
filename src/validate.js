@@ -13,6 +13,7 @@ import { DeliveryContractValidationError, validateAdmissionExtensionResult, vali
 import { CHECKPOINT_ROUTING_KIND, CHECKPOINT_ROUTING_TERMINAL_REASON, validateCheckpointRoutingManifest, validateReviewedCheckpointPlan } from "./delivery-envelope/checkpoint-routing.js";
 import { git } from "./git.js";
 import { checkWorktreeIdentity } from "./worktrees.js";
+import { MAX_CHECKED_EXECUTION_TIMEOUT_MS, MIN_CHECKED_EXECUTION_TIMEOUT_MS } from "./checked-execution-timeout.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -76,7 +77,7 @@ const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "integration_amendment", "special_builder_dispatch", "continuation", "checkpoint_source", "checkpoint_progress", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
 const PLAN_KEYS = new Set(["slices", "integration_gate", "delivery_envelope"]);
 const PLANNED_SLICE_KEYS = new Set(["id", "stack", "paths", "depends_on", "acceptance", "test_plan"]);
-const INTEGRATION_GATE_KEYS = new Set(["required_commands"]);
+const INTEGRATION_GATE_KEYS = new Set(["required_commands", "timeout_ms"]);
 const INTEGRATION_GATE_COMMAND_KEYS = new Set(["program", "args"]);
 const REQUIRED_FINAL_INTEGRATION_COMMAND = Object.freeze({ program: "npm", args: Object.freeze(["run", "check"]) });
 const PLAN_SLICES_REF = "plan/slices.json";
@@ -109,13 +110,13 @@ const CHECKPOINT_PULL_REQUEST_KEYS = new Set(["pr_url", "pr_number", "pr_node_id
 const CHECKPOINT_REMOTE_MAIN_KEYS = new Set(["ref", "commit", "observed_at"]);
 const CHECKPOINT_CLOSURE_KEYS = new Set(["schema_version", "kind", "parent_run_id", "parent_run_hash", "manifest_ref", "manifest_hash", "source_plan_ref", "source_plan_hash", "source_review_ref", "source_review_hash", "source_review_attempt", "parent_review_identity_hash", "admission_probe_hash", "checkpoints", "remote_main", "closed_at"]);
 const CHECKPOINT_CLOSURE_ENTRY_KEYS = new Set(["checkpoint_id", "ordinal", "root_child_run_id", "child_plan_hash", "brief_scope_hash", "completed_child_run_id", "completed_child_run_hash", "checkpoint_source_hash", "configuration", "configuration_hash", "lineage", "pull_request", "merged_at"]);
-const TEST_EXECUTION_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "run_id", "attempt", "plan_ref", "plan_hash", "head_sha", "receipt_ref", "claimed_at"]);
+const TEST_EXECUTION_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "run_id", "attempt", "plan_ref", "plan_hash", "head_sha", "timeout_ms", "receipt_ref", "claimed_at"]);
 const TEST_EXECUTION_CLAIM_COMPLETED_KEYS = new Set([...TEST_EXECUTION_CLAIM_COMMON_KEYS, "completed_at", "status", "receipt_hash"]);
 const TEST_EXECUTION_CLAIM_UNKNOWN_KEYS = new Set([...TEST_EXECUTION_CLAIM_COMMON_KEYS, "failed_at", "reason"]);
 const TEST_EXECUTION_UNKNOWN_REASONS = new Set(["process-outcome-indeterminate", "authority-changed", "receipt-publication-indeterminate"]);
-const TEST_EXECUTION_RECEIPT_KEYS = new Set(["schema_version", "kind", "subject", "run_id", "attempt", "claim_nonce", "plan_ref", "plan_hash", "head_sha", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands"]);
-const VERIFICATION_ARTIFACT_RECEIPT_KEYS = new Set(["schema_version", "kind", "subject", "run_id", "slice_id", "attempt", "claim_nonce", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id", "probe", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands", "result"]);
-const VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id", "probe", "receipt_ref", "claimed_at"]);
+const TEST_EXECUTION_RECEIPT_KEYS = new Set(["schema_version", "kind", "subject", "run_id", "attempt", "claim_nonce", "plan_ref", "plan_hash", "head_sha", "timeout_ms", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands"]);
+const VERIFICATION_ARTIFACT_RECEIPT_KEYS = new Set(["schema_version", "kind", "subject", "run_id", "slice_id", "attempt", "claim_nonce", "plan_ref", "plan_hash", "head_sha", "timeout_ms", "verification_artifact_id", "probe", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands", "result"]);
+const VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "timeout_ms", "verification_artifact_id", "probe", "receipt_ref", "claimed_at"]);
 const VERIFICATION_ARTIFACT_CLAIM_COMPLETED_KEYS = new Set([...VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS, "completed_at", "status", "receipt_hash"]);
 const VERIFICATION_ARTIFACT_CLAIM_UNKNOWN_KEYS = new Set([...VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS, "failed_at", "reason", "status", "receipt_hash"]);
 const VERIFICATION_ARTIFACT_PROBE_KEYS = new Set(["type", "verification_artifact_id", "test_plan_index", "test_plan_entry", "program", "args"]);
@@ -827,6 +828,7 @@ export function validateTestExecutionReceipt(receipt) {
   if (receipt.plan_ref !== PLAN_SLICES_REF) errors.push({ path: "receipt.plan_ref", message: `must equal ${PLAN_SLICES_REF}` });
   requiredHash(errors, receipt, "plan_hash", "receipt.plan_hash");
   requiredFullGitSha(errors, receipt, "head_sha", "receipt.head_sha");
+  optionalCheckedExecutionTimeout(errors, receipt, "receipt.timeout_ms");
   requiredTimestamp(errors, receipt, "started_at", "receipt.started_at");
   requiredTimestamp(errors, receipt, "completed_at", "receipt.completed_at");
   boundedInteger(errors, receipt, "duration_ms", 0, Number.MAX_SAFE_INTEGER, "receipt.duration_ms");
@@ -865,6 +867,7 @@ export function validateVerificationArtifactExecutionReceipt(receipt) {
   if (receipt.plan_ref !== PLAN_SLICES_REF) errors.push({ path: "receipt.plan_ref", message: `must equal ${PLAN_SLICES_REF}` });
   requiredHash(errors, receipt, "plan_hash", "receipt.plan_hash");
   requiredFullGitSha(errors, receipt, "head_sha", "receipt.head_sha");
+  optionalCheckedExecutionTimeout(errors, receipt, "receipt.timeout_ms");
   requiredString(errors, receipt, "verification_artifact_id", "receipt.verification_artifact_id");
   requiredTimestamp(errors, receipt, "started_at", "receipt.started_at");
   requiredTimestamp(errors, receipt, "completed_at", "receipt.completed_at");
@@ -923,6 +926,7 @@ export function validateVerificationArtifactExecutionClaim(claim) {
   if (claim.plan_ref !== PLAN_SLICES_REF) errors.push({ path: "claim.plan_ref", message: `must equal ${PLAN_SLICES_REF}` });
   requiredHash(errors, claim, "plan_hash", "claim.plan_hash");
   requiredFullGitSha(errors, claim, "head_sha", "claim.head_sha");
+  optionalCheckedExecutionTimeout(errors, claim, "claim.timeout_ms");
   requiredTimestamp(errors, claim, "claimed_at", "claim.claimed_at");
   validateVerificationArtifactProbe(errors, claim.probe, claim.verification_artifact_id, "claim.probe");
   if (claim.state === "completed") {
@@ -1009,6 +1013,7 @@ function validateIntegrationGate(errors, gate, path = "plan.integration_gate", {
     return;
   }
   allowedKeys(errors, gate, INTEGRATION_GATE_KEYS, path);
+  optionalCheckedExecutionTimeout(errors, gate, `${path}.timeout_ms`);
   const commands = gate.required_commands;
   if (!Array.isArray(commands)) {
     errors.push({ path: `${path}.required_commands`, message: "must be an array" });
@@ -1037,6 +1042,11 @@ function validateIntegrationGate(errors, gate, path = "plan.integration_gate", {
   } else if (!sameIntegrationCommand(commands.at(-1), REQUIRED_FINAL_INTEGRATION_COMMAND)) {
     errors.push({ path: `${path}.required_commands`, message: "npm run check must be the final command" });
   }
+}
+
+function optionalCheckedExecutionTimeout(errors, value, path) {
+  if (value.timeout_ms === undefined) return;
+  boundedInteger(errors, value, "timeout_ms", MIN_CHECKED_EXECUTION_TIMEOUT_MS, MAX_CHECKED_EXECUTION_TIMEOUT_MS, path);
 }
 
 function validateIntegrationProgram(errors, program, path) {
@@ -4258,6 +4268,7 @@ function validateTestExecutionClaim(errors, claim, path) {
   if (claim.plan_ref !== PLAN_SLICES_REF) errors.push({ path: `${path}.plan_ref`, message: `must equal ${PLAN_SLICES_REF}` });
   requiredHash(errors, claim, "plan_hash", `${path}.plan_hash`);
   requiredFullGitSha(errors, claim, "head_sha", `${path}.head_sha`);
+  optionalCheckedExecutionTimeout(errors, claim, `${path}.timeout_ms`);
   requiredString(errors, claim, "receipt_ref", `${path}.receipt_ref`);
   if (Number.isInteger(claim.attempt) && claim.receipt_ref !== `evidence/test-verifier.attempt-${claim.attempt}.json`) errors.push({ path: `${path}.receipt_ref`, message: "must equal the fixed attempt receipt ref" });
   requiredTimestamp(errors, claim, "claimed_at", `${path}.claimed_at`);

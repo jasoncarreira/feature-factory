@@ -2,6 +2,7 @@ import { validateDeliveryEnvelope, validateInvariantFamilyLedger, validateReview
 import { evaluateReviewLedger } from "./review-ledger.js";
 import { validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "../validate.js";
 import { parseVerificationCommand } from "./verification-command.js";
+import { effectiveCheckedExecutionTimeoutMs } from "../checked-execution-timeout.js";
 
 export function evaluateInvariantFamilyReview({ plan, sliceId, review, observeEvidence } = {}) {
   const ledger = review?.invariant_family_ledger;
@@ -73,6 +74,7 @@ function assertCheckedDispositionReceipt({ deliveryEnvelope, sliceId, review, di
   if (receipt.attempt !== review.attempt) throw new Error("invariant family ledger checked receipt attempt is stale");
   if (receipt.head_sha !== review.reviewed_commit) throw new Error("invariant family ledger checked receipt reviewed HEAD is stale");
   if (receipt.verification_artifact_id !== artifact.id) throw new Error("invariant family ledger checked receipt artifact id is stale");
+  if (effectiveCheckedExecutionTimeoutMs(receipt.timeout_ms) !== effectiveCheckedExecutionTimeoutMs(artifact.timeout_ms)) throw new Error("invariant family ledger checked receipt timeout is stale");
   if (receipt.probe.test_plan_index !== artifact.test_plan_index || receipt.probe.test_plan_entry !== artifact.test_plan_entry
     || receipt.probe.program !== command.program || JSON.stringify(receipt.probe.args) !== JSON.stringify(command.args)) {
     throw new Error("invariant family ledger checked receipt probe does not match the exact current verification artifact command");
@@ -88,7 +90,8 @@ function assertCheckedDispositionReceipt({ deliveryEnvelope, sliceId, review, di
   if (claim.state !== "completed" || claim.status !== receipt.status || claim.receipt_hash !== observed.hash
     || claim.nonce !== receipt.claim_nonce || claim.run_id !== receipt.run_id || claim.slice_id !== receipt.slice_id
     || claim.attempt !== receipt.attempt || claim.plan_ref !== receipt.plan_ref || claim.plan_hash !== receipt.plan_hash
-    || claim.head_sha !== receipt.head_sha || claim.verification_artifact_id !== receipt.verification_artifact_id
+    || claim.head_sha !== receipt.head_sha || effectiveCheckedExecutionTimeoutMs(claim.timeout_ms) !== effectiveCheckedExecutionTimeoutMs(receipt.timeout_ms)
+    || claim.verification_artifact_id !== receipt.verification_artifact_id
     || claim.receipt_ref !== disposition.evidence_ref || JSON.stringify(claim.probe) !== JSON.stringify(receipt.probe)) {
     throw new Error("invariant family ledger checked execution claim is not the exact completed authority for the observed receipt");
   }

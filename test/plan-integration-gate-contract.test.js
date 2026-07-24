@@ -12,6 +12,7 @@ import {
   validateSlicesPlan,
 } from "../src/validate.js";
 import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
+import { DEFAULT_CHECKED_EXECUTION_TIMEOUT_MS, MAX_CHECKED_EXECUTION_TIMEOUT_MS, MIN_CHECKED_EXECUTION_TIMEOUT_MS } from "../src/checked-execution-timeout.js";
 
 const FINAL_COMMAND = Object.freeze({ program: "npm", args: Object.freeze(["run", "check"]) });
 
@@ -60,6 +61,24 @@ describe("plan integration_gate command contract", () => {
       () => validateSlicesPlan({ slices: [plannedSlice()], integration_gate: {} }, { requireIntegrationGate: true }),
       (error) => validationIncludes(error, "plan.integration_gate.required_commands", "must be an array"),
     );
+  });
+
+  it("accepts only bounded plan-authoritative integration and artifact timeouts", () => {
+    const valid = planWithCommands([FINAL_COMMAND]);
+    valid.integration_gate.timeout_ms = DEFAULT_CHECKED_EXECUTION_TIMEOUT_MS;
+    valid.delivery_envelope.delivery_units[0].verification_artifacts[0].timeout_ms = MIN_CHECKED_EXECUTION_TIMEOUT_MS;
+    assert.equal(validateSlicesPlan(valid, { requireIntegrationGate: true }), valid);
+
+    for (const timeout of [999, 1_800_001, 1.5, "600000"]) {
+      const gate = planWithCommands([FINAL_COMMAND]);
+      gate.integration_gate.timeout_ms = timeout;
+      assert.throws(() => validateSlicesPlan(gate, { requireIntegrationGate: true }), /timeout_ms/u);
+
+      const artifact = planWithCommands([FINAL_COMMAND]);
+      artifact.delivery_envelope.delivery_units[0].verification_artifacts[0].timeout_ms = timeout;
+      assert.throws(() => validateSlicesPlan(artifact, { requireIntegrationGate: true }), /timeout_ms/u);
+    }
+    assert.equal(MAX_CHECKED_EXECUTION_TIMEOUT_MS, 1_800_000);
   });
 
   it("enforces command count, program UTF-8 byte, trim, and control-character bounds", () => {

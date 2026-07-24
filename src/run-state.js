@@ -26,6 +26,7 @@ import { validateAdmissionExtensionResult, validateReviewExtensionResult } from 
 import { buildCheckpointRoutingManifest, buildDeliveryPlanAdmissionProbe, buildInvalidDeliveryPlanAdmissionProbe, checkpointRoutingArtifact, CHECKPOINT_ROUTING_KIND, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
 import { parseVerificationCommand } from "./delivery-envelope/verification-command.js";
 import { verificationArtifactExecutionClaimRef, verificationArtifactExecutionReceiptRef } from "./verification-artifact-refs.js";
+import { effectiveCheckedExecutionTimeoutMs } from "./checked-execution-timeout.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -52,6 +53,7 @@ const POST_PR_TERMINAL_PHASE = Object.freeze({ completed: "succeeded", blocked: 
 const MERGED_SLICE_REPAIR_TRANSITION_AUTHORITY = Symbol("merged-slice-repair-transition-authority");
 const INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY = Symbol("integration-amendment-transition-authority");
 const INTEGRATION_AMENDMENT_DOWNSTREAM_MERGE_AUTHORITY = Symbol("integration-amendment-downstream-merge-authority");
+const FAILED_PRE_REVIEW_RETRY_AUTHORITY = Symbol("failed-pre-review-retry-authority");
 const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash", "reviewed_commit"]);
 const SLICE_DISPATCH_BINDING_KEYS = Object.freeze(["dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
 const VALIDATOR_BINDING_KEYS = Object.freeze(["report_hash", "review_hash", "reviewed_head_sha"]);
@@ -1817,6 +1819,7 @@ export async function claimCheckedTestExecution(runDir, options = {}) {
       plan_ref: PLAN_SLICES_REF,
       plan_hash: authority.plan_hash,
       head_sha: authority.head_sha,
+      timeout_ms: authority.timeout_ms,
       receipt_ref: receiptRef,
       claimed_at: timestamp(options.now),
     };
@@ -1913,6 +1916,7 @@ export async function claimCheckedVerificationArtifactExecution(runDir, sliceId,
       plan_ref: authority.plan_ref,
       plan_hash: authority.plan_hash,
       head_sha: authority.head_sha,
+      timeout_ms: authority.timeout_ms,
       verification_artifact_id: authority.verification_artifact_id,
       probe: authority.probe,
       receipt_ref: authority.receipt_ref,
@@ -2009,6 +2013,7 @@ function observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, art
     plan_ref: PLAN_SLICES_REF,
     plan_hash: decomposition.plan_hash,
     head_sha: gitAuthority.head,
+    timeout_ms: effectiveCheckedExecutionTimeoutMs(artifact.timeout_ms),
     verification_artifact_id: artifact.id,
     probe: {
       type: "verification-artifact",
@@ -2027,6 +2032,7 @@ function assertVerificationArtifactReceiptMatches(receipt, authority, claim) {
   for (const key of ["run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id"]) {
     if (receipt[key] !== authority[key]) throw new Error(`checked verification artifact receipt ${key} is stale`);
   }
+  if (effectiveCheckedExecutionTimeoutMs(receipt.timeout_ms) !== authority.timeout_ms) throw new Error("checked verification artifact receipt timeout_ms is stale");
   if (receipt.subject !== authority.slice_id || !sameJson(receipt.probe, authority.probe)) {
     throw new Error("checked verification artifact receipt probe is stale");
   }
@@ -2042,6 +2048,7 @@ function assertVerificationArtifactClaimMatches(claim, authority) {
   for (const key of ["run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id", "receipt_ref"]) {
     if (claim[key] !== authority[key]) throw new Error(`checked verification artifact claim ${key} is stale`);
   }
+  if (effectiveCheckedExecutionTimeoutMs(claim.timeout_ms) !== authority.timeout_ms) throw new Error("checked verification artifact claim timeout_ms is stale");
   if (!sameJson(claim.probe, authority.probe)) throw new Error("checked verification artifact claim probe is stale");
 }
 
@@ -3203,6 +3210,48 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
     },
   }), options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
+}
+
+export async function retrySliceAfterFailedVerification(runDir, sliceId, input = {}, options = {}) {
+  if (!isRecord(input) || !sameStringSet(new Set(Object.keys(input)), new Set(["evidence_ref", "review_ref"]))) {
+    throw new Error("failed verification retry requires exactly evidence_ref and review_ref");
+  }
+  const evidenceRef = requireNonEmptyString(input.evidence_ref, "failed verification retry evidence_ref");
+  const reviewRef = requireNonEmptyString(input.review_ref, "failed verification retry review_ref");
+  let run = await readRunJson(runDir);
+  let slice = (run.slices || []).find((candidate) => candidate?.id === sliceId);
+  let publishedReview = false;
+  if (!slice) throw new Error(`slice '${sliceId}' not found`);
+
+  const latest = slice.attempt_reviews?.at(-1);
+  if (slice.status === "running" && latest?.evidence_ref === evidenceRef && latest?.review_ref === reviewRef && slice.attempts === latest.attempt + 1) {
+    const observed = observeSliceReviewSidecars(runDir, sliceId, { ...slice, attempts: latest.attempt, evidence_ref: evidenceRef, review_ref: reviewRef });
+    if (observed.evidence.status !== "fail" || observed.review.verdict !== "REJECT") throw new Error(`slice '${sliceId}' retry replay authority is not a failed REJECT`);
+    return { updated: false, replayed: true, status: run.status, run, slice_index: run.slices.indexOf(slice), slice };
+  }
+
+  if (slice.status === "running") {
+    await transitionRunSlice(runDir, sliceId, {
+      status: "review",
+      attempts: slice.attempts,
+      evidence_ref: evidenceRef,
+      review_ref: reviewRef,
+    }, { ...options, failedPreReviewRetryAuthority: FAILED_PRE_REVIEW_RETRY_AUTHORITY });
+    publishedReview = true;
+    run = await readRunJson(runDir);
+    slice = (run.slices || []).find((candidate) => candidate?.id === sliceId);
+  }
+  if (slice?.status !== "review" || slice.evidence_ref !== evidenceRef || slice.review_ref !== reviewRef) {
+    throw new Error(`slice '${sliceId}' failed verification retry requires its exact durable review state`);
+  }
+  const observed = assertSliceReviewBindingCurrent(runDir, sliceId, slice);
+  if (observed.evidence.status !== "fail" || observed.review.verdict !== "REJECT") {
+    throw new Error(`slice '${sliceId}' failed verification retry requires a failed receipt and REJECT review`);
+  }
+  if (publishedReview && typeof options.afterFailedReviewPublication === "function") await options.afterFailedReviewPublication({ run, slice, evidence: observed.evidence, review: observed.review });
+  const failedAttempt = slice.attempts;
+  const advanced = await transitionRunSlice(runDir, sliceId, { status: "running", attempts: failedAttempt + 1 }, options);
+  return { ...advanced, replayed: false, failed_attempt: failedAttempt };
 }
 
 export async function transitionSliceMerged(runDir, sliceId, input = {}, options = {}) {
@@ -5316,6 +5365,7 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
     plan_hash: decomposition.plan_hash,
     plan_bytes: decomposition.plan_bytes.toString("base64"),
     commands: cloneJson(decomposition.plan.integration_gate.required_commands),
+    timeout_ms: effectiveCheckedExecutionTimeoutMs(decomposition.plan.integration_gate.timeout_ms),
     decomposition_review_ref: decomposition.review_ref,
     decomposition_review_hash: decomposition.review_hash,
     branch: integration.branch,
@@ -5331,7 +5381,8 @@ export function observeCompletedCheckedTestExecutionAuthority(runDir, run, step 
   if (step.execution_claim_hash !== hashValue(claim)) throw new Error("completed checked execution claim hash is stale");
   const currentAuthority = authority || observeCheckedTestExecutionAuthority(runDir, run, { ...options, runDir }, { allowCompleted: true, skipLocalAuthority: true, allowTerminalCompleted: options.allowTerminalCompleted === true });
   if (claim.run_id !== run.run_id || claim.attempt !== step.attempts || claim.plan_ref !== currentAuthority.plan_ref
-    || claim.plan_hash !== currentAuthority.plan_hash || claim.head_sha !== currentAuthority.head_sha) throw new Error("completed checked execution claim no longer matches current authority");
+    || claim.plan_hash !== currentAuthority.plan_hash || claim.head_sha !== currentAuthority.head_sha
+    || effectiveCheckedExecutionTimeoutMs(claim.timeout_ms) !== currentAuthority.timeout_ms) throw new Error("completed checked execution claim no longer matches current authority");
   const receipt = resolveEvidenceRef(runDir, claim.receipt_ref);
   const receiptValue = validateTestExecutionReceipt(parseJsonObjectFile(receipt.path, "checked test execution receipt"));
   const receiptHash = hashFile(receipt.path, { mode: "raw" });
@@ -5353,6 +5404,7 @@ function assertReceiptMatchesExecution(receipt, claim, authority) {
     head_sha: claim.head_sha,
   };
   for (const [key, value] of Object.entries(expected)) if (receipt[key] !== value) throw new Error(`checked test execution receipt ${key} is cross-bound`);
+  if (effectiveCheckedExecutionTimeoutMs(receipt.timeout_ms) !== authority.timeout_ms) throw new Error("checked test execution receipt timeout_ms is cross-bound");
   if (receipt.commands.length !== authority.commands.length) throw new Error("checked test execution receipt command count differs from accepted plan");
   for (const [index, command] of authority.commands.entries()) {
     const result = receipt.commands[index];
@@ -5655,9 +5707,13 @@ function observeSliceReviewSidecars(runDir, sliceId, slice) {
   const reviewJson = parseJsonObjectBytes(reviewBytes, `slice '${sliceId}' review_ref`);
   observeInvariantFamilyLedgerEvidence(runDir, sliceId, reviewJson);
   if (evidenceJson.subject !== sliceId) throw new Error(`slice '${sliceId}' evidence subject must match slice id`);
-  if (evidenceJson.status !== "pass" || evidenceJson.review_ready !== true) throw new Error(`slice '${sliceId}' evidence must be pass and review_ready`);
   if (reviewJson.subject !== sliceId) throw new Error(`slice '${sliceId}' review subject must match slice id`);
   if (!["APPROVE", "REJECT"].includes(reviewJson.verdict)) throw new Error(`slice '${sliceId}' review verdict must be APPROVE or REJECT`);
+  if (evidenceJson.status === "fail" && evidenceJson.review_ready === false && reviewJson.verdict === "REJECT") {
+    assertFailedPreReviewEvidence(runDir, sliceId, slice, evidenceJson, evidenceBytes, reviewJson);
+  } else if (evidenceJson.status !== "pass" || evidenceJson.review_ready !== true) {
+    throw new Error(`slice '${sliceId}' evidence must be pass and review_ready`);
+  }
   const evidenceAttempt = evidenceJson.attempt;
   const reviewAttempt = reviewJson.attempt;
   const bothAbsent = evidenceAttempt === undefined && reviewAttempt === undefined;
@@ -5688,6 +5744,9 @@ function assertSliceReviewAuthorityCurrent(runDir, sliceId, slice, expected) {
 
 function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, decomposition, options = {}) {
   const observed = observeSliceReviewSidecars(runDir, sliceId, slice);
+  if (observed.evidence.status === "fail" && options.failedPreReviewRetryAuthority !== FAILED_PRE_REVIEW_RETRY_AUTHORITY) {
+    throw new Error(`slice '${sliceId}' failed pre-review evidence requires the checked verification retry transition`);
+  }
   const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: true });
   const attempt = slice.attempts;
   if (!Number.isInteger(attempt) || attempt < 1 || observed.evidence.attempt !== attempt || observed.review.attempt !== attempt) {
@@ -5728,6 +5787,31 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
     ownership,
     review_extension: reviewExtension,
   };
+}
+
+function assertFailedPreReviewEvidence(runDir, sliceId, slice, evidence, evidenceBytes, review) {
+  let receipt;
+  try {
+    receipt = validateVerificationArtifactExecutionReceipt(evidence);
+  } catch (error) {
+    throw new Error(`slice '${sliceId}' failed pre-review evidence must be a checked verification artifact receipt: ${error.message}`);
+  }
+  const hash = sha256Bytes(evidenceBytes);
+  const claimRef = verificationArtifactExecutionClaimRef(slice.evidence_ref);
+  const claim = validateVerificationArtifactExecutionClaim(parseJsonObjectFile(resolveEvidenceRef(runDir, claimRef).path, `slice '${sliceId}' failed verification claim`));
+  if (receipt.status !== "fail" || receipt.review_ready !== false || receipt.slice_id !== sliceId || receipt.subject !== sliceId
+    || claim.state !== "completed" || claim.status !== "fail" || claim.receipt_ref !== slice.evidence_ref || claim.receipt_hash !== hash
+    || claim.nonce !== receipt.claim_nonce || claim.run_id !== receipt.run_id || claim.slice_id !== receipt.slice_id || claim.attempt !== receipt.attempt
+    || claim.plan_ref !== receipt.plan_ref || claim.plan_hash !== receipt.plan_hash || claim.head_sha !== receipt.head_sha
+    || effectiveCheckedExecutionTimeoutMs(claim.timeout_ms) !== effectiveCheckedExecutionTimeoutMs(receipt.timeout_ms)
+    || claim.verification_artifact_id !== receipt.verification_artifact_id || !sameJson(claim.probe, receipt.probe)) {
+    throw new Error(`slice '${sliceId}' failed pre-review evidence is not bound to its exact completed checked claim`);
+  }
+  const disposition = review.invariant_family_ledger?.dispositions?.find((entry) => entry?.evidence_ref === slice.evidence_ref);
+  if (!disposition || disposition.evidence_hash !== hash || disposition.verification_artifact_id !== receipt.verification_artifact_id
+    || disposition.result?.outcome !== "fail" || !sameJson(disposition.result, receipt.result)) {
+    throw new Error(`slice '${sliceId}' failed pre-review evidence must be retained by the REJECT invariant-family ledger`);
+  }
 }
 
 function observeReviewExtensionEvidence(runDir, ref, expectedHash) {

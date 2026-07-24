@@ -59,6 +59,7 @@ export function writeVerificationArtifactReceipt({ runDir, runId, plan, sliceId,
   if (!artifact) throw new Error(`delivery envelope fixture has no artifact '${artifactId}' for slice '${sliceId}'`);
   const [program, ...args] = artifact.test_plan_entry.split(" ");
   const outcome = result.outcome;
+  const timeoutMs = artifact.timeout_ms ?? 300_000;
   const receipt = {
     schema_version: 1,
     kind: "checked-verification-artifact-execution-receipt",
@@ -70,6 +71,7 @@ export function writeVerificationArtifactReceipt({ runDir, runId, plan, sliceId,
     plan_ref: "plan/slices.json",
     plan_hash: hashBytes(`${JSON.stringify(plan, null, 2)}\n`),
     head_sha: reviewedCommit,
+    timeout_ms: timeoutMs,
     verification_artifact_id: artifact.id,
     probe: {
       type: "verification-artifact",
@@ -105,6 +107,7 @@ export function writeVerificationArtifactReceipt({ runDir, runId, plan, sliceId,
     plan_ref: receipt.plan_ref,
     plan_hash: receipt.plan_hash,
     head_sha: receipt.head_sha,
+    timeout_ms: timeoutMs,
     verification_artifact_id: receipt.verification_artifact_id,
     probe: receipt.probe,
     receipt_ref: evidenceRef,

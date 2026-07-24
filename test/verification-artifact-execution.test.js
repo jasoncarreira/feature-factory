@@ -33,7 +33,7 @@ describe("checked verification artifact execution", () => {
             id: "slice-unit", slice_id: "slice",
             invariant_families: [{ id: "slice-family", description: "Slice behavior" }],
             obligations: [{ id: "slice-obligation", description: "Verify behavior", invariant_family_id: "slice-family", verification_artifact_id: "slice-tests" }],
-            verification_artifacts: [{ id: "slice-tests", test_plan_index: 0, test_plan_entry: "node --version" }],
+            verification_artifacts: [{ id: "slice-tests", test_plan_index: 0, test_plan_entry: "node --version", timeout_ms: 420_000 }],
           }],
         },
       };
@@ -57,6 +57,9 @@ describe("checked verification artifact execution", () => {
       assert.equal(result.receipt.attempt, 1);
       assert.equal(result.receipt.head_sha, head);
       assert.equal(result.receipt.verification_artifact_id, "slice-tests");
+      assert.equal(result.authority.timeout_ms, 420_000);
+      assert.equal(result.claim.timeout_ms, 420_000);
+      assert.equal(result.receipt.timeout_ms, 420_000);
       assert.deepEqual(result.receipt.probe, {
         type: "verification-artifact", verification_artifact_id: "slice-tests", test_plan_index: 0,
         test_plan_entry: "node --version", program: "node", args: ["--version"],
@@ -207,6 +210,29 @@ describe("checked verification artifact execution", () => {
       } finally {
         rmSync(replayFixture.repo, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("rejects replay when a claim and receipt are rebound to a different timeout", async () => {
+    const fixture = createArtifactFixture("artifact-timeout-replay");
+    try {
+      const result = await executeCheckedVerificationArtifact(fixture.runDir, "slice", "slice-tests", { env: process.env });
+      const receiptPath = join(fixture.runDir, result.authority.receipt_ref);
+      const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+      receipt.timeout_ms = 600_000;
+      writeJson(receiptPath, receipt);
+      const claimPath = join(fixture.runDir, result.claim_ref);
+      const claim = JSON.parse(readFileSync(claimPath, "utf8"));
+      claim.timeout_ms = 600_000;
+      claim.receipt_hash = hashFile(receiptPath);
+      writeJson(claimPath, claim);
+
+      await assert.rejects(
+        executeCheckedVerificationArtifact(fixture.runDir, "slice", "slice-tests", { env: process.env }),
+        /timeout_ms.*stale/u,
+      );
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
     }
   });
 

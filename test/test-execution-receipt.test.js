@@ -59,6 +59,7 @@ describe("checked test execution receipt", () => {
       const receiptPath = join(fixture.runDir, result.receipt_ref);
       const receipt = validateTestExecutionReceipt(readJson(receiptPath));
       assert.equal(receipt.review_ready, true);
+      assert.equal(receipt.timeout_ms, 1_000);
       assert.deepEqual(receipt.commands.map(({ outcome, status, exit_code }) => [outcome, status, exit_code]), [["exited", "pass", 0], ["exited", "pass", 0]]);
       assert.deepEqual(receipt.commands[0].stdout, { captured_bytes: 14, sha256: hashBytes("acceptance ok\n"), truncated: false });
       assert.deepEqual(receipt.commands[1].stderr, { captured_bytes: 9, sha256: hashBytes("check ok\n"), truncated: false });
@@ -66,6 +67,7 @@ describe("checked test execution receipt", () => {
       const step = run.steps.find(({ agent }) => agent === "test-verifier");
       assert.equal(step.execution_claim.state, "completed");
       assert.equal(step.execution_claim.status, "pass");
+      assert.equal(step.execution_claim.timeout_ms, 1_000);
       assert.equal(step.execution_claim.receipt_hash, result.receipt_hash);
       assert.equal(step.execution_claim_hash, hashValue(step.execution_claim));
 
@@ -136,6 +138,26 @@ describe("checked test execution receipt", () => {
       assert.equal(replay.status, "fail");
       assert.equal(replay.replayed, true);
       assert.equal(replayCalls.length, 0);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("rejects replay when a claim and receipt are rebound to a different timeout", async () => {
+    const fixture = createExecutionFixture("checked-timeout-replay");
+    try {
+      const result = await executeCheckedTestExecution(fixture.runDir, executionOptions([{}, {}], []));
+      const receiptPath = join(fixture.runDir, result.receipt_ref);
+      const receipt = readJson(receiptPath);
+      receipt.timeout_ms = 2_000;
+      writeJson(receiptPath, receipt);
+      const runPath = join(fixture.runDir, "run.json");
+      const run = readJson(runPath);
+      const step = run.steps.find(({ agent }) => agent === "test-verifier");
+      step.execution_claim.timeout_ms = 2_000;
+      step.execution_claim.receipt_hash = hashFile(receiptPath);
+      step.execution_claim_hash = hashValue(step.execution_claim);
+      writeJson(runPath, run);
+
+      await assert.rejects(executeCheckedTestExecution(fixture.runDir, executionOptions([], [])), /timeout_ms|current authority/u);
     } finally { cleanup(fixture.repo); }
   });
 
@@ -269,7 +291,7 @@ function createExecutionFixture(runId, commands = [{ program: "node", args: ["--
   writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: head });
   const plan = withDeliveryEnvelope({
     slices: [{ id: "slice", stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["checked"] }],
-    integration_gate: { required_commands: commands },
+    integration_gate: { required_commands: commands, timeout_ms: 1_000 },
   });
   writeJson(join(runDir, "plan", "slices.json"), plan);
   const sliceEvidenceRef = "evidence/slice.json";

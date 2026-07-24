@@ -9,8 +9,8 @@ import {
   markCheckedTestExecutionUnknown,
 } from "./run-state.js";
 import { TEST_EXECUTION_STREAM_LIMIT_BYTES, validateTestExecutionReceipt, validateVerificationArtifactExecutionReceipt } from "./validate.js";
+import { LEGACY_CHECKED_EXECUTION_TIMEOUT_MS } from "./checked-execution-timeout.js";
 
-const COMMAND_TIMEOUT_MS = 300_000;
 const PROCESS_CLOSE_TIMEOUT_MS = 10_000;
 const ENV_ALLOWLIST = Object.freeze([
   "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "CI", "TERM", "COLORTERM", "NO_COLOR", "FORCE_COLOR",
@@ -26,7 +26,7 @@ export async function executeCheckedTestExecution(runDir, options = {}) {
   const results = [];
   try {
     for (const [index, command] of claimed.authority.commands.entries()) {
-      results.push(await executeCheckedCommand(command, index, claimed.authority.worktree, env, options));
+      results.push(await executeCheckedCommand(command, index, claimed.authority.worktree, env, { ...options, commandTimeoutMs: claimed.authority.timeout_ms }));
     }
   } catch (error) {
     await markCheckedTestExecutionUnknown(runDir, claimed.claim, "process-outcome-indeterminate", options);
@@ -48,6 +48,7 @@ export async function executeCheckedTestExecution(runDir, options = {}) {
     plan_ref: claimed.claim.plan_ref,
     plan_hash: claimed.claim.plan_hash,
     head_sha: claimed.claim.head_sha,
+    timeout_ms: claimed.authority.timeout_ms,
     started_at: startedAt,
     completed_at: completedAt,
     duration_ms: Math.max(0, completedMs - startedMs),
@@ -67,7 +68,7 @@ export async function executeCheckedVerificationArtifact(runDir, sliceId, artifa
   const command = { program: claimed.authority.probe.program, args: claimed.authority.probe.args };
   let result;
   try {
-    result = await executeCheckedCommand(command, 0, claimed.authority.worktree, checkedExecutionEnvironment(options.env ?? process.env), options);
+    result = await executeCheckedCommand(command, 0, claimed.authority.worktree, checkedExecutionEnvironment(options.env ?? process.env), { ...options, commandTimeoutMs: claimed.authority.timeout_ms });
     if (typeof options.afterArtifactProcess === "function") await options.afterArtifactProcess({ claim: claimed.claim, authority: claimed.authority, result });
   } catch (error) {
     await markCheckedVerificationArtifactExecutionUnknown(runDir, claimed.claim, claimed.authority, "process-outcome-indeterminate", options);
@@ -87,6 +88,7 @@ export async function executeCheckedVerificationArtifact(runDir, sliceId, artifa
     plan_ref: claimed.authority.plan_ref,
     plan_hash: claimed.authority.plan_hash,
     head_sha: claimed.authority.head_sha,
+    timeout_ms: claimed.authority.timeout_ms,
     verification_artifact_id: claimed.authority.verification_artifact_id,
     probe: claimed.authority.probe,
     started_at: startedAt,
@@ -226,7 +228,7 @@ function finalizeStream(capture) {
 }
 
 function commandTimeoutMs(options) {
-  return Number.isInteger(options.commandTimeoutMs) && options.commandTimeoutMs > 0 ? options.commandTimeoutMs : COMMAND_TIMEOUT_MS;
+  return Number.isInteger(options.commandTimeoutMs) && options.commandTimeoutMs > 0 ? options.commandTimeoutMs : LEGACY_CHECKED_EXECUTION_TIMEOUT_MS;
 }
 
 function closeTimeoutMs(options) {

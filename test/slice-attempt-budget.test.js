@@ -3,13 +3,74 @@ import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
-import { adoptSliceBuilderTaskDispatchCandidate, completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionRecoverOrphan, transitionRunSlice, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
+import { adoptSliceBuilderTaskDispatchCandidate, completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, retrySliceAfterFailedVerification, transitionRecoverOrphan, transitionRunSlice, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
 import { validateRun, validateSlicesPlan } from "../src/validate.js";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
+const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+
 describe("uniform slice attempt evidence", () => {
+  it("durably binds a failed checked receipt and REJECT before advancing the retry attempt", async () => {
+    const fixture = createFixture("failed-pre-review-retry");
+    try {
+      await startAttempt(fixture, 1);
+      const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
+      const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      const artifact = plan.delivery_envelope.delivery_units[0].verification_artifacts[0];
+      const evidenceRef = "evidence/slice.failed-attempt-1.json";
+      const failed = writeVerificationArtifactReceipt({
+        runDir: fixture.runDir, runId: "run", plan, sliceId: "slice", attempt: 1, reviewedCommit: head,
+        artifactId: artifact.id, evidenceRef,
+        result: { type: "verification-result", outcome: "fail", summary: "Focused verification timed out" },
+      });
+      const reviewRef = "reviews/slice.failed-attempt-1.json";
+      const review = reviewRecord(fixture, 1, { verdict: "REJECT", fixes: ["make focused verification complete within its accepted timeout"] });
+      for (const disposition of review.invariant_family_ledger.dispositions) {
+        disposition.verification_artifact_id = artifact.id;
+        disposition.evidence_ref = evidenceRef;
+        disposition.evidence_hash = failed.hash;
+        disposition.result = structuredClone(failed.receipt.result);
+      }
+      writeJson(join(fixture.runDir, reviewRef), review);
+
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: evidenceRef, review_ref: reviewRef }),
+        /checked verification retry transition/u,
+      );
+      await assert.rejects(
+        retrySliceAfterFailedVerification(fixture.runDir, "slice", { evidence_ref: evidenceRef, review_ref: reviewRef }, {
+          afterFailedReviewPublication() { throw new Error("injected retry crash"); },
+        }),
+        /injected retry crash/u,
+      );
+      const interrupted = readRun(fixture).slices[0];
+      assert.equal(interrupted.status, "review");
+      assert.equal(interrupted.attempts, 1);
+      assert.equal(interrupted.attempt_reviews[0].evidence_ref, evidenceRef);
+      const cli = spawnSync(process.execPath, [CLI_PATH, "factory", "slice-verification-retry", "run", "slice", "--evidence-ref", evidenceRef, "--review-ref", reviewRef, "--json"], {
+        cwd: fixture.repo,
+        encoding: "utf8",
+        env: process.env,
+      });
+      assert.equal(cli.status, 0, cli.stderr || cli.stdout);
+      const retried = JSON.parse(cli.stdout);
+      assert.equal(retried.slice.status, "running");
+      assert.equal(retried.slice.attempts, 2);
+      assert.equal(retried.slice.attempt_reviews[0].evidence_ref, evidenceRef);
+      assert.equal(retried.slice.attempt_reviews[0].review_ref, reviewRef);
+      assert.equal(retried.slice.attempt_reviews[0].verdict, "REJECT");
+
+      const replay = await retrySliceAfterFailedVerification(fixture.runDir, "slice", { evidence_ref: evidenceRef, review_ref: reviewRef });
+      assert.equal(replay.replayed, true);
+      assert.equal(replay.slice.attempts, 2);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
   it("advances one attempt at a time and appends exact review history", async () => {
     const fixture = createFixture("history");
     try {
