@@ -850,6 +850,7 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
   const activeSliceDispatches = new Set();
   const completedSliceDispatches = new Set();
   const compactedSliceSessions = new Map();
+  const sliceChildSessions = new Map();
   const telemetryOptions = b6PluginOptions(options);
   const telemetryEnabled = telemetryOptions.telemetry.enabled;
   const commandCorrelationKey = resolve(String(pluginInput?.directory || pluginInput?.worktree || process.cwd()));
@@ -902,7 +903,10 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
   };
   const clearCompactedSliceBinding = (pending) => {
     for (const [sessionID, binding] of compactedSliceSessions) {
-      if (binding.pending === pending) compactedSliceSessions.delete(sessionID);
+      if (binding.pending === pending) {
+        compactedSliceSessions.delete(sessionID);
+        sliceChildSessions.delete(sessionID);
+      }
     }
   };
   const readSessionMessages = async (sessionID) => {
@@ -910,15 +914,71 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
     if (typeof pluginInput?.client?.session?.messages !== "function") return [];
     return pluginInput.client.session.messages({ sessionID, directory: pluginInput?.directory || pluginInput?.worktree });
   };
+  const bindSliceChildByLineage = (sessionID) => {
+    const child = sliceChildSessions.get(sessionID);
+    if (!child || child.invalid || child.ambiguous || !child.callbackKey || !child.pending
+      || pendingCallbacks.get("slice", child.callbackKey) !== child.pending) return null;
+    const binding = { callbackKey: child.callbackKey, pending: child.pending };
+    compactedSliceSessions.set(sessionID, binding);
+    return binding;
+  };
+  const observeSliceChildSession = (input) => {
+    const type = input?.event?.type;
+    const info = input?.event?.properties?.info;
+    const sessionID = correlationId(info?.id) || correlationId(input?.event?.properties?.sessionID);
+    if (!sessionID) return;
+    if (type === "session.deleted") {
+      compactedSliceSessions.delete(sessionID);
+      sliceChildSessions.delete(sessionID);
+      return;
+    }
+    if (type !== "session.created" && type !== "session.updated") return;
+    const prior = sliceChildSessions.get(sessionID);
+    if (prior?.invalid || prior?.ambiguous) return;
+    const hasObservedParent = Object.hasOwn(info || {}, "parentID");
+    const hasObservedAgent = Object.hasOwn(info || {}, "agent");
+    const observedParentSessionID = correlationId(info?.parentID);
+    const observedAgent = SLICE_BUILDER_AGENTS.has(info?.agent) ? info.agent : null;
+    if (prior && (hasObservedParent && observedParentSessionID !== prior.parentSessionID
+      || hasObservedAgent && observedAgent !== prior.agent)) {
+      compactedSliceSessions.delete(sessionID);
+      sliceChildSessions.set(sessionID, { ...prior, invalid: true });
+      return;
+    }
+    const parentSessionID = observedParentSessionID || prior?.parentSessionID || null;
+    const agent = observedAgent || prior?.agent || null;
+    if (!parentSessionID || !agent) return;
+    if (prior) {
+      bindSliceChildByLineage(sessionID);
+      return;
+    }
+    const matches = pendingCallbacks.entries("slice")
+      .filter(([, pending]) => pending.sessionID === parentSessionID && pending.agent === agent);
+    if (matches.length === 0) return;
+    const [callbackKey, pending] = matches.length === 1 ? matches[0] : [];
+    sliceChildSessions.set(sessionID, {
+      parentSessionID,
+      agent,
+      ambiguous: matches.length !== 1,
+      callbackKey: callbackKey || null,
+      pending: pending || null,
+    });
+    bindSliceChildByLineage(sessionID);
+  };
   const bindCompactedSliceSession = async (sessionID) => {
+    const existing = compactedSliceSessions.get(sessionID);
+    if (existing) return existing;
+    if (sliceChildSessions.get(sessionID)?.invalid) return null;
     const texts = sessionUserTexts(await readSessionMessages(sessionID));
     const matches = pendingCallbacks.entries("slice")
       .filter(([, pending]) => typeof pending.prompt === "string" && texts.includes(pending.prompt));
-    if (matches.length !== 1) return null;
-    const [callbackKey, pending] = matches[0];
-    const binding = { callbackKey, pending };
-    compactedSliceSessions.set(sessionID, binding);
-    return binding;
+    if (matches.length === 1) {
+      const [callbackKey, pending] = matches[0];
+      const binding = { callbackKey, pending };
+      compactedSliceSessions.set(sessionID, binding);
+      return binding;
+    }
+    return bindSliceChildByLineage(sessionID);
   };
 
   function beginTaskTelemetry(input, pending, fields, observedCorrelation = null) {
@@ -954,9 +1014,7 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
   return {
     event(input) {
       try {
-        const eventType = input?.event?.type;
-        const eventSessionID = correlationId(input?.event?.properties?.info?.id) || correlationId(input?.event?.properties?.sessionID);
-        if (eventType === "session.deleted" && eventSessionID) compactedSliceSessions.delete(eventSessionID);
+        observeSliceChildSession(input);
       } catch { /* lifecycle cleanup must never affect plugin behavior */ }
       if (!telemetryEnabled) return;
       synchronizeTelemetryCorrelation();
@@ -1013,10 +1071,12 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
       output.context.push("A checked feature-factory builder dispatch is active. Preserve implementation progress and pending verification/commit work, but do not treat this model-authored summary as authority. The plugin will re-inject the exact checked context after compaction.");
     },
     "experimental.chat.system.transform": async (input, output) => {
-      const binding = compactedSliceSessions.get(input?.sessionID);
+      const binding = compactedSliceSessions.get(input?.sessionID)
+        || (sliceChildSessions.has(input?.sessionID) ? await bindCompactedSliceSession(input.sessionID) : null);
       if (!binding || !Array.isArray(output?.system)) return;
       if (pendingCallbacks.get("slice", binding.callbackKey) !== binding.pending) {
         compactedSliceSessions.delete(input.sessionID);
+        sliceChildSessions.delete(input.sessionID);
         return;
       }
       const repo = pluginInput?.directory || pluginInput?.worktree || process.cwd();
