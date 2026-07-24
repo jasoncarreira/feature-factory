@@ -128,7 +128,7 @@ export function installRepresentativeAuthorityInventory(fixture) {
   });
   writeJson(join(fixture.runDir, reviewRef), {
     subject: "candidate", attempt: 1, reviewed_commit: candidateHead, verdict: "REJECT", convergence: "converging",
-    remaining_fix_count: 1, required_fixes: ["retain candidate unchanged"],
+    late_discovery_strike: false, remaining_fix_count: 1, required_fixes: ["retain candidate unchanged"],
     ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: {
       schema_version: 2,
@@ -162,7 +162,7 @@ export function installRepresentativeAuthorityInventory(fixture) {
   const attemptReview = {
     attempt: 1, evidence_ref: evidenceRef, evidence_hash: hashFile(join(fixture.runDir, evidenceRef)),
     review_ref: reviewRef, review_hash: hashFile(join(fixture.runDir, reviewRef)), reviewed_commit: candidateHead,
-    diff_base_commit: fixture.base, ratified_paths: [], verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
+    diff_base_commit: fixture.base, ratified_paths: [], verdict: "REJECT", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 1,
     ...dispatch,
   };
 
