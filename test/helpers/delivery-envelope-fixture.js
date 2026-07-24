@@ -1,10 +1,13 @@
-export function withDeliveryEnvelope(plan) {
+export function withDeliveryEnvelope(plan, { explicitExecutionTimeouts = true } = {}) {
   const current = structuredClone(plan);
-  current.delivery_envelope = deliveryEnvelopeForSlices(current.slices);
+  if (explicitExecutionTimeouts && current.integration_gate && current.integration_gate.timeout_ms === undefined) {
+    current.integration_gate.timeout_ms = DEFAULT_CHECKED_EXECUTION_TIMEOUT_MS;
+  }
+  current.delivery_envelope = deliveryEnvelopeForSlices(current.slices, { explicitExecutionTimeouts });
   return current;
 }
 
-export function deliveryEnvelopeForSlices(slices) {
+export function deliveryEnvelopeForSlices(slices, { explicitExecutionTimeouts = true } = {}) {
   return {
     schema_version: 1,
     delivery_units: slices.map((slice, index) => {
@@ -25,6 +28,7 @@ export function deliveryEnvelopeForSlices(slices) {
           id: artifactId,
           test_plan_index: 0,
           test_plan_entry: slice.test_plan[0],
+          ...(explicitExecutionTimeouts ? { timeout_ms: DEFAULT_CHECKED_EXECUTION_TIMEOUT_MS } : {}),
         }],
       };
     }),
@@ -59,6 +63,7 @@ export function writeVerificationArtifactReceipt({ runDir, runId, plan, sliceId,
   if (!artifact) throw new Error(`delivery envelope fixture has no artifact '${artifactId}' for slice '${sliceId}'`);
   const [program, ...args] = artifact.test_plan_entry.split(" ");
   const outcome = result.outcome;
+  const timeoutMs = artifact.timeout_ms ?? 300_000;
   const receipt = {
     schema_version: 1,
     kind: "checked-verification-artifact-execution-receipt",
@@ -70,6 +75,7 @@ export function writeVerificationArtifactReceipt({ runDir, runId, plan, sliceId,
     plan_ref: "plan/slices.json",
     plan_hash: hashBytes(`${JSON.stringify(plan, null, 2)}\n`),
     head_sha: reviewedCommit,
+    timeout_ms: timeoutMs,
     verification_artifact_id: artifact.id,
     probe: {
       type: "verification-artifact",
@@ -105,6 +111,7 @@ export function writeVerificationArtifactReceipt({ runDir, runId, plan, sliceId,
     plan_ref: receipt.plan_ref,
     plan_hash: receipt.plan_hash,
     head_sha: receipt.head_sha,
+    timeout_ms: timeoutMs,
     verification_artifact_id: receipt.verification_artifact_id,
     probe: receipt.probe,
     receipt_ref: evidenceRef,
@@ -128,3 +135,4 @@ function hashBytes(value) {
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { DEFAULT_CHECKED_EXECUTION_TIMEOUT_MS } from "../../src/checked-execution-timeout.js";

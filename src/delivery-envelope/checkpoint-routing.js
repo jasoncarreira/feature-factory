@@ -97,6 +97,7 @@ export function buildCheckpointRoutingManifest({ plan, planHash, admissionResult
         required: true,
         scope: "this-checkpoint-whole-story",
         required_commands: clone(checkpoint.planEntry.child_plan.integration_gate.required_commands),
+        timeout_ms: checkpoint.planEntry.child_plan.integration_gate.timeout_ms,
       },
       whole_story_panels: [
         { agent: "implementation-validator", required: true, scope: "this-checkpoint-whole-story" },

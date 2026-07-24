@@ -834,7 +834,7 @@ describe("simplified run-state transitions", () => {
       const emptyStream = { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false };
       const receipt = {
         schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: fixture.runId, attempt: 1,
-        claim_nonce: claimed.claim.nonce, plan_ref: claimed.claim.plan_ref, plan_hash: claimed.claim.plan_hash, head_sha: resolutionHead,
+        claim_nonce: claimed.claim.nonce, plan_ref: claimed.claim.plan_ref, plan_hash: claimed.claim.plan_hash, head_sha: resolutionHead, timeout_ms: claimed.claim.timeout_ms,
         started_at: NOW, completed_at: NOW, duration_ms: 0, status: "pass", review_ready: true,
         commands: claimed.authority.commands.map((command, index) => ({ index, ...command, outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 0, stdout: emptyStream, stderr: emptyStream })),
       };
@@ -1535,7 +1535,7 @@ describe("simplified run-state transitions", () => {
       const emptyStream = { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false };
       const receipt = {
         schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: fixture.runId, attempt: 1,
-        claim_nonce: claimed.claim.nonce, plan_ref: claimed.claim.plan_ref, plan_hash: claimed.claim.plan_hash, head_sha: head,
+        claim_nonce: claimed.claim.nonce, plan_ref: claimed.claim.plan_ref, plan_hash: claimed.claim.plan_hash, head_sha: head, timeout_ms: claimed.claim.timeout_ms,
         started_at: NOW, completed_at: NOW, duration_ms: 0, status: "pass", review_ready: true,
         commands: claimed.authority.commands.map((command, index) => ({ index, ...command, outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 0, stdout: emptyStream, stderr: emptyStream })),
       };
@@ -4519,7 +4519,7 @@ async function acceptIntegratedConflict(fixture, head, attempt) {
   const emptyStream = { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false };
   const receipt = {
     schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: fixture.runId, attempt,
-    claim_nonce: claimed.claim.nonce, plan_ref: claimed.claim.plan_ref, plan_hash: claimed.claim.plan_hash, head_sha: head,
+    claim_nonce: claimed.claim.nonce, plan_ref: claimed.claim.plan_ref, plan_hash: claimed.claim.plan_hash, head_sha: head, timeout_ms: claimed.claim.timeout_ms,
     started_at: NOW, completed_at: NOW, duration_ms: 0, status: "pass", review_ready: true,
     commands: claimed.authority.commands.map((command, index) => ({ index, ...command, outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 0, stdout: emptyStream, stderr: emptyStream })),
   };

@@ -33,7 +33,7 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 - Dependencies must be real consumption dependencies, not blanket backend-before-frontend ordering.
 - For each test command, identify the changed slice outputs it validates. Add dependencies on every sibling slice whose changed output must exist before that command runs. Broad regression commands do not imply dependencies on unaffected code.
 - Keep each slice `test_plan` limited to focused and directly impacted checks that can attribute failure to that slice. Do not assign the repository-wide full-suite/build/package command to any implementation slice, including the final slice; preserve it as the post-merge `test-verifier` integration gate.
-- Emit the accepted brief's whole-story commands in root `integration_gate.required_commands` as ordered structured argv objects containing exactly `program` and `args`. Never emit shell text. The exact `{ "program": "npm", "args": ["run", "check"] }` command must appear exactly once and last.
+- Emit the accepted brief's whole-story commands in root `integration_gate.required_commands` as ordered structured argv objects containing exactly `program` and `args`. Set the bounded `integration_gate.timeout_ms` execution authority, normally `600000`. Never emit shell text. The exact `{ "program": "npm", "args": ["run", "check"] }` command must appear exactly once and last.
 - Shared hotspots must be serialized into different waves.
 - Generated files have one owning slice.
 - **Per-slice width budget (primary constraint).** Each slice owns one dominant hard concern — a single locus of crash-recovery, concurrency, security-boundary, canonicalization/serialization, migration, or protocol-contract reasoning — plus its focused tests. Do not bundle multiple independent hard concerns into one slice. A large, heterogeneous acceptance list (a rough smell above ~6-8 criteria, not a hard line) is a signal to split along the concern seams, not to grow the slice. Width is the primary limit; prefer splitting over widening.
@@ -70,6 +70,7 @@ Return exactly this structure:
 ```json
 {
   "integration_gate": {
+    "timeout_ms": 600000,
     "required_commands": [
       { "program": "npm", "args": ["run", "check"] }
     ]
@@ -110,7 +111,7 @@ Return exactly this structure:
           }
         ],
         "verification_artifacts": [
-          { "id": "api-feature-test", "test_plan_index": 0, "test_plan_entry": "npm test -- api.feature.test" }
+          { "id": "api-feature-test", "test_plan_index": 0, "test_plan_entry": "npm test -- api.feature.test", "timeout_ms": 600000 }
         ]
       },
       {
@@ -128,7 +129,7 @@ Return exactly this structure:
           }
         ],
         "verification_artifacts": [
-          { "id": "screen-feature-test", "test_plan_index": 0, "test_plan_entry": "npm test -- feature-screen.test" }
+          { "id": "screen-feature-test", "test_plan_index": 0, "test_plan_entry": "npm test -- feature-screen.test", "timeout_ms": 600000 }
         ]
       }
     ]
@@ -155,6 +156,6 @@ Return exactly this structure:
 - <parallelism risk, giant slice, ambiguous dependency, generated code, migration, or none>
 ```
 
-The JSON must be valid and directly usable as `plan/slices.json`. `integration_gate` and `delivery_envelope` are required even for a one-slice plan. `integration_gate` is closed to `required_commands`; the ordered list has 1-32 closed `{program,args}` entries. `program` is trimmed, 1-255 UTF-8 bytes, and has no NUL/control characters. `args` has 0-64 strings per command, each at most 4096 UTF-8 bytes and without NUL; the JSON-encoded command list is at most 64 KiB. The human plan mirrors all entries, while the JSON list alone is execution authority. `delivery_envelope.checkpoint_plan` is absent for `admit` and required for `checkpoint`; it is closed to `schema_version`, `kind`, `acceptance_inventory`, `acceptance_mappings`, and `checkpoints`. Every checkpoint is closed to `id`, `ordinal`, `prerequisite_checkpoint_id`, `acceptance_ids`, `brief_scope`, and `child_plan`.
+The JSON must be valid and directly usable as `plan/slices.json`. `integration_gate` and `delivery_envelope` are required even for a one-slice plan. `integration_gate` is closed to `required_commands` and `timeout_ms`; every verification artifact is closed to `id`, `test_plan_index`, `test_plan_entry`, and `timeout_ms`. Each timeout is an integer from 1000 through 1800000 milliseconds and new plans normally use 600000. The ordered command list has 1-32 closed `{program,args}` entries. `program` is trimmed, 1-255 UTF-8 bytes, and has no NUL/control characters. `args` has 0-64 strings per command, each at most 4096 UTF-8 bytes and without NUL; the JSON-encoded command list is at most 64 KiB. The human plan mirrors all entries and timeout values, while the JSON plan alone is execution authority. `delivery_envelope.checkpoint_plan` is absent for `admit` and required for `checkpoint`; it is closed to `schema_version`, `kind`, `acceptance_inventory`, `acceptance_mappings`, and `checkpoints`. Every checkpoint is closed to `id`, `ordinal`, `prerequisite_checkpoint_id`, `acceptance_ids`, `brief_scope`, and `child_plan`.
 
 When the typed probe returns `checkpoint`, the parent plan is routing input only. Work-reviewer must return exact same-attempt `APPROVE-CHECKPOINT`, not plain `APPROVE`, with a self-independent `review_identity` and exactly one ordered reviewer-produced `checkpoint-child-decomposition-review` disposition with verdict `APPROVE` per probe checkpoint. Missing, duplicate, reordered, cross-bound, stale, rejecting, or extra dispositions invalidate checkpoint approval. The parent must not seed runnable slices or proceed to Gate 2, slice branches, worktrees, dispatch, implementation, panels, Gate 3, or a PR. Runtime validates and copies each exact reviewed scope, child plan, acceptance projection, hashes, and child disposition; it never synthesizes a child verdict or infers scope. Each checkpoint is a normal complete child feature run, published with immutable `checkpoint_source`, and follows the ordinary lifecycle with its own complete acceptance boundary, integration test-verifier, whole-story implementation-validator and security-reviewer panels, Gate 3, and one PR. Runs are strictly sequential; checkpoint N+1 starts only from `main` containing merged PR N. B1 carry-forward is allowed only to recover nonconvergence inside that same checkpoint and must copy the immutable source plus the full stored configuration; it cannot carry work across checkpoints or create a partial PR, shared train, or join.

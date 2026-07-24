@@ -443,6 +443,12 @@ describe("generic integration amendment", () => {
         const result = await executeIntegrationAmendment(fixture.runDir, reportRequest(), executionOptions([behavior], calls, overrides));
         assert.equal(result.status, "diagnostic", name);
         assert.equal(result.outcome, outcome, name);
+        if (name === "timeout") {
+          const claim = readJson(join(fixture.runDir, "evidence", "integration-amendment.report.claim.json"));
+          const receipt = readJson(join(fixture.runDir, claim.receipt_ref));
+          assert.equal(claim.timeout_ms, 1000);
+          assert.equal(receipt.timeout_ms, 1000);
+        }
         const replay = await executeIntegrationAmendment(fixture.runDir, reportRequest(), { env: { PATH: "/fixture/bin" }, spawnFn() { throw new Error("report replay must not spawn"); } });
         assert.equal(replay.replayed, true, name);
       } finally { cleanup(fixture); }
@@ -516,6 +522,12 @@ describe("generic integration amendment", () => {
         const result = await executeIntegrationAmendment(fixture.runDir, { action: "verify" }, executionOptions([behavior], calls, overrides));
         assert.equal(result.status, "blocked", name);
         assert.equal(result.outcome, outcome, name);
+        if (name === "timeout") {
+          const claim = readJson(join(fixture.runDir, "evidence", `integration-amendment-${fixture.amendmentId}.verify.claim.json`));
+          const receipt = readJson(join(fixture.runDir, claim.receipt_ref));
+          assert.equal(claim.timeout_ms, 1000);
+          assert.equal(receipt.timeout_ms, 1000);
+        }
         const replay = await executeIntegrationAmendment(fixture.runDir, { action: "verify" }, { env: { PATH: "/fixture/bin" }, spawnFn() { throw new Error("verification replay must not spawn"); } });
         assert.equal(replay.status, "blocked", name);
         assert.equal(replay.replayed, true, name);
@@ -1952,6 +1964,7 @@ function bindRuntimeExecutionClaim(source, original, receiptPath, receipt) {
     head_sha: original.head_sha,
     tree_sha: original.tree_sha,
     cwd: original.cwd,
+    timeout_ms: original.timeout_ms,
     receipt_ref: original.receipt_ref,
   };
   if (claim.state === "completed") claim.receipt_hash = hashFile(receiptPath);
@@ -1980,6 +1993,7 @@ function bindRuntimeExecutionReceipt(source, claim) {
     head_sha: claim.head_sha,
     tree_sha: claim.tree_sha,
     cwd: claim.cwd,
+    timeout_ms: claim.timeout_ms,
   };
 }
 
@@ -2194,7 +2208,8 @@ function createFixture({ managedFeatureWorktree = false, publishReport = true, o
       ...extraSlices.map((slice) => ({ id: slice.id, stack: slice.stack || "backend", paths: slice.effective_paths, depends_on: slice.depends_on || [], acceptance: ["extra works"], test_plan: ["node --test test/extra.test.js"] })),
     ],
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
-  });
+  }, { explicitExecutionTimeouts: true });
+  for (const unit of plan.delivery_envelope.delivery_units) unit.verification_artifacts[0].timeout_ms = 1000;
   writeJson(join(runDir, "plan", "slices.json"), plan);
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
   const family = writeVerificationArtifactReceipt({ runDir, runId: RUN_ID, plan, sliceId: "owner", attempt: 1, reviewedCommit, artifactId: "fixture-artifact-1", evidenceRef: "evidence/owner-family.json", result: { type: "verification-result", outcome: "pass", summary: "owner passed" } });
@@ -2225,7 +2240,7 @@ function admissionFixture({ repo, baseline, baselineTree, owner, consumer, plan 
   const artifact = unit.verification_artifacts[0];
   return {
     baseline_ref: `refs/heads/${FEATURE_BRANCH}`, baseline_commit: baseline, baseline_tree: baselineTree, worktree: repo,
-    probe: { schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: unit.id, consumer_slice_id: "consumer", verification_artifact_id: artifact.id, test_plan_index: artifact.test_plan_index, test_plan_entry: artifact.test_plan_entry, program: "node", args: ["--test", "test/consumer.test.js"], substrate: "feature-baseline" },
+    probe: { schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: unit.id, consumer_slice_id: "consumer", verification_artifact_id: artifact.id, test_plan_index: artifact.test_plan_index, test_plan_entry: artifact.test_plan_entry, program: "node", args: ["--test", "test/consumer.test.js"], timeout_ms: artifact.timeout_ms, substrate: "feature-baseline" },
     owner: pick(owner, ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]),
     consumer: pick(consumer, ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts"]),
   };
@@ -2556,10 +2571,11 @@ function rewriteReportAsForeignRun(fixture) {
 
 function writeExecution(runDir, { phase, identity, amendmentId, probe, head, tree, cwd, exitCode }) {
   const nonce = `${phase}-nonce`;
+  const timeoutMs = probe.timeout_ms ?? 300_000;
   const receiptRef = `evidence/integration-amendment-${amendmentId}.${phase}.receipt.json`;
-  const receipt = { schema_version: 1, kind: "integration-amendment-execution-receipt", phase, subject: `integration-amendment:${amendmentId}:${phase}`, run_id: RUN_ID, amendment_id: amendmentId, claim_nonce: nonce, probe, head_sha: head, tree_sha: tree, cwd, started_at: NOW, completed_at: NOW, duration_ms: 1, status: exitCode === 0 ? "pass" : "fail", review_ready: phase === "verify" ? exitCode === 0 : exitCode !== 0, commands: [{ index: 0, program: probe.program, args: probe.args, outcome: "exited", status: exitCode === 0 ? "pass" : "fail", exit_code: exitCode, signal: null, error_code: null, duration_ms: 1, stdout: stream(), stderr: stream() }] };
+  const receipt = { schema_version: 1, kind: "integration-amendment-execution-receipt", phase, subject: `integration-amendment:${amendmentId}:${phase}`, run_id: RUN_ID, amendment_id: amendmentId, claim_nonce: nonce, probe, head_sha: head, tree_sha: tree, cwd, timeout_ms: timeoutMs, started_at: NOW, completed_at: NOW, duration_ms: 1, status: exitCode === 0 ? "pass" : "fail", review_ready: phase === "verify" ? exitCode === 0 : exitCode !== 0, commands: [{ index: 0, program: probe.program, args: probe.args, outcome: "exited", status: exitCode === 0 ? "pass" : "fail", exit_code: exitCode, signal: null, error_code: null, duration_ms: 1, stdout: stream(), stderr: stream() }] };
   writeJson(join(runDir, receiptRef), receipt);
-  const claim = { schema_version: 1, kind: "integration-amendment-execution-claim", phase, subject: receipt.subject, state: "completed", nonce, amendment_id: amendmentId, identity, run_id: RUN_ID, probe, head_sha: head, tree_sha: tree, cwd, receipt_ref: receiptRef, claimed_at: NOW, completed_at: NOW, status: receipt.status, receipt_hash: hashFile(join(runDir, receiptRef)) };
+  const claim = { schema_version: 1, kind: "integration-amendment-execution-claim", phase, subject: receipt.subject, state: "completed", nonce, amendment_id: amendmentId, identity, run_id: RUN_ID, probe, head_sha: head, tree_sha: tree, cwd, timeout_ms: timeoutMs, receipt_ref: receiptRef, claimed_at: NOW, completed_at: NOW, status: receipt.status, receipt_hash: hashFile(join(runDir, receiptRef)) };
   const claimRef = phase === "report" ? "evidence/integration-amendment.report.claim.json" : `evidence/integration-amendment-${amendmentId}.${phase}.claim.json`;
   writeJson(join(runDir, claimRef), claim);
 }

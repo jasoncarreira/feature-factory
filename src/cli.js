@@ -11,7 +11,7 @@ import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
-import { adoptSliceBuilderTaskDispatchCandidate, transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { adoptSliceBuilderTaskDispatchCandidate, retrySliceAfterFailedVerification, transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { validateRun } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
@@ -96,6 +96,7 @@ Commands:
   factory slices-probe <run-id> --from plan/slices.json [--json]
   factory slices-seed <run-id> --from plan/slices.json [--boundary-token TOKEN]
   factory slice-status <run-id> <slice-id> <running|review|blocked> [--branch REF] [--worktree PATH] [--attempts N] [--evidence-ref REF] [--review-ref REF] [--reason TEXT]
+  factory slice-verification-retry <run-id> <slice-id> --evidence-ref REF --review-ref REF --json
   factory slice-dispatch-adopt <run-id> <slice-id> <attempt> --json
   factory repair <run-id> <reported|repairing|review|merged|blocked> [retained legacy: blocked, previously-attempted, or branch-only consumer]
   factory step <run-id> <agent> <running|accepted|rejected|blocked> [--artifact-ref REF] [--evidence-ref REF] [--review-ref REF] [--attempts N]
@@ -277,6 +278,7 @@ async function factory(args, dependencies = {}) {
   if (sub === "slices-probe") return slicesProbe(rest);
   if (sub === "slices-seed") return slicesSeed(rest);
   if (sub === "slice-status") return sliceStatus(rest);
+  if (sub === "slice-verification-retry") return sliceVerificationRetry(rest);
   if (sub === "repair") return repairStatus(rest);
   if (sub === "step") return step(rest);
   if (sub === "verdicts") return verdicts(rest);
@@ -951,6 +953,20 @@ async function sliceStatus(args) {
   if (stringValue(opts.worktree)) update.worktree = opts.worktree;
   if (opts.attempts !== undefined) update.attempts = normalizeNonNegativeInteger(opts.attempts, "--attempts");
   return print(await transitionRunSlice(resolveRunDir(runId, opts), sliceId, update, { ...opts, mustExist: true }), opts);
+}
+
+async function sliceVerificationRetry(args) {
+  assertOnlyCommandOptions(args, new Set(["--evidence-ref", "--review-ref", "--repo", "--json"]), "factory slice-verification-retry");
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId, sliceId] = positional;
+  if (!stringValue(runId) || !stringValue(sliceId) || positional.length !== 2 || opts.json !== true) {
+    throw new Error("factory slice-verification-retry requires exactly <run-id> <slice-id> --evidence-ref REF --review-ref REF --json");
+  }
+  return print(await retrySliceAfterFailedVerification(resolveRunDir(runId, opts), sliceId, {
+    evidence_ref: requiredOption(opts.evidenceRef, "--evidence-ref", "factory slice-verification-retry"),
+    review_ref: requiredOption(opts.reviewRef, "--review-ref", "factory slice-verification-retry"),
+  }, opts), opts);
 }
 
 async function repairStatus(args) {

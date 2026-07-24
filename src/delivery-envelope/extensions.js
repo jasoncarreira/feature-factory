@@ -1,3 +1,5 @@
+import { isCheckedExecutionTimeoutMs } from "../checked-execution-timeout.js";
+
 const IDENTIFIER_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
@@ -7,7 +9,7 @@ const DELIVERY_ENVELOPE_KEYS = new Set(["schema_version", "delivery_units", "che
 const DELIVERY_UNIT_KEYS = new Set(["id", "slice_id", "invariant_families", "obligations", "verification_artifacts"]);
 const INVARIANT_FAMILY_KEYS = new Set(["id", "description"]);
 const OBLIGATION_KEYS = new Set(["id", "description", "invariant_family_id", "verification_artifact_id"]);
-const VERIFICATION_ARTIFACT_KEYS = new Set(["id", "test_plan_index", "test_plan_entry"]);
+const VERIFICATION_ARTIFACT_KEYS = new Set(["id", "test_plan_index", "test_plan_entry", "timeout_ms"]);
 const INVARIANT_FAMILY_LEDGER_KEYS = new Set(["schema_version", "delivery_unit_id", "dispositions"]);
 const DISPOSITION_KEYS = new Set(["invariant_family_id", "verification_artifact_id", "evidence_ref", "evidence_hash", "probe", "result", "reviewed_commit", "unresolved_findings"]);
 const PROBE_KEYS = new Set(["type", "verification_artifact_id"]);
@@ -26,7 +28,7 @@ export class DeliveryContractValidationError extends Error {
   }
 }
 
-export function validateDeliveryEnvelope(deliveryEnvelope, slices, { path = "plan.delivery_envelope", required = false, plan } = {}) {
+export function validateDeliveryEnvelope(deliveryEnvelope, slices, { path = "plan.delivery_envelope", required = false, plan, requireExecutionTimeouts = false } = {}) {
   if (deliveryEnvelope === undefined || deliveryEnvelope === null) {
     if (required) throwValidation([{ path, message: "is required" }]);
     return null;
@@ -49,7 +51,7 @@ export function validateDeliveryEnvelope(deliveryEnvelope, slices, { path = "pla
     const artifactIds = new Set();
     for (const [index, unit] of deliveryEnvelope.delivery_units.entries()) {
       const unitPath = `${path}.delivery_units[${index}]`;
-      validateDeliveryUnit(errors, unit, unitPath, plannedSlices[index], { unitIds, familyIds, obligationIds, artifactIds });
+      validateDeliveryUnit(errors, unit, unitPath, plannedSlices[index], { unitIds, familyIds, obligationIds, artifactIds }, { requireExecutionTimeouts });
     }
   }
   if (deliveryEnvelope.checkpoint_plan !== undefined && plan !== undefined) {
@@ -127,7 +129,7 @@ export function validateReviewExtensionResult(result) {
   });
 }
 
-function validateDeliveryUnit(errors, unit, path, plannedSlice, registries) {
+function validateDeliveryUnit(errors, unit, path, plannedSlice, registries, { requireExecutionTimeouts }) {
   if (!isRecord(unit)) {
     errors.push({ path, message: "must be an object" });
     return;
@@ -175,6 +177,11 @@ function validateDeliveryUnit(errors, unit, path, plannedSlice, registries) {
       }
     }
     requiredCanonicalText(errors, artifact.test_plan_entry, `${artifactPath}.test_plan_entry`);
+    if (requireExecutionTimeouts && artifact.timeout_ms === undefined) {
+      errors.push({ path: `${artifactPath}.timeout_ms`, message: "is required for newly produced and schema-v2 plans" });
+    } else if (artifact.timeout_ms !== undefined && !isCheckedExecutionTimeoutMs(artifact.timeout_ms)) {
+      errors.push({ path: `${artifactPath}.timeout_ms`, message: "must be an integer from 1000 through 1800000" });
+    }
   }
 
   const obligations = validateNonEmptyRecordArray(errors, unit.obligations, `${path}.obligations`);

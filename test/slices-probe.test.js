@@ -214,7 +214,7 @@ function checkpointPlan() {
 
 function planWithFamilies(familyCount, obligationCount) {
   const families = Array.from({ length: familyCount }, (_, index) => ({ id: `family-${index + 1}`, description: `Family ${index + 1}` }));
-  const artifacts = Array.from({ length: obligationCount }, (_, index) => ({ id: `tests-${index + 1}`, test_plan_index: index, test_plan_entry: `node --version ${index + 1}` }));
+  const artifacts = Array.from({ length: obligationCount }, (_, index) => ({ id: `tests-${index + 1}`, test_plan_index: index, test_plan_entry: `node --version ${index + 1}`, timeout_ms: 600_000 }));
   const obligations = Array.from({ length: obligationCount }, (_, index) => ({
     id: `obligation-${index + 1}`,
     description: `Obligation ${index + 1}`,
@@ -230,7 +230,7 @@ function planWithFamilies(familyCount, obligationCount) {
       acceptance: Array.from({ length: familyCount }, (_, index) => `works ${index + 1}`),
       test_plan: artifacts.map((artifact) => artifact.test_plan_entry),
     }],
-    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }], timeout_ms: 600_000 },
     delivery_envelope: {
       schema_version: 1,
       delivery_units: [{ id: "slice-unit", slice_id: "slice", invariant_families: families, obligations, verification_artifacts: artifacts }],

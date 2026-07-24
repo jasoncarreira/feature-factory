@@ -319,6 +319,7 @@ export async function completeIntegratedConflictCheckedTest(fixture, expectedHea
     plan_ref: claimed.claim.plan_ref,
     plan_hash: claimed.claim.plan_hash,
     head_sha: expectedHead,
+    timeout_ms: claimed.claim.timeout_ms,
     started_at: LIFECYCLE_NOW,
     completed_at: LIFECYCLE_NOW,
     duration_ms: 0,
