@@ -30,6 +30,7 @@ import { assertCheckpointCleanupEligible, assertCheckpointRemoteMainAdvanced, bu
 import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
 import { checkedExecutionEnvironment, executeCheckedCommand } from "./test-execution.js";
 import { BASE_ADVANCE_ERROR_CODES } from "./base-advance/state-model.js";
+import { effectiveCheckedExecutionTimeoutMs } from "./checked-execution-timeout.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -2940,7 +2941,7 @@ export async function executeIntegrationAmendment(runDirInput, request, opts = {
         0,
         claimed.authority.cwd,
         checkedExecutionEnvironment(opts.env ?? process.env),
-        opts,
+        { ...opts, commandTimeoutMs: claimed.authority.timeout_ms },
       );
       await opts.integrationAmendmentExecutionHooks?.afterProcess?.({ claim: cloneJson(claimed.claim), authority: cloneJson(claimed.authority), result: cloneJson(result) });
     } catch (error) {
@@ -2962,6 +2963,7 @@ export async function executeIntegrationAmendment(runDirInput, request, opts = {
       head_sha: claimed.claim.head_sha,
       tree_sha: claimed.claim.tree_sha,
       cwd: claimed.claim.cwd,
+      timeout_ms: claimed.claim.timeout_ms,
       started_at: startedAt,
       completed_at: completedAt,
       duration_ms: Math.max(0, completedMs - startedMs),
@@ -3026,6 +3028,7 @@ async function claimIntegrationAmendmentExecution(runDir, phase, request, opts) 
       head_sha: authority.head_sha,
       tree_sha: authority.tree_sha,
       cwd: authority.cwd,
+      timeout_ms: authority.timeout_ms,
       receipt_ref: authority.receipt_ref,
       claimed_at: amendmentClockIso(opts),
     });
@@ -3188,6 +3191,7 @@ function executionAuthorityFromClaim(claim) {
     head_sha: claim.head_sha,
     tree_sha: claim.tree_sha,
     cwd: resolve(claim.cwd),
+    timeout_ms: effectiveCheckedExecutionTimeoutMs(claim.timeout_ms),
     claim_ref: executionClaimRef(claim),
     receipt_ref: claim.receipt_ref,
   };
@@ -3205,7 +3209,7 @@ function assertExactAmendmentExecutionClaim(runDir, expected) {
 }
 
 function assertSameAmendmentExecutionAuthority(actual, expected) {
-  const projection = (value) => Object.fromEntries(["phase", "run_id", "amendment_id", "identity", "probe", "head_sha", "tree_sha", "cwd", "claim_ref", "receipt_ref"].map((key) => [key, value[key]]));
+  const projection = (value) => Object.fromEntries(["phase", "run_id", "amendment_id", "identity", "probe", "head_sha", "tree_sha", "cwd", "timeout_ms", "claim_ref", "receipt_ref"].map((key) => [key, value[key]]));
   if (!sameJsonValue(projection(actual), projection(expected))) throw new Error("integration amendment execution authority changed");
 }
 
@@ -3213,6 +3217,7 @@ function assertAmendmentReceiptMatchesClaim(receipt, claim) {
   for (const key of ["phase", "subject", "run_id", "amendment_id", "probe", "head_sha", "tree_sha", "cwd"]) {
     if (!sameJsonValue(receipt[key], claim[key])) throw new Error(`integration amendment receipt ${key} is stale`);
   }
+  if (effectiveCheckedExecutionTimeoutMs(receipt.timeout_ms) !== effectiveCheckedExecutionTimeoutMs(claim.timeout_ms)) throw new Error("integration amendment receipt timeout_ms is stale");
   if (receipt.claim_nonce !== claim.nonce || receipt.commands.length !== 1 || receipt.commands[0].program !== claim.probe.program
     || !sameJsonValue(receipt.commands[0].args, claim.probe.args)) throw new Error("integration amendment receipt command or nonce is stale");
 }
@@ -4702,7 +4707,7 @@ async function publishCarryForwardChild(repo, parentRunDir, continuation, config
   if (typeof options.beforeCarryForwardStage === "function") options.beforeCarryForwardStage({ continuation, allocation });
   assertCarryForwardPublicationBoundary(repo, parentRunDir, continuation, configuration, allocation, options);
   const inputs = collectCarryForwardPublicationInputs(parentRunDir, continuation);
-  const plan = parseSlicesPlanBytes(inputs.plan.bytes, { label: "carry-forward plan/slices.json", requireIntegrationGate: true });
+  const plan = parseSlicesPlanBytes(inputs.plan.bytes, { label: "carry-forward plan/slices.json", requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
   const parentRun = readRunFile(join(parentRunDir, "run.json"));
   const childRun = initialCarryForwardRun(continuation, configuration, plan, inputs.decomposition, parentRun.checkpoint_source);
   const stagingParent = dirname(factoryRoot(repo));

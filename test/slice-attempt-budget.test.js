@@ -71,6 +71,50 @@ describe("uniform slice attempt evidence", () => {
     }
   });
 
+  it("rejects replay after retained failed receipt or REJECT review tampering", async () => {
+    for (const target of ["receipt", "review"]) {
+      const fixture = createFixture(`failed-pre-review-retry-tamper-${target}`);
+      try {
+        await startAttempt(fixture, 1);
+        const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
+        const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+        const artifact = plan.delivery_envelope.delivery_units[0].verification_artifacts[0];
+        const evidenceRef = "evidence/slice.failed-attempt-1.json";
+        const failed = writeVerificationArtifactReceipt({
+          runDir: fixture.runDir, runId: "run", plan, sliceId: "slice", attempt: 1, reviewedCommit: head,
+          artifactId: artifact.id, evidenceRef,
+          result: { type: "verification-result", outcome: "fail", summary: "Focused verification timed out" },
+        });
+        const reviewRef = "reviews/slice.failed-attempt-1.json";
+        const review = reviewRecord(fixture, 1, { verdict: "REJECT", fixes: ["make focused verification complete within its accepted timeout"] });
+        for (const disposition of review.invariant_family_ledger.dispositions) {
+          disposition.verification_artifact_id = artifact.id;
+          disposition.evidence_ref = evidenceRef;
+          disposition.evidence_hash = failed.hash;
+          disposition.result = structuredClone(failed.receipt.result);
+        }
+        writeJson(join(fixture.runDir, reviewRef), review);
+        await retrySliceAfterFailedVerification(fixture.runDir, "slice", { evidence_ref: evidenceRef, review_ref: reviewRef });
+
+        const targetPath = join(fixture.runDir, target === "receipt" ? evidenceRef : reviewRef);
+        const tampered = JSON.parse(readFileSync(targetPath, "utf8"));
+        if (target === "receipt") tampered.result.summary = "tampered retained failure";
+        else tampered.required_fixes = ["tampered retained rejection"];
+        writeJson(targetPath, tampered);
+        const before = readFileSync(join(fixture.runDir, "run.json"));
+
+        await assert.rejects(
+          retrySliceAfterFailedVerification(fixture.runDir, "slice", { evidence_ref: evidenceRef, review_ref: reviewRef }),
+          /attempt 1|history|receipt|review|stale/u,
+          target,
+        );
+        assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), before, `${target} tamper rejection must be effect-free`);
+      } finally {
+        cleanup(fixture);
+      }
+    }
+  });
+
   it("advances one attempt at a time and appends exact review history", async () => {
     const fixture = createFixture("history");
     try {

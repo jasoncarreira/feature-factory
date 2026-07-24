@@ -268,7 +268,7 @@ function routingRunFixture(runId) {
 function parentPlan() {
   const testPlan = Array.from({ length: 6 }, (_, index) => `test api ${index + 1}`);
   return {
-    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }], timeout_ms: 600_000 },
     slices: [{
       id: "api",
       stack: "backend",
@@ -296,6 +296,7 @@ function parentPlan() {
           id: `api-artifact-${index + 1}`,
           test_plan_index: index,
           test_plan_entry: entry,
+          timeout_ms: 600_000,
         })),
       }],
     },

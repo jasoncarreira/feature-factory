@@ -40,7 +40,7 @@ export async function reconcileCheckpointPublication(input, options = {}) {
 
   const planBytes = canonicalJsonBytes(context.manifestCheckpoint.child_plan);
   const dispositionBytes = canonicalJsonBytes(context.manifestCheckpoint.child_disposition);
-  const plan = parseSlicesPlanBytes(planBytes, { label: PLAN_REF, requireIntegrationGate: true });
+  const plan = parseSlicesPlanBytes(planBytes, { label: PLAN_REF, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
   assertReviewedBytes(context, planBytes, dispositionBytes);
   const checkpointSource = buildCheckpointSource(context, claim, dispositionBytes);
   const childRun = buildChildRun(context, checkpointSource, plan, planBytes, dispositionBytes);

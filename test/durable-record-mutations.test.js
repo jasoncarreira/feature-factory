@@ -1358,7 +1358,7 @@ describe("finite durable-authority catalog", () => {
     for (const mutationCase of envelopeCases) {
       const plan = structuredClone(envelopeBaseline.plan);
       plan.delivery_envelope = mutationCase.record;
-      assert.throws(() => validateSlicesPlan(plan), undefined, mutationCase.name);
+      assert.throws(() => validateSlicesPlan(plan, { requireIntegrationGate: true }), undefined, mutationCase.name);
     }
 
     const ledgerRecord = findRecord(DURABLE_AUTHORITY_CATALOG, "review-invariant-family-ledger-v1");
@@ -1664,18 +1664,18 @@ describe("finite durable-authority catalog", () => {
 
   it("reviews B1R claim/hash and receipt production consumers before manifest digest updates", () => {
     const expectedDigests = {
-      "test-execution-claim-active": ["08430ac336f37dfbf7acc418c245c44feab2e896df6eac2a4ab76e2655a46e48", "b6d6567744c4bd97eeb465ad8e952666fa30fa9d6286b254e5a939d753aa092c", "53f417c63413d52035e9efc2a7c718e6727410bb98651df6a4d13cdd9c23d694"],
-      "test-execution-claim-completed-pass": ["07a86eb1a92150e6f8653c7fb94974cf1a28b737c82b6ee04805fd433ebe4348", "9fc16b9dd1aab571972cdda772597bac746c0616afed92f3ea07a94ccd07d8ac", "277fe2389d8992030069c248100f6325bf4e559ca8ee89a64e4b3bb5149e7cf5"],
-      "test-execution-claim-completed-fail": ["33c4adf669ce123b20d127a02d2807ebd252cd637ad240bba600f1620c85d88d", "4734b1677957cd938100fbd864e3a10c5e6749006cf9b820d1bd7ccb054f9096", "c03612048913c263b94d6ab8145ec2541e3c29cbeb1a350abe79ee4e675c56c3"],
-      "test-execution-claim-unknown-process-outcome-indeterminate": ["94b1ea8bb563fc79ff80e29cc41491dbc8b6b5466f0a915dfe9bb0f77e5622d1", "f258ceb956f246c510c1c2f980f9d7aedf48584db4054c4aafb3eee6137eb0cf", "18a5baee0e6c59a9f8df701b92a726fa26d2b1b7d540f9c28a4cd63e40ece410"],
-      "test-execution-claim-unknown-authority-changed": ["9e8ae6cf877ad3550a5e64561c1808f08699ef7a39db9a4161bce233a5c6a7a3", "5207c2d7203c285bc73c6835bb83561c5668a1b7e8e3f64165118d51fb511f73", "24a1ffcfad6130fcc6efd64bef8c34ae54c5d35e8941bdad00f9ab1b2e54165c"],
-      "test-execution-claim-unknown-receipt-publication-indeterminate": ["68059dd9f2e2f7043d4d8105ce470337266d3bbd754e124bd96de34b5ddcff77", "38757e7ff6ec3c1db8ee22cb20e6f5433aefd2f212dabd3895dcd9dd7fe5fe66", "757882f5a11fff7e508f0512ec2b244193fb8bdbfdbeeef94ec1cea4404078fd"],
-      "test-execution-receipt-pass": ["71b572bf189aa916a5687308bbe3f12770e64c68f8bec8677c7a168704df79e1", "a8d12876a6459f798537d3afd2b5cf5561637fc7bba5271b4a61412fba233472", "216e29ab03321e502e7f11f9d5f9fafba7a169a334b43f01d0a44239b932ea43"],
-      "test-execution-receipt-failed-nonzero-exit": ["12d2691d93a629f2e06ad82a5595ed6483a34c021a527fb63c38bf4048903a56", "7f2f98e92e13ffa75a3286e3094c344e58e498b97b8cfb69cdb976e2f97cc378", "b380f5786b134a4ab1d23b0b69c9456658c0bc4367f3178eae438b09e9426312"],
-      "test-execution-receipt-failed-signal": ["a1d10c7fcefced69d956914c522a0b4f0cc691118558988624904ecf50278bd6", "3ceff488cc59be6210291029b62a23ab62efb02ce934fe4526c6b38967e93f6b", "c913ae58c43a5afcec6b6d62500d7799574bad7c24f13d034fa6dc4017e14e85"],
-      "test-execution-receipt-failed-launch-error": ["3a72dd6fc46c9e72851a0c7606933b0ea466487336cdad389af5471a957be2b0", "535eda5b023fcbe5a0add7ce7e158f9ee6b71bc4aab4d118427a76360b31aecb", "b1cfd6df559733cba81588e3e66c0062fd92281e4e8eff3305d4a38e13e8846e"],
-      "test-execution-receipt-failed-timeout": ["5965d0f46e1ee946a18a6888abe2cc229b771b2bd4a79faf85d4d05bc9746bcc", "145e09cc8ddf2cc6ad438bfd10eb060732ea5d2818e32f1f2d85bf747b80e755", "b5ab34c8391d36072cb1992aa2e69043215e391d2215daa5a19eecbf7f8a729a"],
-      "test-execution-receipt-failed-output-limit": ["091ea91f8b1f6e56b31a71e085ec28c246738addcb5cf2dab841799db9fa5ee0", "5d67fdbbcb0e50d8597c747e30d41c3217b13c5f18f511e43d0914b05cfc2895", "63b89f33f3ebc6a7795136f0dd99eec4d0b5c6615ad4236a8b77bf341699f88e"],
+      "test-execution-claim-active": ["03f1ff020067bf61c7b7a9d5eafa733280c87ed543db7ad60b35a1f9fd959ff4", "e55cad41c016c8dee103465c0edbd8d0420c5be200b7469a0c487eb584cd1998", "d4a4d2bb577573da8940bf2a2d76157cf36d9519dd5cef85e5dbe4312a252969"],
+      "test-execution-claim-completed-pass": ["35f8b7d639d27df70c71a8fa6ca5dd8b6566def00de6436c69bd8a72c7314d11", "6300c1839365a0e71a880ef8600632b6d3b451e9f2198d3fc6f6847f57860e98", "d5d7cc2956e521212b5d9f3bf452684ebea1c1ddbcce56cfbb9baa789af3cf96"],
+      "test-execution-claim-completed-fail": ["cd062085e9a3ef6faa7574e51ee02e411b5c8a47f62572a03fb773e664ecc899", "b692a52e9978c8081ce71eb32c292aa8cf1c2b2084b48732cae8767265155d74", "1b1f3f27c3ee12cc66f312a394075fbe9488d39f7221518ea79e3583dc8e7308"],
+      "test-execution-claim-unknown-process-outcome-indeterminate": ["4c046c97ba3a20072a6d8d3ad3683b07338586ed2eca6b71fbce59cf56bf7a9a", "b1f923be4789d44f8499ab7e8582ed1b1851c8003c66f7aa1e758b16c0d36766", "7c24ac0448dce935ccb7a6861738a16c0a14661a27a0601db4580661b9863c96"],
+      "test-execution-claim-unknown-authority-changed": ["7bf43890ef2730f9a564d6e326bf94ad685e1cdd22f442fe3e65a19df75f66cf", "315a0338114bf60c9ca237fcb2813f393bd9d2a8f16d5ef50e3bac684f1549e6", "2da0ca8cbea018f74abb0a794a8bddfb28e77f7a1c0db5e25ce498608cd05704"],
+      "test-execution-claim-unknown-receipt-publication-indeterminate": ["7891c097a81f751a63d4a0b22e355587e28ef38f99dda5a6bf6be6107f3ab625", "0590889d9899011ce0b033b9b6b6beb905cf6e6c25ed990a3a5bf748de7946d5", "b0072954c0f3939c2d696eee6e71a5ac37387fc5c7ed4a3a79733cca5d5b380b"],
+      "test-execution-receipt-pass": ["af10a4bb1555afcb16e84a99dad77db4077b974fa96691c946a12a78d436118e", "62c1cf9a8dd6280fb852f0bf59e8998879b93f2867ff74664bd4060b6161b253", "dd7438d18b5391af5f938d6f0aae45c17b307badca132acc2bda5abae6df1ce1"],
+      "test-execution-receipt-failed-nonzero-exit": ["77902b7325c16ba6bd8be03f332ace59a1e9eb146311ec197e722366fe256bb1", "4a155144f55284460d7a4a1ad152e2f1ec7d654e6818f5d09413f76fa33cb06e", "f1c96dedd17251a4d275d183eb598bc2665718bf4b72e447b927c62858342131"],
+      "test-execution-receipt-failed-signal": ["a1062a17a8fa090df073a67da2420c47c3310f2541777e8a14a0d98d10c51aeb", "ef1b84677a9f39273f2cfed12f764ab655824dcefc02896e93b082bbd37261eb", "ded1cb25e9a2e20360a1e80904a9d0e1a07726eadcc3cd5a97b5dce80e3c53cf"],
+      "test-execution-receipt-failed-launch-error": ["d2bd3056c8c63416fd2f267ccf501e761ab6c5c2d2f1e0b153fd339cab88ca56", "98fb5aed768d553eb1cf4aba84b389bab19adc6631c0ed699296b23449a53d5c", "7d91074f027be0361cdaa2fb7eb1850209b2837504225a30b968363ee36fe8b1"],
+      "test-execution-receipt-failed-timeout": ["892f06549abd30822f2874d1bb273afc5ea38e489558ec4478f4d02fadd00d68", "3458081e9dd7f4e65d1ed6e2f5002ab07906a675f2fdff2bfac16b0fcdc50dc2", "5d5a2975e970c83e77b746e50ee1899859e4ebdbb07139a1b8798d015012ca36"],
+      "test-execution-receipt-failed-output-limit": ["6eca685723654ba1d6c4e8b2a3ba2b1a4dc56f65fbd4731e848823f76a07e727", "833673e91272686dedee1555e3e9d2a66961789abeec53f6a0ed4e21edd8af0a", "9e7b99607828b8f8cbcf232b0187ded202f9fd921fbae90570269b8ed2dc0cb5"],
     };
     for (const [id, digests] of Object.entries(expectedDigests)) {
       const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
@@ -1688,12 +1688,15 @@ describe("finite durable-authority catalog", () => {
       if (!isClaim) {
         assert.deepEqual(review.metadata.readers, ["completeCheckedTestExecution protected completion transition", "executeCheckedTestExecution completed replay", "transitionRunStep schema-v2 generic acceptance"], id);
         assert.deepEqual([review.canonicalSource.source.status, review.canonicalSource.source.commands[0].outcome], [record.source.status, record.source.commands[0].outcome], id);
+        assert.equal(review.canonicalSource.source.timeout_ms, 600_000, `${id} timeout authority`);
+        assert.equal(review.descriptor.targets.some(({ path: targetPath }) => targetPath.join(".") === "timeout_ms"), true, `${id} timeout tamper target`);
       } else {
         assert.equal(review.canonicalSource.source.execution_claim.state, record.source.execution_claim.state, id);
         assert.equal(review.canonicalSource.source.execution_claim_hash, record.source.execution_claim_hash, id);
+        assert.equal(review.canonicalSource.source.execution_claim.timeout_ms, 600_000, `${id} timeout authority`);
         assert.equal(review.metadata.readers.includes("transitionRecoverOrphan public fail-closed recovery refusal"), !id.includes("completed"), `${id} public recovery consumer`);
         assert.equal(review.descriptor.targets.some(({ path: targetPath }) => targetPath.join(".") === "execution_claim_hash"), true, `${id} execution_claim_hash`);
-        for (const path of ["execution_claim.state", "execution_claim.attempt", "execution_claim.nonce", "execution_claim.claimed_at", "execution_claim.plan_ref", "execution_claim.plan_hash", "execution_claim.head_sha", "execution_claim.receipt_ref"]) {
+        for (const path of ["execution_claim.state", "execution_claim.attempt", "execution_claim.nonce", "execution_claim.claimed_at", "execution_claim.plan_ref", "execution_claim.plan_hash", "execution_claim.head_sha", "execution_claim.timeout_ms", "execution_claim.receipt_ref"]) {
           assert.equal(review.descriptor.targets.some(({ path: targetPath }) => targetPath.join(".") === path), true, `${id} ${path}`);
         }
         if (record.source.execution_claim.status) {
@@ -3185,6 +3188,7 @@ async function createCheckedClaimMutationFixture(root, record, index) {
   const receipt = {
     schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: runId, attempt: 1,
     claim_nonce: claimed.claim.nonce, plan_ref: claimed.claim.plan_ref, plan_hash: claimed.claim.plan_hash, head_sha: head,
+    timeout_ms: claimed.claim.timeout_ms,
     started_at: CLAIM_NOW, completed_at: CLAIM_NOW, duration_ms: 1, status: fail ? "fail" : "pass", review_ready: !fail,
     commands: [{ index: 0, program: "npm", args: ["run", "check"], outcome: "exited", status: fail ? "fail" : "pass", exit_code: fail ? 7 : 0, signal: null, error_code: null, duration_ms: 1, stdout: emptyStream, stderr: emptyStream }],
   };
@@ -3204,6 +3208,7 @@ function bindCatalogReceiptToFixture(source, fixture) {
     plan_ref: fixture.claimed.claim.plan_ref,
     plan_hash: fixture.claimed.claim.plan_hash,
     head_sha: fixture.claimed.claim.head_sha,
+    timeout_ms: fixture.claimed.claim.timeout_ms,
   };
 }
 

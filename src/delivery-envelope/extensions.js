@@ -28,7 +28,7 @@ export class DeliveryContractValidationError extends Error {
   }
 }
 
-export function validateDeliveryEnvelope(deliveryEnvelope, slices, { path = "plan.delivery_envelope", required = false, plan } = {}) {
+export function validateDeliveryEnvelope(deliveryEnvelope, slices, { path = "plan.delivery_envelope", required = false, plan, requireExecutionTimeouts = false } = {}) {
   if (deliveryEnvelope === undefined || deliveryEnvelope === null) {
     if (required) throwValidation([{ path, message: "is required" }]);
     return null;
@@ -51,7 +51,7 @@ export function validateDeliveryEnvelope(deliveryEnvelope, slices, { path = "pla
     const artifactIds = new Set();
     for (const [index, unit] of deliveryEnvelope.delivery_units.entries()) {
       const unitPath = `${path}.delivery_units[${index}]`;
-      validateDeliveryUnit(errors, unit, unitPath, plannedSlices[index], { unitIds, familyIds, obligationIds, artifactIds });
+      validateDeliveryUnit(errors, unit, unitPath, plannedSlices[index], { unitIds, familyIds, obligationIds, artifactIds }, { requireExecutionTimeouts });
     }
   }
   if (deliveryEnvelope.checkpoint_plan !== undefined && plan !== undefined) {
@@ -129,7 +129,7 @@ export function validateReviewExtensionResult(result) {
   });
 }
 
-function validateDeliveryUnit(errors, unit, path, plannedSlice, registries) {
+function validateDeliveryUnit(errors, unit, path, plannedSlice, registries, { requireExecutionTimeouts }) {
   if (!isRecord(unit)) {
     errors.push({ path, message: "must be an object" });
     return;
@@ -177,7 +177,9 @@ function validateDeliveryUnit(errors, unit, path, plannedSlice, registries) {
       }
     }
     requiredCanonicalText(errors, artifact.test_plan_entry, `${artifactPath}.test_plan_entry`);
-    if (artifact.timeout_ms !== undefined && !isCheckedExecutionTimeoutMs(artifact.timeout_ms)) {
+    if (requireExecutionTimeouts && artifact.timeout_ms === undefined) {
+      errors.push({ path: `${artifactPath}.timeout_ms`, message: "is required for newly produced and schema-v2 plans" });
+    } else if (artifact.timeout_ms !== undefined && !isCheckedExecutionTimeoutMs(artifact.timeout_ms)) {
       errors.push({ path: `${artifactPath}.timeout_ms`, message: "must be an integer from 1000 through 1800000" });
     }
   }

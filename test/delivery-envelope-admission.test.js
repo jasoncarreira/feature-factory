@@ -171,6 +171,7 @@ function deliveryUnit(spec, plannedSlice) {
       id: `${spec.id}-artifact-${index + 1}`,
       test_plan_index: index,
       test_plan_entry: entry,
+      timeout_ms: 600_000,
     })),
   };
 }
@@ -182,7 +183,7 @@ function replaceUnitShape(plan, index, families, obligations) {
 }
 
 function integrationGate() {
-  return { required_commands: [{ program: "npm", args: ["run", "check"] }] };
+  return { required_commands: [{ program: "npm", args: ["run", "check"] }], timeout_ms: 600_000 };
 }
 
 function inactiveAdmission() {

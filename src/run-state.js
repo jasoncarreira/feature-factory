@@ -2361,7 +2361,7 @@ export function assertPublishedCarryForwardRun(repoInput, expectedContinuation, 
   const planPath = resolve(runDir, planRef);
   assertNoSymlinkPath(runDir, planPath, "published carry-forward plan");
   if (!existsSync(planPath) || !lstatSync(planPath).isFile() || hashFile(planPath) !== expectedContinuation.carry_forward.plan_hash) throw new Error("published carry-forward plan bytes do not match continuation authority");
-  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true });
+  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
   assertPublishedCarryForwardSlices(runDir, run, plan, expectedContinuation.carry_forward);
   assertPublishedCarryForwardSpec(runDir, run, expectedContinuation);
   observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
@@ -3225,6 +3225,7 @@ export async function retrySliceAfterFailedVerification(runDir, sliceId, input =
 
   const latest = slice.attempt_reviews?.at(-1);
   if (slice.status === "running" && latest?.evidence_ref === evidenceRef && latest?.review_ref === reviewRef && slice.attempts === latest.attempt + 1) {
+    assertSliceAttemptHistoryCurrent(runDir, sliceId, slice);
     const observed = observeSliceReviewSidecars(runDir, sliceId, { ...slice, attempts: latest.attempt, evidence_ref: evidenceRef, review_ref: reviewRef });
     if (observed.evidence.status !== "fail" || observed.review.verdict !== "REJECT") throw new Error(`slice '${sliceId}' retry replay authority is not a failed REJECT`);
     return { updated: false, replayed: true, status: run.status, run, slice_index: run.slices.indexOf(slice), slice };
@@ -3753,6 +3754,7 @@ function validateObservedPlanSource(source, slices, options = {}) {
     label: PLAN_SLICES_REF,
     enforceDependencyDepth: options.enforceDependencyDepth !== false,
     requireIntegrationGate: options.requireIntegrationGate === true,
+    allowLegacyExecutionTimeouts: options.allowLegacyExecutionTimeouts === true,
   });
   const admissionExtension = validateAdmissionExtensionResult(evaluateDeliveryEnvelopeAdmission({ plan }));
   const admissionProbe = buildDeliveryPlanAdmissionProbe({ plan, planHash: source.plan_hash, admissionResult: admissionExtension });
@@ -3802,6 +3804,7 @@ export function observeAcceptedDecompositionAuthority(runDir, run, options = {})
     ...options,
     enforceDependencyDepth: false,
     requireIntegrationGate: options.requireIntegrationGate === true,
+    allowLegacyExecutionTimeouts: true,
   });
   if (source.plan.integration_gate === undefined && options.requireForIntegrationGatePlan === true) return null;
   const matches = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
@@ -4031,7 +4034,7 @@ export function assertV2LocalPublishedAuthority(runDir, run, options = {}, expec
   const planPath = resolve(runDir, run.continuation.carry_forward.plan_ref);
   assertNoSymlinkPath(runDir, planPath, "published carry-forward plan");
   if (!existsSync(planPath) || !lstatSync(planPath).isFile() || hashFile(planPath) !== run.continuation.carry_forward.plan_hash) throw new Error("published carry-forward plan bytes do not match continuation authority");
-  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true });
+  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
   assertPublishedCarryForwardSlices(runDir, run, plan, run.continuation.carry_forward);
   assertPublishedCarryForwardSpec(runDir, run, run.continuation);
   observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
@@ -8577,7 +8580,7 @@ function observeIntegrationAmendmentAdmission(runDir, run, request, options = {}
     probe: {
       schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: unit.id, consumer_slice_id: consumer.id,
       verification_artifact_id: artifact.id, test_plan_index: artifact.test_plan_index, test_plan_entry: artifact.test_plan_entry,
-      program: command.program, args: command.args, substrate: "feature-baseline",
+      program: command.program, args: command.args, ...(artifact.timeout_ms === undefined ? {} : { timeout_ms: artifact.timeout_ms }), substrate: "feature-baseline",
     },
     owner: ownerSnapshot,
     consumer: consumerSnapshot,
@@ -8621,6 +8624,7 @@ export function observeIntegrationAmendmentExecutionAuthority(runDir, run, phase
       head_sha: admission.baseline_commit,
       tree_sha: admission.baseline_tree,
       cwd: resolve(admission.worktree),
+      timeout_ms: effectiveCheckedExecutionTimeoutMs(admission.probe.timeout_ms),
       claim_ref: "evidence/integration-amendment.report.claim.json",
       receipt_ref: `evidence/integration-amendment-${amendmentId}.report.receipt.json`,
       request,
@@ -8647,6 +8651,7 @@ export function observeIntegrationAmendmentExecutionAuthority(runDir, run, phase
     head_sha: amendment.integration.commit,
     tree_sha: amendment.integration.tree,
     cwd: resolve(amendment.integration.worktree),
+    timeout_ms: effectiveCheckedExecutionTimeoutMs(amendment.admission.probe.timeout_ms),
     claim_ref: `evidence/integration-amendment-${amendment.amendment_id}.verify.claim.json`,
     receipt_ref: `evidence/integration-amendment-${amendment.amendment_id}.verify.receipt.json`,
   };

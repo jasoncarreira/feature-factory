@@ -9,11 +9,11 @@ import { validatePlanPath } from "./post-pr-ci.js";
 import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
 import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
-import { DeliveryContractValidationError, validateAdmissionExtensionResult, validateInvariantFamilyLedger, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
+import { DeliveryContractValidationError, validateAdmissionExtensionResult, validateDeliveryEnvelope, validateInvariantFamilyLedger, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
 import { CHECKPOINT_ROUTING_KIND, CHECKPOINT_ROUTING_TERMINAL_REASON, validateCheckpointRoutingManifest, validateReviewedCheckpointPlan } from "./delivery-envelope/checkpoint-routing.js";
 import { git } from "./git.js";
 import { checkWorktreeIdentity } from "./worktrees.js";
-import { MAX_CHECKED_EXECUTION_TIMEOUT_MS, MIN_CHECKED_EXECUTION_TIMEOUT_MS } from "./checked-execution-timeout.js";
+import { effectiveCheckedExecutionTimeoutMs, MAX_CHECKED_EXECUTION_TIMEOUT_MS, MIN_CHECKED_EXECUTION_TIMEOUT_MS } from "./checked-execution-timeout.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -176,7 +176,7 @@ const INTEGRATION_AMENDMENT_COMMON_KEYS = new Set(["schema_version", "kind", "am
 const INTEGRATION_AMENDMENT_ADMISSION_KEYS = new Set(["baseline_ref", "baseline_commit", "baseline_tree", "worktree", "probe", "owner", "consumer"]);
 const INTEGRATION_AMENDMENT_OWNER_KEYS = new Set(["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
 const INTEGRATION_AMENDMENT_CONSUMER_KEYS = new Set(["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts"]);
-const INTEGRATION_AMENDMENT_PROBE_KEYS = new Set(["schema_version", "kind", "delivery_unit_id", "consumer_slice_id", "verification_artifact_id", "test_plan_index", "test_plan_entry", "program", "args", "substrate"]);
+const INTEGRATION_AMENDMENT_PROBE_KEYS = new Set(["schema_version", "kind", "delivery_unit_id", "consumer_slice_id", "verification_artifact_id", "test_plan_index", "test_plan_entry", "program", "args", "timeout_ms", "substrate"]);
 const INTEGRATION_AMENDMENT_EXECUTION_BINDING_KEYS = new Set(["claim_ref", "claim_hash", "receipt_ref", "receipt_hash"]);
 const INTEGRATION_AMENDMENT_BUILDING_KEYS = new Set(["attempt", "state", "build_base_commit", "branch_ref", "worktree"]);
 const INTEGRATION_AMENDMENT_REVIEWED_KEYS = new Set([...INTEGRATION_AMENDMENT_BUILDING_KEYS, "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash", "candidate_commit", "candidate_tree", "changed_paths", "review_ref", "review_hash", "reviewed_commit", "reviewed_tree"]);
@@ -186,10 +186,10 @@ const INTEGRATION_AMENDMENT_BLOCKED_KEYS = new Set(["origin", "reason", "blocked
 const INTEGRATION_AMENDMENT_REVIEW_KEYS = new Set(["schema_version", "kind", "subject", "amendment_id", "attempt", "build_base_commit", "reviewed_commit", "reviewed_tree", "changed_paths", "dispositions", "verdict", "required_fixes", "reviewed_at"]);
 const INTEGRATION_AMENDMENT_DISPOSITIONS = Object.freeze(["accepted_contract", "public_contract", "persisted_contract", "product_scope", "security_boundary", "generated_ownership", "decomposition"]);
 const INTEGRATION_AMENDMENT_IDENTITY_KEYS = new Set(["schema_version", "kind", "run_id", "defect_path", "admission"]);
-const INTEGRATION_AMENDMENT_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "phase", "subject", "state", "nonce", "amendment_id", "identity", "run_id", "probe", "head_sha", "tree_sha", "cwd", "receipt_ref", "claimed_at"]);
+const INTEGRATION_AMENDMENT_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "phase", "subject", "state", "nonce", "amendment_id", "identity", "run_id", "probe", "head_sha", "tree_sha", "cwd", "timeout_ms", "receipt_ref", "claimed_at"]);
 const INTEGRATION_AMENDMENT_CLAIM_COMPLETED_KEYS = new Set([...INTEGRATION_AMENDMENT_CLAIM_COMMON_KEYS, "completed_at", "status", "receipt_hash"]);
 const INTEGRATION_AMENDMENT_CLAIM_UNKNOWN_KEYS = new Set([...INTEGRATION_AMENDMENT_CLAIM_COMMON_KEYS, "failed_at", "reason", "receipt_status", "receipt_hash"]);
-const INTEGRATION_AMENDMENT_RECEIPT_KEYS = new Set(["schema_version", "kind", "phase", "subject", "run_id", "amendment_id", "claim_nonce", "probe", "head_sha", "tree_sha", "cwd", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands"]);
+const INTEGRATION_AMENDMENT_RECEIPT_KEYS = new Set(["schema_version", "kind", "phase", "subject", "run_id", "amendment_id", "claim_nonce", "probe", "head_sha", "tree_sha", "cwd", "timeout_ms", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands"]);
 const INTEGRATION_AMENDMENT_UNKNOWN_REASONS = new Set(["process-outcome-indeterminate", "authority-changed", "receipt-publication-indeterminate"]);
 
 export class ValidationError extends Error {
@@ -768,13 +768,17 @@ export function validateCostAttributionEntries(entries, runId) {
   return entries;
 }
 
-export function validateSlicesPlan(plan, { enforceDependencyDepth = true, requireIntegrationGate = false } = {}) {
+export function validateSlicesPlan(plan, { enforceDependencyDepth = true, requireIntegrationGate = false, allowLegacyExecutionTimeouts = false } = {}) {
   const errors = [];
   if (!isRecord(plan)) return fail([{ path: "plan", message: "must be an object" }]);
   allowedKeys(errors, plan, PLAN_KEYS, "plan");
   if (!Array.isArray(plan.slices)) errors.push({ path: "plan.slices", message: "must be an array" });
   else validatePlannedSlices(errors, plan.slices, "plan.slices", { enforceDependencyDepth });
-  validateIntegrationGate(errors, plan.integration_gate, "plan.integration_gate", { required: requireIntegrationGate });
+  const requireExecutionTimeouts = requireIntegrationGate && !allowLegacyExecutionTimeouts;
+  validateIntegrationGate(errors, plan.integration_gate, "plan.integration_gate", { required: requireIntegrationGate, requireExecutionTimeouts });
+  if (plan.delivery_envelope !== undefined) {
+    appendDeliveryContractErrors(errors, () => validateDeliveryEnvelope(plan.delivery_envelope, plan.slices, { plan, requireExecutionTimeouts }));
+  }
   if (plan.delivery_envelope?.checkpoint_plan !== undefined) {
     try { validateReviewedCheckpointPlan(plan); }
     catch (error) { errors.push({ path: "plan.delivery_envelope.checkpoint_plan", message: error.message }); }
@@ -1003,7 +1007,7 @@ function requireNullableProperty(errors, value, key, path, predicate, message) {
   if (value[key] !== null && !predicate(value[key])) errors.push({ path, message });
 }
 
-function validateIntegrationGate(errors, gate, path = "plan.integration_gate", { required = true } = {}) {
+function validateIntegrationGate(errors, gate, path = "plan.integration_gate", { required = true, requireExecutionTimeouts = false } = {}) {
   if (gate === undefined) {
     if (required) errors.push({ path, message: "is required for newly produced and schema-v2 plans" });
     return;
@@ -1013,7 +1017,8 @@ function validateIntegrationGate(errors, gate, path = "plan.integration_gate", {
     return;
   }
   allowedKeys(errors, gate, INTEGRATION_GATE_KEYS, path);
-  optionalCheckedExecutionTimeout(errors, gate, `${path}.timeout_ms`);
+  if (requireExecutionTimeouts && gate.timeout_ms === undefined) errors.push({ path: `${path}.timeout_ms`, message: "is required for newly produced and schema-v2 plans" });
+  else optionalCheckedExecutionTimeout(errors, gate, `${path}.timeout_ms`);
   const commands = gate.required_commands;
   if (!Array.isArray(commands)) {
     errors.push({ path: `${path}.required_commands`, message: "must be an array" });
@@ -1727,7 +1732,7 @@ export function assertIntegrationAmendmentConsistency(runDir, run, options = {})
 
 function assertIntegrationAmendmentAcceptedAuthority(runDir, run, amendment) {
   const planPath = join(runDir, PLAN_SLICES_REF);
-  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: PLAN_SLICES_REF, enforceDependencyDepth: false, requireIntegrationGate: true });
+  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: PLAN_SLICES_REF, enforceDependencyDepth: false, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
   const steps = (run.steps || []).filter((entry) => entry?.agent === "work-decomposer");
   const step = steps[0];
   if (steps.length !== 1 || step.status !== "accepted" || step.artifact_ref !== PLAN_SLICES_REF || step.acceptance?.artifact_ref !== PLAN_SLICES_REF
@@ -1957,6 +1962,7 @@ function assertIntegrationAmendmentReceiptClaimPair(claim, receipt, receiptHash)
   for (const key of ["phase", "subject", "run_id", "amendment_id", "probe", "head_sha", "tree_sha", "cwd"]) {
     if (JSON.stringify(claim[key]) !== JSON.stringify(receipt[key])) throw new Error(`integration amendment receipt ${key} is cross-bound`);
   }
+  if (effectiveCheckedExecutionTimeoutMs(claim.timeout_ms) !== effectiveCheckedExecutionTimeoutMs(receipt.timeout_ms)) throw new Error("integration amendment receipt timeout_ms is cross-bound");
   if (receipt.claim_nonce !== claim.nonce) throw new Error("integration amendment receipt nonce is cross-bound");
   if (claim.state === "completed" && claim.receipt_hash !== receiptHash) throw new Error("integration amendment receipt hash is stale");
 }
@@ -2453,6 +2459,7 @@ function validateIntegrationAmendmentProbe(errors, probe, path) {
   boundedInteger(errors, probe, "test_plan_index", 0, Number.MAX_SAFE_INTEGER, `${path}.test_plan_index`);
   validateIntegrationProgram(errors, probe.program, `${path}.program`);
   validateIntegrationArgs(errors, probe.args, `${path}.args`);
+  optionalCheckedExecutionTimeout(errors, probe, `${path}.timeout_ms`);
   if (probe.substrate !== "feature-baseline") errors.push({ path: `${path}.substrate`, message: "must equal feature-baseline" });
 }
 
@@ -2604,6 +2611,7 @@ export function validateIntegrationAmendmentExecutionClaim(claim) {
   for (const key of ["head_sha", "tree_sha"]) requiredFullGitSha(errors, claim, key, `${path}.${key}`);
   optionalAbsolutePath(errors, claim, "cwd", `${path}.cwd`);
   if (!stringValue(claim.cwd)) errors.push({ path: `${path}.cwd`, message: "must be an absolute path" });
+  optionalCheckedExecutionTimeout(errors, claim, `${path}.timeout_ms`);
   requiredString(errors, claim, "receipt_ref", `${path}.receipt_ref`);
   requiredTimestamp(errors, claim, "claimed_at", `${path}.claimed_at`);
   const expectedSubject = `integration-amendment:${claim.amendment_id}:${claim.phase}`;
@@ -2650,6 +2658,7 @@ export function validateIntegrationAmendmentExecutionReceipt(receipt) {
   for (const key of ["head_sha", "tree_sha"]) requiredFullGitSha(errors, receipt, key, `${path}.${key}`);
   optionalAbsolutePath(errors, receipt, "cwd", `${path}.cwd`);
   if (!stringValue(receipt.cwd)) errors.push({ path: `${path}.cwd`, message: "must be an absolute path" });
+  optionalCheckedExecutionTimeout(errors, receipt, `${path}.timeout_ms`);
   requiredTimestamp(errors, receipt, "started_at", `${path}.started_at`);
   requiredTimestamp(errors, receipt, "completed_at", `${path}.completed_at`);
   boundedInteger(errors, receipt, "duration_ms", 0, Number.MAX_SAFE_INTEGER, `${path}.duration_ms`);

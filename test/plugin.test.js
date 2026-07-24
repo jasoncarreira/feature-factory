@@ -2198,7 +2198,7 @@ async function createRealAmendmentReviewerFixture(label) {
     probe: {
       schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: unit.id, consumer_slice_id: "consumer",
       verification_artifact_id: artifact.id, test_plan_index: artifact.test_plan_index, test_plan_entry: artifact.test_plan_entry,
-      program: "node", args: ["--test", "test/consumer.test.js"], substrate: "feature-baseline",
+      program: "node", args: ["--test", "test/consumer.test.js"], timeout_ms: artifact.timeout_ms, substrate: "feature-baseline",
     },
     owner: pickRealAmendment(owner, ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]),
     consumer: pickRealAmendment(consumer, ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts"]),
@@ -2315,14 +2315,14 @@ function writeRealAmendmentExecution(runDir, { identity, amendmentId, probe, hea
   const stream = { captured_bytes: 0, sha256: shaRealAmendment(""), truncated: false };
   const receipt = {
     schema_version: 1, kind: "integration-amendment-execution-receipt", phase: "report", subject: `integration-amendment:${amendmentId}:report`,
-    run_id: REAL_AMENDMENT_RUN_ID, amendment_id: amendmentId, claim_nonce: nonce, probe, head_sha: head, tree_sha: tree, cwd,
+    run_id: REAL_AMENDMENT_RUN_ID, amendment_id: amendmentId, claim_nonce: nonce, probe, head_sha: head, tree_sha: tree, cwd, timeout_ms: probe.timeout_ms,
     started_at: REAL_AMENDMENT_NOW, completed_at: REAL_AMENDMENT_NOW, duration_ms: 1, status: "fail", review_ready: true,
     commands: [{ index: 0, program: probe.program, args: probe.args, outcome: "exited", status: "fail", exit_code: 1, signal: null, error_code: null, duration_ms: 1, stdout: stream, stderr: stream }],
   };
   writeJson(join(runDir, receiptRef), receipt);
   writeJson(join(runDir, "evidence", "integration-amendment.report.claim.json"), {
     schema_version: 1, kind: "integration-amendment-execution-claim", phase: "report", subject: receipt.subject, state: "completed", nonce,
-    amendment_id: amendmentId, identity, run_id: REAL_AMENDMENT_RUN_ID, probe, head_sha: head, tree_sha: tree, cwd,
+    amendment_id: amendmentId, identity, run_id: REAL_AMENDMENT_RUN_ID, probe, head_sha: head, tree_sha: tree, cwd, timeout_ms: probe.timeout_ms,
     receipt_ref: receiptRef, claimed_at: REAL_AMENDMENT_NOW, completed_at: REAL_AMENDMENT_NOW, status: "fail", receipt_hash: fileHash(join(runDir, receiptRef)),
   });
 }

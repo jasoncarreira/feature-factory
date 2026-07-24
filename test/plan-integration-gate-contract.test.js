@@ -81,6 +81,24 @@ describe("plan integration_gate command contract", () => {
     assert.equal(MAX_CHECKED_EXECUTION_TIMEOUT_MS, 1_800_000);
   });
 
+  it("requires explicit timeouts at new-plan admission while preserving accepted legacy reads", () => {
+    const missingGateTimeout = planWithCommands([FINAL_COMMAND]);
+    delete missingGateTimeout.integration_gate.timeout_ms;
+    assert.throws(
+      () => validateSlicesPlan(missingGateTimeout, { requireIntegrationGate: true }),
+      (error) => validationIncludes(error, "plan.integration_gate.timeout_ms", "is required for newly produced and schema-v2 plans"),
+    );
+    assert.equal(validateSlicesPlan(missingGateTimeout, { requireIntegrationGate: true, allowLegacyExecutionTimeouts: true }), missingGateTimeout);
+
+    const missingArtifactTimeout = planWithCommands([FINAL_COMMAND]);
+    delete missingArtifactTimeout.delivery_envelope.delivery_units[0].verification_artifacts[0].timeout_ms;
+    assert.throws(
+      () => validateSlicesPlan(missingArtifactTimeout, { requireIntegrationGate: true }),
+      (error) => validationIncludes(error, "plan.delivery_envelope.delivery_units[0].verification_artifacts[0].timeout_ms", "is required for newly produced and schema-v2 plans"),
+    );
+    assert.equal(validateSlicesPlan(missingArtifactTimeout, { requireIntegrationGate: true, allowLegacyExecutionTimeouts: true }), missingArtifactTimeout);
+  });
+
   it("enforces command count, program UTF-8 byte, trim, and control-character bounds", () => {
     assert.equal(MAX_INTEGRATION_GATE_COMMANDS, 32);
     assert.equal(MAX_INTEGRATION_GATE_PROGRAM_BYTES, 255);
@@ -156,7 +174,7 @@ describe("plan integration_gate command contract", () => {
 });
 
 function planWithCommands(requiredCommands) {
-  return withDeliveryEnvelope({ slices: [plannedSlice()], integration_gate: { required_commands: structuredClone(requiredCommands) } });
+  return withDeliveryEnvelope({ slices: [plannedSlice()], integration_gate: { required_commands: structuredClone(requiredCommands) } }, { explicitExecutionTimeouts: true });
 }
 
 function plannedSlice() {

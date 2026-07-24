@@ -1,10 +1,13 @@
-export function withDeliveryEnvelope(plan) {
+export function withDeliveryEnvelope(plan, { explicitExecutionTimeouts = true } = {}) {
   const current = structuredClone(plan);
-  current.delivery_envelope = deliveryEnvelopeForSlices(current.slices);
+  if (explicitExecutionTimeouts && current.integration_gate && current.integration_gate.timeout_ms === undefined) {
+    current.integration_gate.timeout_ms = DEFAULT_CHECKED_EXECUTION_TIMEOUT_MS;
+  }
+  current.delivery_envelope = deliveryEnvelopeForSlices(current.slices, { explicitExecutionTimeouts });
   return current;
 }
 
-export function deliveryEnvelopeForSlices(slices) {
+export function deliveryEnvelopeForSlices(slices, { explicitExecutionTimeouts = true } = {}) {
   return {
     schema_version: 1,
     delivery_units: slices.map((slice, index) => {
@@ -25,6 +28,7 @@ export function deliveryEnvelopeForSlices(slices) {
           id: artifactId,
           test_plan_index: 0,
           test_plan_entry: slice.test_plan[0],
+          ...(explicitExecutionTimeouts ? { timeout_ms: DEFAULT_CHECKED_EXECUTION_TIMEOUT_MS } : {}),
         }],
       };
     }),
@@ -131,3 +135,4 @@ function hashBytes(value) {
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { DEFAULT_CHECKED_EXECUTION_TIMEOUT_MS } from "../../src/checked-execution-timeout.js";
