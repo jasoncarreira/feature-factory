@@ -135,7 +135,7 @@ export function installApprovedLifecycleSlice(fixture, { path = "src/lifecycle.j
     ...dispatch,
   };
 
-  git(fixture.worktree, ["merge", "--no-ff", branch, "-m", "integrate advanced lifecycle candidate"]);
+  git(fixture.worktree, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "--no-ff", branch, "-m", "integrate advanced lifecycle candidate"]);
   const integrationHead = output(fixture.worktree, ["rev-parse", "HEAD"]);
   const run = fixture.readRun();
   run.gates.pre_pr = { status: "approved" };

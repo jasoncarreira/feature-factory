@@ -3,7 +3,7 @@
   "version": "0.2.1",
   "description": "Hybrid opencode plugin and scriptable feature factory workflow.",
   "type": "module",
-  "main": "src/plugin.js",
+  "main": "src/opencode-plugin.js",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jasoncarreira/opencode-feature-factory.git"
@@ -13,8 +13,8 @@
   },
   "homepage": "https://github.com/jasoncarreira/opencode-feature-factory#readme",
   "exports": {
-    ".": "./src/plugin.js",
-    "./server": "./src/plugin.js",
+    ".": "./src/opencode-plugin.js",
+    "./server": "./src/opencode-plugin.js",
     "./tui": "./dist/tui.js",
     "./cli": "./src/cli.js"
   },

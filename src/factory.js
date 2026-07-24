@@ -13,7 +13,7 @@ import { checkWorktreeIdentity, createOrRecoverWorktree, deriveExpectedWorktreeP
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv, startB6Span } from "./telemetry.js";
-import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLaunchFence, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, inspectProcessIdentity, readProcessEvidence, releaseLaunchClaim, releaseLaunchFence, transitionLaunchClaimPhase } from "./process-evidence.js";
+import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLaunchFence, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, inspectProcessIdentity, matchesProcessLaunchToken, readProcessEvidence, releaseLaunchClaim, releaseLaunchFence, transitionLaunchClaimPhase } from "./process-evidence.js";
 import { encodeFeatureCommandPayload } from "./feature-command-payload.js";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
@@ -1476,6 +1476,11 @@ function inspectRecoveryOwnership(runDir, run, opts = {}) {
   if (!claim.missing && claim.owner_status !== "live") return { condition: "unsafe-ownership", reason_code: claim.owner_status === "indeterminate" ? "launch-owner-indeterminate" : "launch-claim-conflict", reason: "Resume check cannot safely prove the preserved launch claim owner.", launch_claim_ref: LAUNCH_CLAIM_REF, process_ref: processState.missing ? null : PROCESS_EVIDENCE_FILE };
   if (!processState.missing && processState.evidence.state === "running" && processState.verification?.status !== "live-and-matching") return { condition: "unsafe-ownership", reason_code: "process-identity-mismatch", reason: "Resume check cannot safely prove the recorded detached process identity.", launch_claim_ref: claim.missing ? null : LAUNCH_CLAIM_REF, process_ref: PROCESS_EVIDENCE_FILE };
   if (!claim.missing && !processState.missing && processState.evidence.execution_id !== claim.claim.execution_id) return { condition: "unsafe-ownership", reason_code: "launch-claim-conflict", reason: "Resume check found contradictory launch and process execution identities.", launch_claim_ref: LAUNCH_CLAIM_REF, process_ref: PROCESS_EVIDENCE_FILE };
+  const inheritedLaunchToken = opts.env?.[FACTORY_LAUNCH_CLAIM_ENV] ?? process.env[FACTORY_LAUNCH_CLAIM_ENV];
+  const matchingLaunchClaim = claim.missing || (claim.ok && claim.claim.phase === "spawning" && claim.claim.nonce === inheritedLaunchToken);
+  if (matchingLaunchClaim && !processState.missing && processState.evidence.state === "running"
+    && processState.verification?.status === "live-and-matching"
+    && matchesProcessLaunchToken(processState.evidence, inheritedLaunchToken)) return null;
   return { condition: "unsafe-ownership", reason_code: !processState.missing && processState.evidence.state === "running" ? "matching-detached-shepherd-live" : "launch-claim-conflict", reason: "Resume check preserved active or ambiguous run ownership; no recovery mutation was attempted.", launch_claim_ref: claim.missing ? null : LAUNCH_CLAIM_REF, process_ref: processState.missing ? null : PROCESS_EVIDENCE_FILE };
 }
 
@@ -2108,7 +2113,7 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
     launchAttempted = true;
     started = await launch(opts.repo, commandArgs, {
       ...detachedProcessOptions(opts.repo, { ...opts, runId, runDir, executionId: claim.claim.execution_id }),
-      env: factoryLaunchEnv(opts, runId),
+      env: { ...factoryLaunchEnv(opts, runId), [FACTORY_LAUNCH_CLAIM_ENV]: token },
     });
   } catch (error) {
     let preservedClaim = launchAttempted;
@@ -5965,7 +5970,7 @@ function awaitDetachedReadiness(supervisor, init) {
   });
 }
 
-function factoryLaunchEnv(opts = {}, runId = null) {
+export function factoryLaunchEnv(opts = {}, runId = null) {
   try {
     const env = prepareTelemetryEnv(process.env, {
       parentSpanId: opts.parentSpanId,
@@ -5973,6 +5978,7 @@ function factoryLaunchEnv(opts = {}, runId = null) {
       tracestate: opts.tracestate,
     });
     delete env.FEATURE_FACTORY_RUN_ID;
+    delete env[FACTORY_LAUNCH_CLAIM_ENV];
     if (stringValue(runId)) env.FEATURE_FACTORY_RUN_ID = String(runId).trim();
     return env;
   } catch (error) {
