@@ -43,6 +43,7 @@ test("packed package installs and exposes release surfaces", () => {
     assertIncludes(files, "README.md");
     assertIncludes(files, "dist/tui.js");
     assertIncludes(files, "src/plugin.js");
+    assertIncludes(files, "src/opencode-plugin.js");
     assertIncludes(files, "src/cli.js");
     assertIncludes(files, "src/tui-data.js");
     assertIncludes(files, "assets/command/feature.md");
@@ -96,6 +97,8 @@ function verifyImportSurfaces(consumer, home) {
       await import("opencode-feature-factory/cli");
       const telemetry = await import(${JSON.stringify(pathToFileURL(join(consumer, "node_modules", "opencode-feature-factory", "src", "telemetry.js")).href)});
       if (typeof root.default !== "function") throw new Error("root export should be plugin function");
+      if (JSON.stringify(Object.keys(root)) !== JSON.stringify(["default"])) throw new Error("root plugin entry must export only default");
+      if (JSON.stringify(Object.keys(server)) !== JSON.stringify(["default"])) throw new Error("server plugin entry must export only default");
       if (root.default !== server.default) throw new Error("server export should match root plugin");
       if (tui.default?.id !== "opencode-feature-factory") throw new Error("tui export should expose plugin id");
       if (typeof tui.default?.tui !== "function") throw new Error("the ./tui export must default-export an object with tui(); hosts detect the sidebar entry from exports['./tui']");

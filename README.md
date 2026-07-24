@@ -91,7 +91,7 @@ Local installs configure the package root, not `src/plugin.js`, so the package e
 
 The published package exposes only the release-supported entry points declared in `package.json`:
 
-- Package root `.` and `./server` resolve to `./src/plugin.js`, the server plugin registration (`import "opencode-feature-factory"` or `import "opencode-feature-factory/server"`).
+- Package root `.` and `./server` resolve to the default-only `./src/opencode-plugin.js` server entry (`import "opencode-feature-factory"` or `import "opencode-feature-factory/server"`). Internal helpers remain available only from source modules so OpenCode cannot mistake them for plugin registrations.
 - `./tui` resolves to the generated `./dist/tui.js` module (`import "opencode-feature-factory/tui"`).
 - `./cli` resolves to `./src/cli.js` (`import "opencode-feature-factory/cli"`).
 - The `feature-factory` bin resolves to `src/cli.js`.

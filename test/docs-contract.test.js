@@ -2724,8 +2724,8 @@ describe("public documentation contract", () => {
 
   it("documents the exact metadata-derived exports and bin", () => {
     assert.deepEqual(PACKAGE.exports, {
-      ".": "./src/plugin.js",
-      "./server": "./src/plugin.js",
+      ".": "./src/opencode-plugin.js",
+      "./server": "./src/opencode-plugin.js",
       "./tui": "./dist/tui.js",
       "./cli": "./src/cli.js",
     });
