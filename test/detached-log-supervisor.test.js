@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,10 +54,12 @@ describe("detached log supervisor", () => {
     const fixture = createFixture("heartbeat-cleanup");
     const runDir = join(fixture.root, ".opencode", "factory", "scoped-run");
     const calls = [];
+    const launchToken = "opaque-supervisor-launch-token";
     mkdirSync(join(runDir, "processes"), { recursive: true });
     try {
       await superviseDetachedLaunch({
         ...init(fixture),
+        env: { ...init(fixture).env, OPENCODE_FACTORY_LAUNCH_CLAIM: launchToken },
         runDir,
         runId: "scoped-run",
         executionId: "execution-1",
@@ -69,7 +72,9 @@ describe("detached log supervisor", () => {
       });
 
       assert.deepEqual(calls, [runDir]);
-      assert.equal(JSON.parse(readFileSync(join(runDir, "process.json"), "utf8")).state, "exited");
+      const evidence = JSON.parse(readFileSync(join(runDir, "process.json"), "utf8"));
+      assert.equal(evidence.state, "exited");
+      assert.equal(evidence.launch_token_hash, `sha256:${createHash("sha256").update(launchToken, "utf8").digest("hex")}`);
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }

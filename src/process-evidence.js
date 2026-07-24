@@ -22,6 +22,7 @@ export const LAUNCH_CLAIM_REF = `${LAUNCH_CLAIM_DIR}/${LAUNCH_CLAIM_FILE}`;
 export const LAUNCH_CLAIM_KIND = "opencode-launch-claim";
 export const LAUNCH_CLAIM_SCHEMA_VERSION = 1;
 export const LAUNCH_FENCE_KIND = "opencode-launch-fence";
+export const BASE_ADVANCE_LAUNCH_FENCE_OWNER_KIND = "base-advance";
 export const LAUNCH_CLAIM_PHASES = Object.freeze(["foreground-live", "predecessor-active", "predecessor-released", "spawning"]);
 export const LAUNCH_KINDS = Object.freeze(["approval-handoff", "resume-foreground", "resume-detached", "start-resume-foreground", "start-resume-detached"]);
 
@@ -186,7 +187,7 @@ function acquireLaunchClaimFenced(root, input = {}, opts = {}) {
 }
 
 export function acquireLaunchFence(runDir, ownerKind, opts = {}) {
-  if (!["launch", "cleanup"].includes(ownerKind)) throw new Error("launch fence owner kind is invalid");
+  if (!["launch", "cleanup", BASE_ADVANCE_LAUNCH_FENCE_OWNER_KIND].includes(ownerKind)) throw new Error("launch fence owner kind is invalid");
   const requestedRoot = resolve(runDir);
   const runStat = lstatSync(requestedRoot);
   if (!runStat.isDirectory() || runStat.isSymbolicLink()) throw new Error("run directory must be a non-symlink directory");
@@ -202,26 +203,30 @@ export function acquireLaunchFence(runDir, ownerKind, opts = {}) {
   const ownerPath = join(path, "owner.json");
   const nonce = opts.launchFenceNonce || randomUUID();
   opts.onLaunchFenceReadyToAcquire?.({ requestedRoot, root, fenceRoot: fenceRoot.path, path, identity: claimIdentity(runStat) });
-  try {
-    mkdirSync(path, { mode: 0o700 });
-  } catch (error) {
-    if (error?.code === "EEXIST") return { acquired: false, path, owner_kind: ownerKind };
-    throw error;
+  if (!createLaunchFenceDirectory(path)) {
+    if (!reclaimDeadBaseAdvanceLaunchFence(path, key, opts) || !createLaunchFenceDirectory(path)) {
+      return { acquired: false, path, owner_kind: ownerKind };
+    }
   }
   const dirStat = lstatSync(path);
   if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) throw new Error("launch fence directory identity is invalid");
-  const owner = {
-    schema_version: 1,
-    kind: LAUNCH_FENCE_KIND,
-    run_path_hash: `sha256:${key}`,
-    owner_kind: ownerKind,
-    nonce,
-    pid: process.pid,
-    hostname: opts.hostname || hostname(),
-    acquired_at: timestamp(opts.now),
-  };
+  let owner;
   let ownerStat;
   try {
+    const baseAdvanceIdentity = ownerKind === BASE_ADVANCE_LAUNCH_FENCE_OWNER_KIND
+      ? currentLaunchFenceProcessIdentity(opts)
+      : null;
+    owner = {
+      schema_version: 1,
+      kind: LAUNCH_FENCE_KIND,
+      run_path_hash: `sha256:${key}`,
+      owner_kind: ownerKind,
+      nonce,
+      pid: process.pid,
+      hostname: opts.hostname || hostname(),
+      acquired_at: timestamp(opts.now),
+    };
+    if (baseAdvanceIdentity) owner.identity = baseAdvanceIdentity;
     assertLaunchFenceRunIdentity(requestedRoot, root, runStat);
     assertLaunchFenceNamespace(fenceRoot);
     const writeOwner = opts.writeLaunchFenceOwner || writeFileSync;
@@ -235,6 +240,171 @@ export function acquireLaunchFence(runDir, ownerKind, opts = {}) {
     throw error;
   }
   return { acquired: true, path, owner_path: ownerPath, owner_kind: ownerKind, nonce, identity: claimIdentity(dirStat, ownerStat) };
+}
+
+function createLaunchFenceDirectory(path) {
+  try {
+    mkdirSync(path, { mode: 0o700 });
+    return true;
+  } catch (error) {
+    if (error?.code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+function currentLaunchFenceProcessIdentity(opts) {
+  const inspected = inspectVerifiedProcessIdentity(process.pid, processVerificationOptions(opts));
+  if (inspected.status !== "live" || !plainObject(inspected.identity)) {
+    throw new Error("base-advance launch fence requires verifiable live process identity");
+  }
+  const identity = inspected.identity;
+  if (identity.pid !== process.pid
+    || identity.inspector !== PROCESS_INSPECTOR
+    || !nonEmptyString(identity.start_marker)
+    || !nonEmptyString(identity.command_name)
+    || !nonEmptyString(identity.cwd)
+    || !isAbsolute(identity.cwd)) {
+    throw new Error("base-advance launch fence process identity is invalid");
+  }
+  return {
+    inspector: identity.inspector,
+    start_marker: identity.start_marker,
+    command_name: identity.command_name,
+    cwd: resolve(identity.cwd),
+  };
+}
+
+function reclaimDeadBaseAdvanceLaunchFence(path, runPathKey, opts) {
+  const observed = inspectBaseAdvanceLaunchFence(path, runPathKey);
+  if (!observed || inspectBaseAdvanceFenceOwner(observed.owner, opts) !== "dead") return false;
+
+  const confirmed = inspectBaseAdvanceLaunchFence(path, runPathKey);
+  if (!sameBaseAdvanceFenceEvidence(observed, confirmed)
+    || inspectBaseAdvanceFenceOwner(confirmed.owner, opts) !== "dead") return false;
+
+  const quarantine = join(dirnameForClaimDir(path), `.${basename(path)}.quarantine-${randomUUID()}`);
+  try {
+    renameSync(path, quarantine);
+  } catch {
+    return false;
+  }
+
+  const moved = inspectBaseAdvanceLaunchFence(quarantine, runPathKey);
+  if (!sameBaseAdvanceFenceEvidence(observed, moved)
+    || inspectBaseAdvanceFenceOwner(moved.owner, opts) !== "dead") {
+    restoreContendedLaunchFence(path, quarantine, observed);
+    return false;
+  }
+
+  const finalEvidence = inspectBaseAdvanceLaunchFence(quarantine, runPathKey);
+  if (!sameBaseAdvanceFenceEvidence(observed, finalEvidence)
+    || inspectBaseAdvanceFenceOwner(finalEvidence.owner, opts) !== "dead") {
+    restoreContendedLaunchFence(path, quarantine, observed);
+    return false;
+  }
+  rmSync(quarantine, { recursive: true, force: true });
+  return true;
+}
+
+function inspectBaseAdvanceLaunchFence(path, runPathKey) {
+  const ownerPath = join(path, "owner.json");
+  let descriptor;
+  try {
+    const dirStat = lstatSync(path);
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) return null;
+    descriptor = openSync(ownerPath, FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW || 0));
+    const fileStat = fstatSync(descriptor);
+    if (!fileStat.isFile()) return null;
+    const bytes = readFileSync(descriptor);
+    const owner = JSON.parse(bytes.toString("utf8"));
+    if (!validBaseAdvanceLaunchFenceOwner(owner, runPathKey)) return null;
+    const currentDir = lstatSync(path);
+    const currentFile = lstatSync(ownerPath);
+    if (!sameIdentity(currentDir, dirStat) || currentDir.isSymbolicLink() || !currentDir.isDirectory()
+      || !sameIdentity(currentFile, fileStat) || currentFile.isSymbolicLink() || !currentFile.isFile()) return null;
+    return {
+      owner,
+      identity: claimIdentity(dirStat, fileStat),
+      hash: createHash("sha256").update(bytes).digest("hex"),
+    };
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function validBaseAdvanceLaunchFenceOwner(owner, runPathKey) {
+  if (!plainObject(owner) || !plainObject(owner.identity)) return false;
+  const ownerKeys = ["schema_version", "kind", "run_path_hash", "owner_kind", "nonce", "pid", "hostname", "acquired_at", "identity"];
+  const identityKeys = ["inspector", "start_marker", "command_name", "cwd"];
+  if (!exactObjectKeys(owner, ownerKeys) || !exactObjectKeys(owner.identity, identityKeys)) return false;
+  return owner.schema_version === 1
+    && owner.kind === LAUNCH_FENCE_KIND
+    && owner.run_path_hash === `sha256:${runPathKey}`
+    && owner.owner_kind === BASE_ADVANCE_LAUNCH_FENCE_OWNER_KIND
+    && nonEmptyString(owner.nonce)
+    && /^[A-Za-z0-9_-]{16,128}$/u.test(owner.nonce)
+    && positivePid(owner.pid)
+    && nonEmptyString(owner.hostname)
+    && validTimestamp(owner.acquired_at)
+    && owner.identity.inspector === PROCESS_INSPECTOR
+    && nonEmptyString(owner.identity.start_marker)
+    && nonEmptyString(owner.identity.command_name)
+    && nonEmptyString(owner.identity.cwd)
+    && isAbsolute(owner.identity.cwd);
+}
+
+function exactObjectKeys(value, expected) {
+  const actual = Object.keys(value);
+  return actual.length === expected.length && expected.every((key) => actual.includes(key));
+}
+
+function inspectBaseAdvanceFenceOwner(owner, opts) {
+  if (owner.hostname !== (opts.hostname || hostname())) return "indeterminate";
+  const verification = verifyProcessIdentity({
+    pid: owner.pid,
+    cwd: owner.identity.cwd,
+    identity: {
+      inspector: owner.identity.inspector,
+      start_marker: owner.identity.start_marker,
+      command_name: owner.identity.command_name,
+    },
+  }, processVerificationOptions(opts));
+  if (verification.status === "absent") return "dead";
+  if (verification.status === "live-and-matching") return "live";
+  if (verification.status === "mismatched") return "mismatched";
+  return "indeterminate";
+}
+
+function sameBaseAdvanceFenceEvidence(left, right) {
+  return Boolean(left && right
+    && sameIdentity(left.identity.dir, right.identity.dir)
+    && sameIdentity(left.identity.file, right.identity.file)
+    && left.hash === right.hash);
+}
+
+function restoreContendedLaunchFence(path, quarantine, observed) {
+  try {
+    const current = lstatSync(quarantine);
+    if (sameIdentity(current, observed.identity.dir) && current.isDirectory() && !current.isSymbolicLink()) {
+      try {
+        renameSync(quarantine, path);
+        return;
+      } catch (error) {
+        if (error?.code !== "EEXIST" && error?.code !== "ENOTEMPTY") throw error;
+        return;
+      }
+    }
+  } catch {
+    // Fall through to an ownerless fail-closed fence when the quarantined
+    // identity cannot safely be restored.
+  }
+  try {
+    mkdirSync(path, { mode: 0o700 });
+  } catch {
+    // An existing or concurrently-created path already preserves contention.
+  }
 }
 
 export function releaseLaunchFence(fence) {
@@ -393,6 +563,7 @@ export function validateProcessEvidence(evidence, opts = {}) {
   if (!nonEmptyString(evidence.run_id)) errors.push("run_id must be a non-empty string");
   if (nonEmptyString(opts.runId) && evidence.run_id !== opts.runId) errors.push("run_id must match requested run");
   if (!nonEmptyString(evidence.execution_id)) errors.push("execution_id must be a non-empty string");
+  if (evidence.launch_token_hash !== undefined && !/^sha256:[a-f0-9]{64}$/u.test(evidence.launch_token_hash)) errors.push("launch_token_hash must be a SHA-256 digest");
   if (!positivePid(evidence.pid)) errors.push("pid must be a positive integer");
   if (!validTimestamp(evidence.started_at)) errors.push("started_at must be an ISO timestamp");
   if (!validTimestamp(evidence.updated_at)) errors.push("updated_at must be an ISO timestamp");
@@ -442,6 +613,7 @@ export function recordDetachedProcessEvidence(runDir, input = {}) {
     kind: PROCESS_EVIDENCE_KIND,
     run_id: input.runId,
     execution_id: input.executionId || randomUUID(),
+    ...(nonEmptyString(input.launchToken) ? { launch_token_hash: launchTokenHash(input.launchToken) } : {}),
     pid: input.pid,
     started_at: startedAt,
     updated_at: startedAt,
@@ -453,6 +625,16 @@ export function recordDetachedProcessEvidence(runDir, input = {}) {
   };
   writeProcessEvidence(runDir, evidence);
   return evidence;
+}
+
+export function matchesProcessLaunchToken(evidence, token) {
+  return nonEmptyString(token)
+    && /^sha256:[a-f0-9]{64}$/u.test(evidence?.launch_token_hash)
+    && evidence.launch_token_hash === launchTokenHash(token);
+}
+
+function launchTokenHash(token) {
+  return `sha256:${createHash("sha256").update(String(token), "utf8").digest("hex")}`;
 }
 
 export async function cancelProcessFromEvidence(runDir, opts = {}) {

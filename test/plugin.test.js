@@ -549,6 +549,10 @@ describe("feature command payload parsing", () => {
     assert.match(encoded, /\\u2029/u);
   });
 
+  it("renders omitted normalized payload fields as null", () => {
+    assert.equal(safePayloadValue(undefined), "null");
+  });
+
   it("rejects invalid transport and every ambiguous routing combination", () => {
     const runId = "route-run";
     const resume = { schema_version: 1, kind: "existing-run-resume", run_id: runId };

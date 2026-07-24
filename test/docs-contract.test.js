@@ -40,6 +40,64 @@ const FRONTEND_BUILDER_PROMPT = readDoc("../assets/agent/frontend-builder.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
 const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>";
+const BASE_ADVANCE_COMMAND = "feature-factory factory base-advance <run-id> --json";
+const BASE_ADVANCE_DOCS = Object.freeze({
+  README: markdownSection(README, "Checked Active-Run Base Advancement"),
+  SKILL: markdownSection(SKILL, "Checked Active-Run Base Advancement"),
+  SCHEMA: markdownSection(SCHEMA, "Checked Active-Run Base Advancement"),
+});
+
+describe("checked active-run base advancement operator contract", () => {
+  it("documents the exact JSON command, CLI API export, closed exits, and caller-authority rejection", () => {
+    for (const [name, text] of documentEntries(BASE_ADVANCE_DOCS)) {
+      assert.equal(text.includes(BASE_ADVANCE_COMMAND), true, `${name} must contain the exact base-advance command`);
+      assert.match(text, /JSON-only/i, name);
+      assert.match(text, /advanceFactoryRunBase\(runId, \{ cwd \}\)/u, name);
+      assert.match(text, /opencode-feature-factory\/cli/u, name);
+      assert.match(text, /trim(?: that primitive string)? exactly once|trim once|one ECMAScript trim/i, name);
+      assert.match(text, /the concatenation of `\^\[A-Za-z0-9\]` and `\(\?:\[A-Za-z0-9\._-\]\*\[A-Za-z0-9\]\)\?\$`/u, name);
+      assert.match(text, /Success (?:returns|is|exits).*exit 0|success exits 0/i, name);
+      assert.match(text, /failures? exit 1|rejection is one terminal-safe JSON document and exit 1/i, name);
+      assert.match(text, /caller-supplied repo|caller authority for a repo|caller Git authority/i, name);
+      assert.match(text, /ref(?:\/SHA)?|target ref\/SHA/i, name);
+      assert.match(text, /force/i, name);
+      assert.match(text, /worktree/i, name);
+    }
+  });
+
+  it("documents eligibility, fixed lock order, FF-only identity, preservation, replay, and crash states", () => {
+    for (const [name, text] of documentEntries(BASE_ADVANCE_DOCS)) {
+      assert.match(text, /ordinary/i, name);
+      assert.match(text, /`running`|status: "running"/i, name);
+      assert.match(text, /pre-PR/i, name);
+      assert.match(text, /no continuation\/checkpoint authority/i, name);
+      assert.match(text, /no .*merged or blocked slice|merged or blocked slice/i, name);
+      assert.match(text, /`run-json\.lock`[\s\S]{0,80}(?:then|and then) the existing external launch fence/i, name);
+      assert.match(text, /concurrent normal resume|normal resume cannot launch concurrently/i, name);
+      assert.match(text, /one canonical GitHub `origin`/i, name);
+      assert.match(text, /`refs\/heads\/main`/u, name);
+      assert.match(text, /`git merge --ff-only`/u, name);
+      assert.match(text, /only `run\.json\.base_commit` and `run\.json\.updated_at` may change|only top-level `base_commit` and `updated_at`/i, name);
+      assert.match(text, /candidate ref(?:s)?\/commit(?:s)?\/worktree/i, name);
+      assert.match(text, /`already-current`/u, name);
+      assert.match(text, /before Git movement/i, name);
+      assert.match(text, /after Git movement but before binding|Git advanced but manifest unbound|Git-advanced\/unbound/i, name);
+      assert.match(text, /after binding|already bound current|bound\/current/i, name);
+      assert.match(text, /fails? closed without reset or repair/i, name);
+    }
+  });
+
+  it("distinguishes active advancement from fresh initialization, rebaseline, and blocked continuation", () => {
+    for (const [name, text] of documentEntries(BASE_ADVANCE_DOCS)) {
+      assert.match(text, /not fresh-run initialization or rebaseline|not fresh initialization\/rebaseline|neither fresh initialization\/rebaseline/i, name);
+      assert.match(text, /`factory start`[\s\S]{0,100}(?:new|fresh).*run/i, name);
+      assert.match(text, /not blocked-run continuation|not blocked continuation|nor blocked continuation|terminal blocked parent/i, name);
+      assert.match(text, /`factory continue`[\s\S]{0,100}(?:new child|creates a new child)/i, name);
+      assert.match(text, /does not resume|does not resume or dispatch/i, name);
+      assert.match(text, /does not (?:advance\/rebase|rewrite) candidate|candidate history/i, name);
+    }
+  });
+});
 
 describe("cleanup sweep operator contract", () => {
   it("documents preview, digest-bound execution, and the closed no-force grammar", () => {
@@ -75,6 +133,7 @@ describe("cleanup sweep operator contract", () => {
   });
 });
 const STATE_WRITE_COMMANDS = Object.freeze([
+  "factory base-advance <run-id> --json",
   "factory env record-created <run-id> --json",
   "factory env record-resume <run-id> --json",
   "factory provenance review-dispatch <run-id> --agent AGENT --subject SUBJECT --attempts N --hash sha256:<hash> --prompt-bytes N --json",
@@ -2741,8 +2800,8 @@ describe("public documentation contract", () => {
 
   it("documents the exact metadata-derived exports and bin", () => {
     assert.deepEqual(PACKAGE.exports, {
-      ".": "./src/plugin.js",
-      "./server": "./src/plugin.js",
+      ".": "./src/opencode-plugin.js",
+      "./server": "./src/opencode-plugin.js",
       "./tui": "./dist/tui.js",
       "./cli": "./src/cli.js",
     });

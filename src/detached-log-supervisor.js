@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { renderErrorForTerminal } from "./hardening/output-policy.js";
 import { inspectProcessIdentity, readProcessEvidence, recordDetachedProcessEvidence, writeProcessEvidence } from "./process-evidence.js";
-import { stopHeartbeatInRunDir } from "./factory.js";
+import { FACTORY_LAUNCH_CLAIM_ENV, stopHeartbeatInRunDir } from "./factory.js";
 import { timestamp } from "./utils.js";
 
 const ABORT_GRACE_MS = 1000;
@@ -64,6 +64,7 @@ export async function superviseDetachedLaunch(init, options = {}) {
       recordDetachedProcessEvidence(init.runDir, {
         runId: init.runId,
         executionId: init.executionId,
+        launchToken: init.env?.[FACTORY_LAUNCH_CLAIM_ENV],
         pid: child.pid,
         cwd: init.repo,
         commandName: "opencode",

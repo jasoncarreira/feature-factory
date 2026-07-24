@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
-import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -13,7 +13,7 @@ import { checkWorktreeIdentity, createOrRecoverWorktree, deriveExpectedWorktreeP
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv, startB6Span } from "./telemetry.js";
-import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLaunchFence, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, inspectProcessIdentity, readProcessEvidence, releaseLaunchClaim, releaseLaunchFence, transitionLaunchClaimPhase } from "./process-evidence.js";
+import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLaunchFence, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, inspectProcessIdentity, matchesProcessLaunchToken, readProcessEvidence, releaseLaunchClaim, releaseLaunchFence, transitionLaunchClaimPhase } from "./process-evidence.js";
 import { encodeFeatureCommandPayload } from "./feature-command-payload.js";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
@@ -29,6 +29,7 @@ import { reconcileCheckpointPublication } from "./checkpoint-publication.js";
 import { assertCheckpointCleanupEligible, assertCheckpointRemoteMainAdvanced, buildCheckpointFinalClosure, buildCheckpointMergedCompletion, resolveCheckpointCompletionLineage, verifyRecordedCheckpointMerges } from "./checkpoint-completion.js";
 import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
 import { checkedExecutionEnvironment, executeCheckedCommand } from "./test-execution.js";
+import { BASE_ADVANCE_ERROR_CODES } from "./base-advance/state-model.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -53,6 +54,8 @@ const CHECKPOINT_PLANNING_REUSE_KEYS = new Set(["eligible", "plan_ref", "plan_ha
 const CARRY_FORWARD_MODES = new Set(["interactive", "headless", "autonomous"]);
 const CARRY_FORWARD_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const FULL_COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
+const BASE_ADVANCE_OPERATION = "active-run-base-advance";
+const BASE_ADVANCE_PUBLIC_ERROR_CODES = new Set(Object.values(BASE_ADVANCE_ERROR_CODES));
 const CONTINUATION_PARENT_ARTIFACT_REFS = [
   { kind: "story", ref: "artifacts/story.md" },
   { kind: "research_map", ref: "artifacts/research-map.md" },
@@ -1050,6 +1053,120 @@ function assertRegularFile(path, label) {
   if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile()) throw new Error(`${label} must be a regular non-symlink file`);
 }
 
+export async function advanceFactoryRunBase(runId, options = {}) {
+  const envelopeRunId = baseAdvanceEnvelopeRunId(runId);
+  try {
+    const normalizedRunId = normalizeBaseAdvanceRunId(runId);
+    const { cwd } = readBaseAdvanceApiOptions(options);
+    const target = resolveDirectBaseAdvanceRun(normalizedRunId, cwd);
+    return await transitionRunBaseAdvance(target.runDir, { repoRoot: target.repo });
+  } catch (error) {
+    return {
+      ok: false,
+      operation: BASE_ADVANCE_OPERATION,
+      run_id: envelopeRunId,
+      error: {
+        code: baseAdvancePublicErrorCode(error),
+        message: renderErrorForTerminal(error),
+      },
+    };
+  }
+}
+
+function normalizeBaseAdvanceRunId(value) {
+  const runId = baseAdvanceEnvelopeRunId(value);
+  if (runId === null) {
+    throw baseAdvanceApiFailure(BASE_ADVANCE_ERROR_CODES.usage, "factory base-advance requires one safe bare run id");
+  }
+  return runId;
+}
+
+function baseAdvanceEnvelopeRunId(value) {
+  if (typeof value !== "string") return null;
+  const runId = value.trim();
+  if (!SAFE_RUN_ID_PATTERN.test(runId) || runId === "." || runId === ".." || runId.includes("..") || runId.endsWith(".lock")) return null;
+  return runId;
+}
+
+function readBaseAdvanceApiOptions(options) {
+  try {
+    if (options === null || typeof options !== "object" || Object.getPrototypeOf(options) !== Object.prototype) {
+      throw new Error("invalid options");
+    }
+    const keys = Reflect.ownKeys(options);
+    if (keys.some((key) => key !== "cwd")) throw new Error("invalid options");
+    const descriptor = Reflect.getOwnPropertyDescriptor(options, "cwd");
+    if (descriptor === undefined) return { cwd: process.cwd() };
+    if (!Object.hasOwn(descriptor, "value") || typeof descriptor.value !== "string" || descriptor.value.trim() === "") {
+      throw new Error("invalid options");
+    }
+    return { cwd: descriptor.value };
+  } catch {
+    throw baseAdvanceApiFailure(BASE_ADVANCE_ERROR_CODES.usage,
+      "factory base-advance options must be a plain closed object containing only optional cwd");
+  }
+}
+
+function resolveDirectBaseAdvanceRun(runId, cwd) {
+  let repo;
+  let factory;
+  let runDir;
+  let runFile;
+  try {
+    repo = resolve(repoRoot(cwd));
+    factory = resolve(directFactoryRoot(repo));
+    runDir = resolve(factory, runId);
+    runFile = join(runDir, "run.json");
+    if (dirname(runDir) !== factory) throw new Error("run is not an immediate child");
+    const factoryEntry = lstatSync(factory);
+    const runEntry = lstatSync(runDir);
+    const runFileEntry = lstatSync(runFile);
+    if (factoryEntry.isSymbolicLink() || !factoryEntry.isDirectory()
+      || runEntry.isSymbolicLink() || !runEntry.isDirectory()
+      || runFileEntry.isSymbolicLink() || !runFileEntry.isFile()) {
+      throw new Error("unsafe run identity");
+    }
+    const physicalFactory = realpathSync(factory);
+    const physicalRunDir = realpathSync(runDir);
+    if (dirname(physicalRunDir) !== physicalFactory) throw new Error("run is not a physical immediate child");
+  } catch {
+    throw baseAdvanceApiFailure(BASE_ADVANCE_ERROR_CODES.runInvalid,
+      "factory base-advance run could not be resolved safely");
+  }
+
+  let run;
+  try {
+    run = readRunFile(runFile);
+  } catch {
+    throw baseAdvanceApiFailure(BASE_ADVANCE_ERROR_CODES.runInvalid,
+      "factory base-advance run could not be resolved safely");
+  }
+  if (run.run_id !== runId) {
+    throw baseAdvanceApiFailure(BASE_ADVANCE_ERROR_CODES.runInvalid,
+      "factory base-advance durable run identity does not match the requested run");
+  }
+  return { repo, runDir };
+}
+
+function baseAdvanceApiFailure(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function baseAdvancePublicErrorCode(error) {
+  try {
+    const descriptor = error !== null && (typeof error === "object" || typeof error === "function")
+      ? Reflect.getOwnPropertyDescriptor(error, "code")
+      : undefined;
+    return descriptor && Object.hasOwn(descriptor, "value") && BASE_ADVANCE_PUBLIC_ERROR_CODES.has(descriptor.value)
+      ? descriptor.value
+      : BASE_ADVANCE_ERROR_CODES.failed;
+  } catch {
+    return BASE_ADVANCE_ERROR_CODES.failed;
+  }
+}
+
 export async function recoverDisruptedRun(runId, opts = {}) {
   assertPostPrCliOptions(opts, { command: "factory resume-check", resume: true });
   if (hasExplicitPostPrOptions(opts)) throw new Error("factory resume-check rejects post-PR policy flags; the persisted policy is authoritative");
@@ -1359,6 +1476,11 @@ function inspectRecoveryOwnership(runDir, run, opts = {}) {
   if (!claim.missing && claim.owner_status !== "live") return { condition: "unsafe-ownership", reason_code: claim.owner_status === "indeterminate" ? "launch-owner-indeterminate" : "launch-claim-conflict", reason: "Resume check cannot safely prove the preserved launch claim owner.", launch_claim_ref: LAUNCH_CLAIM_REF, process_ref: processState.missing ? null : PROCESS_EVIDENCE_FILE };
   if (!processState.missing && processState.evidence.state === "running" && processState.verification?.status !== "live-and-matching") return { condition: "unsafe-ownership", reason_code: "process-identity-mismatch", reason: "Resume check cannot safely prove the recorded detached process identity.", launch_claim_ref: claim.missing ? null : LAUNCH_CLAIM_REF, process_ref: PROCESS_EVIDENCE_FILE };
   if (!claim.missing && !processState.missing && processState.evidence.execution_id !== claim.claim.execution_id) return { condition: "unsafe-ownership", reason_code: "launch-claim-conflict", reason: "Resume check found contradictory launch and process execution identities.", launch_claim_ref: LAUNCH_CLAIM_REF, process_ref: PROCESS_EVIDENCE_FILE };
+  const inheritedLaunchToken = opts.env?.[FACTORY_LAUNCH_CLAIM_ENV] ?? process.env[FACTORY_LAUNCH_CLAIM_ENV];
+  const matchingLaunchClaim = claim.missing || (claim.ok && claim.claim.phase === "spawning" && claim.claim.nonce === inheritedLaunchToken);
+  if (matchingLaunchClaim && !processState.missing && processState.evidence.state === "running"
+    && processState.verification?.status === "live-and-matching"
+    && matchesProcessLaunchToken(processState.evidence, inheritedLaunchToken)) return null;
   return { condition: "unsafe-ownership", reason_code: !processState.missing && processState.evidence.state === "running" ? "matching-detached-shepherd-live" : "launch-claim-conflict", reason: "Resume check preserved active or ambiguous run ownership; no recovery mutation was attempted.", launch_claim_ref: claim.missing ? null : LAUNCH_CLAIM_REF, process_ref: processState.missing ? null : PROCESS_EVIDENCE_FILE };
 }
 
@@ -1991,7 +2113,7 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
     launchAttempted = true;
     started = await launch(opts.repo, commandArgs, {
       ...detachedProcessOptions(opts.repo, { ...opts, runId, runDir, executionId: claim.claim.execution_id }),
-      env: factoryLaunchEnv(opts, runId),
+      env: { ...factoryLaunchEnv(opts, runId), [FACTORY_LAUNCH_CLAIM_ENV]: token },
     });
   } catch (error) {
     let preservedClaim = launchAttempted;
@@ -5848,7 +5970,7 @@ function awaitDetachedReadiness(supervisor, init) {
   });
 }
 
-function factoryLaunchEnv(opts = {}, runId = null) {
+export function factoryLaunchEnv(opts = {}, runId = null) {
   try {
     const env = prepareTelemetryEnv(process.env, {
       parentSpanId: opts.parentSpanId,
@@ -5856,6 +5978,7 @@ function factoryLaunchEnv(opts = {}, runId = null) {
       tracestate: opts.tracestate,
     });
     delete env.FEATURE_FACTORY_RUN_ID;
+    delete env[FACTORY_LAUNCH_CLAIM_ENV];
     if (stringValue(runId)) env.FEATURE_FACTORY_RUN_ID = String(runId).trim();
     return env;
   } catch (error) {
