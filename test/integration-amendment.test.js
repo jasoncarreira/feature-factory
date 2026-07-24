@@ -307,7 +307,7 @@ describe("generic integration amendment", () => {
     } finally { cleanup(fixture); }
   });
 
-  it("keeps the authorized baseline through a valid pristine first dispatch and retry", async () => {
+  it("keeps the authorized baseline through valid retries and binds strike history to review bytes", async () => {
     const fixture = createFixture();
     try {
       addAcceptedTechnicalBrief(fixture);
@@ -339,7 +339,30 @@ describe("generic integration amendment", () => {
       git(worktree, ["commit", "-m", "consumer attempt two"]);
       const secondHead = git(worktree, ["rev-parse", "HEAD"]).trim();
       await completeSliceBuilderTaskDispatch(fixture.repo, { run_id: RUN_ID, slice_id: "consumer", attempt: 2, agent: "backend-builder", claim_ref: second.dispatch_claim.ref, claim_hash: second.dispatch_claim.hash, completion_token: secondToken }, { now: NOW });
-      await publishConsumerReview(fixture, { attempt: 2, reviewedCommit: secondHead });
+      await publishConsumerReview(fixture, { attempt: 2, reviewedCommit: secondHead, verdict: "REJECT", requiredFixes: ["apply final consumer correction"] });
+
+      const runPath = join(fixture.runDir, "run.json");
+      const runBytes = readFileSync(runPath);
+      const run = readRun(fixture);
+      run.slices.find((slice) => slice.id === "consumer").attempt_reviews[1].late_discovery_strike = true;
+      writeJson(runPath, run);
+      const consistency = checkRunConsistency(fixture.runDir, readRun(fixture));
+      assert.equal(consistency.checks.find((check) => check.name === "run.schema")?.ok, true, "attempt-two strike remains schema-valid");
+      const authority = consistency.checks.find((check) => check.name === "run.integration_amendment.authority");
+      assert.equal(authority?.ok, false, "amendment authority rejects history that differs from the review sidecar");
+      assert.match(authority.errors.map((error) => error.message).join("\n"), /consumer attempt 2 review authority is stale/u);
+      writeFileSync(runPath, runBytes);
+
+      await transitionRunSlice(fixture.runDir, "consumer", { status: "running", attempts: 3 }, { mustExist: true, now: NOW });
+      const thirdToken = "consumer-retry-three";
+      const third = await prepareSliceBuilderTaskDispatch(fixture.repo, { run_id: RUN_ID, slice_id: "consumer", attempt: 3, agent: "backend-builder" }, { claimDispatch: true, completionToken: thirdToken, now: NOW });
+      assert.equal(third.slice.head, secondHead);
+      writeFileSync(join(worktree, "src", "consumer", "index.js"), "export const consumer = 3;\n");
+      git(worktree, ["add", "src/consumer/index.js"]);
+      git(worktree, ["commit", "-m", "consumer attempt three"]);
+      const thirdHead = git(worktree, ["rev-parse", "HEAD"]).trim();
+      await completeSliceBuilderTaskDispatch(fixture.repo, { run_id: RUN_ID, slice_id: "consumer", attempt: 3, agent: "backend-builder", claim_ref: third.dispatch_claim.ref, claim_hash: third.dispatch_claim.hash, completion_token: thirdToken }, { now: NOW });
+      await publishConsumerReview(fixture, { attempt: 3, reviewedCommit: thirdHead });
 
       git(fixture.featureWorktree, ["merge", "--no-ff", branch, "-m", "merge retried consumer"]);
       const mergeCommit = git(fixture.featureWorktree, ["rev-parse", "HEAD"]).trim();
@@ -347,6 +370,7 @@ describe("generic integration amendment", () => {
       assert.equal(merged.slice.authorized_baseline_commit, integrationCommit);
       assert.equal(merged.slice.attempt_reviews[0].diff_base_commit, integrationCommit);
       assert.equal(merged.slice.attempt_reviews[1].diff_base_commit, integrationCommit);
+      assert.equal(merged.slice.attempt_reviews[2].diff_base_commit, integrationCommit);
       assert.equal(checkRunConsistency(fixture.runDir, readRun(fixture)).ok, true);
     } finally { cleanup(fixture); }
   });
@@ -2389,7 +2413,6 @@ async function advanceMergedAmendmentConsumer(fixture, { assertCurrentDispatchTa
     status: "review", attempts: 1, evidence_ref: evidenceRef, review_ref: reviewRef,
   }, { mustExist: true, now: NOW });
   assert.equal(checkRunConsistency(fixture.runDir, readRun(fixture)).ok, true, "merged amendment accepts checked consumer review");
-
   git(fixture.featureWorktree, ["merge", "--no-ff", branch, "-m", "merge consumer integration"]);
   const mergeCommit = git(fixture.featureWorktree, ["rev-parse", "HEAD"]).trim();
   const mergedResult = await transitionSliceMerged(fixture.runDir, "consumer", { merge_commit: mergeCommit }, { repoRoot: fixture.repo, now: NOW });
@@ -2564,7 +2587,7 @@ function reportRequest() {
 
 function manifestFixture() {
   const id = "A".repeat(43);
-  const admission = { baseline_ref: "refs/heads/f", baseline_commit: "1".repeat(40), baseline_tree: "2".repeat(40), worktree: "/tmp/f", probe: { schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: "u", consumer_slice_id: "consumer", verification_artifact_id: "artifact", test_plan_index: 0, test_plan_entry: "node test.js", program: "node", args: ["test.js"], substrate: "feature-baseline" }, owner: { id: "owner", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "merged", attempts: 1, attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/o.json", evidence_hash: sha("e"), review_ref: "reviews/o.json", review_hash: sha("r"), reviewed_commit: "3".repeat(40), diff_base_commit: "1".repeat(40), ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }], evidence_ref: "evidence/o.json", evidence_hash: sha("e"), review_ref: "reviews/o.json", review_hash: sha("r"), reviewed_commit: "3".repeat(40), merge_commit: "4".repeat(40) }, consumer: { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["test/**"], effective_paths: ["test/**"], status: "pending", attempts: 0 } };
+  const admission = { baseline_ref: "refs/heads/f", baseline_commit: "1".repeat(40), baseline_tree: "2".repeat(40), worktree: "/tmp/f", probe: { schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: "u", consumer_slice_id: "consumer", verification_artifact_id: "artifact", test_plan_index: 0, test_plan_entry: "node test.js", program: "node", args: ["test.js"], substrate: "feature-baseline" }, owner: { id: "owner", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "merged", attempts: 1, attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/o.json", evidence_hash: sha("e"), review_ref: "reviews/o.json", review_hash: sha("r"), reviewed_commit: "3".repeat(40), diff_base_commit: "1".repeat(40), ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 }], evidence_ref: "evidence/o.json", evidence_hash: sha("e"), review_ref: "reviews/o.json", review_hash: sha("r"), reviewed_commit: "3".repeat(40), merge_commit: "4".repeat(40) }, consumer: { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["test/**"], effective_paths: ["test/**"], status: "pending", attempts: 0 } };
   return { schema_version: 1, kind: "integration-amendment", amendment_id: id, status: "reported", owner_slice_id: "owner", consumer_slice_id: "consumer", defect_path: "src/a.js", verification_artifact_id: "artifact", admission, failure_execution: { claim_ref: "evidence/integration-amendment.report.claim.json", claim_hash: sha("c"), receipt_ref: `evidence/integration-amendment-${id}.report.receipt.json`, receipt_hash: sha("x") }, max_attempts: 2, attempts: [], created_at: NOW, updated_at: NOW };
 }
 

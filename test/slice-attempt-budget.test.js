@@ -44,8 +44,7 @@ describe("uniform slice attempt evidence", () => {
       await startAttempt(fixture, 2);
       await publishReview(fixture, 2, { verdict: "REJECT", fixes: ["second"] });
       await startAttempt(fixture, 3);
-      await publishReview(fixture, 3, { verdict: "REJECT", fixes: ["third"] });
-      await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 4 }), /must not exceed 3/u);
+      await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 4 }), /attempt advancement requires pending start or a reviewed REJECT/u);
     } finally {
       cleanup(fixture);
     }
@@ -136,6 +135,7 @@ describe("uniform slice attempt evidence", () => {
         writeJson(join(fixture.runDir, "evidence", "slice.attempt-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
         writeJson(join(fixture.runDir, "reviews", "slice.attempt-1.json"), {
           subject: "slice", attempt: 1, reviewed_commit: head,
+          late_discovery_strike: false,
           remediation_context: {
             schema_version: 2,
             fixes: (review.required_fixes || []).map((_, required_fix_index) => ({
@@ -168,22 +168,19 @@ describe("uniform slice attempt evidence", () => {
   it("terminalizes an attempted retry from the exact nonconvergent review into checked carry-forward", async () => {
     const fixture = createFixture("nonconvergent-terminal");
     try {
-      await startAttempt(fixture, 1);
-      await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["first correction"] });
-      await startAttempt(fixture, 2);
-      await publishReview(fixture, 2, { verdict: "REJECT", fixes: ["review process missed a category"], convergence: "nonconvergent" });
+      await publishFinalNonconvergentReview(fixture);
 
-      const result = await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 3 });
+      const result = await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 4 });
 
       assert.equal(result.run.status, "blocked");
       assert.equal(result.slice.status, "blocked");
-      assert.equal(result.slice.attempts, 2);
+      assert.equal(result.slice.attempts, 3);
       assert.equal(result.slice.blocked_reason, "slice-review-nonconvergent");
       assert.equal(result.run.terminal_result.reason, "slice-review-nonconvergent");
-      assert.deepEqual(result.run.terminal_result.nonconvergence.source_review, result.slice.attempt_reviews[1]);
+      assert.deepEqual(result.run.terminal_result.nonconvergence.source_review, result.slice.attempt_reviews[2]);
       assert.deepEqual(result.run.terminal_result.nonconvergence.continuation, {
         program: "feature-factory",
-        args: ["factory", "continue", "run", "--review", "reviews/slice.attempt-2.json", "--run-id", "<new-run-id>", "--carry-forward", "--json"],
+        args: ["factory", "continue", "run", "--review", "reviews/slice.attempt-3.json", "--run-id", "<new-run-id>", "--carry-forward", "--json"],
       });
       assert.equal(validateRun(readRun(fixture)).status, "blocked");
     } finally {
@@ -191,19 +188,111 @@ describe("uniform slice attempt evidence", () => {
     }
   });
 
-  it("allows a converging attempt-two rejection to advance to attempt three", async () => {
+  it("terminalizes genuine attempt-one nonconvergence without consuming a strike", async () => {
+    const fixture = createFixture("attempt-one-nonconvergent");
+    try {
+      await startAttempt(fixture, 1);
+      await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["replace infeasible architecture"], convergence: "nonconvergent" });
+
+      const result = await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 });
+
+      assert.equal(result.run.status, "blocked");
+      assert.equal(result.slice.status, "blocked");
+      assert.equal(result.slice.attempts, 1);
+      assert.equal(result.slice.attempt_reviews[0].late_discovery_strike, false);
+      assert.equal(result.run.terminal_result.nonconvergence.source_review.attempt, 1);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("records one late-discovery strike and allows attempt two to advance to the final attempt", async () => {
     const fixture = createFixture("converging-third");
     try {
       await startAttempt(fixture, 1);
       await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["first"] });
       await startAttempt(fixture, 2);
-      await publishReview(fixture, 2, { verdict: "REJECT", fixes: ["second"] });
+      const reviewed = await publishReview(fixture, 2, { verdict: "REJECT", fixes: ["late category"], lateDiscoveryStrike: true });
+      assert.equal(reviewed.slice.attempt_reviews[1].late_discovery_strike, true);
 
       const result = await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 3 });
 
       assert.equal(result.run.status, "running");
       assert.equal(result.slice.status, "running");
       assert.equal(result.slice.attempts, 3);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("terminalizes a strikeless final rejection", async () => {
+    const fixture = createFixture("strikeless-final");
+    try {
+      await publishFinalNonconvergentReview(fixture, { lateDiscoveryStrike: false });
+
+      const result = await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 4 });
+
+      assert.equal(result.run.status, "blocked");
+      assert.equal(result.slice.attempt_reviews[1].late_discovery_strike, false);
+      assert.equal(result.run.terminal_result.nonconvergence.source_review.attempt, 3);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("rejects a repeated or final-attempt strike", async () => {
+    const fixture = createFixture("repeated-strike");
+    try {
+      await startAttempt(fixture, 1);
+      await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["first"] });
+      await startAttempt(fixture, 2);
+      await publishReview(fixture, 2, { verdict: "REJECT", fixes: ["late category"], lateDiscoveryStrike: true });
+      await startAttempt(fixture, 3);
+
+      await assert.rejects(
+        publishReview(fixture, 3, { verdict: "REJECT", fixes: ["another late category"], lateDiscoveryStrike: true }),
+        /requires a later review with one normal attempt remaining|already recorded/u,
+      );
+      await assert.rejects(
+        publishReview(fixture, 3, { verdict: "REJECT", fixes: ["final correction"] }),
+        /must be nonconvergent when the final attempt is rejected/u,
+      );
+      assert.equal(readRun(fixture).slices[0].status, "running");
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("requires the strike marker on sidecars and persisted history", async () => {
+    const fixture = createFixture("strike-marker-required");
+    try {
+      await startAttempt(fixture, 1);
+      commitSliceAttempt(fixture, 1);
+      const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      const evidenceRef = "evidence/slice.attempt-1.json";
+      const reviewRef = "reviews/slice.attempt-1.json";
+      writeJson(join(fixture.runDir, evidenceRef), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
+      const review = reviewRecord(fixture, 1, { verdict: "APPROVE" });
+      delete review.late_discovery_strike;
+      writeJson(join(fixture.runDir, reviewRef), review);
+
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: evidenceRef, review_ref: reviewRef }),
+        /late_discovery_strike.*must be a boolean/u,
+      );
+      assert.equal(readRun(fixture).slices[0].status, "running");
+
+      assert.throws(() => validateRun({
+        schema_version: 1, run_id: "markerless", status: "running",
+        slices: [{
+          id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 2,
+          attempt_reviews: [{
+            attempt: 1, evidence_ref: "evidence/markerless.json", evidence_hash: `sha256:${"1".repeat(64)}`,
+            review_ref: "reviews/markerless.json", review_hash: `sha256:${"2".repeat(64)}`, reviewed_commit: "3".repeat(40),
+            diff_base_commit: "4".repeat(40), ratified_paths: [], verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
+          }],
+        }],
+      }), /late_discovery_strike.*must be a boolean/u);
     } finally {
       cleanup(fixture);
     }
@@ -295,11 +384,10 @@ describe("uniform slice attempt evidence", () => {
   it("rejects stale nonconvergent review bytes without publishing terminal state", async () => {
     const fixture = createFixture("nonconvergent-stale");
     try {
-      await startAttempt(fixture, 1);
-      await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["missed category"], convergence: "nonconvergent" });
-      writeJson(join(fixture.runDir, "reviews", "slice.attempt-1.json"), reviewRecord(fixture, 1, { verdict: "REJECT", fixes: ["rewritten category"], convergence: "nonconvergent" }));
+      await publishFinalNonconvergentReview(fixture);
+      writeJson(join(fixture.runDir, "reviews", "slice.attempt-3.json"), reviewRecord(fixture, 3, { verdict: "REJECT", fixes: ["rewritten category"], convergence: "nonconvergent" }));
 
-      await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 }), /hashes are stale|history is stale/u);
+      await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 4 }), /hashes are stale|history is stale/u);
       const run = readRun(fixture);
       assert.equal(run.status, "running");
       assert.equal(run.terminal_result, undefined);
@@ -312,10 +400,9 @@ describe("uniform slice attempt evidence", () => {
   it("rejects generic terminalization while an exact current nonconvergent review is pending", async () => {
     const fixture = createFixture("nonconvergent-generic-terminal");
     try {
-      await startAttempt(fixture, 1);
-      await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["missed category"], convergence: "nonconvergent" });
+      await publishFinalNonconvergentReview(fixture);
       await assert.rejects(
-        transitionRunSlice(fixture.runDir, "slice", { status: "blocked", attempts: 1, blocked_reason: "generic block" }),
+        transitionRunSlice(fixture.runDir, "slice", { status: "blocked", attempts: 3, blocked_reason: "generic block" }),
         /cannot transition to ordinary blocked state/u,
       );
       const opened = await transitionSteeringBoundaryOpened(fixture.runDir, "terminal");
@@ -334,8 +421,7 @@ describe("uniform slice attempt evidence", () => {
     for (const route of ["recover", "steering-conflict"]) {
       const fixture = createFixture(`nonconvergent-${route}`);
       try {
-        await startAttempt(fixture, 1);
-        await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["missed category"], convergence: "nonconvergent" });
+        await publishFinalNonconvergentReview(fixture);
         let terminalize;
         if (route === "recover") {
           terminalize = () => transitionRecoverOrphan(fixture.runDir, "generic recovery bypass");
@@ -356,9 +442,8 @@ describe("uniform slice attempt evidence", () => {
   it("rejects forged nonconvergence sources and carry-forward routes", async () => {
     const fixture = createFixture("nonconvergent-forgery");
     try {
-      await startAttempt(fixture, 1);
-      await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["missed category"], convergence: "nonconvergent" });
-      await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 });
+      await publishFinalNonconvergentReview(fixture);
+      await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 4 });
       const terminal = readRun(fixture);
 
       const wrongSource = structuredClone(terminal);
@@ -366,13 +451,13 @@ describe("uniform slice attempt evidence", () => {
       assert.throws(() => validateRun(wrongSource), /must equal the current latest append-only slice review entry/u);
 
       const historicalSource = structuredClone(terminal);
-      historicalSource.slices[0].attempts = 2;
+      historicalSource.slices[0].attempts = 4;
       historicalSource.slices[0].attempt_reviews.push({
-        ...historicalSource.slices[0].attempt_reviews[0],
-        attempt: 2,
-        evidence_ref: "evidence/slice.attempt-2.json",
+        ...historicalSource.slices[0].attempt_reviews[2],
+        attempt: 4,
+        evidence_ref: "evidence/slice.attempt-4.json",
         evidence_hash: `sha256:${"1".repeat(64)}`,
-        review_ref: "reviews/slice.attempt-2.json",
+        review_ref: "reviews/slice.attempt-4.json",
         review_hash: `sha256:${"2".repeat(64)}`,
       });
       assert.throws(() => validateRun(historicalSource), /must equal the current latest append-only slice review entry/u);
@@ -688,12 +773,25 @@ describe("uniform slice attempt evidence", () => {
     for (const convergence of ["converging", "nonconvergent"]) {
       const fixture = createFixture(`dispatch-commit-bound-${convergence}`);
       try {
-        const { context } = await startAttempt(fixture, 1);
-        await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["repair"], convergence });
+        let context;
+        let nextAttempt;
+        if (convergence === "converging") {
+          ({ context } = await startAttempt(fixture, 1));
+          await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["repair"] });
+          nextAttempt = 2;
+        } else {
+          await startAttempt(fixture, 1);
+          await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["first repair"] });
+          await startAttempt(fixture, 2);
+          await publishReview(fixture, 2, { verdict: "REJECT", fixes: ["late category"], lateDiscoveryStrike: true });
+          ({ context } = await startAttempt(fixture, 3));
+          await publishReview(fixture, 3, { verdict: "REJECT", fixes: ["final repair"], convergence: "nonconvergent" });
+          nextAttempt = 4;
+        }
         const closurePath = join(fixture.runDir, context.dispatch_claim.closure_ref);
         const closureBytes = readFileSync(closurePath, "utf8");
         await assert.rejects(
-          transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 }, {
+          transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: nextAttempt }, {
             atomicWriteHooks: {
               beforeCommit: () => {
                 const changed = JSON.parse(closureBytes);
@@ -805,7 +903,7 @@ function commitSliceAttempt(fixture, attempt) {
   git(fixture.repo, ["commit", "-m", `slice attempt ${attempt}`]);
 }
 
-function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "converging", classifications, scopeEffect = "in-lane", likelyPaths = ["slice.txt"], fixOwner = "slice" }) {
+function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "converging", lateDiscoveryStrike = false, classifications, scopeEffect = "in-lane", likelyPaths = ["slice.txt"], fixOwner = "slice" }) {
   const reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
   const familyEvidenceRef = `evidence/slice.family-attempt-${attempt}.json`;
   const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
@@ -822,6 +920,7 @@ function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "co
     reviewed_commit: reviewedCommit,
     verdict,
     convergence,
+    late_discovery_strike: lateDiscoveryStrike,
     remaining_fix_count: fixes.length,
     required_fixes: fixes,
     ownership_ratification: { schema_version: 1, paths: [] },
@@ -843,6 +942,15 @@ function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "co
       evidenceHash: checkedFamilyEvidence.hash,
     }),
   };
+}
+
+async function publishFinalNonconvergentReview(fixture, { lateDiscoveryStrike = true } = {}) {
+  await startAttempt(fixture, 1);
+  await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["first correction"] });
+  await startAttempt(fixture, 2);
+  await publishReview(fixture, 2, { verdict: "REJECT", fixes: ["review process missed a category"], lateDiscoveryStrike });
+  await startAttempt(fixture, 3);
+  return publishReview(fixture, 3, { verdict: "REJECT", fixes: ["final attempt remains rejected"], convergence: "nonconvergent" });
 }
 
 // Every fixture rebuilds the identical init + config + README-commit base on

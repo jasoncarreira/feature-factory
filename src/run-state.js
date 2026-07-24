@@ -5675,8 +5675,8 @@ function observeSliceReviewSidecars(runDir, sliceId, slice) {
   };
 }
 
-function observeAttemptReviewResult(sliceId, review) {
-  const { task_context: _taskContext, ...result } = validateSliceReviewResult(review, { sliceId });
+function observeAttemptReviewResult(sliceId, review, { priorReviews = [] } = {}) {
+  const { task_context: _taskContext, ...result } = validateSliceReviewResult(review, { sliceId, priorReviews });
   return result;
 }
 
@@ -5689,11 +5689,13 @@ function assertSliceReviewAuthorityCurrent(runDir, sliceId, slice, expected) {
 function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, decomposition, options = {}) {
   const observed = observeSliceReviewSidecars(runDir, sliceId, slice);
   const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: true });
-  const result = observeAttemptReviewResult(sliceId, observed.review);
   const attempt = slice.attempts;
   if (!Number.isInteger(attempt) || attempt < 1 || observed.evidence.attempt !== attempt || observed.review.attempt !== attempt) {
     throw new Error(`slice '${sliceId}' successor evidence and review attempts must equal the positive slice attempt`);
   }
+  const result = observeAttemptReviewResult(sliceId, observed.review, {
+    priorReviews: (Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews : []).filter((entry) => entry?.attempt < attempt),
+  });
   const gitAuthority = observeSliceHeadAuthority(runDir, run, sliceId, slice, options);
   if (observed.evidence.head_sha !== gitAuthority.head) throw new Error(`slice '${sliceId}' evidence head_sha must equal the current slice head`);
   if (observed.review.reviewed_commit !== gitAuthority.head) throw new Error(`slice '${sliceId}' review reviewed_commit must equal the current slice head`);
@@ -7763,6 +7765,7 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
     && slice.attempt_reviews[0].diff_base_commit !== slice.authorized_baseline_commit) {
     throw new Error(`slice '${sliceId}' first review baseline differs from its authorized baseline`);
   }
+  const priorReviews = [];
   for (const entry of Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews : []) {
     const observed = observeSliceReviewSidecars(runDir, sliceId, {
       ...slice,
@@ -7770,7 +7773,7 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
       evidence_ref: entry.evidence_ref,
       review_ref: entry.review_ref,
     });
-    const result = observeAttemptReviewResult(sliceId, observed.review);
+    const result = observeAttemptReviewResult(sliceId, observed.review, { priorReviews });
     const dispatch = observeAttemptReviewDispatch(runDir, sliceId, slice, entry);
     const current = {
       attempt: entry.attempt,
@@ -7787,6 +7790,7 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
     if (observed.evidence.head_sha !== current.reviewed_commit || !sameJson(current, entry)) {
       throw new Error(`slice '${sliceId}' attempt ${entry.attempt} review history is stale`);
     }
+    priorReviews.push(current);
   }
 }
 

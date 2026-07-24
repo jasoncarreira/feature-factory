@@ -750,7 +750,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(stepTwo, /fresh `work-reviewer` Task on the complete canonical brief/i);
     assert.match(stepTwo, /reviews\/spec-writer\.attempt-N\.json/i);
     assert.match(WORK_REVIEWER_PROMPT, /newly raised implementation mechanic or optional hardening detail is NONBLOCKING and never creates a required fix or retry/i);
-    assert.match(WORK_REVIEWER_PROMPT, /first-pass miss[\s\S]*mark the review `nonconvergent`[\s\S]*stop autonomous spec retries/i);
+    assert.match(WORK_REVIEWER_PROMPT, /first-pass miss[\s\S]*For `spec-writer`, `work-decomposer`, and `test-verifier`[\s\S]*mark the review `nonconvergent`[\s\S]*stop autonomous retries/i);
     assert.match(stepTwo, /terminalize through the normal blocked\/needs-human boundary/i);
   });
 
@@ -813,13 +813,30 @@ describe("class-wide planning prompt contract", () => {
     }
   });
 
-  it("gives nonconvergent slice reviews one checked terminal carry-forward meaning", () => {
+  it("gives slice reviews one strike before checked terminal carry-forward", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /first such miss on attempt 2 consumes one review-process strike/i);
+    assert.match(WORK_REVIEWER_PROMPT, /`late_discovery_strike: true`[\s\S]*keep `convergence: "converging"`/i);
+    assert.match(WORK_REVIEWER_PROMPT, /must not issue the strike on attempt 1 or attempt 3, issue it twice, or create attempt 4/i);
+    assert.match(WORK_REVIEWER_PROMPT, /required boolean `late_discovery_strike`/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Include `Late discovery strike` only for a slice review; omit that line for `spec-writer`, `work-decomposer`, and `test-verifier`/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Genuine implementation nonconvergence[\s\S]*`late_discovery_strike: false`[\s\S]*may stop on any attempt/i);
+    assert.match(WORK_REVIEWER_PROMPT, /genuine implementation nonconvergence with `late_discovery_strike: false` is valid on any attempt/i);
     assert.match(WORK_REVIEWER_PROMPT, /`nonconvergent` has one terminal meaning/i);
     assert.match(WORK_REVIEWER_PROMPT, /must not receive another autonomous builder attempt/i);
+    assert.match(SKILL, /Slice Review One-Strike Policy/i);
+    assert.match(SKILL, /attempt-2 first-pass miss[\s\S]*receives normal attempt 3 instead of terminalizing/i);
     assert.match(SKILL, /current REJECT marked `nonconvergent` never receives another autonomous attempt/i);
     assert.match(SKILL, /atomically terminalizes the run as `slice-review-nonconvergent`/i);
     assert.match(SKILL, /factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> --carry-forward --json/i);
     assert.match(SKILL, /Do not create the child automatically/i);
+    assert.match(SCHEMA, /Every slice review sidecar and `attempt_reviews` entry requires boolean `late_discovery_strike`/i);
+    assert.match(SCHEMA, /marker-less records reject fail-closed and are re-seeded rather than upgraded/i);
+    assert.match(SCHEMA, /non-strike review may declare genuine implementation nonconvergence on any attempt/i);
+    assert.match(SCHEMA, /REJECT with `convergence: "nonconvergent"` and `late_discovery_strike: false` is terminal[\s\S]*on any attempt/i);
+    assert.match(README, /Slice review one-strike policy/i);
+    assert.match(SPEC, /Every slice review sidecar and append-only history entry requires boolean `late_discovery_strike`/i);
+    assert.match(DURABLE_AUTHORITY_LEDGER, /required `late_discovery_strike`/i);
+    assert.match(DURABLE_AUTHORITY_LEDGER, /legacy, marker-less, or[\s\S]*incomplete current bindings\/history reject without mutation/i);
     assert.match(SCHEMA, /`source_review` equals the exact current latest append-only attempt entry/i);
     assert.match(SCHEMA, /alternate parent-referenced review/i);
     assert.match(SCHEMA, /carry-forward construction, publication, adoption, resume, and launch check/i);

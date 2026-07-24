@@ -278,7 +278,7 @@ describe("cli write surface", () => {
         result: { type: "verification-result", outcome: "pass", summary: "Verify slice behavior passed" },
       });
       writeJson(join(runDir, "reviews", "slice.json"), {
-        subject: "slice", verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [],
+        subject: "slice", verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0, required_fixes: [],
         ownership_ratification: { schema_version: 1, paths: ["extension/slice.txt"] }, remediation_context: { schema_version: 2, fixes: [] }, attempt: 1, reviewed_commit: reviewedHead,
         invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: reviewedHead, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
       });

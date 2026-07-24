@@ -126,7 +126,7 @@ const TEST_EXECUTION_OUTCOMES = new Set(["exited", "signaled", "timeout", "outpu
 const TEST_EXECUTION_STATUSES = new Set(["pass", "fail"]);
 const SIGNAL_PATTERN = /^SIG[A-Z0-9]{1,31}$/u;
 const SLICE_KEYS = new Set(["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "branch", "worktree", "authorized_baseline_commit", "attempts", "attempt_reviews", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "integration_conflict", "blocked_reason", "updated_at"]);
-const SLICE_ATTEMPT_REVIEW_KEYS = new Set(["attempt", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "diff_base_commit", "ratified_paths", "verdict", "convergence", "remaining_fix_count", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
+const SLICE_ATTEMPT_REVIEW_KEYS = new Set(["attempt", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "diff_base_commit", "ratified_paths", "verdict", "convergence", "late_discovery_strike", "remaining_fix_count", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
 const SLICE_REVIEW_VERDICTS = new Set(["APPROVE", "REJECT"]);
 const SLICE_REVIEW_CONVERGENCE = new Set(["converging", "nonconvergent"]);
 const SLICE_MAX_ATTEMPTS = 3;
@@ -204,7 +204,7 @@ export class ValidationError extends Error {
   }
 }
 
-export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
+export function validateSliceReviewResult(review, { sliceId = "slice", priorReviews = [] } = {}) {
   const errors = [];
   const path = "review";
   if (!isRecord(review)) fail([{ path, message: "must be an object" }]);
@@ -220,6 +220,7 @@ export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
   }
   requiredEnum(errors, review, "verdict", SLICE_REVIEW_VERDICTS, `${path}.verdict`);
   requiredEnum(errors, review, "convergence", SLICE_REVIEW_CONVERGENCE, `${path}.convergence`);
+  appendSliceReviewStrikePolicyErrors(errors, review, path, priorReviews);
   boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${path}.remaining_fix_count`);
   if (review.remaining_fix_count !== fixes.length) errors.push({ path: `${path}.remaining_fix_count`, message: "must equal required_fixes length" });
   if (review.verdict === "APPROVE" && fixes.length !== 0) errors.push({ path: `${path}.required_fixes`, message: "APPROVE review requires zero remaining fixes" });
@@ -273,10 +274,30 @@ export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
   return {
     verdict: review.verdict,
     convergence: review.convergence,
+    late_discovery_strike: review.late_discovery_strike,
     remaining_fix_count: review.remaining_fix_count,
     ratified_paths: [...ratification.paths],
     task_context: classifications.length > 0 && classifications.every((classification) => classification === "narrow-correction") ? "reuse" : "fresh",
   };
+}
+
+function appendSliceReviewStrikePolicyErrors(errors, review, path, priorReviews = []) {
+  requiredBoolean(errors, review, "late_discovery_strike", `${path}.late_discovery_strike`);
+  if (review.late_discovery_strike === true) {
+    if (review.verdict !== "REJECT" || review.convergence !== "converging") {
+      errors.push({ path: `${path}.late_discovery_strike`, message: "requires a converging REJECT" });
+    }
+    if (!Number.isInteger(review.attempt) || review.attempt <= 1 || review.attempt >= SLICE_MAX_ATTEMPTS) {
+      errors.push({ path: `${path}.late_discovery_strike`, message: "requires a later review with one normal attempt remaining" });
+    }
+    const priorStrike = priorReviews.find((entry) => entry?.late_discovery_strike === true);
+    if (priorStrike) {
+      errors.push({ path: `${path}.late_discovery_strike`, message: `must not repeat the strike recorded at attempt ${priorStrike.attempt}` });
+    }
+  }
+  if (review.attempt === SLICE_MAX_ATTEMPTS && review.verdict === "REJECT" && review.convergence !== "nonconvergent") {
+    errors.push({ path: `${path}.convergence`, message: "must be nonconvergent when the final attempt is rejected" });
+  }
 }
 
 export function sliceReviewTaskContext(review, options = {}) {
@@ -1757,6 +1778,7 @@ function assertIntegrationAmendmentConsumerProgress(runDir, run, consumer) {
       || evidence.subject !== consumer.id || evidence.attempt !== entry.attempt || evidence.status !== "pass" || evidence.review_ready !== true
       || evidence.head_sha !== entry.reviewed_commit || review.subject !== consumer.id || review.attempt !== entry.attempt
       || review.reviewed_commit !== entry.reviewed_commit || review.verdict !== entry.verdict || review.convergence !== entry.convergence
+      || result.late_discovery_strike !== entry.late_discovery_strike
       || entry.diff_base_commit !== consumer.authorized_baseline_commit
       || review.remaining_fix_count !== entry.remaining_fix_count || JSON.stringify(result.ratified_paths) !== JSON.stringify(entry.ratified_paths)) {
       throw new Error(`integration amendment consumer attempt ${entry.attempt} review authority is stale`);
@@ -4043,6 +4065,7 @@ function validateSliceAttemptReviews(errors, slice, path) {
     validateCanonicalConcretePathSet(errors, review.ratified_paths, `${reviewPath}.ratified_paths`, { allowEmpty: true, sorted: true });
     requiredEnum(errors, review, "verdict", SLICE_REVIEW_VERDICTS, `${reviewPath}.verdict`);
     requiredEnum(errors, review, "convergence", SLICE_REVIEW_CONVERGENCE, `${reviewPath}.convergence`);
+    appendSliceReviewStrikePolicyErrors(errors, review, reviewPath, slice.attempt_reviews.slice(0, index));
     boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${reviewPath}.remaining_fix_count`);
     for (const key of ["dispatch_claim_ref", "dispatch_closure_ref"]) optionalString(errors, review, key, `${reviewPath}.${key}`);
     for (const key of ["dispatch_claim_hash", "dispatch_closure_hash"]) optionalHash(errors, review, key, `${reviewPath}.${key}`);

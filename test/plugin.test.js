@@ -647,8 +647,8 @@ describe("feature command payload parsing", () => {
         review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`,
         reviewed_commit: "4".repeat(40), merge_commit: "5".repeat(40),
         attempt_reviews: [
-          { attempt: 1, evidence_ref: "evidence/A.attempt-1.json", evidence_hash: `sha256:${"8".repeat(64)}`, review_ref: "reviews/A.attempt-1.json", review_hash: `sha256:${"9".repeat(64)}`, reviewed_commit: "a".repeat(40), diff_base_commit: "e".repeat(40), ratified_paths: [], verdict: "REJECT", convergence: "converging", remaining_fix_count: 1 },
-          { attempt: 2, evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`, review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`, reviewed_commit: "4".repeat(40), diff_base_commit: "e".repeat(40), ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 },
+          { attempt: 1, evidence_ref: "evidence/A.attempt-1.json", evidence_hash: `sha256:${"8".repeat(64)}`, review_ref: "reviews/A.attempt-1.json", review_hash: `sha256:${"9".repeat(64)}`, reviewed_commit: "a".repeat(40), diff_base_commit: "e".repeat(40), ratified_paths: [], verdict: "REJECT", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 1 },
+          { attempt: 2, evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`, review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`, reviewed_commit: "4".repeat(40), diff_base_commit: "e".repeat(40), ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 },
         ],
       }],
       remaining_slice_ids: ["B"],
@@ -2428,7 +2428,7 @@ function createSpecialPanelDispatchFixture() {
     result: { type: "verification-result", outcome: "pass", summary: "Verify slice behavior passed" },
   });
   writeJson(join(fixture.runDir, reviewRef), {
-    subject: "slice", attempt: 1, reviewed_commit: fixture.head, verdict: "APPROVE", convergence: "converging",
+    subject: "slice", attempt: 1, reviewed_commit: fixture.head, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false,
     remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] },
     invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: fixture.head, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
   });
@@ -2437,7 +2437,7 @@ function createSpecialPanelDispatchFixture() {
     id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "merged", attempts: 1,
     evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
     reviewed_commit: fixture.head, merge_commit: fixture.head,
-    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: fixture.head, diff_base_commit: fixture.head, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: fixture.head, diff_base_commit: fixture.head, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 }],
   }];
   run.validator = {
     verdict: "NO-GO", report: reportRef, review_ref: validatorRef,
@@ -2458,6 +2458,7 @@ function writeBuilderRemediation(fixture, classification) {
     reviewed_commit: fixture.head,
     verdict: "REJECT",
     convergence: "converging",
+    late_discovery_strike: false,
     remaining_fix_count: 1,
     required_fixes: ["repair"],
     ownership_ratification: { schema_version: 1, paths: [] },
@@ -2480,6 +2481,7 @@ function writeBuilderRemediation(fixture, classification) {
     ratified_paths: [],
     verdict: "REJECT",
     convergence: "converging",
+    late_discovery_strike: false,
     remaining_fix_count: 1,
     ...dispatch,
   }];

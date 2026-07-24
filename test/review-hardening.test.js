@@ -15,10 +15,12 @@ import { SLICE_FIX_CLASSIFICATIONS, SLICE_FIX_SCOPE_EFFECTS, sliceReviewTaskCont
 
 const NOW = "2026-07-09T15:00:00.000Z";
 
-function classifiedReview(classifications, { convergence = "converging", schemaVersion = 2, scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = "slice" } = {}) {
+function classifiedReview(classifications, { attempt = 1, convergence = "converging", lateDiscoveryStrike = false, schemaVersion = 2, scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = "slice" } = {}) {
   return {
+    attempt,
     verdict: "REJECT",
     convergence,
+    late_discovery_strike: lateDiscoveryStrike,
     required_fixes: classifications.map((_, index) => `fix-${index + 1}`),
     remaining_fix_count: classifications.length,
     ownership_ratification: { schema_version: 1, paths: [] },
@@ -80,14 +82,14 @@ describe("slice merge transition guard", () => {
   it("refuses to roll a merged slice back to running/review/blocked via transitionRunSlice", async () => {
     const reviewedCommit = "c".repeat(40);
     const evidence = { subject: "s1", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit };
-    const review = { subject: "s1", attempt: 1, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] } };
+    const review = { subject: "s1", attempt: 1, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] } };
     const evidenceHash = jsonHash(evidence);
     const reviewHash = jsonHash(review);
     const runDir = createRunDir("slice-merged-immutable", {
       slices: [{
         id: "s1", declared_paths: ["s1.txt"], effective_paths: ["s1.txt"], status: "merged", merge_commit: "abc1234", review_ref: "reviews/s1.json", review_hash: reviewHash,
         evidence_ref: "evidence/s1.json", evidence_hash: evidenceHash, reviewed_commit: reviewedCommit, attempts: 1,
-        attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/s1.json", evidence_hash: evidenceHash, review_ref: "reviews/s1.json", review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+        attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/s1.json", evidence_hash: evidenceHash, review_ref: "reviews/s1.json", review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 }],
       }],
     });
     try {
@@ -138,6 +140,28 @@ describe("slice remediation task context", () => {
   it("keeps nonconvergent review state and fix classification consistent", () => {
     assert.throws(() => validateSliceReviewResult(classifiedReview(["nonconvergent"])), /classify nonconvergent exactly when review convergence is nonconvergent/u);
     assert.throws(() => validateSliceReviewResult(classifiedReview(["narrow-correction"], { convergence: "nonconvergent" })), /classify nonconvergent exactly when review convergence is nonconvergent/u);
+  });
+
+  it("validates the required late-discovery strike shape", () => {
+    const strike = classifiedReview(["narrow-correction"], { attempt: 2, lateDiscoveryStrike: true });
+    assert.equal(validateSliceReviewResult(strike).late_discovery_strike, true);
+
+    const missing = classifiedReview(["narrow-correction"]);
+    delete missing.late_discovery_strike;
+    assert.throws(() => validateSliceReviewResult(missing), /late_discovery_strike.*must be a boolean/u);
+
+    const wrongType = classifiedReview(["narrow-correction"]);
+    wrongType.late_discovery_strike = "true";
+    assert.throws(() => validateSliceReviewResult(wrongType), /late_discovery_strike.*boolean/u);
+
+    const terminalStrike = classifiedReview(["nonconvergent"], { convergence: "nonconvergent" });
+    terminalStrike.late_discovery_strike = true;
+    assert.throws(() => validateSliceReviewResult(terminalStrike), /requires a converging REJECT/u);
+
+    const approvingStrike = classifiedReview([]);
+    approvingStrike.verdict = "APPROVE";
+    approvingStrike.late_discovery_strike = true;
+    assert.throws(() => validateSliceReviewResult(approvingStrike), /requires a converging REJECT/u);
   });
 
   it("rejects schema-v1 and unstructured slice reviews for validation, task context, and feasibility", () => {
