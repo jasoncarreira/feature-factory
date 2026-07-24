@@ -323,6 +323,84 @@ describe("checked slice builder Task dispatch", () => {
     }
   });
 
+  it("reinjects checked authority from exact child lineage when compaction pruned the dispatch prompt", async () => {
+    const fixture = createBuilderDispatchFixture();
+    try {
+      const instance = await plugin({ directory: fixture.repo }, { sessionMessagesReader: async () => [] });
+      const task = { args: { subagent_type: "backend-builder", prompt: builderPrompt(1) } };
+      await instance["tool.execute.before"]({ tool: "task", sessionID: "parent-session", callID: "pruned-build" }, task);
+      instance.event({ event: { type: "session.created", properties: { info: { id: "builder-child", parentID: "parent-session", agent: "backend-builder" } } } });
+
+      const compacting = { context: [] };
+      await instance["experimental.session.compacting"]({ sessionID: "builder-child" }, compacting);
+      assert.match(compacting.context[0], /plugin will re-inject the exact checked context/u);
+
+      const system = { system: [] };
+      await instance["experimental.chat.system.transform"]({ sessionID: "builder-child", model: {} }, system);
+      assert.match(system.system[0], /^PLUGIN_CHECKED_SLICE_CONTEXT_START\ntrust: plugin-observed-authority/mu);
+      assert.match(system.system[0], /PLUGIN_CANONICAL_COMPACTION_CONTINUATION_DIRECTIVE/u);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("does not guess pruned compaction authority across ambiguous parallel builder children", async () => {
+    const fixture = createBuilderDispatchFixture({
+      slices: [
+        { id: "slice-a", stack: "backend", paths: ["src/a/**"], depends_on: [], acceptance: ["a works"], test_plan: ["node --test test/a.test.js"] },
+        { id: "slice-b", stack: "backend", paths: ["src/b/**"], depends_on: [], acceptance: ["b works"], test_plan: ["node --test test/b.test.js"] },
+      ],
+    });
+    try {
+      const instance = await plugin({ directory: fixture.repo }, { sessionMessagesReader: async () => [] });
+      const identityA = { tool: "task", sessionID: "parent-session", callID: "parallel-a" };
+      const taskA = { args: { subagent_type: "backend-builder", prompt: builderPrompt(1, "slice-a") } };
+      await instance["tool.execute.before"](identityA, taskA);
+      await instance["tool.execute.before"](
+        { tool: "task", sessionID: "parent-session", callID: "parallel-b" },
+        { args: { subagent_type: "backend-builder", prompt: builderPrompt(1, "slice-b") } },
+      );
+      instance.event({ event: { type: "session.created", properties: { info: { id: "ambiguous-child", parentID: "parent-session", agent: "backend-builder" } } } });
+      await instance["tool.execute.after"]({ ...identityA, args: taskA.args }, { output: "complete", metadata: {} });
+
+      const compacting = { context: [] };
+      await instance["experimental.session.compacting"]({ sessionID: "ambiguous-child" }, compacting);
+      const system = { system: [] };
+      await instance["experimental.chat.system.transform"]({ sessionID: "ambiguous-child", model: {} }, system);
+      assert.deepEqual(compacting.context, []);
+      assert.deepEqual(system.system, []);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("invalidates pruned compaction lineage when OpenCode explicitly reparents or reassigns the child", async () => {
+    for (const [label, update] of [
+      ["reparented", { parentID: "other-parent", agent: "backend-builder" }],
+      ["reassigned", { parentID: "parent-session", agent: "general" }],
+    ]) {
+      const fixture = createBuilderDispatchFixture();
+      try {
+        const instance = await plugin({ directory: fixture.repo }, { sessionMessagesReader: async () => [] });
+        await instance["tool.execute.before"](
+          { tool: "task", sessionID: "parent-session", callID: label },
+          { args: { subagent_type: "backend-builder", prompt: builderPrompt(1) } },
+        );
+        instance.event({ event: { type: "session.created", properties: { info: { id: `${label}-child`, parentID: "parent-session", agent: "backend-builder" } } } });
+        instance.event({ event: { type: "session.updated", properties: { info: { id: `${label}-child`, ...update } } } });
+
+        const compacting = { context: [] };
+        await instance["experimental.session.compacting"]({ sessionID: `${label}-child` }, compacting);
+        const system = { system: [] };
+        await instance["experimental.chat.system.transform"]({ sessionID: `${label}-child`, model: {} }, system);
+        assert.deepEqual(compacting.context, [], label);
+        assert.deepEqual(system.system, [], label);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("does not guess compaction authority when the child session lacks one exact dispatch prompt", async () => {
     const fixture = createBuilderDispatchFixture();
     try {
@@ -2022,8 +2100,8 @@ async function rejectionMessage(instance, callID) {
   assert.fail("checked reviewer task_id must reject");
 }
 
-function builderPrompt(attempt) {
-  return `FEATURE_FACTORY_SLICE_DISPATCH ${JSON.stringify({ run_id: "run", slice_id: "slice", attempt, agent: "backend-builder" })}\nImplement the checked slice.`;
+function builderPrompt(attempt, sliceId = "slice") {
+  return `FEATURE_FACTORY_SLICE_DISPATCH ${JSON.stringify({ run_id: "run", slice_id: sliceId, attempt, agent: "backend-builder" })}\nImplement the checked slice.`;
 }
 
 function specialBuilderPrompt() {
@@ -2357,7 +2435,7 @@ async function flushB6Telemetry() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-function createBuilderDispatchFixture() {
+function createBuilderDispatchFixture(options = {}) {
   const repo = mkdtempSync(join(tmpdir(), "plugin-builder-dispatch-"));
   git(repo, ["init", "-b", "main"]);
   git(repo, ["config", "user.email", "test@example.com"]);
@@ -2371,9 +2449,10 @@ function createBuilderDispatchFixture() {
   mkdirSync(join(runDir, "evidence"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
+  const slices = options.slices || [{ id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }];
   writeJson(join(runDir, "plan", "slices.json"), withDeliveryEnvelope({
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
-    slices: [{ id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
+    slices,
   }));
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE", required_fixes: [] });
   writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", required_fixes: [] });
@@ -2397,7 +2476,7 @@ function createBuilderDispatchFixture() {
         review_ref: "reviews/work-decomposer.json", review_hash: fileHash(join(runDir, "reviews", "work-decomposer.json")),
       },
     }],
-    slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "running", branch: "main", worktree: repo, attempts: 1 }],
+    slices: slices.map((slice) => ({ id: slice.id, stack: slice.stack, depends_on: slice.depends_on, declared_paths: slice.paths, effective_paths: slice.paths, status: "running", branch: "main", worktree: repo, attempts: 1 })),
   });
   return { repo, runDir, head: gitOutput(repo, ["rev-parse", "HEAD"]) };
 }
