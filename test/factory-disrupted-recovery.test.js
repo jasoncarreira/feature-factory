@@ -5,10 +5,31 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listRuns, recoverDisruptedRun, status, validateState } from "../src/factory.js";
+import { advanceFactoryRunBase, listRuns, recoverDisruptedRun, status, validateState } from "../src/factory.js";
 import { acquireLaunchClaim, recordDetachedProcessEvidence, releaseLaunchClaim } from "../src/process-evidence.js";
+import { createBaseAdvanceTransitionFixture, git as fixtureGit, output as fixtureOutput } from "./helpers/base-advance-transition/fixture.js";
 
 describe("factory disrupted run recovery", () => {
+  it("recreates an advanced run worktree at the exact newly bound base", async () => {
+    const fixture = createBaseAdvanceTransitionFixture("advanced-recovery");
+    try {
+      const target = fixture.advance();
+      const advanced = await advanceFactoryRunBase(fixture.runId, { cwd: fixture.repo });
+      fixtureGit(fixture.repo, ["worktree", "remove", "--force", fixture.worktree]);
+
+      const recovered = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo });
+
+      assert.equal(advanced.base_commit, target);
+      assert.equal(recovered.ok, true);
+      assert.equal(recovered.recovered, true);
+      assert.equal(recovered.branch_head, target);
+      assert.equal(fixtureOutput(fixture.worktree, ["rev-parse", "HEAD"]), target);
+      assert.equal(fixture.readRun().base_commit, target);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("does not re-scaffold a missing run.json and returns a synthetic non-durable terminal result", async () => {
     const repo = tempRepo("missing-run");
     try {

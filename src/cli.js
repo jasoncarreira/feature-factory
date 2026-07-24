@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, attachCheckpointCompletionRecovery, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, executeIntegrationAmendment, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordFactoryCheckpointMerged, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, advanceFactoryRunBase, assertHeartbeatStartable, attachCheckpointCompletionRecovery, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, executeIntegrationAmendment, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordFactoryCheckpointMerged, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
@@ -45,6 +45,9 @@ const COST_NUMERIC_FLAGS = new Map([
   ["--cost-cache-read", "costCacheRead"],
 ]);
 const SAFE_COST_REPORT_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
+const SAFE_BASE_ADVANCE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
+
+export { advanceFactoryRunBase };
 
 function usage(write = console.log) {
   write(`feature-factory
@@ -56,6 +59,7 @@ Commands:
   factory checkpoint-start <parent-run-id> <checkpoint-id> --run-id <child-run-id> [start options]
   factory checkpoint-record-merged <parent-run-id> <checkpoint-id> [--json]
   factory checkpoint-close <parent-run-id> [--json]  Close the final checkpoint route after its canonical PR merge
+  factory base-advance <run-id> --json  Advance an eligible active pre-PR run to fresh origin/main
   factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
   factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--carry-forward|--new-pr] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory cancel <run-id> [--json]
@@ -196,6 +200,7 @@ async function doctor(args) {
 
 async function factory(args, dependencies = {}) {
   const [sub, ...rest] = args;
+  if (sub === "base-advance") return baseAdvance(rest);
   if (sub === "answer") return answer(rest);
   if (sub === "test-execute") return testExecute(rest, dependencies);
   if (sub === "artifact-execute") return artifactExecute(rest, dependencies);
@@ -297,6 +302,40 @@ async function factory(args, dependencies = {}) {
   ]).trim());
   usage(console.error);
   process.exitCode = 1;
+}
+
+async function baseAdvance(args) {
+  const jsonCount = args.filter((value) => value === "--json").length;
+  const positionals = args.filter((value) => value !== "--json");
+  let result;
+  if (args.length !== 2 || jsonCount !== 1 || positionals.length !== 1 || positionals[0].startsWith("--")) {
+    result = baseAdvanceUsageEnvelope(positionals);
+  } else {
+    result = await advanceFactoryRunBase(positionals[0], { cwd: process.cwd() });
+  }
+  console.log(serializeTerminalJson(result, { space: 2 }));
+  if (!result.ok) process.exitCode = 1;
+  return result;
+}
+
+function baseAdvanceUsageEnvelope(values) {
+  const candidate = values.length === 1 ? normalizeBaseAdvanceCliRunId(values[0]) : null;
+  return {
+    ok: false,
+    operation: "active-run-base-advance",
+    run_id: candidate,
+    error: {
+      code: "BASE_ADVANCE_USAGE",
+      message: "factory base-advance requires exactly <run-id> --json",
+    },
+  };
+}
+
+function normalizeBaseAdvanceCliRunId(value) {
+  if (typeof value !== "string") return null;
+  const runId = value.trim();
+  if (!SAFE_BASE_ADVANCE_RUN_ID_PATTERN.test(runId) || runId === "." || runId === ".." || runId.includes("..") || runId.endsWith(".lock")) return null;
+  return runId;
 }
 
 async function sliceDispatchAdopt(args, dependencies = {}) {

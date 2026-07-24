@@ -5,10 +5,32 @@ import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { advanceFactoryRunBase } from "../src/factory.js";
+import { createBaseAdvanceTransitionFixture } from "./helpers/base-advance-transition/fixture.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
 describe("cli resume-check and resume preflight", () => {
+  it("reports the sanitized advanced branch while preserving the exact bound commit", async () => {
+    const fixture = createBaseAdvanceTransitionFixture("cli-advanced-resume-check");
+    try {
+      const target = fixture.advance();
+      const advanced = await advanceFactoryRunBase(fixture.runId, { cwd: fixture.repo });
+
+      const proc = runCli(fixture.repo, ["factory", "resume-check", fixture.runId, "--json"]);
+      const output = JSON.parse(proc.stdout);
+
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.equal(advanced.base_commit, target);
+      assert.equal(output.ok, true);
+      assert.equal(output.updated, false);
+      assert.equal(output.branch_head, "[redacted]");
+      assert.equal(fixture.readRun().base_commit, target);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("prints synthetic non-durable JSON and does not scaffold missing run state", () => {
     const repo = tempRepo("resume-check-missing");
     try {
