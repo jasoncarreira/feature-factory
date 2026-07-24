@@ -683,8 +683,13 @@ function observeBaseAdvanceSpecialDispatchAuthority(runDir, run) {
     return "absent";
   }
   const names = readdirSync(dispatchDir);
+  const claimNames = new Set(names.filter((entry) => entry.endsWith(".special.json")));
+  for (const name of names.filter((entry) => entry.endsWith(".special.closed.json"))) {
+    const claimName = `${name.slice(0, -".special.closed.json".length)}.special.json`;
+    if (!claimNames.has(claimName)) throw new Error(`special dispatch closure '${name}' has no claim`);
+  }
   let classification = "absent";
-  for (const name of names.filter((entry) => entry.endsWith(".special.json"))) {
+  for (const name of claimNames) {
     const observed = observeSpecialDispatchClaim(runDir, `dispatch/${name}`);
     if (observed.claim.run_id !== run.run_id) throw new Error("special dispatch is cross-bound");
     if (!existsSync(resolve(runDir, observed.claim.closure_ref))) {

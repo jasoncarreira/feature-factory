@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { hashValue } from "../src/refs.js";
 import { transitionRunBaseAdvance, transitionRunJson } from "../src/run-state.js";
+import { spawnSync } from "./helpers/git-fixture.js";
 import {
   captureRepresentativeAuthorityInventory,
   createBaseAdvanceTransitionFixture,
@@ -126,6 +126,25 @@ describe("checked active-run base advancement", () => {
       assert.equal(output(movedAfterGit.worktree, ["rev-parse", "HEAD"]), firstTarget);
     } finally {
       movedAfterGit.cleanup();
+    }
+  });
+
+  it("rejects an orphan special-dispatch closure before Git movement", async () => {
+    const fixture = createBaseAdvanceTransitionFixture("orphan-special-closure");
+    try {
+      fixture.advance();
+      const dispatchDir = join(fixture.runDir, "dispatch");
+      mkdirSync(dispatchDir);
+      writeJson(join(dispatchDir, `${"a".repeat(64)}.special.closed.json`), { orphan: true });
+      const manifest = readFileSync(join(fixture.runDir, "run.json"));
+
+      await assert.rejects(transitionRunBaseAdvance(fixture.runDir), (error) => error.code === "BASE_ADVANCE_RUN_INVALID");
+
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), manifest);
+      assert.equal(output(fixture.repo, ["rev-parse", `refs/heads/${fixture.runId}`]), fixture.base);
+      assert.equal(output(fixture.worktree, ["rev-parse", "HEAD"]), fixture.base);
+    } finally {
+      fixture.cleanup();
     }
   });
 
