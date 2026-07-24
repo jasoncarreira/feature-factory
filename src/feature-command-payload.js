@@ -175,7 +175,7 @@ function inspectRouteSchema(repo, runId, schemaVersion, options) {
 }
 
 export function safePayloadValue(value) {
-  return JSON.stringify(value)
+  return (JSON.stringify(value) ?? "null")
     .replaceAll("\u0085", "\\u0085")
     .replaceAll("\u2028", "\\u2028")
     .replaceAll("\u2029", "\\u2029");

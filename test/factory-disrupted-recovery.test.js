@@ -6,6 +6,7 @@ import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listRuns, recoverDisruptedRun, status, validateState } from "../src/factory.js";
+import { acquireLaunchClaim, recordDetachedProcessEvidence, releaseLaunchClaim } from "../src/process-evidence.js";
 
 describe("factory disrupted run recovery", () => {
   it("does not re-scaffold a missing run.json and returns a synthetic non-durable terminal result", async () => {
@@ -115,6 +116,65 @@ describe("factory disrupted run recovery", () => {
       for (const [key, path] of Object.entries(paths)) assert.equal(readFileSync(path, "utf8"), before[key], `${key} sidecar must be byte-identical`);
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), runBefore, "unsafe ownership must not mutate run state");
       assert.equal(existsSync(fixture.worktree), false, "unsafe ownership must not recover the worktree");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("accepts only the live detached shepherd's bound launch token during in-process preflight", async () => {
+    const fixture = createRecoveryFixture("self-owned-resume-run");
+    const token = "opaque-self-owned-launch-token";
+    const pid = 43210;
+    const inspectorFn = (observedPid) => ({ ok: true, inspector: "test-inspector", pid: observedPid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo });
+    try {
+      mkdirSync(join(fixture.runDir, "processes"), { recursive: true });
+      writeFileSync(join(fixture.runDir, "processes", "resume.log"), "", "utf8");
+      recordDetachedProcessEvidence(fixture.runDir, {
+        runId: fixture.runId,
+        executionId: "self-owned-execution",
+        launchToken: token,
+        pid,
+        cwd: fixture.repo,
+        logRef: "processes/resume.log",
+        inspectorFn,
+      });
+      const claim = acquireLaunchClaim(fixture.runDir, {
+        runId: fixture.runId,
+        executionId: "self-owned-execution",
+        launchKind: "resume-detached",
+        phase: "spawning",
+        pid: process.pid,
+        cwd: fixture.repo,
+        nonce: token,
+      }, { inspectorFn });
+      assert.equal(claim.acquired, true);
+
+      const rejected = await recoverDisruptedRun(fixture.runId, {
+        cwd: fixture.repo,
+        env: { OPENCODE_FACTORY_LAUNCH_CLAIM: "different-launch-token" },
+        inspectorFn,
+      });
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.ownership.reason_code, "matching-detached-shepherd-live");
+      assert.equal(existsSync(fixture.worktree), false);
+
+      const accepted = await recoverDisruptedRun(fixture.runId, {
+        cwd: fixture.repo,
+        env: { OPENCODE_FACTORY_LAUNCH_CLAIM: token },
+        inspectorFn,
+      });
+      assert.equal(accepted.ok, true);
+      assert.equal(accepted.status, "running");
+      assert.equal(existsSync(join(fixture.worktree, ".git")), true);
+
+      assert.equal(releaseLaunchClaim(fixture.runDir, token, { expectedPhase: "spawning", runId: fixture.runId, inspectorFn }), true);
+      const acceptedAfterRelease = await recoverDisruptedRun(fixture.runId, {
+        cwd: fixture.repo,
+        env: { OPENCODE_FACTORY_LAUNCH_CLAIM: token },
+        inspectorFn,
+      });
+      assert.equal(acceptedAfterRelease.ok, true);
+      assert.equal(acceptedAfterRelease.status, "running");
     } finally {
       cleanup(fixture.repo);
     }

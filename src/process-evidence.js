@@ -393,6 +393,7 @@ export function validateProcessEvidence(evidence, opts = {}) {
   if (!nonEmptyString(evidence.run_id)) errors.push("run_id must be a non-empty string");
   if (nonEmptyString(opts.runId) && evidence.run_id !== opts.runId) errors.push("run_id must match requested run");
   if (!nonEmptyString(evidence.execution_id)) errors.push("execution_id must be a non-empty string");
+  if (evidence.launch_token_hash !== undefined && !/^sha256:[a-f0-9]{64}$/u.test(evidence.launch_token_hash)) errors.push("launch_token_hash must be a SHA-256 digest");
   if (!positivePid(evidence.pid)) errors.push("pid must be a positive integer");
   if (!validTimestamp(evidence.started_at)) errors.push("started_at must be an ISO timestamp");
   if (!validTimestamp(evidence.updated_at)) errors.push("updated_at must be an ISO timestamp");
@@ -442,6 +443,7 @@ export function recordDetachedProcessEvidence(runDir, input = {}) {
     kind: PROCESS_EVIDENCE_KIND,
     run_id: input.runId,
     execution_id: input.executionId || randomUUID(),
+    ...(nonEmptyString(input.launchToken) ? { launch_token_hash: launchTokenHash(input.launchToken) } : {}),
     pid: input.pid,
     started_at: startedAt,
     updated_at: startedAt,
@@ -453,6 +455,16 @@ export function recordDetachedProcessEvidence(runDir, input = {}) {
   };
   writeProcessEvidence(runDir, evidence);
   return evidence;
+}
+
+export function matchesProcessLaunchToken(evidence, token) {
+  return nonEmptyString(token)
+    && /^sha256:[a-f0-9]{64}$/u.test(evidence?.launch_token_hash)
+    && evidence.launch_token_hash === launchTokenHash(token);
+}
+
+function launchTokenHash(token) {
+  return `sha256:${createHash("sha256").update(String(token), "utf8").digest("hex")}`;
 }
 
 export async function cancelProcessFromEvidence(runDir, opts = {}) {

@@ -3,12 +3,25 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { consumeSteering, persistFactoryRunResumeEnv, resumeFactory, startFactory, transitionGateDecisionAndHandoff, writeSteering } from "../src/factory.js";
+import { FACTORY_LAUNCH_CLAIM_ENV, consumeSteering, factoryLaunchEnv, persistFactoryRunResumeEnv, resumeFactory, startFactory, transitionGateDecisionAndHandoff, writeSteering } from "../src/factory.js";
 import { acquireLaunchClaim, recordDetachedProcessEvidence, transitionLaunchClaimPhase, writeProcessEvidence } from "../src/process-evidence.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { transitionGateDecision, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 
 describe("factory resume", () => {
+  it("strips inherited launch tokens before a checked launch injects its own", () => {
+    const previous = process.env[FACTORY_LAUNCH_CLAIM_ENV];
+    try {
+      process.env[FACTORY_LAUNCH_CLAIM_ENV] = "ambient-cross-run-token";
+      const env = factoryLaunchEnv({}, "fresh-run");
+      assert.equal(Object.hasOwn(env, FACTORY_LAUNCH_CLAIM_ENV), false);
+      assert.equal(env.FEATURE_FACTORY_RUN_ID, "fresh-run");
+    } finally {
+      if (previous === undefined) delete process.env[FACTORY_LAUNCH_CLAIM_ENV];
+      else process.env[FACTORY_LAUNCH_CLAIM_ENV] = previous;
+    }
+  });
+
   const behavioralCases = [
     { code: "matching-detached-shepherd-live", setup: (f) => writeRunningEvidence(f, "matching-live"), options: (f) => ({ inspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: f.repo }) }) },
     { code: "run-mode-not-interactive", setup: (f) => mutateRun(f, (run) => { run.mode = "headless"; delete run.gates.story.handoff_receipt; }) },
@@ -174,9 +187,10 @@ describe("factory resume", () => {
           },
           detachedLaunchFn: async (_repo, _args, launchOpts) => {
             spawnCount += 1;
+            assert.equal(launchOpts.env[FACTORY_LAUNCH_CLAIM_ENV], claim.nonce);
             mkdirSync(join(fixture.runDir, "processes"), { recursive: true });
             writeFileSync(join(fixture.runDir, "processes", "handoff.log"), "ready\n", "utf8");
-            recordDetachedProcessEvidence(fixture.runDir, { runId: fixture.runId, executionId: launchOpts.executionId, pid: 9876, cwd: fixture.repo, logRef: "processes/handoff.log", inspectorFn });
+            recordDetachedProcessEvidence(fixture.runDir, { runId: fixture.runId, executionId: launchOpts.executionId, launchToken: launchOpts.env[FACTORY_LAUNCH_CLAIM_ENV], pid: 9876, cwd: fixture.repo, logRef: "processes/handoff.log", inspectorFn });
             return { status: "started", pid: 9876 };
           },
         });

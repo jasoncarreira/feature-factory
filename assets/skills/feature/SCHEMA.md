@@ -306,6 +306,7 @@ Validated run-owned detached launches write run-scoped process evidence to `$RUN
   "kind": "opencode-process",
   "run_id": "app-123",
   "execution_id": "uuid",
+  "launch_token_hash": "sha256:...",
   "pid": 4242,
   "started_at": "2026-07-06T12:00:00Z",
   "updated_at": "2026-07-06T12:00:00Z",
@@ -321,7 +322,7 @@ Validated run-owned detached launches write run-scoped process evidence to `$RUN
 }
 ```
 
-`state` is one of `running`, `cancelled`, `failed-closed`, or `exited`. `log_ref` must stay under `processes/`; `cwd` must be absolute; `identity` must include `inspector`, a verified `start_marker`, and `command_name`; and `run_id` must match the requested run for cancellation.
+`state` is one of `running`, `cancelled`, `failed-closed`, or `exited`. `log_ref` must stay under `processes/`; `cwd` must be absolute; `identity` must include `inspector`, a verified `start_marker`, and `command_name`; and `run_id` must match the requested run for cancellation. New checked resume launches may include `launch_token_hash`, a SHA-256 binding of the transient launch nonce. It contains no raw nonce and permits only that live identity-matching detached shepherd to recognize its own already-completed resume preflight; missing, legacy, malformed, stale, or mismatched bindings remain fail-closed.
 
 `feature-factory factory cancel <run-id> --json` reads this evidence and is SIGTERM-only. It sends exactly one targeted `SIGTERM` to the recorded PID only when `process.json` exists, validates, is `state:"running"`, and live process inspection matches PID, start marker, command name, and cwd. Success writes `state:"cancelled"` with `cancel.signal:"SIGTERM"` and returns `ok:true`, `status:"cancelled"`, `process_ref:"process.json"`, `signaled:true`, and `updated:true`. Missing, invalid, stale, mismatched, non-running, or signal-failed evidence returns `ok:false`, `status:"failed-closed"`, `signaled:false`, `updated:false`, and a reason; it must not send a broad process kill, process-group signal, `pkill`, or `killall`. This command updates only `$RUN/process.json`; it is not a semantic `run.json` transition.
 
