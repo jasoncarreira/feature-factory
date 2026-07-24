@@ -27,6 +27,8 @@ export function createBaseAdvanceTransitionFixture(name) {
   git(repo, ["remote", "set-url", "origin", canonicalUrl]);
   git(repo, ["config", `url.file://${remote}.insteadOf`, canonicalUrl]);
   git(repo, ["config", "protocol.file.allow", "always"]);
+  git(repo, ["config", "user.name", "Test"]);
+  git(repo, ["config", "user.email", "test@example.com"]);
   const base = output(repo, ["rev-parse", "HEAD"]);
   mkdirSync(join(repo, ".opencode", "worktrees"), { recursive: true });
   git(repo, ["worktree", "add", "-b", runId, worktree, base]);
