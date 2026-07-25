@@ -4,7 +4,7 @@ import { existsSync, lstatSync, mkdirSync, renameSync, rmSync, symlinkSync, unli
 import { join } from "node:path";
 import test from "node:test";
 import { discoverCleanupSweepCandidates } from "../src/cleanup-sweep-eligibility.js";
-import { createCleanupSweepFixture, snapshotTree, writeJson } from "./helpers/cleanup-sweep-fixture.js";
+import { createCleanupSweepFixture as createBaseCleanupSweepFixture, snapshotTree, writeJson } from "./helpers/cleanup-sweep-fixture.js";
 
 const NOW = Date.parse("2026-07-12T12:00:00.000Z");
 
@@ -286,6 +286,43 @@ test("R24-R28 require exact closed PR metadata and a freshly fetched exact base"
       assert.equal(candidate.reason_codes.includes(reason), true);
     } finally { fixture.cleanup(); }
   });
+});
+
+test("cleanup propagates the exact validated candidate account to bounded PR lookup", () => {
+  const fixture = createCleanupSweepFixture("cleanup-account-propagation");
+  let invocation;
+  try {
+    fixture.addRun("run", { github_account: "Exact-Account" });
+    const candidate = inspect(fixture, {
+      githubRunner(cwd, args, options) {
+        invocation = { cwd, args, options };
+        return fixture.githubRunner(cwd, args, options);
+      },
+      githubTimeout: 1234,
+      githubMaxBuffer: 5678,
+    }).candidates[0];
+    assert.equal(candidate.classification, "eligible");
+    assert.deepEqual(invocation, {
+      cwd: fixture.repo,
+      args: ["api", "--method", "GET", "repos/example/project/pulls/7", "--header", "Accept:application/vnd.github+json"],
+      options: { account: "Exact-Account", timeout: 1234, maxBuffer: 5678 },
+    });
+  } finally { fixture.cleanup(); }
+});
+
+test("cleanup denies missing and invalid candidate accounts without invoking GitHub", () => {
+  for (const [label, githubAccount] of [["missing", undefined], ["invalid", "invalid account"]]) {
+    const fixture = createCleanupSweepFixture(`cleanup-account-${label}`);
+    let calls = 0;
+    try {
+      fixture.addRun("run", { github_account: githubAccount });
+      const candidate = inspect(fixture, { githubRunner: () => { calls += 1; } }).candidates[0];
+      assert.equal(candidate.classification, "skipped", label);
+      assert.deepEqual(candidate.reason_codes, ["SKIPPED_PR_LOOKUP_UNCERTAIN"], label);
+      assert.equal(candidate.evidence.pr.state, "inaccessible", label);
+      assert.equal(calls, 0, label);
+    } finally { fixture.cleanup(); }
+  }
 });
 
 test("R28 resolves the current canonical base ref and fetches its advertised immutable SHA", () => {
@@ -617,6 +654,12 @@ function inspect(fixture, options = {}) {
     gitRunner: options.gitRunner ?? fixture.gitRunner,
     ...options,
   });
+}
+function createCleanupSweepFixture(name) {
+  const fixture = createBaseCleanupSweepFixture(name);
+  const addRun = fixture.addRun;
+  fixture.addRun = (runId, overrides = {}) => addRun(runId, { github_account: "cleanup-account", ...overrides });
+  return fixture;
 }
 function candidatesByName(result) { return Object.fromEntries(result.candidates.map((candidate) => [candidate.entry_name, candidate])); }
 function heartbeat(runId, lastTick) { return { schema_version: 1, run_id: runId, phase: "builder-wave", pid: 123, interval_ms: 30_000, last_tick_at: new Date(lastTick).toISOString() }; }

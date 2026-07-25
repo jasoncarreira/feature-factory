@@ -16,7 +16,7 @@ export function git(cwd, args, options = {}) {
   const maxBuffer = clampPositiveInteger(options.maxBuffer, DEFAULT_GIT_MAX_BUFFER, MAX_GIT_MAX_BUFFER);
   const spawn = typeof options.spawnSync === "function" ? options.spawnSync : defaultSpawnSync;
   const env = {
-    ...process.env,
+    ...(options.replaceEnv === true ? {} : process.env),
     ...options.env,
     GIT_TERMINAL_PROMPT: "0",
     GIT_PAGER: "cat",

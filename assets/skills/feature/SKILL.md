@@ -681,21 +681,55 @@ For autonomous Gate 3 approval, apply the Live-Run Steering Drain Protocol after
 
 After Gate 3 approval only:
 
-1. If `run.json.github_account` is non-empty, run `gh auth switch -h github.com -u "$GITHUB_ACCOUNT"` before any `gh` or authenticated GitHub remote command.
-2. Verify the selected account can see the repository before pushing.
-3. Push the feature branch from `$FEAT_WT`.
+1. Require `run.json.github_account` to be a valid exact GitHub login before any account-bound effect. Derive only `join(homedir(), ".config", "opencode-feature-factory", "gh", run.github_account)` and use that already prepared directory as `GH_CONFIG_DIR`; there is no XDG, APPDATA, platform-root, parent-directory, case-normalization, provisioning, or global configuration fallback. For each command below, create a fresh child environment, remove every case-insensitive spelling of `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN`, and set `GH_CONFIG_DIR`, `GH_HOST=github.com`, `GH_PROMPT_DISABLED=1`, `GH_PAGER=cat`, and `PAGER=cat`. Never mutate the parent environment or `process.env`. Missing, invalid, absent, or unusable account configuration stops before the effect. Immediately before the first effect, derive the directory from the durable run and reject alternate-case token aliases before relying on the POSIX `env -u` commands:
+   ```sh
+   CONFIG_DIR="$(
+     node -e '
+       const { readFileSync } = require("node:fs");
+       const { homedir } = require("node:os");
+       const { join } = require("node:path");
+       const run = JSON.parse(readFileSync(process.argv[1], "utf8"));
+       const account = run.github_account;
+       if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(account)) process.exit(2);
+       const tokens = new Set(["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]);
+       if (Object.keys(process.env).some((key) => tokens.has(key.toUpperCase()) && key !== key.toUpperCase())) process.exit(3);
+       process.stdout.write(join(homedir(), ".config", "opencode-feature-factory", "gh", account));
+     ' "$RUN/run.json"
+   )" || exit 1
+   test -n "$CONFIG_DIR" || exit 1
+   ```
+2. Verify account visibility of the canonical repository before pushing, using the scoped child only:
+   ```sh
+   env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+     GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat PAGER=cat \
+     gh repo view "$REPOSITORY"
+   ```
+3. Push the feature branch from `$FEAT_WT` with the same scoped child environment so an HTTPS Git credential helper cannot select ambient credentials:
+   ```sh
+   env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+     GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat PAGER=cat \
+     git push origin "$FEATURE_BRANCH"
+   ```
 4. Build PR metadata from repo conventions and changed paths.
 5. Write PR body to `$RUN/artifacts/pr-body.md`.
 6. Use the effective PR mode persisted in `run.json.pr_mode`. For new manifests, determine and persist it before the first write: `driver.pr_mode` (`draft` or `ready`) overrides the plugin configured PR mode for this run; legacy `driver.ready: true` means `ready`; otherwise use the plugin configured PR mode injected into the `/feature` command. In `ready` mode create a ready-for-review PR. In `draft` mode create a draft PR with the repository's CLI conventions, preferably `gh pr create --draft --body-file`.
-7. After final push, apply the Live-Run Steering Drain Protocol, including acknowledgement, then establish `feature-factory factory pr-fence <run-id> --json`. Read the durable `operation_id`, append its exact standalone marker to the PR body, and only then call `gh pr create`. Treat fenced PR creation plus immediate reconciliation as one logical operation; do not drain again after the external PR exists.
+7. After final push, apply the Live-Run Steering Drain Protocol, including acknowledgement, then establish `feature-factory factory pr-fence <run-id> --json`. Read the durable `operation_id`, append its exact standalone marker to the PR body, and only then create the PR through the scoped child environment (add `--draft` only when the persisted mode requires it):
+   ```sh
+   env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+     GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat PAGER=cat \
+     gh pr create --body-file "$RUN/artifacts/pr-body.md"
+   ```
+   Treat fenced PR creation plus immediate reconciliation as one logical operation; do not drain again after the external PR exists.
 8. Immediately after the external create attempt, call the PR-created reconciliation transition. Do not directly edit or persist `run.json.pr_url` yourself:
    ```sh
-   gh pr view <url>
-    feature-factory factory pr-created <run-id> --fence-token <fence.token> --json
+   env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+     GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat PAGER=cat \
+     gh pr view <url>
+   feature-factory factory pr-created <run-id> --fence-token <fence.token> --json
    ```
-    The helper revalidates readiness and fenced Git identity, then performs the account-switched, shell-free, maximum-10-page exact head/base `state=all` query. It strictly derives the universal operation/node/head/base tuple from GitHub before any completion or post-PR handoff; caller proof fields and booleans are not accepted.
+    The helper revalidates readiness and fenced Git identity, then performs the account-scoped, token-stripped, shell-free, maximum-10-page exact head/base `state=all` query. It strictly derives the universal operation/node/head/base tuple from GitHub before any completion or post-PR handoff; caller proof fields and booleans are not accepted.
 
-Never merge the PR. Never force-push unless the user explicitly approves.
+Unset `CONFIG_DIR` after reconciliation. Never merge the PR. Never force-push unless the user explicitly approves.
 
 ## Resuming
 

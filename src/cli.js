@@ -209,7 +209,7 @@ async function factory(args, dependencies = {}) {
   if (sub === "amendment") return amendment(rest, dependencies);
   if (sub === "cost-report") return costReport(rest);
   if (sub === "cleanup" && rest.some((argument) => argument === "--all" || argument === "--digest" || argument.startsWith("--all=") || argument.startsWith("--digest="))) return cleanupSweep(rest);
-  const opts = { ...options(rest), ...(dependencies.factoryOptions || {}) };
+  const opts = withoutGithubSwitchLockOptions({ ...options(rest), ...(dependencies.factoryOptions || {}) });
   const positional = positionals(rest);
   if (sub === "start") {
     if (opts.dryRun) throw new Error("factory start --dry-run is unsupported");
@@ -304,6 +304,12 @@ async function factory(args, dependencies = {}) {
   ]).trim());
   usage(console.error);
   process.exitCode = 1;
+}
+
+function withoutGithubSwitchLockOptions(options) {
+  const result = { ...options };
+  delete result.githubLockOptions;
+  return result;
 }
 
 async function baseAdvance(args) {

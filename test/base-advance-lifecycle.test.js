@@ -144,16 +144,13 @@ describe("active-run base advancement lifecycle compatibility", () => {
       assert.equal(pr.operationMarker, `<!-- opencode-feature-factory:pr-operation=${pr.fence.operation_id} -->`);
       assert.equal(pr.observedPull.body, `${pr.operationMarker}\n`);
       assert.deepEqual(pr.observationCalls, [
-        ["auth", "switch", "-h", "github.com", "-u", "octocat"],
         ["api", "--method", "GET", "--include", `repos/${pr.fence.repository}/pulls?state=all&head=example%3A${fixture.runId}&base=main&per_page=100`, "--header", "Accept:application/vnd.github+json"],
-        ["auth", "switch", "-h", "github.com", "-u", "octocat"],
         ["api", "--method", "GET", "--include", `repos/${pr.fence.repository}/pulls?state=all&head=example%3A${fixture.runId}&base=main&per_page=100`, "--header", "Accept:application/vnd.github+json"],
       ]);
 
       const reviewer = await requestConfiguredReviewer(fixture);
       assert.equal(reviewer.result.action, "reviewer-requested");
       assert.deepEqual(reviewer.calls, [
-        ["auth", "switch", "-h", "github.com", "-u", "octocat"],
         ["pr", "edit", "100", "--repo", pr.fence.repository, "--add-reviewer", LIFECYCLE_REVIEWER],
       ]);
       const finalRun = fixture.readRun();

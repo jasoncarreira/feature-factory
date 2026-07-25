@@ -1,8 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
@@ -22,6 +22,19 @@ describe("cli pr-created", () => {
         pr_url: PR_URL, pr_number: 99, pr_node_id: "PR_cli_operation", repository: "jasoncarreira/opencode-feature-factory",
         operation_id: result.fence.operation_id, head_ref: "feature-branch", head_sha: fixture.head, base_ref: "main", base_sha: fixture.base, draft: false,
       });
+      const observations = readObservations(fixture);
+      assert.equal(observations.length, 2);
+      for (const observation of observations) {
+        assert.equal(observation.args[0], "api");
+        assert.equal(observation.gh_config_dir, join(homedir(), ".config", "opencode-feature-factory", "gh", "jasoncarreira"));
+        assert.equal(observation.gh_host, "github.com");
+        assert.deepEqual(observation.auth_environment, {
+          GH_TOKEN: null,
+          GITHUB_TOKEN: null,
+          GH_ENTERPRISE_TOKEN: null,
+          GITHUB_ENTERPRISE_TOKEN: null,
+        });
+      }
     } finally { cleanup(fixture.repo); }
   });
 
@@ -45,6 +58,24 @@ describe("cli pr-created", () => {
         const run = readJson(fixture.runPath);
         assert.equal(run.steering.pr_fence.token, fence.token);
         assert.equal(run.terminal_result?.reason ?? null, reason);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("denies missing and invalid persisted accounts before spawning the fenced observer", () => {
+    for (const [label, account] of [["missing-account", null], ["invalid-account", "invalid!"]]) {
+      const fixture = createFixture(label);
+      try {
+        const fence = establish(fixture);
+        const run = readJson(fixture.runPath);
+        if (account === null) delete run.github_account;
+        else run.github_account = account;
+        writeJson(fixture.runPath, run);
+
+        const proc = record(fixture, fence.token);
+        assert.notEqual(proc.status, 0, label);
+        assert.equal(readJson(fixture.runPath).steering.pr_fence.token, fence.token);
+        assert.deepEqual(readObservations(fixture), []);
       } finally { cleanup(fixture.repo); }
     }
   });
@@ -128,8 +159,10 @@ function createFixture(runId, disposition = "open") {
 function writeFakeGh(repo, disposition) {
   const bin = join(repo, ".opencode", "fake-bin"); mkdirSync(bin, { recursive: true }); const gh = join(bin, "gh");
   writeFileSync(gh, `#!/usr/bin/env node
-const fs=require("node:fs"),path=require("node:path"); const args=process.argv.slice(2); if(args[0]==="auth")process.exit(0); if(args[0]!=="api")process.exit(2);
-const root=path.join(process.cwd(),".opencode","factory"); const name=fs.readdirSync(root).find(n=>fs.existsSync(path.join(root,n,"run.json"))); const run=JSON.parse(fs.readFileSync(path.join(root,name,"run.json"),"utf8")); const f=run.steering.pr_fence;
+const fs=require("node:fs"),path=require("node:path"); const args=process.argv.slice(2);
+const root=path.join(process.cwd(),".opencode","factory"); const name=fs.readdirSync(root).find(n=>fs.existsSync(path.join(root,n,"run.json"))); const runDir=path.join(root,name); const run=JSON.parse(fs.readFileSync(path.join(runDir,"run.json"),"utf8")); const f=run.steering.pr_fence;
+fs.appendFileSync(path.join(runDir,"gh-observations.jsonl"),JSON.stringify({args,gh_config_dir:process.env.GH_CONFIG_DIR??null,gh_host:process.env.GH_HOST??null,auth_environment:{GH_TOKEN:process.env.GH_TOKEN??null,GITHUB_TOKEN:process.env.GITHUB_TOKEN??null,GH_ENTERPRISE_TOKEN:process.env.GH_ENTERPRISE_TOKEN??null,GITHUB_ENTERPRISE_TOKEN:process.env.GITHUB_ENTERPRISE_TOKEN??null}})+"\\n");
+if(args[0]!=="api")process.exit(2);
 if(${JSON.stringify(disposition)}==="unknown"){process.stdout.write("malformed");process.exit(0);} const p={html_url:${JSON.stringify(PR_URL)},number:99,node_id:"PR_cli_operation",draft:f.draft,body:"<!-- opencode-feature-factory:pr-operation="+f.operation_id+" -->",state:${JSON.stringify(disposition)}==="closed"?"closed":"open",merged_at:null,head:{ref:f.head_ref,sha:f.head_sha,repo:{full_name:f.repository}},base:{ref:f.base_ref,sha:f.base_sha,repo:{full_name:f.repository}}}; const body=${JSON.stringify(disposition)}==="absent"?[]:${JSON.stringify(disposition)}==="ambiguous"?[p,{...p,html_url:"https://github.com/jasoncarreira/opencode-feature-factory/pull/100",number:100,node_id:"PR_other"}]:[p]; process.stdout.write("HTTP/2 200 OK\\r\\ncontent-type: application/json\\r\\n\\r\\n"+JSON.stringify(body));
 `); chmodSync(gh, 0o755);
 }
@@ -137,12 +170,13 @@ if(${JSON.stringify(disposition)}==="unknown"){process.stdout.write("malformed")
 function establish(fixture) { const proc = runCli(fixture.repo, ["factory", "pr-fence", fixture.runId, "--json"]); assert.equal(proc.status, 0, proc.stderr); return readJson(fixture.runPath).steering.pr_fence; }
 function record(fixture, token) { return runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--fence-token", token, "--json"]); }
 function establishAndRecord(fixture) { const fence = establish(fixture); return { fence, proc: record(fixture, fence.token) }; }
-function runCli(repo, args) { return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: { ...process.env, PATH: `${join(repo, ".opencode", "fake-bin")}:${process.env.PATH}` } }); }
+function runCli(repo, args) { return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: { ...process.env, PATH: `${join(repo, ".opencode", "fake-bin")}:${process.env.PATH}`, GH_CONFIG_DIR: "/ambient/global-gh", GH_TOKEN: "ambient-gh-token", GITHUB_TOKEN: "ambient-github-token", GH_ENTERPRISE_TOKEN: "ambient-gh-enterprise-token", GITHUB_ENTERPRISE_TOKEN: "ambient-github-enterprise-token" } }); }
 function initGit(repo) { runGit(repo, ["init", "-b", "main"]); runGit(repo, ["config", "user.email", "test@example.com"]); runGit(repo, ["config", "user.name", "Test"]); writeFileSync(join(repo, ".gitignore"), ".opencode/\n"); writeFileSync(join(repo, "README.md"), "test\n"); runGit(repo, ["add", ".gitignore", "README.md"]); runGit(repo, ["commit", "-m", "init"]); }
 function runGit(repo, args) { const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }); assert.equal(proc.status, 0, proc.stderr || proc.stdout); }
 function gitOutput(repo, args) { const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }); assert.equal(proc.status, 0, proc.stderr || proc.stdout); return proc.stdout.trim(); }
 function hashFile(file) { return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`; }
 function readJson(file) { return JSON.parse(readFileSync(file, "utf8")); }
 function writeJson(file, value) { writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`); }
+function readObservations(fixture) { const path = join(fixture.runDir, "gh-observations.jsonl"); return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : []; }
 function pick(value, keys) { return Object.fromEntries(keys.map((key) => [key, value[key]])); }
 function cleanup(repo) { rmSync(repo, { recursive: true, force: true }); }

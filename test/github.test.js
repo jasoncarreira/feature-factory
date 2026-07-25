@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEFAULT_GITHUB_MAX_BUFFER,
@@ -51,7 +53,17 @@ function run(overrides = {}) {
 
 test("github uses a bounded noninteractive shell-free injectable command", () => {
   let invocation;
+  const parentEnvironment = {
+    GH_CONFIG_DIR: "/operator/default",
+    GH_TOKEN: "ambient-gh-token",
+    GITHUB_TOKEN: "ambient-github-token",
+    GH_ENTERPRISE_TOKEN: "ambient-gh-enterprise-token",
+    GITHUB_ENTERPRISE_TOKEN: "ambient-github-enterprise-token",
+    SENTINEL: "preserved",
+  };
   const result = github(cwd, ["api", "user"], {
+    account: "Exact-Account",
+    env: parentEnvironment,
     timeout: MAX_GITHUB_TIMEOUT_MS + 1,
     maxBuffer: MAX_GITHUB_MAX_BUFFER + 1,
     spawnSync(file, args, options) {
@@ -65,9 +77,23 @@ test("github uses a bounded noninteractive shell-free injectable command", () =>
   assert.equal(invocation.options.shell, false);
   assert.equal(invocation.options.timeout, MAX_GITHUB_TIMEOUT_MS);
   assert.equal(invocation.options.maxBuffer, MAX_GITHUB_MAX_BUFFER);
+  assert.equal(invocation.options.env.GH_CONFIG_DIR, join(homedir(), ".config", "opencode-feature-factory", "gh", "Exact-Account"));
+  assert.equal(invocation.options.env.GH_HOST, "github.com");
   assert.equal(invocation.options.env.GH_PROMPT_DISABLED, "1");
   assert.equal(invocation.options.env.GH_PAGER, "cat");
   assert.equal(invocation.options.env.PAGER, "cat");
+  assert.equal(invocation.options.env.SENTINEL, "preserved");
+  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]) {
+    assert.equal(Object.hasOwn(invocation.options.env, key), false, key);
+  }
+  assert.deepEqual(parentEnvironment, {
+    GH_CONFIG_DIR: "/operator/default",
+    GH_TOKEN: "ambient-gh-token",
+    GITHUB_TOKEN: "ambient-github-token",
+    GH_ENTERPRISE_TOKEN: "ambient-gh-enterprise-token",
+    GITHUB_ENTERPRISE_TOKEN: "ambient-github-enterprise-token",
+    SENTINEL: "preserved",
+  });
   assert.deepEqual(result, {
     ok: true,
     status: 0,
@@ -88,6 +114,7 @@ test("github uses a bounded noninteractive shell-free injectable command", () =>
 
 test("github applies defaults and converts spawn failures into bounded results", () => {
   const result = github(cwd, ["api", "user"], {
+    account: "cleanup-account",
     timeout: 0,
     maxBuffer: Number.NaN,
     spawnSync() {
@@ -106,9 +133,43 @@ test("github applies defaults and converts spawn failures into bounded results",
 
 test("github rejects malformed arguments before spawning", () => {
   let called = false;
-  assert.throws(() => github(cwd, ["api", ""], { spawnSync() { called = true; } }), /non-empty string/u);
-  assert.throws(() => github(cwd, ["api\0user"], { spawnSync() { called = true; } }), /NUL bytes/u);
+  assert.throws(() => github(cwd, ["api", ""], { account: "cleanup-account", spawnSync() { called = true; } }), /non-empty string/u);
+  assert.throws(() => github(cwd, ["api\0user"], { account: "cleanup-account", spawnSync() { called = true; } }), /NUL bytes/u);
   assert.equal(called, false);
+});
+
+test("github rejects missing and invalid selected accounts before spawning", () => {
+  let calls = 0;
+  const spawnSync = () => { calls += 1; };
+  assert.throws(() => github(cwd, ["api", "user"], { spawnSync }), /invalid GitHub login/u);
+  assert.throws(() => github(cwd, ["api", "user"], { account: "invalid account", spawnSync }), /invalid GitHub login/u);
+  assert.equal(calls, 0);
+});
+
+test("github keeps classifiable command failure bounded inside the selected account environment", () => {
+  let invocation;
+  const result = github(cwd, ["api", "user"], {
+    account: "cleanup-account",
+    timeout: 4321,
+    maxBuffer: 8765,
+    spawnSync(file, args, options) {
+      invocation = { file, args, options };
+      return { status: 4, stdout: "", stderr: "authentication failed", signal: null };
+    },
+  });
+  assert.equal(invocation.options.env.GH_CONFIG_DIR, join(homedir(), ".config", "opencode-feature-factory", "gh", "cleanup-account"));
+  assert.equal(invocation.options.shell, false);
+  assert.equal(invocation.options.timeout, 4321);
+  assert.equal(invocation.options.maxBuffer, 8765);
+  assert.deepEqual(result, {
+    ok: false,
+    status: 4,
+    stdout: "",
+    stderr: "authentication failed",
+    command: { file: "gh", cwd, args: ["api", "user"], shell: false, timeout: 4321, maxBuffer: 8765 },
+    error: null,
+    signal: null,
+  });
 });
 
 test("builds the exact strict GET pull-request lookup command", () => {
@@ -170,18 +231,19 @@ test("R25 returns lookup uncertainty for nonzero, malformed, or mismatched injec
     { ok: true, status: 0, stdout: JSON.stringify(response({ number: 43, html_url: "https://github.com/owner/repo/pull/43" })), command: { file: "gh" } },
   ];
   for (const output of outputs) {
-    const result = lookupPullRequest(cwd, run(), { githubRunner: () => output });
+    const result = lookupPullRequest(cwd, run(), { account: "cleanup-account", githubRunner: () => output });
     assert.equal(result.ok, false);
     assert.equal(result.reason, "lookup-uncertain");
     assert.equal(result.pullRequest, null);
   }
-  const thrown = lookupPullRequest(cwd, run(), { githubRunner: () => { throw new Error("timeout"); } });
+  const thrown = lookupPullRequest(cwd, run(), { account: "cleanup-account", githubRunner: () => { throw new Error("timeout"); } });
   assert.deepEqual(thrown, { ok: false, reason: "lookup-uncertain", pullRequest: null, command: null });
 });
 
 test("does not invoke GitHub when canonical recorded metadata is inconsistent", () => {
   let calls = 0;
   const result = lookupPullRequest(cwd, run({ terminal_result: { ...run().terminal_result, pr_number: 7 } }), {
+    account: "cleanup-account",
     githubRunner() {
       calls += 1;
     },
@@ -193,6 +255,7 @@ test("does not invoke GitHub when canonical recorded metadata is inconsistent", 
 test("R27 performs the exact injected lookup and returns only normalized response fields", () => {
   let invocation;
   const result = lookupPullRequest(cwd, run(), {
+    account: "Exact-Account",
     timeout: 123,
     maxBuffer: 456,
     githubRunner(receivedCwd, args, options) {
@@ -204,12 +267,26 @@ test("R27 performs the exact injected lookup and returns only normalized respons
   assert.deepEqual(invocation, {
     receivedCwd: cwd,
     args: pullRequestLookupArgs("owner/repo", 42),
-    options: { timeout: 123, maxBuffer: 456 },
+    options: { account: "Exact-Account", timeout: 123, maxBuffer: 456 },
   });
   assert.equal(result.ok, true);
   assert.equal(result.reason, null);
   assert.deepEqual(result.pullRequest, normalizePullRequestResponse(response()));
   assert.deepEqual(Object.keys(result.pullRequest), ["url", "number", "state", "repository", "base_ref", "base_sha"]);
+});
+
+test("lookupPullRequest denies missing and invalid selected accounts before invoking its runner", () => {
+  let calls = 0;
+  const githubRunner = () => { calls += 1; };
+  for (const account of [undefined, "invalid account"]) {
+    assert.deepEqual(lookupPullRequest(cwd, run(), { account, githubRunner }), {
+      ok: false,
+      reason: "lookup-uncertain",
+      pullRequest: null,
+      command: null,
+    });
+  }
+  assert.equal(calls, 0);
 });
 
 const OPERATION_ID = `ffpr-v1-${"1".repeat(64)}`;
