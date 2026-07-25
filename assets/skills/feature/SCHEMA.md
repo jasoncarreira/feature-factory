@@ -1303,6 +1303,14 @@ Acquisition verifies the claimant's process identity before atomically creating 
 
 A missing claim means ownership is absent. A valid claim with a verified live owner remains authoritative and blocks competing launch. Ownerless, malformed, inaccessible, symlinked, stale, mismatched, dead-owner, or indeterminate-owner evidence is never permission to reclaim or relaunch: preserve it and fail closed with manual ownership reconciliation. Resume may reconcile only an exact valid claim/process pairing defined by the launch phase; ambiguous claims remain on disk. Never infer ownership from PID liveness alone, remove a claim by pathname without exact-token and identity checks, or silently discard a claim while recovery is uncertain.
 
+## GitHub Account-Scoped Child Environment
+
+`run.json.github_account` preserves the exact validated GitHub login spelling. Every account-bound GitHub CLI or authenticated Git child derives `GH_CONFIG_DIR` only as `join(homedir(), ".config", "opencode-feature-factory", "gh", run.github_account)`. There is no XDG, APPDATA, platform-root, inherited-parent-directory, case-normalization, provisioning, or global configuration fallback. The prepared directory remains trusted local operator state and is not copied into the run.
+
+For every account-bound spawn, copy the parent environment, delete `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN`, then set `GH_CONFIG_DIR`, `GH_HOST: "github.com"`, `GH_PROMPT_DISABLED: "1"`, `GH_PAGER: "cat"`, and `PAGER: "cat"` only on that child. Never mutate the parent environment or `process.env`, and never print, persist, return, or attach the child environment to production results. A missing or invalid account denies before spawn. An absent or unusable prepared directory follows the existing classifiable failure/reconciliation path without automatic login, directory creation, credential copying, or global fallback.
+
+This is an execution-environment contract only. It adds no `run.json`, payload, CLI, plugin, evidence, review, or terminal field. Historical terminal identifiers remain readable; new execution does not produce account-selection records.
+
 ## PR-Created Transition
 
 The normal CLI surface is:

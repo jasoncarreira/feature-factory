@@ -683,6 +683,43 @@ Human diagnostics apply sensitive-value projection and terminal-safe encoding, s
 
 Human and JSON execution reports distinguish deleted, protected, skipped, inspection-failed, and attempted-cleanup-failed outcomes. Preview, completed execution, refusal, attempted cleanup failure, and report-level failure each emit one complete selected report on stdout with empty stderr; grammar rejection is the only sweep outcome written to stderr instead. Ordinary protected and fail-closed skipped outcomes do not make execution fail. Any attempted-cleanup failure makes the final command exit nonzero after independent candidates finish. Report-level failures expose no usable digest or confirmation but preserve completed candidate outcomes when discovery or mutation had already begun. Runs in `blocked`, `partial`, or `needs-human` are protected recoverable work and are never automatically deleted: inspect their report reasons, recover or preserve any needed artifacts manually, then use the existing single-run cleanup command only when an operator intentionally decides how to handle that work.
 
+### Prepare isolated GitHub CLI account directories
+
+Before an account-bound factory run, prepare its GitHub CLI directory once. `ACCOUNT` must use the exact spelling persisted in `run.json.github_account`; that spelling selects `join(homedir(), ".config", "opencode-feature-factory", "gh", ACCOUNT)` and is case-sensitive. This is the sole supported preparation procedure:
+
+```sh
+ACCOUNT='your-exact-github-login'
+CONFIG_DIR="$(
+  node -e '
+    const { homedir } = require("node:os");
+    const { join } = require("node:path");
+    const account = process.argv[1];
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(account)) process.exit(2);
+    process.stdout.write(join(homedir(), ".config", "opencode-feature-factory", "gh", account));
+  ' "$ACCOUNT"
+)" || exit 1
+
+mkdir -p "$CONFIG_DIR"
+
+env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+  GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com \
+  gh auth login --hostname github.com --git-protocol https --web
+
+ACTUAL="$(
+  env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+    GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat PAGER=cat \
+    gh api user --jq .login
+)" || exit 1
+
+test "$ACTUAL" = "$ACCOUNT" || exit 1
+printf 'verified isolated GitHub CLI configuration for %s\n' "$ACCOUNT"
+unset ACTUAL CONFIG_DIR ACCOUNT
+```
+
+The browser login and exact comparison verify the isolated directory without copying or printing a token. Repeat once per account. Do not enable shell tracing (`set -x`), use `--with-token`, engage in copying or pasting tokens, or permit redirecting authentication-detail output while preparing or verifying the directory.
+
+Factory execution never provisions these directories, logs in, copies credentials, or falls back to global configuration. Each account-bound child copies the parent environment, removes `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN`, and sets the derived `GH_CONFIG_DIR` plus `GH_HOST=github.com`, `GH_PROMPT_DISABLED=1`, `GH_PAGER=cat`, and `PAGER=cat`. It does not mutate the parent/operator environment or `process.env`. Missing, invalid, absent, or unusable prepared account state fails through the operation's existing classified/reconciliation path. There is no XDG, APPDATA, platform-root, inherited `GH_CONFIG_DIR`, or case-normalization fallback.
+
 ### Environment snapshots and PR recording
 
 The factory records diagnostic environment snapshots explicitly:
@@ -698,8 +735,12 @@ After the final steering drain/checkpoint, Gate 3 approval, and final push, esta
 
 ```sh
 feature-factory factory pr-fence <run-id> --json
-gh pr create ...
-gh pr view <url>
+env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+  GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat PAGER=cat \
+  gh pr create ...
+env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+  GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat PAGER=cat \
+  gh pr view <url>
 ```
 
 The fence response supplies `fence.token`; the durable fence supplies `{operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft}` all-or-none. `operation_id` is `ffpr-v1-` plus lowercase SHA-256 of canonical UTF-8 JSON `{"base_commit":...,"branch":...,"created_at":...,"repository":...,"run_id":...}` in lexical key order. Append exactly one standalone `<!-- opencode-feature-factory:pr-operation=<operation_id> -->` line to the external PR body. Fence creation rechecks canonical PR readiness under the run lock and blocks new steering and every other `run.json` writer so the checked state cannot churn between external creation and reconciliation.
@@ -708,7 +749,7 @@ The fence response supplies `fence.token`; the durable fence supplies `{operatio
 feature-factory factory pr-created <run-id> --fence-token TOKEN --json
 ```
 
-`factory pr-created` rejects a missing, mismatched, or stale fence, rejects caller PR metadata, and accepts only the run ID and exact fence token. Through the persisted GitHub account it performs a bounded, account-switched, shell-free `GET repos/{repository}/pulls?state=all&head={owner}:{head_ref}&base={base_ref}&per_page=100`, following only valid Link pagination for at most 10 pages. A unique exact open PR records the universal operation/node/head/base tuple and either completes or starts enabled post-PR observation; a unique exact merged PR completes without polling. Closed-unmerged becomes `needs-human`; absent, ambiguous, malformed, foreign/repeated/incomplete pagination, adapter failure, or other unknown observation retains the fence and does not claim completion.
+`factory pr-created` rejects a missing, mismatched, or stale fence, rejects caller PR metadata, and accepts only the run ID and exact fence token. Through the persisted GitHub account it performs a bounded, account-scoped, token-stripped, shell-free `GET repos/{repository}/pulls?state=all&head={owner}:{head_ref}&base={base_ref}&per_page=100`, following only valid Link pagination for at most 10 pages. A unique exact open PR records the universal operation/node/head/base tuple and either completes or starts enabled post-PR observation; a unique exact merged PR completes without polling. Closed-unmerged becomes `needs-human`; absent, ambiguous, malformed, foreign/repeated/incomplete pagination, adapter failure, or other unknown observation retains the fence and does not claim completion.
 
 Only complete checked absence permits `feature-factory factory pr-fence <run-id> --clear --fence-token TOKEN --json`; a caller assertion that creation failed is not authority. After an external PR exists, never clear the fence: keep the token and reconcile that PR with `factory pr-created`. An identity-less legacy fence cannot be reconciled safely; its next mutation atomically terminalizes `needs-human` with reason `legacy-pr-fence-operation-identity-missing` while retaining the fence.
 
