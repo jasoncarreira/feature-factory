@@ -175,7 +175,7 @@ Add checks for:
 - `HOME` and provider credential env vars survive from the driver into `opencode run`.
 - `git` is available.
 - `gh` is available if PR creation is desired.
-- `gh auth status` succeeds before any run expected to create a PR.
+- Accountless `gh auth status` is diagnostic-only and never authorizes PR work. A run expected to create a PR must use only the validated persisted `github_account` directory at `GH_CONFIG_DIR=join(homedir(), ".config", "opencode-feature-factory", "gh", github_account)`, with `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN` stripped from the child and no global configuration fallback.
 - current repo has a base branch or detectable default branch.
 - `.opencode/factory/` and `.opencode/worktrees/` are ignored by git.
 
@@ -571,7 +571,7 @@ Required environment behavior:
 
 - `HOME` must point at the home where opencode provider auth/config lives, unless `OPENCODE_CONFIG` or equivalent config overrides are intentionally used.
 - Provider credential env vars needed by configured models must be present in the subprocess environment or already stored in opencode's auth/config store.
-- `GITHUB_TOKEN` or `gh` auth must be available before PR creation.
+- Account-bound PR creation must use only the validated persisted `github_account` directory at `GH_CONFIG_DIR=join(homedir(), ".config", "opencode-feature-factory", "gh", github_account)`, with `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN` stripped from the child and no global configuration fallback. Accountless `gh auth status` remains diagnostic-only.
 - The driver must not strip opencode config/auth env vars when spawning `feature-factory factory start` or `opencode run`.
 - Doctor should run under the same environment as the eventual factory run.
 
@@ -582,7 +582,7 @@ ok: HOME=/home/agent
 ok: opencode config found under HOME
 ok: provider openai smoke passed
 missing: provider anthropic auth failed under scripted env
-missing: gh auth unavailable for PR creation
+missing: persisted-account GH_CONFIG_DIR unusable for PR creation; ambient tokens stripped and no global fallback
 ```
 
 If credentials are missing, fail before starting a long build.

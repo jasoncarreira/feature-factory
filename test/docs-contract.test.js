@@ -201,13 +201,48 @@ describe("account-scoped GitHub workflow contract", () => {
       /["'`]gh["'`]\s*,\s*["'`]auth["'`]\s*,\s*["'`]switch["'`]/iu,
       /(?:args|commandArgs)\s*[:=]\s*\[\s*["'`]auth["'`]\s*,\s*["'`]switch["'`]/iu,
     ];
+    const staleActivePolicyPatterns = [
+      /\bgh\s+auth\s+status\b[^\n]{0,120}\b(?:before|for)\b[^\n]{0,60}\b(?:create|creation)\b[^\n]{0,30}\b(?:PR|pull request)\b/iu,
+      /\bGITHUB_TOKEN\b[^\n]{0,120}\b(?:available|credential|authorit(?:y|ative)|authoriz(?:e[sd]?|ation))\b[^\n]{0,80}\b(?:PR|pull request)\b/iu,
+      /\bgh\s+auth\b(?![^\n]{0,120}\bdiagnostic-only\b)[^\n]{0,120}\b(?:available|unavailable|authorit(?:y|ative)|authoriz(?:e[sd]?|ation))\b[^\n]{0,80}\b(?:PR|pull request)\b/iu,
+      /\baccount-switch\s+bypass\b/iu,
+      /\baccount-switches\b/iu,
+    ];
+    const staleActivePolicyExamples = [
+      "gh auth status succeeds before any run expected to create a PR",
+      "GITHUB_TOKEN or gh auth must be available before PR creation",
+      "missing: gh auth unavailable for PR creation",
+      "attempt account-switch bypass",
+      "reconciliation account-switches before observation",
+    ];
+    assert.equal(staleActivePolicyPatterns.length, 5);
+    assert.equal(staleActivePolicyExamples.length, 5);
+    for (const [index, example] of staleActivePolicyExamples.entries()) {
+      assert.match(example, staleActivePolicyPatterns[index], `stale policy example ${index + 1} must remain guarded`);
+    }
+    assert.match("ambient GITHUB_TOKEN is available as PR authority", staleActivePolicyPatterns[1]);
+    assert.match("generic gh auth is authority for PR creation", staleActivePolicyPatterns[2]);
+    assert.doesNotMatch("accountless gh auth status is diagnostic-only and never authorizes PR work", staleActivePolicyPatterns[2]);
     for (const [path, text] of [...documentEntries(GITHUB_ACCOUNT_RUNTIME_SOURCES), ...documentEntries(GITHUB_ACCOUNT_ACTIVE_DOCS)]) {
       for (const pattern of executableSwitchPatterns) assert.doesNotMatch(text, pattern, `${path} must not select a global GitHub account`);
     }
+    for (const [path, text] of documentEntries(GITHUB_ACCOUNT_ACTIVE_DOCS)) {
+      for (const pattern of staleActivePolicyPatterns) assert.doesNotMatch(text, pattern, `${path} must not grant legacy or global GitHub authority`);
+    }
 
-    assert.match(GITHUB_ACCOUNT_RUNTIME_SOURCES["src/run-state.js"], /post-pr-account-switch-failed/u);
-    assert.match(GITHUB_ACCOUNT_RUNTIME_SOURCES["src/run-state.js"], /account-switch-failed/u);
-    assert.match(VALIDATE_SOURCE, /gh-auth-switch/u);
+    const acceptedHistoricalIdentifiers = [
+      "post-pr-account-switch-failed",
+      "account-switch-failed",
+      "gh-auth-switch",
+    ];
+    assert.match(GITHUB_ACCOUNT_RUNTIME_SOURCES["src/run-state.js"], literalPattern(acceptedHistoricalIdentifiers[0]));
+    assert.match(GITHUB_ACCOUNT_RUNTIME_SOURCES["src/run-state.js"], literalPattern(acceptedHistoricalIdentifiers[1]));
+    assert.match(VALIDATE_SOURCE, literalPattern(acceptedHistoricalIdentifiers[2]));
+    for (const identifier of acceptedHistoricalIdentifiers) {
+      for (const pattern of [...executableSwitchPatterns, ...staleActivePolicyPatterns]) {
+        assert.doesNotMatch(identifier, pattern, `${identifier} must remain an accepted historical identifier`);
+      }
+    }
   });
 
   it("keeps all eight active documents on the exact child-only directory and token policy", () => {
