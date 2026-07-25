@@ -1,6 +1,7 @@
 import { spawnSync as defaultSpawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
+import { githubAccountEnvironment } from "./github-account-env.js";
 import { runGitHubOperation } from "./post-pr-ci.js";
 
 export const DEFAULT_GITHUB_TIMEOUT_MS = 10_000;
@@ -17,6 +18,7 @@ export function github(cwd, args, options = {}) {
   const timeout = boundedPositiveInteger(options.timeout, DEFAULT_GITHUB_TIMEOUT_MS, MAX_GITHUB_TIMEOUT_MS);
   const maxBuffer = boundedPositiveInteger(options.maxBuffer, DEFAULT_GITHUB_MAX_BUFFER, MAX_GITHUB_MAX_BUFFER);
   const spawn = typeof options.spawnSync === "function" ? options.spawnSync : defaultSpawnSync;
+  const environment = githubAccountEnvironment(options.account, options.env ?? process.env);
   const command = {
     file: "gh",
     cwd: resolvedCwd,
@@ -30,12 +32,7 @@ export function github(cwd, args, options = {}) {
     const proc = spawn("gh", commandArgs, {
       cwd: resolvedCwd,
       encoding: "utf8",
-      env: {
-        ...process.env,
-        GH_PROMPT_DISABLED: "1",
-        GH_PAGER: "cat",
-        PAGER: "cat",
-      },
+      env: environment,
       shell: false,
       timeout,
       maxBuffer,
@@ -483,10 +480,17 @@ export function lookupPullRequest(cwd, run, options = {}) {
     return { ok: false, reason: "metadata-mismatch", pullRequest: null, command: null };
   }
 
+  try {
+    githubAccountEnvironment(options.account, {});
+  } catch {
+    return { ok: false, reason: "lookup-uncertain", pullRequest: null, command: null };
+  }
+
   const runner = typeof options.githubRunner === "function" ? options.githubRunner : github;
   let result;
   try {
     result = runner(cwd, pullRequestLookupArgs(recorded.repository, recorded.number), {
+      account: options.account,
       timeout: options.timeout,
       maxBuffer: options.maxBuffer,
     });

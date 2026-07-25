@@ -182,7 +182,7 @@ function classifyEntry(repo, entry, sharedClaim, options) {
   if (sidecars.protected.length) return finish("protected", [...sidecars.protected, ...sidecars.skipped]);
   if (sidecars.skipped.length) return finish("skipped", sidecars.skipped);
 
-  const lookup = lookupPullRequest(repo, run, { githubRunner: options.githubRunner, timeout: options.githubTimeout, maxBuffer: options.githubMaxBuffer });
+  const lookup = lookupPullRequest(repo, run, { account: run.github_account, githubRunner: options.githubRunner, timeout: options.githubTimeout, maxBuffer: options.githubMaxBuffer });
   if (!lookup.ok) {
     evidence.pr.state = lookup.reason === "metadata-mismatch" ? "missing-metadata" : "inaccessible";
     return finish("skipped", [lookup.reason === "metadata-mismatch" ? "SKIPPED_PR_METADATA_MISMATCH" : "SKIPPED_PR_LOOKUP_UNCERTAIN"]);
