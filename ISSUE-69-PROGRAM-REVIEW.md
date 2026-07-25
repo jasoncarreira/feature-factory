@@ -506,19 +506,21 @@ this doc does not duplicate per-issue detail, so it cannot rot against it.)
 | 1 | #110 | Legacy retirement (Part 5, L1–L12); L3 decided in-PR (recommendation: option b, repair-by-continuation); removes the inverted probe (1.1) by deletion | #109 (soft; keeps hotspot PRs serial) |
 | 2a | #111 | P2 attestation-deletion sweep (keep/simplify/drop table: 1.3, 3.2, 2.3-simplify, 2.5, 3.4) plus reviewer/catalog-registration recalibration | #110 |
 | 2b | #112 | P3 width recalibration (simplification block, countable acceptance probes, width budget, scope-terminal routing) | adjacent to #111 (shared prompt files); width budget may land earlier |
-| 3 | #113 | Substrate extraction (constants, canonical JSON, claim/receipt engine, attribution, error codes; one owner per invariant) | #111 |
-| 4 | #114 | Catalog narrowing + tooling (3.1, code+path binding, `catalog:review`) | #113 |
-| 5 | #117 | Validator family split: `src/validate/` per-record-family modules behind a re-export index — removes the persistence lane choke point (evidence: the issue-103 fail-closed stop; the DAG's shared-file serialization table) | #111; coordinated with #113 |
+| 3 | #117 | Validator family split: `src/validate/` per-record-family modules behind a re-export index — behavior-identical extraction that removes the persistence lane choke point (evidence: the issue-103 fail-closed stop; the DAG's shared-file serialization table) | #111 |
+| 4 | #113 | Substrate extraction (constants, canonical JSON, claim/receipt engine, attribution, error codes; one owner per invariant), consolidating guards directly into validator family modules | #111, #117 (or land atomically with #117) |
+| 5 | #114 | Catalog narrowing + tooling (3.1, code+path binding, `catalog:review`) | #113 |
 | 6 | #118 | Run-state family split: core write pipeline + per-family transition modules behind a re-export index | #110, #111, #113, #117 |
 | 7 | #104 | Post-refactor durable wait state + truncated-output recovery, built on the new substrate (wait-state records land in their own family module) | #113, #114, #118 |
 | — | #103 | Pre-refactor operational hardening — independent; re-seed with the mandated split after its two width-blocked runs (the P3 evidence) | — |
 
 Sequencing rationale: steps 1 and 2 are deletion-dominant and interact — in
-that order, extraction (3) and catalog work (4) operate on the smallest
-surviving surface. Steps 2a/2b are one recalibration batch: P2 fixes the
-proof-mass ratchet, P3 the spec-mass ratchet, and both edit the same reviewer
-prompts. Opportunistic cleanups (CLI flag scoping 3.5, TUI projection dedup
-3.6, mirror pairs 3.3) ride along when their files are next open — no
+that order, the behavior-identical validator split (3) operates on the smallest
+surviving surface. Substrate extraction (4) then establishes one owner per
+invariant directly in the validator family modules, avoiding a monolithic
+consolidation followed by a second move. Steps 2a/2b are one recalibration
+batch: P2 fixes the proof-mass ratchet, P3 the spec-mass ratchet, and both edit
+the same reviewer prompts. Opportunistic cleanups (CLI flag scoping 3.5, TUI
+projection dedup 3.6, mirror pairs 3.3) ride along when their files are next open — no
 dedicated issue, by design.
 
 ## Verification notes
