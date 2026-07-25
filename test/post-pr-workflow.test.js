@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "./helpers/git-fixture.js";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, resumeFactory, startHeartbeat, status, stopHeartbeat, writeSteering } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
@@ -32,25 +32,26 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
-  it("performs exactly one account-switch/query pair and terminalizes green without merge", async () => {
+  it("runs one account-scoped query and terminalizes green without merge", async () => {
     const fixture = createFixture("post-pr-green");
     const calls = [];
+    const parentEnv = accountParentEnvironment();
     try {
       const result = await postPrObserve(fixture.runId, {
         ...operationAuthorityOptions(fixture),
-        cwd: fixture.repo, now: "2026-07-12T12:00:30.000Z",
-        executeGithub: async ({ args }) => {
-          calls.push(args);
-          if (args[0] === "auth") return { exitCode: 0, stdout: "", stderr: "" };
+        cwd: fixture.repo, now: "2026-07-12T12:00:30.000Z", env: parentEnv,
+        executeGithub: async ({ args, env }) => {
+          calls.push({ args, env });
           return { exitCode: 0, stderr: "", stdout: JSON.stringify({ headRefOid: SHA, isDraft: false, reviewDecision: null, reviews: [], state: "OPEN", statusCheckRollup: [{ __typename: "CheckRun", name: "unit", status: "COMPLETED", conclusion: "SUCCESS" }] }) };
         },
       });
       assert.equal(result.status, "completed");
       assert.equal(result.reason, "post-pr-ci-green");
-      assert.equal(calls.length, 2);
-      assert.deepEqual(calls[0], ["auth", "switch", "-h", "github.com", "-u", "octocat"]);
-      assert.equal(calls[1][0], "pr");
-      assert.equal(calls.flat().includes("merge"), false);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].args[0], "pr");
+      assert.deepEqual(calls[0].env, expectedAccountEnvironment(parentEnv));
+      assert.equal(calls[0].args.includes("merge"), false);
+      assert.deepEqual(parentEnv, accountParentEnvironment());
       assert.equal(readRun(fixture).post_pr.observation.poll_count, 1);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -58,12 +59,15 @@ describe("post-PR workflow orchestration", () => {
   it("replays only the reviewer request on the first due call", async () => {
     const fixture = createFixture("post-pr-reviewer", { reviewer: "reviewer-one" });
     const calls = [];
+    const parentEnv = accountParentEnvironment();
     try {
-      const result = await postPrObserve(fixture.runId, { cwd: fixture.repo, now: "2026-07-12T12:00:30.000Z", executeGithub: async ({ args }) => { calls.push(args); return { exitCode: 0, stdout: "", stderr: "" }; } });
+      const result = await postPrObserve(fixture.runId, { cwd: fixture.repo, now: "2026-07-12T12:00:30.000Z", env: parentEnv, executeGithub: async ({ args, env }) => { calls.push({ args, env }); return { exitCode: 0, stdout: "", stderr: "" }; } });
       assert.equal(result.action, "reviewer-requested");
-      assert.equal(calls.length, 2);
-      assert.deepEqual(calls[1].slice(0, 3), ["pr", "edit", "7"]);
-      assert.equal(calls[1].includes("view"), false);
+      assert.equal(calls.length, 1);
+      assert.deepEqual(calls[0].args.slice(0, 3), ["pr", "edit", "7"]);
+      assert.equal(calls[0].args.includes("view"), false);
+      assert.deepEqual(calls[0].env, expectedAccountEnvironment(parentEnv));
+      assert.deepEqual(parentEnv, accountParentEnvironment());
       assert.equal(readRun(fixture).post_pr.observation.review_request.status, "requested");
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -355,18 +359,20 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
-  it("account-switches every remote/push operation, reconciles push, and creates one fresh epoch", async () => {
+  it("scopes every remote/push operation, reconciles push, and creates one fresh epoch", async () => {
     const fixture = createRevalidationFixture("post-pr-push");
     const refs = writePassingRevalidationArtifacts(fixture);
-    const accountCalls = [];
     const gitOps = [];
+    const gitEnvs = [];
+    const parentEnv = accountParentEnvironment();
     let remote = fixture.baseline;
     try {
       const result = await postPrRemediation(fixture.runId, 1, "complete", {
-        cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", headSha: fixture.candidate, ...refs,
-        executeGithub: async ({ args }) => { accountCalls.push(args); return { exitCode: 0, stdout: "", stderr: "" }; },
-        executeGitOperation: async ({ operation }) => {
+        cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", headSha: fixture.candidate, env: parentEnv, ...refs,
+        executeGithub: async () => { throw new Error("post-PR Git must not use a synthetic GitHub wrapper"); },
+        executeGitOperation: async ({ operation, env }) => {
           gitOps.push(operation);
+          gitEnvs.push(env);
           if (operation === "remote-head") return { exitCode: 0, stdout: `${remote}\trefs/heads/main\n`, stderr: "" };
           remote = fixture.candidate;
           return { exitCode: 0, stdout: "", stderr: "" };
@@ -375,29 +381,32 @@ describe("post-PR workflow orchestration", () => {
       assert.equal(result.action, "observing");
       assert.equal(result.epoch, 2);
       assert.deepEqual(gitOps, ["remote-head", "fast-forward-push", "remote-head"]);
-      assert.equal(accountCalls.length, 3);
-      assert.ok(accountCalls.every((args) => args.join(" ") === "auth switch -h github.com -u octocat"));
+      assert.deepEqual(gitEnvs, [expectedAccountEnvironment(parentEnv), expectedAccountEnvironment(parentEnv), expectedAccountEnvironment(parentEnv)]);
+      assert.deepEqual(parentEnv, accountParentEnvironment());
       const run = readRun(fixture);
       assert.equal(run.post_pr.observation.expected_head_sha, fixture.candidate);
       assert.equal(run.post_pr.remediation.push.remote_after_sha, fixture.candidate);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
-  it("durably records account-switch push failure and does not blindly retry", async () => {
+  it("fails an invalid persisted account before Git and emits no account-switch fact", async () => {
     const fixture = createRevalidationFixture("post-pr-push-account-failure");
     const refs = writePassingRevalidationArtifacts(fixture);
-    let switches = 0;
+    let gitOperations = 0;
     try {
+      updateRunFile(fixture, (run) => { run.github_account = "invalid/account"; });
       const result = await postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", headSha: fixture.candidate, ...refs,
-        executeGithub: async () => { switches += 1; return { exitCode: 1, stdout: "", stderr: "authentication failed" }; } });
+        executeGitOperation: async () => { gitOperations += 1; return { exitCode: 0, stdout: "", stderr: "" }; } });
       assert.equal(result.action, "terminal");
       const run = readRun(fixture);
       assert.equal(run.post_pr.phase, "needs-human");
-      assert.equal(run.terminal_result.reason, "post-pr-account-switch-failed");
+      assert.equal(run.terminal_result.reason, "post-pr-push-failed");
+      assert.equal(run.post_pr.terminal_fact.kind, "push-failed");
       assert.equal(run.post_pr.remediation.push.consecutive_transient_errors, 1);
       assert.equal(run.post_pr.remediation.push.next_retry_at, null);
       await assert.rejects(postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:11:00.000Z" }), /terminal run|requires revalidating/u);
-      assert.equal(switches, 1);
+      assert.equal(gitOperations, 0);
+      assert.equal(JSON.stringify(run).includes('"kind":"account-switch-failed"'), false);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
@@ -542,6 +551,46 @@ describe("post-PR workflow orchestration", () => {
       assert.equal(result.status, "dry-run");
       assert.equal(fileHash(join(fixture.runDir, binding.ref)), binding.hash);
       assert.equal(readRun(fixture).post_pr.phase, "remediation-planned");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("scopes changed-file and recovery pagination to the persisted account", async () => {
+    const fixture = createFixture("post-pr-regenerate-paginated-evidence");
+    const parentEnv = accountParentEnvironment();
+    const initialCalls = [];
+    const pageResponse = (args) => args.at(-1).endsWith("page=1")
+      ? `HTTP/2 200\nLink: <https://api.github.com/page/2>; rel="next"\n\n${JSON.stringify([{ filename: "src/api.js", status: "modified" }])}`
+      : "HTTP/2 200\n\n[]";
+    try {
+      const observed = await postPrObserve(fixture.runId, {
+        cwd: fixture.repo, now: "2026-07-12T12:00:30.000Z", env: parentEnv,
+        executeGithub: async ({ args, env }) => {
+          initialCalls.push({ args, env });
+          if (args[0] === "pr") return { exitCode: 0, stderr: "", stdout: JSON.stringify({ headRefOid: SHA, isDraft: false, reviewDecision: null, reviews: [], state: "OPEN", statusCheckRollup: [{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" }] }) };
+          return { exitCode: 0, stderr: "", stdout: pageResponse(args) };
+        },
+      });
+      assert.equal(observed.action, "remediation-planned");
+      assert.deepEqual(initialCalls.map(({ args }) => args[0]), ["pr", "api", "api"]);
+      assert.deepEqual(initialCalls.map(({ env }) => env), Array(3).fill(expectedAccountEnvironment(parentEnv)));
+
+      const before = readRun(fixture);
+      const binding = before.post_pr.evidence_refs[0];
+      updateRunFile(fixture, (run) => { run.post_pr.phase = "failure-recording"; });
+      rmSync(join(fixture.runDir, binding.ref));
+      const recoveryCalls = [];
+      const recovered = await resumeFactory(fixture.runId, {
+        cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", env: parentEnv,
+        executeGithub: async ({ args, env }) => {
+          recoveryCalls.push({ args, env });
+          return { exitCode: 0, stderr: "", stdout: pageResponse(args) };
+        },
+      });
+      assert.equal(recovered.status, "dry-run");
+      assert.deepEqual(recoveryCalls.map(({ args }) => args[0]), ["api", "api"]);
+      assert.deepEqual(recoveryCalls.map(({ env }) => env), Array(2).fill(expectedAccountEnvironment(parentEnv)));
+      assert.equal(fileHash(join(fixture.runDir, binding.ref)), binding.hash);
+      assert.deepEqual(parentEnv, accountParentEnvironment());
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
@@ -909,6 +958,32 @@ async function observeApiRed(fixture) {
     if (args[0] === "auth") return { exitCode: 0, stdout: "", stderr: "" };
     return { exitCode: 0, stderr: "", stdout: JSON.stringify({ headRefOid: SHA, isDraft: false, reviewDecision: null, reviews: [], state: "OPEN", statusCheckRollup: [{ __typename: "CheckRun", name: "api / unit", status: "COMPLETED", conclusion: "FAILURE" }] }) };
   } });
+}
+
+function accountParentEnvironment() {
+  return {
+    TEST_SENTINEL: "preserved",
+    GH_CONFIG_DIR: "/ambient/config",
+    GH_HOST: "enterprise.example",
+    GH_PROMPT_DISABLED: "0",
+    GH_PAGER: "less",
+    PAGER: "less",
+    GH_TOKEN: "gh-token",
+    GITHUB_TOKEN: "github-token",
+    GH_ENTERPRISE_TOKEN: "gh-enterprise-token",
+    GITHUB_ENTERPRISE_TOKEN: "github-enterprise-token",
+  };
+}
+
+function expectedAccountEnvironment(parentEnv, account = "octocat") {
+  return {
+    TEST_SENTINEL: parentEnv.TEST_SENTINEL,
+    GH_CONFIG_DIR: join(homedir(), ".config", "opencode-feature-factory", "gh", account),
+    GH_HOST: "github.com",
+    GH_PROMPT_DISABLED: "1",
+    GH_PAGER: "cat",
+    PAGER: "cat",
+  };
 }
 
 function createFixture(runId, { nextPollAt = "2026-07-12T12:00:00.000Z", reviewer = null, requested = false } = {}) {

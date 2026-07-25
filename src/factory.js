@@ -19,7 +19,8 @@ import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
 import { publicLivenessBoolean, probeLegacyBooleanLiveness, probeProcessLiveness } from "./hardening/process-verification.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
-import { affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyOwnership, createOwnershipIndex, decideObservationSchedule, decideTransientSchedule, emitAffectedJson, fetchChangedFiles, inspectPanelRunnerReturn, isPollDue, normalizePullRequestResponse, normalizeRepositoryPath, queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, snapshotPanelAffectedValue, validateLane, PostPrCiError } from "./post-pr-ci.js";
+import { affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyGitHubFailure, classifyOwnership, createOwnershipIndex, decideObservationSchedule, decideTransientSchedule, emitAffectedJson, fetchChangedFiles, inspectPanelRunnerReturn, isPollDue, normalizePullRequestResponse, normalizeRepositoryPath, queryPullRequest, requestReviewer, runBoundedProcess, snapshotPanelAffectedValue, validateLane, PostPrCiError } from "./post-pr-ci.js";
+import { githubAccountEnvironment } from "./github-account-env.js";
 import { hashValue } from "./refs.js";
 import { resolvePostPrCiPolicy } from "./config.js";
 import { validateCheckpointRoutingManifest, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
@@ -2424,9 +2425,6 @@ async function handleObserverError(runDir, run, error, opts) {
   next.observation.last_error = { class: errorClass, exit_code: classified.exitCode, occurred_at: timestamp(opts.now), next_retry_at: null };
   await transitionPostPrState(runDir, next, opts);
   const current = readRunFile(join(runDir, "run.json"));
-  if (classified.errorClass === "account-switch") {
-    return postPrTerminal(runDir, current, "needs-human", "post-pr-account-switch-failed", opts, {}, { schema_version: 1, kind: "account-switch-failed", observed_at: next.observation.last_error.occurred_at, operation: "gh-auth-switch", github_account: run.github_account, error_class: errorClass, exit_code: classified.exitCode });
-  }
   return postPrTerminal(runDir, current, "blocked", "post-pr-observer-infrastructure", opts);
 }
 
@@ -2584,7 +2582,7 @@ async function reconcilePostPrPush(repo, runDir, run, opts) {
   let action = await claimPostPrAction(runDir, "post-pr-push", { ...opts, expectedCurrentHash: hashRunState(run) });
   let remoteBefore;
   try {
-    remoteBefore = await serializedRemoteBranchHead(repo, run, opts);
+    remoteBefore = await postPrRemoteBranchHead(repo, run, opts);
   } catch (error) {
     return persistPushFailure(runDir, run, action, "remote-head", error, opts);
   }
@@ -2594,14 +2592,14 @@ async function reconcilePostPrPush(repo, runDir, run, opts) {
     if (remoteBefore !== next.remediation.baseline_head_sha) return postPrTerminal(runDir, readRunFile(join(runDir, "run.json")), "needs-human", "post-pr-remote-head-diverged", { ...opts, expectedCurrentHash: action.state_hash }, {}, { schema_version: 1, kind: "remote-head-diverged", observed_at: timestamp(opts.now), attempt: run.post_pr.attempt, expected_remote_sha: next.remediation.baseline_head_sha, observed_remote_sha: remoteBefore, candidate_head_sha: candidate });
     action = await claimPostPrAction(runDir, "post-pr-push", { ...opts, expectedCurrentHash: hashRunState(readRunFile(join(runDir, "run.json"))) });
     try {
-      await serializedFastForwardPush(repo, run, candidate, opts);
+      await postPrFastForwardPush(run, candidate, opts);
     } catch (error) {
       return persistPushFailure(runDir, run, action, "fast-forward-push", error, opts);
     }
     if (typeof opts.afterExternalPush === "function") await opts.afterExternalPush();
     action = await claimPostPrAction(runDir, "post-pr-push", { ...opts, expectedCurrentHash: hashRunState(readRunFile(join(runDir, "run.json"))) });
     try {
-      remoteAfter = await serializedRemoteBranchHead(repo, run, opts);
+      remoteAfter = await postPrRemoteBranchHead(repo, run, opts);
     } catch (error) {
       return persistPushFailure(runDir, run, action, "remote-confirmation", error, opts);
     }
@@ -2619,17 +2617,16 @@ async function persistPushFailure(runDir, run, action, operation, error, opts) {
   const classified = error instanceof PostPrCiError ? error : new PostPrCiError("command", "post-PR push operation failed", { cause: error });
   const next = cloneJson(run.post_pr);
   const count = next.remediation.push.consecutive_transient_errors + 1;
-  const accountSwitch = classified.errorClass === "account-switch";
-  const permanent = accountSwitch || !classified.transient || count >= next.policy.max_transient_errors;
+  const permanent = !classified.transient || count >= next.policy.max_transient_errors;
   const delay = classified.rateLimited ? Math.max(600_000, classified.retryAfterMs || 0) : Math.max(classified.retryAfterMs || 0, Math.min(600_000, 60_000 * (2 ** Math.min(count - 1, 4))));
   next.remediation.push.consecutive_transient_errors = count;
   next.remediation.push.next_retry_at = permanent ? null : new Date(Date.parse(timestamp(opts.now)) + delay).toISOString();
   const errorClass = durablePushErrorClass(classified.errorClass);
   next.remediation.push.last_error = { operation, observed_at: timestamp(opts.now), error_class: errorClass, exit_code: classified.exitCode,
-    classification: permanent ? accountSwitch || !classified.transient ? "permanent" : "exhausted" : "transient", error_count: count, error_limit: next.policy.max_transient_errors,
+    classification: permanent ? !classified.transient ? "permanent" : "exhausted" : "transient", error_count: count, error_limit: next.policy.max_transient_errors,
     expected_remote_sha: next.remediation.baseline_head_sha, candidate_head_sha: next.remediation.candidate_head_sha, next_retry_at: next.remediation.push.next_retry_at };
   const persisted = await transitionPostPrState(runDir, next, { ...opts, worktree: run.worktree, expectedCurrentHash: action.state_hash });
-  if (permanent) return terminalPersistedPushFailure(runDir, persisted.run, opts, accountSwitch);
+  if (permanent) return terminalPersistedPushFailure(runDir, persisted.run, opts);
   return { run_id: run.run_id, action: permanent ? "push-needs-human" : "push-retry", error_class: classified.errorClass,
     error_count: persisted.run.post_pr.remediation.push.consecutive_transient_errors, next_retry_at: persisted.run.post_pr.remediation.push.next_retry_at };
 }
@@ -2640,12 +2637,12 @@ function durablePushErrorClass(value) {
   return "command";
 }
 
-async function terminalPersistedPushFailure(runDir, run, opts, accountSwitch = false) {
+async function terminalPersistedPushFailure(runDir, run, opts) {
   const error = run.post_pr.remediation.push.last_error;
   if (!error) throw new Error("terminal push failure requires persisted last_error");
   const common = { schema_version: 1, observed_at: error.observed_at, attempt: run.post_pr.attempt, operation: error.operation, error_class: error.error_class, exit_code: error.exit_code,
     classification: error.classification, error_count: error.error_count, error_limit: error.error_limit, expected_remote_sha: error.expected_remote_sha, candidate_head_sha: error.candidate_head_sha, next_retry_at: null };
-  return postPrTerminal(runDir, run, "needs-human", accountSwitch ? "post-pr-account-switch-failed" : "post-pr-push-failed", opts, {}, { ...common, kind: accountSwitch ? "account-switch-failed" : "push-failed" });
+  return postPrTerminal(runDir, run, "needs-human", "post-pr-push-failed", opts, {}, { ...common, kind: "push-failed" });
 }
 
 async function beginPostPrEpoch(runDir, run, opts) {
@@ -6920,7 +6917,7 @@ function assertPostPrActionFresh(runDir, action) {
 }
 
 function githubOperationInput(repo, run, opts, extra = {}) {
-  return { repositoryRoot: repo, cwd: repo, account: run.github_account, executable: opts.ghExecutable, execute: opts.executeGithub, spawnImpl: opts.spawnImpl, lockOptions: opts.githubLockOptions, ...extra };
+  return { repositoryRoot: repo, cwd: repo, account: run.github_account, executable: opts.ghExecutable, execute: opts.executeGithub, spawnImpl: opts.spawnImpl, env: opts.env, ...extra };
 }
 
 function remediationDispatchEnvelope(run) {
@@ -7627,28 +7624,29 @@ function postPrSummary(run) {
     latest_evidence: value.evidence_refs?.at(-1) || null };
 }
 
-async function serializedRemoteBranchHead(repo, run, opts = {}) {
-  const result = await serializedGitHubGitOperation(repo, run, "remote-head", opts, () => git(repo, ["ls-remote", "--heads", "origin", `refs/heads/${run.branch}`], { timeout: 30000 }));
+async function postPrRemoteBranchHead(repo, run, opts = {}) {
+  const result = await executePostPrGitOperation(run, "remote-head", opts, (env) => git(repo, ["ls-remote", "--heads", "origin", `refs/heads/${run.branch}`], { timeout: 30000, env: postPrGitSpawnEnvironment(env) }));
   const value = result.stdout.trim().split(/\s+/u)[0];
   if (!/^[0-9a-f]{40}$/u.test(value || "")) throw new Error("remote branch head is missing or malformed");
   return value;
 }
 
-async function serializedFastForwardPush(repo, run, candidate, opts = {}) {
-  const result = await serializedGitHubGitOperation(repo, run, "fast-forward-push", opts, () => git(run.worktree, ["push", "origin", `${candidate}:refs/heads/${run.branch}`], { timeout: 30000 }));
-  if (result.exitCode !== 0) throw new Error("normal fast-forward post-PR push failed");
+async function postPrFastForwardPush(run, candidate, opts = {}) {
+  await executePostPrGitOperation(run, "fast-forward-push", opts, (env) => git(run.worktree, ["push", "origin", `${candidate}:refs/heads/${run.branch}`], { timeout: 30000, env: postPrGitSpawnEnvironment(env) }));
 }
 
-async function serializedGitHubGitOperation(repo, run, operation, opts, gitOperation) {
-  return runGitHubOperation({
-    repositoryRoot: repo, cwd: repo, account: run.github_account, executable: opts.ghExecutable,
-    args: ["factory-internal-git-operation", operation], lockOptions: opts.githubLockOptions,
-    execute: async (input) => {
-      if (input.args[0] === "auth") return typeof opts.executeGithub === "function" ? opts.executeGithub(input) : runBoundedProcess(input);
-      const proc = typeof opts.executeGitOperation === "function" ? await opts.executeGitOperation({ operation, run: cloneJson(run) }) : gitOperation();
-      return { exitCode: proc.ok === false ? 1 : Number.isInteger(proc.exitCode) ? proc.exitCode : 0, stdout: proc.stdout || "", stderr: proc.stderr || "", signal: null };
-    },
-  });
+async function executePostPrGitOperation(run, operation, opts, gitOperation) {
+  const env = githubAccountEnvironment(run.github_account, opts.env ?? process.env);
+  const proc = typeof opts.executeGitOperation === "function"
+    ? await opts.executeGitOperation({ operation, run: cloneJson(run), env })
+    : gitOperation(env);
+  const exitCode = proc?.ok === false ? Number.isInteger(proc.status) && proc.status !== 0 ? proc.status : 1 : Number.isInteger(proc?.exitCode) ? proc.exitCode : 0;
+  if (exitCode !== 0) throw classifyGitHubFailure({ ...proc, exitCode });
+  return { stdout: proc?.stdout || "", stderr: proc?.stderr || "", exitCode };
+}
+
+function postPrGitSpawnEnvironment(env) {
+  return { ...env, GH_TOKEN: undefined, GITHUB_TOKEN: undefined, GH_ENTERPRISE_TOKEN: undefined, GITHUB_ENTERPRISE_TOKEN: undefined };
 }
 
 function assertPostPrContinuationParent(run) {
