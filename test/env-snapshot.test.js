@@ -1,12 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { githubAccountEnvironment } from "../src/github-account-env.js";
 import {
   REDACTED_ENV_VALUE,
   collectEffectiveProvenance,
   collectRunDebugSnapshot,
+  detectCapabilities,
   isSensitiveEnvKey,
   isSensitiveEnvValue,
   installedPluginOptions,
@@ -14,6 +16,52 @@ import {
 } from "../src/env-snapshot.js";
 
 describe("environment snapshot redaction", () => {
+  it("builds a fresh exact-account GitHub environment without inherited auth tokens", () => {
+    const parent = {
+      KEEP: "operator-value",
+      GH_CONFIG_DIR: "/operator/config",
+      GH_HOST: "enterprise.example",
+      GH_TOKEN: "gh-token",
+      GITHUB_TOKEN: "github-token",
+      GH_ENTERPRISE_TOKEN: "gh-enterprise-token",
+      GITHUB_ENTERPRISE_TOKEN: "github-enterprise-token",
+      GH_PROMPT_DISABLED: "0",
+      GH_PAGER: "less",
+      PAGER: "more",
+    };
+    const original = { ...parent };
+    const environment = githubAccountEnvironment("Exact-Account", parent);
+
+    assert.notEqual(environment, parent);
+    assert.deepEqual(parent, original);
+    assert.equal(environment.KEEP, "operator-value");
+    assert.equal(environment.GH_CONFIG_DIR, join(homedir(), ".config", "opencode-feature-factory", "gh", "Exact-Account"));
+    assert.equal(environment.GH_HOST, "github.com");
+    assert.equal(environment.GH_PROMPT_DISABLED, "1");
+    assert.equal(environment.GH_PAGER, "cat");
+    assert.equal(environment.PAGER, "cat");
+    for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]) {
+      assert.equal(Object.hasOwn(environment, key), false, key);
+    }
+
+    const savedToken = process.env.GH_TOKEN;
+    const savedMarker = process.env.FACTORY_ACCOUNT_ENV_MARKER;
+    try {
+      process.env.GH_TOKEN = "process-parent-token";
+      process.env.FACTORY_ACCOUNT_ENV_MARKER = "process-parent-value";
+      const processChild = githubAccountEnvironment("Process-Account");
+      assert.equal(process.env.GH_TOKEN, "process-parent-token");
+      assert.equal(process.env.FACTORY_ACCOUNT_ENV_MARKER, "process-parent-value");
+      assert.equal(Object.hasOwn(processChild, "GH_TOKEN"), false);
+      assert.equal(processChild.FACTORY_ACCOUNT_ENV_MARKER, "process-parent-value");
+    } finally {
+      if (savedToken === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = savedToken;
+      if (savedMarker === undefined) delete process.env.FACTORY_ACCOUNT_ENV_MARKER;
+      else process.env.FACTORY_ACCOUNT_ENV_MARKER = savedMarker;
+    }
+  });
+
   it("redacts token-shaped and high-entropy values", () => {
     assert.equal(scrubSecretEnv("github_pat_123456789012345678901234567890"), REDACTED_ENV_VALUE);
     assert.equal(scrubSecretEnv("ghp_123456789012345678901234567890"), REDACTED_ENV_VALUE);
@@ -101,6 +149,37 @@ describe("environment snapshot redaction", () => {
       writeFileSync(file, JSON.stringify({ plugin: [["file:///tmp/opencode-feature-factory", { prMode: "draft", profiles: { "work-reviewer": { model: "test/reviewer" } } }]] }), "utf8");
       assert.deepEqual(installedPluginOptions(file), { prMode: "draft", profiles: { "work-reviewer": { model: "test/reviewer" } } });
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps accountless GitHub diagnostics read-only in the operator environment", () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-gh-diagnostics-"));
+    const log = join(dir, "gh-calls.jsonl");
+    const executable = join(dir, "gh");
+    const saved = Object.fromEntries(["PATH", "FACTORY_GH_LOG", "DIAGNOSTIC_MARKER", "GH_CONFIG_DIR", "GH_TOKEN"].map((key) => [key, process.env[key]]));
+    try {
+      writeFileSync(executable, `#!/usr/bin/env node\nimport { appendFileSync } from "node:fs";\nappendFileSync(process.env.FACTORY_GH_LOG, JSON.stringify({ args: process.argv.slice(2), marker: process.env.DIAGNOSTIC_MARKER, config: process.env.GH_CONFIG_DIR, token: process.env.GH_TOKEN }) + "\\n");\n`, "utf8");
+      chmodSync(executable, 0o755);
+      process.env.PATH = `${dir}:${saved.PATH ?? ""}`;
+      process.env.FACTORY_GH_LOG = log;
+      process.env.DIAGNOSTIC_MARKER = "operator-environment";
+      process.env.GH_CONFIG_DIR = "/operator/gh-config";
+      process.env.GH_TOKEN = "operator-token";
+
+      detectCapabilities(dir);
+
+      const calls = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      assert.deepEqual(calls.map((call) => call.args), [["--version"], ["auth", "status"]]);
+      assert.deepEqual(calls.map(({ marker, config, token }) => ({ marker, config, token })), [
+        { marker: "operator-environment", config: "/operator/gh-config", token: "operator-token" },
+        { marker: "operator-environment", config: "/operator/gh-config", token: "operator-token" },
+      ]);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   });
