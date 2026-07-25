@@ -56,6 +56,28 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
+  it("evaluates green post-PR completion against fresh drifted main while retaining fence-time base provenance", async () => {
+    const fixture = createFixture("post-pr-green-drifted-main");
+    const currentMain = "b".repeat(40);
+    try {
+      const result = await postPrObserve(fixture.runId, {
+        ...operationAuthorityOptions(fixture, currentMain),
+        cwd: fixture.repo,
+        now: "2026-07-12T12:00:30.000Z",
+        executeGithub: async () => ({
+          exitCode: 0,
+          stderr: "",
+          stdout: JSON.stringify({ headRefOid: SHA, isDraft: false, reviewDecision: null, reviews: [], state: "OPEN", statusCheckRollup: [{ __typename: "CheckRun", name: "merge-ref", status: "COMPLETED", conclusion: "SUCCESS" }] }),
+        }),
+      });
+      const run = readRun(fixture);
+      assert.equal(result.status, "completed");
+      assert.equal(run.base_commit, SHA);
+      assert.equal(run.post_pr.pr_operation.base_sha, SHA);
+      assert.equal(run.terminal_result.base_sha, SHA);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
   it("replays only the reviewer request on the first due call", async () => {
     const fixture = createFixture("post-pr-reviewer", { reviewer: "reviewer-one" });
     const calls = [];
@@ -1013,15 +1035,17 @@ function createFixture(runId, { nextPollAt = "2026-07-12T12:00:00.000Z", reviewe
   return { repo, runDir, runId };
 }
 
-function operationAuthorityOptions(fixture) {
+function operationAuthorityOptions(fixture, currentBaseSha = SHA) {
   return {
     repoRoot: fixture.repo,
     gitFn(_cwd, args) {
       if (args.join(" ") === "config --get remote.origin.url") return { ok: true, status: 0, stdout: "https://github.com/acme/widgets.git\n", stderr: "" };
       if (args[0] === "ls-remote") {
         const ref = args[3].slice("refs/heads/".length);
-        return { ok: true, status: 0, stdout: `${SHA}\trefs/heads/${ref}\n`, stderr: "" };
+        const sha = ref === "main" ? currentBaseSha : SHA;
+        return { ok: true, status: 0, stdout: `${sha}\trefs/heads/${ref}\n`, stderr: "" };
       }
+      if (args[0] === "cat-file") return { ok: true, status: 0, stdout: "", stderr: "" };
       if (args[0] === "rev-parse") return { ok: true, status: 0, stdout: `${SHA}\n`, stderr: "" };
       if (args[0] === "symbolic-ref") return { ok: true, status: 0, stdout: "feature\n", stderr: "" };
       if (args[0] === "status") return { ok: true, status: 0, stdout: "", stderr: "" };
@@ -1029,7 +1053,7 @@ function operationAuthorityOptions(fixture) {
       throw new Error(`unexpected git authority command: ${args.join(" ")}`);
     },
     observePrOperation(identity) {
-      return { disposition: "open", reason: null, pull_request: { pr_url: "https://github.com/acme/widgets/pull/7", pr_number: 7, pr_node_id: "PR_workflow", repository: "acme/widgets", draft: false, body: "", state: "open", merged_at: null, head_ref: "feature", head_sha: identity.head_sha, head_repository: "acme/widgets", base_ref: "main", base_sha: SHA, base_repository: "acme/widgets" } };
+      return { disposition: "open", reason: null, pull_request: { pr_url: "https://github.com/acme/widgets/pull/7", pr_number: 7, pr_node_id: "PR_workflow", repository: "acme/widgets", draft: false, body: "", state: "open", merged_at: null, head_ref: "feature", head_sha: identity.head_sha, head_repository: "acme/widgets", base_ref: "main", base_sha: currentBaseSha, base_repository: "acme/widgets" } };
     },
   };
 }

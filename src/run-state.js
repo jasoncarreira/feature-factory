@@ -912,7 +912,7 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
   let v2Authority = null;
   const result = await withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    if (gateName === "pre_pr" && ["pending", "approved"].includes(nextGate.status)) v2Authority = assertV2PrePrGateAuthority(runDir, current, `pre_pr ${nextGate.status}`);
+    if (gateName === "pre_pr" && ["pending", "approved"].includes(nextGate.status)) v2Authority = assertCheckedPrePrGateAuthority(runDir, current, `pre_pr ${nextGate.status}`);
     if (nextGate.status === "approved" && mergedSliceRepairFence(current)) {
       throw new Error(`gate '${gateName}' cannot be approved while a merged-slice repair is unresolved`);
     }
@@ -938,7 +938,7 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
             await archiveConsumedGateAnswer(archive);
             publishedArchives.push(archive);
           }
-        }, beforeReplace: v2Authority ? (_next, observed) => assertV2PrePrGateAuthority(runDir, observed, `pre_pr ${nextGate.status}`, v2Authority) : null },
+        }, beforeReplace: v2Authority ? (_next, observed) => assertCheckedPrePrGateAuthority(runDir, observed, `pre_pr ${nextGate.status}`, v2Authority) : null },
       );
     } catch (error) {
       await restoreConsumedGateAnswers(publishedArchives);
@@ -1411,7 +1411,7 @@ export async function transitionPrePrFenceEstablished(runDir, options = {}) {
       generation: steeringGeneration(current),
       state_hash: steeringBoundaryStateHash(base),
       created_at: createdAt,
-      operation_id: computePrOperationId({ base_commit: gitAuthority.base_sha, branch: gitAuthority.head_ref, created_at: createdAt, repository: gitAuthority.repository, run_id: current.run_id }),
+      operation_id: computePrOperationId({ base_commit: current.base_commit, branch: gitAuthority.head_ref, created_at: createdAt, repository: gitAuthority.repository, run_id: current.run_id }),
       repository: gitAuthority.repository,
       head_ref: gitAuthority.head_ref,
       head_sha: gitAuthority.head_sha,
@@ -1460,13 +1460,14 @@ async function reconcilePrOperation(runDir, token, mode, options = {}) {
     if (current.status !== "running") throw new Error(`${mode === "clear" ? "pr-fence clear" : "pr-created"} requires a running run`);
     assertNoCurrentSliceNonconvergence(runDir, current);
     if (mergedSliceRepairFence(current)) throw new Error("pr-created is fenced while a merged-slice repair is unresolved");
-    if (mode === "record") assertV2FreshDownstreamAuthority(runDir, current, "PR creation");
+    if (mode === "record") assertCheckedFreshDownstreamAuthority(runDir, current, "PR creation");
     const fence = assertPrFence(current, token);
     if (!hasCompleteBinding(fence, PR_FENCE_IDENTITY_KEYS)) return terminalizeLegacyPrFenceLocked(runDir, current, options);
 
     const readiness = assertPrCreatedReadiness(runDir, current);
     const gitAuthority = assertPrFenceGitAuthorityCurrent(runDir, current, fence, options);
-    const observation = await observeFencedPrOperation(current, fence, options, gitAuthority.head_sha);
+    const observationIdentity = { ...fence, base_sha: gitAuthority.base_sha };
+    const observation = await observeFencedPrOperation(current, observationIdentity, options, gitAuthority.head_sha);
     if (["unknown", "ambiguous"].includes(observation.disposition) || observation.disposition === "absent" && mode === "record") {
       return { ok: false, updated: false, disposition: observation.disposition, reason: observation.reason, status: current.status, run: current, fence: cloneJson(fence), pr_url: null, terminal_result: null };
     }
@@ -1531,7 +1532,7 @@ async function reconcilePrOperation(runDir, token, mode, options = {}) {
 async function assertPrReconciliationCurrent(runDir, current, fence, readiness, expectedObservation, options) {
   assertPrCreatedAuthorityCurrent(runDir, current, readiness);
   const authority = assertPrFenceGitAuthorityCurrent(runDir, current, fence, options);
-  const observed = await observeFencedPrOperation(current, fence, options, authority.head_sha);
+  const observed = await observeFencedPrOperation(current, { ...fence, base_sha: authority.base_sha }, options, authority.head_sha);
   if (!sameJson(observed, expectedObservation)) throw new Error("PR operation GitHub observation changed before publication");
 }
 
@@ -2372,7 +2373,7 @@ export function assertPublishedCarryForwardRun(repoInput, expectedContinuation, 
   const worktree = checkWorktreeIdentity(repo, run.worktree, { branch: run.branch, head: branch.stdout.trim() });
   if (!worktree.ok) throw new Error(`published carry-forward worktree identity is invalid: ${worktree.reason}`);
   if ((run.steps || []).some((step) => step?.agent === "test-verifier" && step.status === "accepted")) {
-    assertV2FreshDownstreamAuthority(runDir, run, "published carry-forward authority");
+    assertCheckedFreshDownstreamAuthority(runDir, run, "published carry-forward authority");
   }
   if (options.driver) assertCarryForwardDriverProjection(run, options.driver);
   if (options.postPrPolicy !== undefined && !sameJson(run.post_pr?.policy, options.postPrPolicy)) throw new Error("schema-v2 resume policy does not match published child configuration");
@@ -2917,7 +2918,7 @@ async function transitionRunStepChecked(runDir, stepSelector, updater, options, 
       if (["running", "accepted"].includes(steps[stepIndex]?.status) && mergedSliceRepairFence(draft)) {
         throw new Error(`step '${steps[stepIndex].agent || formatSelector(stepSelector)}' cannot advance while a merged-slice repair is unresolved`);
       }
-      assertTestVerifierIntegrationGate(draft, steps[stepIndex], priorStep);
+      assertTestVerifierIntegrationGate(runDir, draft, steps[stepIndex], priorStep, options);
       if (steps[stepIndex]?.agent === "test-verifier" && steps[stepIndex].status === "running" && draft.continuation?.schema_version !== 2) {
         decompositionAuthority = observeAcceptedDecompositionAuthority(runDir, draft, { requireForIntegrationGatePlan: true });
       }
@@ -3007,11 +3008,11 @@ function assertDraftSpecReuseAttempt(run, step, priorStep) {
   }
 }
 
-function assertTestVerifierIntegrationGate(run, step, priorStep) {
+function assertTestVerifierIntegrationGate(runDir, run, step, priorStep, options = {}) {
   if (step?.agent !== "test-verifier") return;
-  if ((run.continuation?.schema_version === 2 || integrationConflictSlices(run).length > 0) && step.status === "accepted") {
+  if (step.status === "accepted" && classifyWholeStoryTestRoute(runDir, run, options) !== "legacy-unselected") {
     if (priorStep?.status !== "running" || !Number.isInteger(step.attempts) || step.attempts < 1 || step.attempts !== priorStep.attempts) {
-      throw new Error("schema-v2 test-verifier acceptance must transition from running at the same positive attempt");
+      throw new Error("checked test-verifier acceptance must transition from running at the same positive attempt");
     }
     return;
   }
@@ -3050,8 +3051,8 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
   if (!step) return null;
   delete step.acceptance;
   if (step.status !== "accepted") return null;
-  if ((run?.continuation?.schema_version === 2 || integrationConflictSlices(run).length > 0) && step.agent === "test-verifier") {
-    step.acceptance = observeV2TestVerifierAuthority(runDir, run, step, options).acceptance;
+  if (step.agent === "test-verifier" && classifyWholeStoryTestRoute(runDir, run, options) !== "legacy-unselected") {
+    step.acceptance = observeCheckedTestVerifierAuthority(runDir, run, step, options).acceptance;
     return null;
   }
   if (step.agent === "work-decomposer") {
@@ -3873,7 +3874,7 @@ export async function transitionPanelVerdicts(runDir, input, options = {}) {
       if (integrationConflictSlices(current).some(({ conflict }) => conflict.status !== "accepted")) throw new Error("panel verdicts require fresh integrated conflict tests and review");
       assertSliceIntegrationConflictsCurrent(runDir, current, options);
     }
-    v2Authority = assertV2FreshDownstreamAuthority(runDir, current, "panel publication");
+    v2Authority = assertCheckedFreshDownstreamAuthority(runDir, current, "panel publication");
     const exactReplay = panelBaseEquals(current.validator, request.validator) && panelBaseEquals(current.security_review, request.security_review);
     const legacyValidator = isRecord(current.validator) && !hasCompleteBinding(current.validator, VALIDATOR_BINDING_KEYS);
     const legacySecurity = isRecord(current.security_review) && !hasCompleteBinding(current.security_review, SECURITY_BINDING_KEYS);
@@ -3910,7 +3911,7 @@ export async function transitionPanelVerdicts(runDir, input, options = {}) {
     panelVerdicts: true,
     consumeSpecialDispatch: true,
     beforeReplace: (_next, current) => {
-      assertV2FreshDownstreamAuthority(runDir, current, "panel publication", v2Authority);
+      assertCheckedFreshDownstreamAuthority(runDir, current, "panel publication", v2Authority);
       assertSliceIntegrationConflictsCurrent(runDir, current, options);
       assertPanelVerdictAuthorityCurrent(runDir, current, request, authority, options);
     },
@@ -4051,7 +4052,7 @@ export function assertV2LocalPublishedAuthority(runDir, run, options = {}, expec
     return { id: slice.id, merge_commit: slice.merge_commit, resolved_sha: resolvedSha };
   });
   const testStep = (run.steps || []).find((step) => step?.agent === "test-verifier");
-  if (testStep?.status === "accepted") assertV2FreshDownstreamAuthority(runDir, run, "checked v2 mutation");
+  if (testStep?.status === "accepted") assertCheckedFreshDownstreamAuthority(runDir, run, "checked route mutation");
   const observed = {
     continuation_hash: hashValue(run.continuation),
     plan_hash: run.continuation.carry_forward.plan_hash,
@@ -5192,13 +5193,13 @@ async function observePostPrCompletedIdentity(runDir, run, reason, options = {})
   if (!isRecord(operation)) throw new Error("post-PR completion requires the successor PR operation identity");
   const expectedHeadSha = requireNonEmptyString(run.post_pr?.observation?.expected_head_sha, "post-PR expected head");
   const authority = observePrOperationGitAuthority(runDir, run, options, "post-PR completion");
-  for (const [key, value] of Object.entries({ repository: authority.repository, head_ref: authority.head_ref, base_ref: authority.base_ref, base_sha: authority.base_sha, draft: authority.draft })) {
+  for (const [key, value] of Object.entries({ repository: authority.repository, head_ref: authority.head_ref, base_ref: authority.base_ref, draft: authority.draft })) {
     if (operation[key] !== value) throw new Error(`post-PR PR operation ${key} no longer matches local/origin authority`);
   }
   if (authority.head_sha !== expectedHeadSha) throw new Error("post-PR completion requires local, worktree, origin, and expected remediation head equality");
-  const stableOperationId = computePrOperationId({ base_commit: operation.base_sha, branch: operation.head_ref, created_at: operation.created_at, repository: operation.repository, run_id: run.run_id });
+  const stableOperationId = computePrOperationId({ base_commit: run.base_commit, branch: operation.head_ref, created_at: operation.created_at, repository: operation.repository, run_id: run.run_id });
   if (operation.operation_id !== stableOperationId) throw new Error("post-PR operation_id is stale or malformed");
-  const observation = await observeFencedPrOperation(run, operation, options, expectedHeadSha);
+  const observation = await observeFencedPrOperation(run, { ...operation, base_sha: authority.base_sha }, options, expectedHeadSha);
   const requiredDisposition = reason === "post-pr-external-merge" ? "merged" : "open";
   if (observation.disposition !== requiredDisposition) throw new Error(`post-PR completion GitHub observation is ${observation.disposition}, expected ${requiredDisposition}`);
   if (observation.pull_request.pr_url !== operation.pr_url || observation.pull_request.pr_number !== operation.pr_number || observation.pull_request.pr_node_id !== operation.pr_node_id) {
@@ -5301,7 +5302,7 @@ function assertPrCreatedReadiness(runDir, run) {
   if (run.gates?.pre_pr?.status !== "approved") throw new Error("pr-created requires approved pre_pr gate");
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) throw new Error("pr-created requires validator verdict GO or GO-WITH-NITS");
   if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");
-  const freshTestAuthority = assertV2FreshDownstreamAuthority(runDir, run, "pre-PR admission");
+  const freshTestAuthority = assertCheckedFreshDownstreamAuthority(runDir, run, "pre-PR admission");
   return {
     fresh_test_authority: freshTestAuthority,
     slices: assertPrCreatedSliceState(runDir, run),
@@ -5325,15 +5326,19 @@ function assertPrCreatedSliceState(runDir, run) {
 }
 
 export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, policy = {}) {
-  const continuationEligible = run?.continuation?.schema_version === 2 && run.continuation.kind === "blocked-run-continuation";
+  const route = classifyWholeStoryTestRoute(runDir, run, options);
+  const continuationEligible = route === "schema-v2";
   const conflicts = integrationConflictSlices(run);
-  const conflictEligible = conflicts.length > 0;
-  if (!continuationEligible && !conflictEligible) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact published schema-v2 child or delegated integration conflict");
+  const conflictEligible = route === "delegated-conflict" || continuationEligible && conflicts.length > 0;
+  const ordinaryEligible = route === "ordinary-fresh-v1";
+  if (!continuationEligible && !conflictEligible && !ordinaryEligible) {
+    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact schema-v2 child, delegated integration conflict, or ordinary fresh all-merged run");
+  }
   const repository = resolve(runDir, "../../..");
   const target = run.continuation?.target;
   if (resolve(runDir) !== resolve(directFactoryRoot(repository), run.run_id)
     || (continuationEligible && (target?.run_id !== run.run_id || target?.branch !== run.branch || resolve(target?.worktree || "") !== resolve(run.worktree || "")))) {
-    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution run identity does not match the published schema-v2 target");
+    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution run identity does not match its selected route authority");
   }
   if (run.status !== "running" && !(policy.allowTerminalCompleted === true && run.status === "completed")) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
   if (policy.skipLocalAuthority !== true) {
@@ -5377,9 +5382,23 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
   };
 }
 
+export function classifyWholeStoryTestRoute(runDir, run, options = {}) {
+  const conflicts = integrationConflictSlices(run);
+  if (run?.continuation?.schema_version === 2 && run.continuation.kind === "blocked-run-continuation") return "schema-v2";
+  if (conflicts.length > 0) return "delegated-conflict";
+  if (run?.continuation || run?.checkpoint_source || run?.checkpoint_progress) return "legacy-unselected";
+  if (!Array.isArray(run?.slices) || run.slices.length === 0 || run.slices.some((slice) => slice?.status !== "merged")) return "legacy-unselected";
+  if (!existsSync(join(resolve(runDir), "plan", "slices.json"))) return "legacy-unselected";
+  const decompositionSteps = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
+  if (decompositionSteps.length !== 1 || decompositionSteps[0].status !== "accepted" || !isRecord(decompositionSteps[0].acceptance)) return "legacy-unselected";
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, options);
+  if (!Array.isArray(decomposition.plan.slices) || decomposition.plan.slices.length === 0 || !isRecord(decomposition.plan.integration_gate)) return "legacy-unselected";
+  return "ordinary-fresh-v1";
+}
+
 export function observeCompletedCheckedTestExecutionAuthority(runDir, run, step = uniqueTestVerifierStep(run), authority = null, options = {}) {
   const claim = step?.execution_claim;
-  if (!isRecord(claim) || claim.state !== "completed") throw new Error("schema-v2 test authority requires a completed checked execution claim");
+  if (!isRecord(claim) || claim.state !== "completed") throw new Error("checked test authority requires a completed checked execution claim");
   if (step.execution_claim_hash !== hashValue(claim)) throw new Error("completed checked execution claim hash is stale");
   const currentAuthority = authority || observeCheckedTestExecutionAuthority(runDir, run, { ...options, runDir }, { allowCompleted: true, skipLocalAuthority: true, allowTerminalCompleted: options.allowTerminalCompleted === true });
   if (claim.run_id !== run.run_id || claim.attempt !== step.attempts || claim.plan_ref !== currentAuthority.plan_ref
@@ -5458,44 +5477,46 @@ function testExecutionError(code, message) {
   return error;
 }
 
-function assertV2FreshDownstreamAuthority(runDir, run, sink, expected = null) {
-  if (run.continuation?.schema_version !== 2) return null;
-  const route = "schema-v2";
+function assertCheckedFreshDownstreamAuthority(runDir, run, sink, expected = null) {
+  const route = classifyWholeStoryTestRoute(runDir, run, { runDir });
+  if (route === "legacy-unselected") return null;
   const incomplete = (run.slices || []).filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
   if (incomplete.length) throw new Error(`${route} downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
   const step = (run.steps || []).find((candidate) => candidate?.agent === "test-verifier");
   if (!step || step.status !== "accepted" || !Number.isInteger(step.attempts) || step.attempts < 1 || !isRecord(step.acceptance)) {
     throw new Error(`${route} downstream authority requires fresh accepted test-verifier authority before ${sink}`);
   }
-  const authority = observeV2TestVerifierAuthority(runDir, run, step, { runDir });
+  const authority = observeCheckedTestVerifierAuthority(runDir, run, step, { runDir });
   if (!sameJson(step.acceptance, authority.acceptance)) throw new Error(`${route} test-verifier acceptance bytes or head are stale`);
   const observed = { step: cloneJson(step), ...authority };
   if (expected && !sameJson(observed, expected)) throw new Error(`checked downstream authority changed before ${sink} publication`);
   return observed;
 }
 
-function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
+function observeCheckedTestVerifierAuthority(runDir, run, step, options = {}) {
+  const route = classifyWholeStoryTestRoute(runDir, run, options);
+  if (route === "legacy-unselected") throw new Error("checked test-verifier acceptance requires a selected checked route");
   for (const [key, label] of [["artifact_ref", "artifact"], ["evidence_ref", "evidence"], ["review_ref", "review"]]) {
-    if (!stringValue(step?.[key])) throw new Error(`schema-v2 test-verifier acceptance requires ${label}_ref`);
+    if (!stringValue(step?.[key])) throw new Error(`checked test-verifier acceptance requires ${label}_ref`);
   }
-  if (step.artifact_ref !== "artifacts/test-report.md") throw new Error("schema-v2 test-verifier acceptance requires artifacts/test-report.md");
+  if (step.artifact_ref !== "artifacts/test-report.md") throw new Error("checked test-verifier acceptance requires artifacts/test-report.md");
   const artifact = resolveArtifactRef(runDir, step.artifact_ref);
   const evidence = resolveEvidenceRef(runDir, step.evidence_ref);
   const review = resolveReviewRef(runDir, step.review_ref);
   const checked = observeCompletedCheckedTestExecutionAuthority(runDir, run, step, null, options);
-  const evidenceValue = validateTestExecutionReceipt(parseJsonObjectFile(evidence.path, "schema-v2 test-verifier receipt"));
-  const reviewValue = parseJsonObjectFile(review.path, "schema-v2 test-verifier review");
-  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "schema-v2 test-verifier acceptance");
-  if (step.evidence_ref !== checked.claim.receipt_ref || hashFile(evidence.path, { mode: "raw" }) !== checked.receipt_hash || !sameJson(evidenceValue, checked.receipt)) throw new Error("schema-v2 test-verifier evidence must be the exact completed checked receipt");
-  if (checked.claim.status !== "pass" || evidenceValue.status !== "pass" || evidenceValue.review_ready !== true) throw new Error("schema-v2 test-verifier acceptance requires a completed passing checked receipt");
+  const evidenceValue = validateTestExecutionReceipt(parseJsonObjectFile(evidence.path, "checked test-verifier receipt"));
+  const reviewValue = parseJsonObjectFile(review.path, "checked test-verifier review");
+  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "checked test-verifier acceptance");
+  if (step.evidence_ref !== checked.claim.receipt_ref || hashFile(evidence.path, { mode: "raw" }) !== checked.receipt_hash || !sameJson(evidenceValue, checked.receipt)) throw new Error("checked test-verifier evidence must be the exact completed checked receipt");
+  if (checked.claim.status !== "pass" || evidenceValue.status !== "pass" || evidenceValue.review_ready !== true) throw new Error("checked test-verifier acceptance requires a completed passing checked receipt");
   const planAuthority = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
   const expectedCommands = planAuthority.plan.integration_gate.required_commands;
-  if (evidenceValue.commands.length !== expectedCommands.length || evidenceValue.commands.some((result, index) => result.program !== expectedCommands[index].program || !sameJson(result.args, expectedCommands[index].args) || result.status !== "pass")) throw new Error("schema-v2 test-verifier receipt commands must exactly pass every accepted plan command in order");
-  if (evidenceValue.head_sha !== integration.head) throw new Error("schema-v2 test-verifier evidence head_sha must equal the current clean child branch/worktree HEAD");
+  if (evidenceValue.commands.length !== expectedCommands.length || evidenceValue.commands.some((result, index) => result.program !== expectedCommands[index].program || !sameJson(result.args, expectedCommands[index].args) || result.status !== "pass")) throw new Error("checked test-verifier receipt commands must exactly pass every accepted plan command in order");
+  if (evidenceValue.head_sha !== integration.head) throw new Error("checked test-verifier evidence head_sha must equal the current clean child/integration HEAD");
   if (reviewValue.subject !== "test-verifier" || reviewValue.attempt !== step.attempts || String(reviewValue.verdict || "").toUpperCase() !== "APPROVE") {
-    throw new Error("schema-v2 test-verifier review must bind subject, attempt, and APPROVE verdict");
+    throw new Error("checked test-verifier review must bind subject, attempt, and APPROVE verdict");
   }
-  if (reviewValue.reviewed_head_sha !== integration.head) throw new Error("schema-v2 test-verifier review reviewed_head_sha must equal the current clean child branch/worktree HEAD");
+  if (reviewValue.reviewed_head_sha !== integration.head) throw new Error("checked test-verifier review reviewed_head_sha must equal the current clean child/integration HEAD");
   return {
     acceptance: {
       artifact_ref: step.artifact_ref, artifact_hash: hashFile(artifact.path),
@@ -5509,17 +5530,18 @@ function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
   };
 }
 
-function assertV2PrePrGateAuthority(runDir, run, sink, expected = null) {
-  if (run.continuation?.schema_version !== 2) return null;
-  const freshTestAuthority = assertV2FreshDownstreamAuthority(runDir, run, sink);
+function assertCheckedPrePrGateAuthority(runDir, run, sink, expected = null) {
+  const route = classifyWholeStoryTestRoute(runDir, run, { runDir });
+  if (route === "legacy-unselected") return null;
+  const freshTestAuthority = assertCheckedFreshDownstreamAuthority(runDir, run, sink);
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict) || !PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
-    throw new Error(`schema-v2 pre-PR gate requires fresh passing child panels before ${sink}`);
+    throw new Error(`checked pre-PR gate requires fresh passing panels before ${sink}`);
   }
   const observed = {
     fresh_test_authority: freshTestAuthority,
     panels: assertPanelReviewBindingsCurrent(runDir, run),
   };
-  if (expected && !sameJson(observed, expected)) throw new Error(`schema-v2 downstream authority changed before ${sink} publication`);
+  if (expected && !sameJson(observed, expected)) throw new Error(`checked downstream authority changed before ${sink} publication`);
   return observed;
 }
 
@@ -9562,7 +9584,7 @@ function normalizePrCreatedTerminalResult(run, request, operation, overrides = {
     head_ref: request.head_ref,
     head_sha: request.head_sha,
     base_ref: request.base_ref,
-    base_sha: request.base_sha,
+    base_sha: operation.base_sha,
     draft: request.draft,
     reason: overrides.reason ?? null,
     summary: overrides.summary ?? (request.draft ? "Draft PR created." : "PR created."),
@@ -9776,9 +9798,26 @@ function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR o
   const headSha = observeExactRemoteHead(options, integration.repository, headRef, label);
   const baseSha = observeExactRemoteHead(options, integration.repository, baseRef, label);
   if (headSha !== integration.head) throw new Error(`${label} requires local, worktree, and origin head equality`);
-  if (requireNonEmptyString(run.base_commit, "run.base_commit") !== baseSha) throw new Error(`${label} requires run.base_commit equal to the exact origin base head`);
-  if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", baseSha, headSha]).ok) throw new Error(`${label} requires the origin base to be an ancestor of the origin head`);
+  const recordedBase = requireNonEmptyString(run.base_commit, "run.base_commit");
+  if (baseSha !== recordedBase) ensureObservedRemoteCommitAvailable(options, integration.repository, baseRef, baseSha, label);
+  if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", recordedBase, headSha]).ok) throw new Error(`${label} requires run.base_commit to be an ancestor of the origin head`);
+  if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", recordedBase, baseSha]).ok) throw new Error(`${label} requires run.base_commit to be an ancestor of the current origin base head`);
   return { repository, origin: origin.stdout.trim(), head_ref: headRef, head_sha: headSha, base_ref: baseRef, base_sha: baseSha, draft: run.pr_mode === "draft", integration };
+}
+
+function ensureObservedRemoteCommitAvailable(options, repository, ref, commit, label) {
+  if (authorityGit(options, repository, ["cat-file", "-e", `${commit}^{commit}`]).ok) return;
+  const temporaryRef = `refs/opencode-feature-factory/pr-base-observation/${randomUUID()}`;
+  try {
+    const fetched = authorityGit(options, repository, ["fetch", "--no-tags", "--quiet", "origin", `refs/heads/${ref}:${temporaryRef}`]);
+    if (!fetched.ok) throw new Error(`${label} cannot fetch the observed origin base head`);
+    const resolved = authorityGit(options, repository, ["rev-parse", "--verify", `${temporaryRef}^{commit}`]);
+    if (!resolved.ok || resolved.stdout.trim() !== commit) throw new Error(`${label} fetched origin base head differs from its observation`);
+    if (observeExactRemoteHead(options, repository, ref, label) !== commit) throw new Error(`${label} origin base head moved during observation`);
+  } finally {
+    const removed = authorityGit(options, repository, ["update-ref", "-d", temporaryRef]);
+    if (!removed.ok) throw new Error(`${label} could not remove its private origin base observation ref`);
+  }
 }
 
 function localPrBaseRef(run) {
@@ -9811,11 +9850,10 @@ function assertPrFenceGitAuthorityCurrent(runDir, run, fence, options = {}) {
     head_ref: authority.head_ref,
     head_sha: authority.head_sha,
     base_ref: authority.base_ref,
-    base_sha: authority.base_sha,
     draft: authority.draft,
   };
   for (const [key, value] of Object.entries(expected)) if (fence[key] !== value) throw new Error(`pre-PR fence ${key} no longer matches local/origin authority`);
-  const operationId = computePrOperationId({ base_commit: fence.base_sha, branch: fence.head_ref, created_at: fence.created_at, repository: fence.repository, run_id: run.run_id });
+  const operationId = computePrOperationId({ base_commit: run.base_commit, branch: fence.head_ref, created_at: fence.created_at, repository: fence.repository, run_id: run.run_id });
   if (fence.operation_id !== operationId) throw new Error("pre-PR fence operation_id is stale or malformed");
   if (run.validator?.reviewed_head_sha !== fence.head_sha || run.security_review?.reviewed_head_sha !== fence.head_sha) throw new Error("pre-PR fence head no longer equals both reviewed panel heads");
   return authority;

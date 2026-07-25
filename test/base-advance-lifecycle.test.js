@@ -3,7 +3,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { advanceFactoryRunBase, resumeFactory } from "../src/factory.js";
-import { completeSpecialBuilderTaskDispatch, claimCheckedTestExecution, prepareSpecialBuilderTaskDispatch, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionSliceMerged } from "../src/run-state.js";
+import { classifyWholeStoryTestRoute, completeSpecialBuilderTaskDispatch, claimCheckedTestExecution, prepareSpecialBuilderTaskDispatch, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionSliceMerged } from "../src/run-state.js";
+import { computePrOperationId } from "../src/github.js";
 import { captureRepresentativeAuthorityInventory, createBaseAdvanceTransitionFixture, git, installRepresentativeAuthorityInventory, output } from "./helpers/base-advance-transition/fixture.js";
 import { approvePreservedCandidate, completeFinalCheckedTest, completeIntegratedConflictCheckedTest, configureReadyPostPrReview, installApprovedLifecycleSlice, LIFECYCLE_REVIEWER, publishIndependentPanels, recordOpenReadyPr, requestConfiguredReviewer } from "./helpers/base-advance-lifecycle/fixture.js";
 import { spawnSync } from "./helpers/git-fixture.js";
@@ -122,10 +123,13 @@ describe("active-run base advancement lifecycle compatibility", () => {
       const merged = await transitionSliceMerged(fixture.runDir, candidate.sliceId, { merge_commit: candidate.integrationHead }, { repoRoot: fixture.repo });
       assert.equal(merged.slice.status, "merged");
       assert.equal(merged.slice.merge_commit, candidate.integrationHead);
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, merged.run), "ordinary-fresh-v1");
       await assert.rejects(transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }), /test-verifier|panel|validator|security/u);
 
       const checked = await completeFinalCheckedTest(fixture, candidate.integrationHead);
       assert.equal(checked.completed.status, "pass");
+      assert.equal(checked.claimed.authority.head_sha, candidate.integrationHead);
+      assert.deepEqual(checked.receipt.commands.map(({ program, args }) => [program, args]), [["npm", ["run", "check"]]]);
       assert.equal(checked.accepted.run.steps.find((step) => step.agent === "test-verifier").status, "accepted");
       await assert.rejects(transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }), /panel|validator|security/u);
 
@@ -134,13 +138,21 @@ describe("active-run base advancement lifecycle compatibility", () => {
         { validator: panels.run.validator.verdict, validator_head: panels.run.validator.reviewed_head_sha, security: panels.run.security_review.verdict, security_head: panels.run.security_review.reviewed_head_sha },
         { validator: "GO", validator_head: candidate.integrationHead, security: "PASS", security_head: candidate.integrationHead },
       );
-      const pr = await recordOpenReadyPr(fixture, target, candidate.integrationHead);
+      const driftedMain = fixture.advance("post-review canonical main drift\n");
+      const pr = await recordOpenReadyPr(fixture, driftedMain, candidate.integrationHead);
       assert.equal(pr.recorded.disposition, "open");
       assert.equal(pr.recorded.status, "running");
       assert.equal(pr.recorded.pr_url, pr.pullRequest.pr_url);
-      assert.equal(pr.fence.base_sha, target);
+      assert.equal(pr.fence.base_sha, driftedMain);
       assert.equal(pr.fence.head_sha, candidate.integrationHead);
       assert.equal(pr.fence.draft, false);
+      assert.equal(pr.fence.operation_id, computePrOperationId({
+        base_commit: target,
+        branch: fixture.runId,
+        created_at: pr.fence.created_at,
+        repository: pr.fence.repository,
+        run_id: fixture.runId,
+      }));
       assert.equal(pr.operationMarker, `<!-- opencode-feature-factory:pr-operation=${pr.fence.operation_id} -->`);
       assert.equal(pr.observedPull.body, `${pr.operationMarker}\n`);
       assert.deepEqual(pr.observationCalls, [
@@ -155,6 +167,7 @@ describe("active-run base advancement lifecycle compatibility", () => {
       ]);
       const finalRun = fixture.readRun();
       assert.equal(finalRun.base_commit, target);
+      assert.equal(finalRun.post_pr.pr_operation.base_sha, driftedMain);
       assert.equal(finalRun.pr_mode, "ready");
       assert.equal(finalRun.pr_url, pr.pullRequest.pr_url);
       assert.equal(finalRun.post_pr.policy.review.reviewer_login, LIFECYCLE_REVIEWER);
@@ -180,6 +193,33 @@ describe("active-run base advancement lifecycle compatibility", () => {
       assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), before);
       assert.equal(output(fixture.worktree, ["rev-parse", "HEAD"]), firstTarget);
       assert.equal(fixture.readRun().base_commit, fixture.base);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("fails closed when current canonical main no longer descends from the immutable recorded base", async () => {
+    const fixture = createBaseAdvanceTransitionFixture("lifecycle-non-ancestor-main");
+    try {
+      fixture.advance();
+      await advanceFactoryRunBase(fixture.runId, { cwd: fixture.repo });
+      const candidate = installApprovedLifecycleSlice(fixture);
+      await transitionSliceMerged(fixture.runDir, candidate.sliceId, { merge_commit: candidate.integrationHead }, { repoRoot: fixture.repo });
+      await completeFinalCheckedTest(fixture, candidate.integrationHead);
+      await publishIndependentPanels(fixture, candidate.integrationHead);
+
+      git(fixture.publisher, ["checkout", "--orphan", "divergent-main"]);
+      git(fixture.publisher, ["rm", "-rf", "."]);
+      writeFileSync(join(fixture.publisher, "divergent.txt"), "unrelated canonical history\n");
+      git(fixture.publisher, ["add", "divergent.txt"]);
+      git(fixture.publisher, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "replace canonical history"]);
+      git(fixture.publisher, ["push", "--force", "origin", "HEAD:main"]);
+      git(fixture.worktree, ["push", "-u", "origin", `HEAD:refs/heads/${fixture.runId}`]);
+
+      await assert.rejects(
+        transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }),
+        /run\.base_commit.*ancestor.*current origin base head/u,
+      );
     } finally {
       fixture.cleanup();
     }

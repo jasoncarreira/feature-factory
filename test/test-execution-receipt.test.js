@@ -13,6 +13,7 @@ import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
 import {
   claimCheckedTestExecution,
+  classifyWholeStoryTestRoute,
   markCheckedTestExecutionUnknown,
   transitionRecoverOrphan,
   transitionRunJson,
@@ -32,10 +33,47 @@ const LATER = "2026-07-17T12:00:01.000Z";
 const CLI_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 
 describe("checked test execution receipt", () => {
+  it("selects ordinary fresh exactly once and rejects legacy evidence as a parallel whole-story answer", async () => {
+    const fixture = createExecutionFixture("checked-ordinary-fresh", undefined, { ordinary: true });
+    try {
+      const initial = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, initial), "ordinary-fresh-v1");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, continuation: { schema_version: 1 } }), "legacy-unselected");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, checkpoint_source: {} }), "legacy-unselected");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, checkpoint_progress: {} }), "legacy-unselected");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, slices: initial.slices.map((slice) => ({ ...slice, status: "review" })) }), "legacy-unselected");
+
+      writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "caller-authored legacy evidence\n");
+      writeJson(join(fixture.runDir, "evidence", "legacy.json"), { subject: "test-verifier", status: "pass" });
+      writeJson(join(fixture.runDir, "reviews", "test-verifier.attempt-1.json"), {
+        subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: fixture.head, required_fixes: [],
+      });
+      await assert.rejects(transitionRunStep(fixture.runDir, "test-verifier", {
+        status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md",
+        evidence_ref: "evidence/legacy.json", review_ref: "reviews/test-verifier.attempt-1.json",
+      }, { mustExist: true }), /completed checked execution claim/u);
+
+      const calls = [];
+      const completed = await executeCheckedTestExecution(fixture.runDir, executionOptions([{}, {}], calls));
+      assert.equal(completed.status, "pass");
+      assert.deepEqual(calls.map(({ program, args }) => [program, args]), [
+        ["node", ["--test", "test/acceptance.test.js"]],
+        ["npm", ["run", "check"]],
+      ]);
+      const accepted = await transitionRunStep(fixture.runDir, "test-verifier", {
+        status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md",
+        evidence_ref: completed.receipt_ref, review_ref: "reviews/test-verifier.attempt-1.json",
+      }, { mustExist: true });
+      assert.equal(accepted.step.acceptance.evidence_hash, completed.receipt_hash);
+      assert.equal(accepted.step.acceptance.reviewed_head_sha, fixture.head);
+    } finally { cleanup(fixture.repo); }
+  });
+
   it("claims before sequential shell-free execution, publishes a passing receipt, and exact-replays without process or write", async () => {
     const fixture = createExecutionFixture("checked-pass");
     const calls = [];
     try {
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, readJson(join(fixture.runDir, "run.json"))), "schema-v2");
       const result = await executeCheckedTestExecution(fixture.runDir, executionOptions([
         { stdout: "acceptance ok\n" },
         { stderr: "check ok\n" },
@@ -272,7 +310,7 @@ describe("checked test execution receipt", () => {
   });
 });
 
-function createExecutionFixture(runId, commands = [{ program: "node", args: ["--test", "test/acceptance.test.js"] }, { program: "npm", args: ["run", "check"] }]) {
+function createExecutionFixture(runId, commands = [{ program: "node", args: ["--test", "test/acceptance.test.js"] }, { program: "npm", args: ["run", "check"] }], options = {}) {
   const repo = mkdtempSync(join(tmpdir(), "feature-factory-checked-execution-"));
   runGit(repo, ["init", "-b", "main"]);
   runGit(repo, ["config", "user.email", "test@example.com"]);
@@ -327,7 +365,7 @@ function createExecutionFixture(runId, commands = [{ program: "node", args: ["--
   };
   const run = {
     schema_version: 1, run_id: runId, mode: "headless", status: "running", base_ref: "main", base_commit: head, branch: runId, worktree: repo,
-    github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, gates: {}, continuation,
+    github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, gates: {}, ...(options.ordinary ? {} : { continuation }),
     post_pr: { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
     slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["README.md"], effective_paths: ["README.md"], status: "merged", attempts: 1, attempt_reviews: [sliceAttemptReview], evidence_ref: sliceEvidenceRef, evidence_hash: sliceEvidenceHash, review_ref: sliceReviewRef, review_hash: sliceReviewHash, reviewed_commit: head, merge_commit: head }],
     steps: [
@@ -336,7 +374,8 @@ function createExecutionFixture(runId, commands = [{ program: "node", args: ["--
       { agent: "test-verifier", status: "running", attempts: 1 },
     ],
   };
-  publishSyntheticV2Parent(runDir, continuation);
+  if (options.ordinary) delete run.steps[0].inherited_acceptance;
+  if (!options.ordinary) publishSyntheticV2Parent(runDir, continuation);
   writeJson(join(runDir, "run.json"), validateRun(run));
   return { repo, runDir, runId, head };
 }

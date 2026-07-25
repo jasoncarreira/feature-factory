@@ -10,6 +10,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assertSliceReviewBindingCurrent,
+  classifyWholeStoryTestRoute,
   claimCheckedTestExecution,
   completeSliceBuilderTaskDispatch,
   completeSpecialBuilderTaskDispatch,
@@ -821,6 +822,11 @@ describe("simplified run-state transitions", () => {
 
       const integrated = await transitionSliceMerged(fixture.runDir, "slice", { merge_commit: resolutionHead });
       assert.equal(integrated.slice.status, "merged");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, integrated.run), "delegated-conflict");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, {
+        ...integrated.run,
+        continuation: { schema_version: 2, kind: "blocked-run-continuation" },
+      }), "schema-v2", "combined schema-v2/conflict shape retains one checked executor route");
       assert.equal(integrated.run.special_builder_dispatch, undefined);
       assert.equal(integrated.slice.integration_conflict.status, "pending-integrated-review");
       assert.equal(integrated.slice.integration_conflict.resolution_commit, resolutionHead);
@@ -1998,6 +2004,11 @@ describe("simplified run-state transitions", () => {
         /slices can only be changed by checked slice transitions/u,
       );
       assert.deepEqual(readJson(join(fixture.runDir, "run.json")).slices[0].effective_paths, ["src/**", "extension/feature.txt"]);
+      assertConsistent(fixture);
+
+      const checked = await acceptIntegratedConflict(fixture, integrationHead, 1);
+      assert.equal(checked.step.execution_claim.status, "pass");
+      assert.equal(checked.step.acceptance.reviewed_head_sha, integrationHead);
       assertConsistent(fixture);
 
       writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n");
