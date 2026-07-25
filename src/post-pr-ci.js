@@ -1,12 +1,10 @@
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { link, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { hostname } from "node:os";
-import { dirname, join, posix, relative, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { posix, relative, resolve } from "node:path";
 import { types as utilTypes } from "node:util";
+import { githubAccountEnvironment } from "./github-account-env.js";
 
 export const GITHUB_LIMITS = Object.freeze({
-  switch: Object.freeze({ timeoutMs: 10_000, stdoutCap: 16 * 1024, stderrCap: 16 * 1024 }),
   verdict: Object.freeze({ timeoutMs: 30_000, stdoutCap: 1024 * 1024, stderrCap: 64 * 1024 }),
   reviewer: Object.freeze({ timeoutMs: 30_000, stdoutCap: 1024 * 1024, stderrCap: 64 * 1024 }),
   ownershipPage: Object.freeze({ timeoutMs: 20_000, stdoutCap: 512 * 1024, stderrCap: 64 * 1024 }),
@@ -537,15 +535,17 @@ export async function runGitHubOperation(input) {
   const repositoryRoot = resolve(input.repositoryRoot);
   const account = optionalLogin(input.account);
   if (!account) throw new PostPrCiError("account-auth", "a persisted GitHub account is required");
-  return withGitHubOperationLock(repositoryRoot, async () => {
-    const execute = input.execute ?? runBoundedProcess;
-    const common = { executable: input.executable ?? "gh", cwd: input.cwd ?? repositoryRoot, spawnImpl: input.spawnImpl };
-    const switched = await execute({ ...common, args: ["auth", "switch", "-h", "github.com", "-u", account], ...GITHUB_LIMITS.switch });
-    requireSuccessful(switched, "account-switch");
-    const result = await execute({ ...common, args: [...input.args], ...(input.limits ?? GITHUB_LIMITS.verdict) });
-    requireSuccessful(result, "operation");
-    return { exitCode: result.exitCode, signal: result.signal ?? null, stdout: result.stdout ?? "" };
-  }, input.lockOptions);
+  const execute = input.execute ?? runBoundedProcess;
+  const result = await execute({
+    ...(input.limits ?? GITHUB_LIMITS.verdict),
+    executable: input.executable ?? "gh",
+    cwd: input.cwd ?? repositoryRoot,
+    spawnImpl: input.spawnImpl,
+    args: [...input.args],
+    env: githubAccountEnvironment(account, input.env ?? process.env),
+  });
+  requireSuccessful(result);
+  return { exitCode: result.exitCode, signal: result.signal ?? null, stdout: result.stdout ?? "" };
 }
 
 export async function queryPullRequest(input) {
@@ -588,7 +588,7 @@ export async function fetchChangedFiles(input) {
 }
 
 export async function runBoundedProcess(input) {
-  const child = (input.spawnImpl ?? spawn)(input.executable, input.args, { cwd: input.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+  const child = (input.spawnImpl ?? spawn)(input.executable, input.args, { cwd: input.cwd, env: input.env, shell: false, stdio: ["ignore", "pipe", "pipe"] });
   return new Promise((resolvePromise, rejectPromise) => {
     const stdout = []; const stderr = []; let stdoutBytes = 0; let stderrBytes = 0; let settled = false; let timedOut = false; let overflow = null;
     const finishError = (error) => { if (!settled) { settled = true; clearTimeout(timer); rejectPromise(error); } };
@@ -624,63 +624,6 @@ export function classifyGitHubFailure(input = {}) {
   if (status === 403) return new PostPrCiError("permission", "GitHub permission failure", { exitCode });
   if (status === 404) return new PostPrCiError("not-found", "GitHub resource not found", { exitCode });
   return new PostPrCiError("command", "GitHub command failed", { exitCode });
-}
-
-async function withGitHubOperationLock(repositoryRoot, fn, options = {}) {
-  const factoryDir = join(repositoryRoot, ".opencode", "factory");
-  const lockFile = join(factoryDir, "github-operation.lock");
-  await mkdir(factoryDir, { recursive: true });
-  const now = options?.now ?? Date.now;
-  const sleep = options?.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
-  const deadline = now() + (options?.timeoutMs ?? 10_000);
-  let owner;
-  while (!owner) {
-    const candidate = { pid: process.pid, hostname: hostname(), nonce: randomUUID() };
-    const claimFile = join(factoryDir, `.github-operation.lock-claim-${candidate.nonce}.json`);
-    try {
-      await writeFile(claimFile, `${JSON.stringify(candidate)}\n`, { flag: "wx" });
-      if (options?.onClaimPublished) await options.onClaimPublished({ claimFile, lockFile, owner: candidate });
-      await link(claimFile, lockFile);
-      await rm(claimFile, { force: true });
-      owner = candidate;
-    } catch (error) {
-      await rm(claimFile, { force: true }).catch(() => {});
-      if (error.code !== "EEXIST") throw error;
-      if (await reclaimDeadLocalLock(lockFile, options)) continue;
-      if (now() >= deadline) throw new PostPrCiError("lock-timeout", "GitHub operation lock timed out", { transient: true });
-      await sleep(Math.min(25, Math.max(1, deadline - now())));
-    }
-  }
-  try { return await fn(); } finally {
-    try {
-      const current = JSON.parse(await readFile(lockFile, "utf8"));
-      if (current.nonce === owner.nonce) await rm(lockFile, { force: true });
-    } catch { /* Never remove a lock whose ownership cannot be confirmed. */ }
-  }
-}
-
-async function reclaimDeadLocalLock(lockFile, options = {}) {
-  let owner;
-  try { owner = JSON.parse(await readFile(lockFile, "utf8")); } catch { return false; }
-  if (owner.hostname !== hostname() || !Number.isInteger(owner.pid) || owner.pid <= 0 || typeof owner.nonce !== "string") return false;
-  if (options.isProcessAlive) { if (await options.isProcessAlive(owner.pid)) return false; }
-  else {
-    try { process.kill(owner.pid, 0); return false; } catch (error) { if (error.code !== "ESRCH") return false; }
-  }
-  const quarantine = `${lockFile}.dead-${randomUUID()}`;
-  try {
-    await rename(lockFile, quarantine);
-    const confirmed = JSON.parse(await readFile(quarantine, "utf8"));
-    if (confirmed.nonce !== owner.nonce || confirmed.pid !== owner.pid || confirmed.hostname !== owner.hostname) {
-      throw new PostPrCiError("lock-identity", "GitHub operation lock identity changed");
-    }
-    await rm(quarantine, { force: true });
-    await rm(join(dirname(lockFile), `.github-operation.lock-claim-${owner.nonce}.json`), { force: true });
-    return true;
-  } catch (error) {
-    if (error instanceof PostPrCiError) throw error;
-    return false;
-  }
 }
 
 function latestApplicableReviews(reviews, expectedHeadSha) {
@@ -753,7 +696,7 @@ function isTestLanePath(path) { return TEST_PREFIXES.some((prefix) => path.start
 function isUnsafeRuntimePath(path) { return UNSAFE_RUNTIME_PATHS.has(path) || path.startsWith(".yarn/") || path.startsWith("node_modules/")
   || (!path.includes("/") && (/^(?:tsconfig(?:\.[^.]+)?\.json|(?:eslint|prettier|babel|webpack|vite|vitest|jest)\.config\.[A-Za-z0-9]+)$/u.test(path) || /^\.env(?:\.|$)/u.test(path))); }
 function hasUnsafeChanges(input) { return Boolean(input.hasRename || input.hasDelete || input.hasGenerated || input.hasSymlink || input.changes?.some((change) => change?.previous_path || ["renamed", "removed", "deleted"].includes(String(change?.status).toLowerCase()))); }
-function requireSuccessful(result, phase) { if (!result || result.exitCode !== 0) { const classified = classifyGitHubFailure(result ?? {}); if (phase === "account-switch") throw new PostPrCiError("account-switch", "GitHub account switch failed", { exitCode: classified.exitCode }); throw classified; } }
+function requireSuccessful(result) { if (!result || result.exitCode !== 0) throw classifyGitHubFailure(result ?? {}); }
 function parseJsonObject(text) { try { const value = JSON.parse(text); if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(); return value; } catch { throw protocol("malformed GitHub JSON response"); } }
 function parseIncludedArray(text) {
   if (typeof text !== "string") throw protocol("malformed GitHub included response");

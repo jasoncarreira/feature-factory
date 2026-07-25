@@ -1,12 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
-  PostPrCiError, aggregateObservation, affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyGitHubFailure, classifyOwnership, classifyPanelResult, createOwnershipIndex,
+  GITHUB_LIMITS, PostPrCiError, aggregateObservation, affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyGitHubFailure, classifyOwnership, classifyPanelResult, createOwnershipIndex,
   decideObservationSchedule, decideTransientSchedule, emitAffectedJson, encodeUntrustedMetadata, fetchChangedFiles,
   normalizeCheck, normalizeChecks, normalizePullRequestResponse, normalizeRepositoryPath, normalizeReview, parseRetryDelay,
   inspectPanelRunnerReturn, queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, snapshotPanelAffectedValue, validateLane,
@@ -347,34 +347,44 @@ describe("panel result and affected-path trust boundaries", () => {
 });
 
 describe("bounded GitHub execution", () => {
-  it("runs mandatory switch immediately before one operation without a shell", async () => {
+  it("runs the requested operation exactly once with the isolated account environment", async () => {
     const root = mkdtempSync(join(tmpdir(), "post-pr-gh-")); const calls = [];
     try {
-      const result = await runGitHubOperation({ repositoryRoot: root, account: "octocat", args: ["pr", "view", "1"], execute: async (input) => {
-        calls.push(input); return { exitCode: 0, stdout: calls.length === 2 ? "{}" : "", stderr: "" };
-      } });
+      const parentEnvironment = { KEEP: "yes", GH_TOKEN: "one", GITHUB_TOKEN: "two", GH_ENTERPRISE_TOKEN: "three", GITHUB_ENTERPRISE_TOKEN: "four" };
+      const result = await runGitHubOperation({ repositoryRoot: root, account: "Exact-Account", args: ["pr", "view", "1"], env: parentEnvironment,
+        execute: async (input) => { calls.push(input); return { exitCode: 0, stdout: "{}", stderr: "" }; } });
       assert.equal(result.stdout, "{}");
-      assert.deepEqual(calls.map((call) => call.args), [["auth", "switch", "-h", "github.com", "-u", "octocat"], ["pr", "view", "1"]]);
-      assert.equal(calls.every((call) => call.executable === "gh"), true);
+      assert.deepEqual(Object.keys(result), ["exitCode", "signal", "stdout"]);
+      assert.equal(calls.length, 1);
+      assert.deepEqual(calls[0].args, ["pr", "view", "1"]);
+      assert.equal(calls[0].executable, "gh");
+      assert.equal(calls[0].env.KEEP, "yes");
+      assert.equal(calls[0].env.GH_CONFIG_DIR, join(homedir(), ".config", "opencode-feature-factory", "gh", "Exact-Account"));
+      assert.equal(calls[0].env.GH_HOST, "github.com");
+      assert.equal(calls[0].env.GH_PROMPT_DISABLED, "1");
+      assert.equal(calls[0].env.GH_PAGER, "cat");
+      assert.equal(calls[0].env.PAGER, "cat");
+      for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]) assert.equal(Object.hasOwn(calls[0].env, key), false);
+      assert.deepEqual(Object.keys(GITHUB_LIMITS), ["verdict", "reviewer", "ownershipPage"]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("fails closed on account switch and does not execute the operation", async () => {
+  it("fails closed after one requested operation failure", async () => {
     const root = mkdtempSync(join(tmpdir(), "post-pr-gh-")); let calls = 0;
     try {
-      await assert.rejects(runGitHubOperation({ repositoryRoot: root, account: "octocat", args: ["pr", "view"], execute: async () => ({ exitCode: ++calls === 1 ? 1 : 0, stdout: "", stderr: "token" }) }),
-        (error) => error.errorClass === "account-switch");
+      await assert.rejects(runGitHubOperation({ repositoryRoot: root, account: "octocat", args: ["pr", "view"], execute: async () => { calls += 1; return { exitCode: 1, stdout: "", stderr: "bad credentials" }; } }),
+        (error) => error.errorClass === "account-auth");
       assert.equal(calls, 1);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("constructs the reviewer request as the sole operation after account switch", async () => {
+  it("constructs the reviewer request as the sole operation", async () => {
     const root = mkdtempSync(join(tmpdir(), "post-pr-gh-")); const calls = [];
     try {
       await requestReviewer({ repositoryRoot: root, account: "octocat", repository: "o/r", prNumber: 7, reviewerLogin: "Review-Bot", execute: async (input) => {
         calls.push(input.args); return { exitCode: 0, stdout: "", stderr: "hidden" };
       } });
-      assert.deepEqual(calls, [["auth", "switch", "-h", "github.com", "-u", "octocat"], ["pr", "edit", "7", "--repo", "o/r", "--add-reviewer", "Review-Bot"]]);
+      assert.deepEqual(calls, [["pr", "edit", "7", "--repo", "o/r", "--add-reviewer", "Review-Bot"]]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -385,7 +395,7 @@ describe("bounded GitHub execution", () => {
         calls.push(input.args); return { exitCode: 0, stdout: input.args[0] === "pr" ? JSON.stringify({ headRefOid: SHA }) : "", stderr: "" };
       } });
       assert.equal(response.headRefOid, SHA);
-      assert.deepEqual(calls[1].slice(0, 5), ["pr", "view", "7", "--repo", "o/r"]);
+      assert.deepEqual(calls[0].slice(0, 5), ["pr", "view", "7", "--repo", "o/r"]);
       await assert.rejects(queryPullRequest({ repositoryRoot: root, account: "octocat", repository: "-R", prNumber: 7 }), /invalid repository/u);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
@@ -447,8 +457,9 @@ describe("bounded GitHub execution", () => {
       queueMicrotask(() => { child.stdout.end("ok"); child.stderr.end(); child.emit("close", 0, null); });
       return child;
     };
-    const result = await runBoundedProcess({ executable: "gh", args: ["pr", "view", "7"], cwd: "/tmp", timeoutMs: 1000, stdoutCap: 100, stderrCap: 100, spawnImpl });
-    assert.equal(result.stdout, "ok"); assert.equal(observed.options.shell, false); assert.deepEqual(observed.args, ["pr", "view", "7"]);
+    const env = { GH_CONFIG_DIR: "/tmp/gh-account" };
+    const result = await runBoundedProcess({ executable: "gh", args: ["pr", "view", "7"], cwd: "/tmp", env, timeoutMs: 1000, stdoutCap: 100, stderrCap: 100, spawnImpl });
+    assert.equal(result.stdout, "ok"); assert.equal(observed.options.shell, false); assert.equal(observed.options.env, env); assert.deepEqual(observed.args, ["pr", "view", "7"]);
   });
 
   it("classifies deterministic transient and permanent errors", () => {
@@ -468,55 +479,51 @@ describe("bounded GitHub execution", () => {
     for (const status of [408, 500, 502, 503, 504]) assert.equal(classifyGitHubFailure({ httpStatus: status }).errorClass, "http-transient");
   });
 
-  it("publishes lock ownership before atomic acquisition and cleans failed claims", async () => {
-    const root = mkdtempSync(join(tmpdir(), "post-pr-lock-"));
-    try {
-      await assert.rejects(runGitHubOperation({ repositoryRoot: root, account: "octocat", args: ["pr", "view"], execute: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-        lockOptions: { onClaimPublished: async () => { throw new Error("publication interrupted"); } } }), /publication interrupted/u);
-      const factory = join(root, ".opencode", "factory");
-      assert.deepEqual(readdirSync(factory), []);
-    } finally { rmSync(root, { recursive: true, force: true }); }
-  });
-
-  it("reclaims only a confirmed dead local lock and preserves live/ownerless locks", async () => {
-    const root = mkdtempSync(join(tmpdir(), "post-pr-lock-")); const factory = join(root, ".opencode", "factory"); const lock = join(factory, "github-operation.lock");
-    mkdirSync(factory, { recursive: true });
-    writeFileSync(lock, JSON.stringify({ pid: 999999, hostname: hostname(), nonce: "dead" }));
-    try {
-      const calls = [];
-      await runGitHubOperation({ repositoryRoot: root, account: "octocat", args: ["pr", "view"], execute: async (input) => { calls.push(input.args); return { exitCode: 0, stdout: "", stderr: "" }; }, lockOptions: { isProcessAlive: async () => false } });
-      assert.equal(calls.length, 2);
-      let clock = 0;
-      writeFileSync(lock, JSON.stringify({ pid: process.pid, hostname: hostname(), nonce: "live" }));
-      await assert.rejects(runGitHubOperation({ repositoryRoot: root, account: "octocat", args: ["pr"], execute: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-        lockOptions: { now: () => clock, sleep: async (ms) => { clock += ms; }, timeoutMs: 1, isProcessAlive: async () => true } }), (error) => error.errorClass === "lock-timeout");
-      rmSync(lock);
-      writeFileSync(lock, ""); clock = 0;
-      await assert.rejects(runGitHubOperation({ repositoryRoot: root, account: "octocat", args: ["pr"], execute: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-        lockOptions: { now: () => clock, sleep: async (ms) => { clock += ms; }, timeoutMs: 1 } }), (error) => error.errorClass === "lock-timeout");
-      assert.equal(readdirSync(factory).includes("github-operation.lock"), true);
-    } finally { rmSync(root, { recursive: true, force: true }); }
-  });
-
-  it("serializes complete switch-operation pairs", async () => {
-    const root = mkdtempSync(join(tmpdir(), "post-pr-lock-")); const calls = [];
-    let releaseFirst; let markStarted;
-    const firstStarted = new Promise((resolvePromise) => { markStarted = resolvePromise; });
-    const blocker = new Promise((resolvePromise) => { releaseFirst = resolvePromise; });
+  it("allows two repositories and accounts to enter concurrently while stale locks stay inert", async () => {
+    const firstRoot = mkdtempSync(join(tmpdir(), "post-pr-account-a-"));
+    const secondRoot = mkdtempSync(join(tmpdir(), "post-pr-account-b-"));
+    const calls = [];
+    let markBothEntered;
+    let releaseBoth;
+    const bothEntered = new Promise((resolvePromise) => { markBothEntered = resolvePromise; });
+    const blocker = new Promise((resolvePromise) => { releaseBoth = resolvePromise; });
     const execute = async (input) => {
-      calls.push(input.args);
-      if (input.args[0] === "pr" && calls.length === 2) { markStarted(); await blocker; }
+      calls.push(input);
+      if (calls.length === 2) markBothEntered();
+      await blocker;
       return { exitCode: 0, stdout: "", stderr: "" };
     };
+    const firstLock = join(firstRoot, ".opencode", "factory", "github-operation.lock");
+    const secondLock = join(secondRoot, ".opencode", "factory", "github-operation.lock-claim-stale.json");
+    mkdirSync(join(firstRoot, ".opencode", "factory"), { recursive: true });
+    mkdirSync(join(secondRoot, ".opencode", "factory"), { recursive: true });
+    writeFileSync(firstLock, "first-stale-lock", "utf8");
+    writeFileSync(secondLock, "second-stale-lock", "utf8");
     try {
-      const first = runGitHubOperation({ repositoryRoot: root, account: "octocat", args: ["pr", "view", "1"], execute });
-      await firstStarted;
-      const second = runGitHubOperation({ repositoryRoot: root, account: "octocat", args: ["pr", "view", "2"], execute });
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      const first = runGitHubOperation({ repositoryRoot: firstRoot, account: "Account-One", args: ["pr", "view", "1"], execute });
+      const second = runGitHubOperation({ repositoryRoot: secondRoot, account: "Account-Two", args: ["pr", "view", "2"], execute });
+      await bothEntered;
+
       assert.equal(calls.length, 2);
-      releaseFirst(); await Promise.all([first, second]);
-      assert.deepEqual(calls.map((args) => args.slice(0, 3)), [["auth", "switch", "-h"], ["pr", "view", "1"], ["auth", "switch", "-h"], ["pr", "view", "2"]]);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+      assert.deepEqual(calls.map((call) => call.args), [["pr", "view", "1"], ["pr", "view", "2"]]);
+      assert.deepEqual(calls.map((call) => call.env.GH_CONFIG_DIR), [
+        join(homedir(), ".config", "opencode-feature-factory", "gh", "Account-One"),
+        join(homedir(), ".config", "opencode-feature-factory", "gh", "Account-Two"),
+      ]);
+      assert.deepEqual(calls.map((call) => call.cwd), [firstRoot, secondRoot]);
+      assert.equal(calls.some((call) => call.args.includes("switch")), false);
+      assert.equal(readFileSync(firstLock, "utf8"), "first-stale-lock");
+      assert.equal(readFileSync(secondLock, "utf8"), "second-stale-lock");
+
+      releaseBoth();
+      await Promise.all([first, second]);
+      assert.equal(readFileSync(firstLock, "utf8"), "first-stale-lock");
+      assert.equal(readFileSync(secondLock, "utf8"), "second-stale-lock");
+    } finally {
+      releaseBoth?.();
+      rmSync(firstRoot, { recursive: true, force: true });
+      rmSync(secondRoot, { recursive: true, force: true });
+    }
   });
 });
 
