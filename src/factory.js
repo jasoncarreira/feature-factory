@@ -771,7 +771,6 @@ function checkpointPullRequestObserver(repo, snapshots, opts) {
       executable: opts.ghExecutable,
       execute: opts.executeGithub,
       spawnImpl: opts.spawnImpl,
-      lockOptions: opts.githubLockOptions,
       observePage: opts.observePrOperationPage,
     });
   };
@@ -796,7 +795,6 @@ function checkpointRecordedPullRequestObserver(repo, opts) {
     executable: opts.ghExecutable,
     execute: opts.executeGithub,
     spawnImpl: opts.spawnImpl,
-    lockOptions: opts.githubLockOptions,
     observePage: opts.observePrOperationPage,
   });
 }
@@ -7625,14 +7623,14 @@ function postPrSummary(run) {
 }
 
 async function postPrRemoteBranchHead(repo, run, opts = {}) {
-  const result = await executePostPrGitOperation(run, "remote-head", opts, (env) => git(repo, ["ls-remote", "--heads", "origin", `refs/heads/${run.branch}`], { timeout: 30000, env: postPrGitSpawnEnvironment(env) }));
+  const result = await executePostPrGitOperation(run, "remote-head", opts, (env) => git(repo, ["ls-remote", "--heads", "origin", `refs/heads/${run.branch}`], { timeout: 30000, env }));
   const value = result.stdout.trim().split(/\s+/u)[0];
   if (!/^[0-9a-f]{40}$/u.test(value || "")) throw new Error("remote branch head is missing or malformed");
   return value;
 }
 
 async function postPrFastForwardPush(run, candidate, opts = {}) {
-  await executePostPrGitOperation(run, "fast-forward-push", opts, (env) => git(run.worktree, ["push", "origin", `${candidate}:refs/heads/${run.branch}`], { timeout: 30000, env: postPrGitSpawnEnvironment(env) }));
+  await executePostPrGitOperation(run, "fast-forward-push", opts, (env) => git(run.worktree, ["push", "origin", `${candidate}:refs/heads/${run.branch}`], { timeout: 30000, env }));
 }
 
 async function executePostPrGitOperation(run, operation, opts, gitOperation) {
@@ -7643,10 +7641,6 @@ async function executePostPrGitOperation(run, operation, opts, gitOperation) {
   const exitCode = proc?.ok === false ? Number.isInteger(proc.status) && proc.status !== 0 ? proc.status : 1 : Number.isInteger(proc?.exitCode) ? proc.exitCode : 0;
   if (exitCode !== 0) throw classifyGitHubFailure({ ...proc, exitCode });
   return { stdout: proc?.stdout || "", stderr: proc?.stderr || "", exitCode };
-}
-
-function postPrGitSpawnEnvironment(env) {
-  return { ...env, GH_TOKEN: undefined, GITHUB_TOKEN: undefined, GH_ENTERPRISE_TOKEN: undefined, GITHUB_ENTERPRISE_TOKEN: undefined };
 }
 
 function assertPostPrContinuationParent(run) {

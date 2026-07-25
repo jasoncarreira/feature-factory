@@ -25,6 +25,15 @@ describe("environment snapshot redaction", () => {
       GITHUB_TOKEN: "github-token",
       GH_ENTERPRISE_TOKEN: "gh-enterprise-token",
       GITHUB_ENTERPRISE_TOKEN: "github-enterprise-token",
+      gh_token: "lower-gh-token",
+      Github_Token: "mixed-github-token",
+      gh_enterprise_token: "lower-gh-enterprise-token",
+      github_enterprise_token: "lower-github-enterprise-token",
+      gh_config_dir: "/wrong/lower-config",
+      gh_host: "wrong.example",
+      gh_prompt_disabled: "0",
+      gh_pager: "wrong-pager",
+      pager: "wrong-pager",
       GH_PROMPT_DISABLED: "0",
       GH_PAGER: "less",
       PAGER: "more",
@@ -40,7 +49,11 @@ describe("environment snapshot redaction", () => {
     assert.equal(environment.GH_PROMPT_DISABLED, "1");
     assert.equal(environment.GH_PAGER, "cat");
     assert.equal(environment.PAGER, "cat");
-    for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]) {
+    const tokenKeys = new Set(["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]);
+    for (const key of Object.keys(environment)) {
+      assert.equal(tokenKeys.has(key.toUpperCase()), false, key);
+    }
+    for (const key of ["gh_config_dir", "gh_host", "gh_prompt_disabled", "gh_pager", "pager"]) {
       assert.equal(Object.hasOwn(environment, key), false, key);
     }
 

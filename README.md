@@ -718,7 +718,7 @@ unset ACTUAL CONFIG_DIR ACCOUNT
 
 The browser login and exact comparison verify the isolated directory without copying or printing a token. Repeat once per account. Do not enable shell tracing (`set -x`), use `--with-token`, engage in copying or pasting tokens, or permit redirecting authentication-detail output while preparing or verifying the directory.
 
-Factory execution never provisions these directories, logs in, copies credentials, or falls back to global configuration. Each account-bound child copies the parent environment, removes `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN`, and sets the derived `GH_CONFIG_DIR` plus `GH_HOST=github.com`, `GH_PROMPT_DISABLED=1`, `GH_PAGER=cat`, and `PAGER=cat`. It does not mutate the parent/operator environment or `process.env`. Missing, invalid, absent, or unusable prepared account state fails through the operation's existing classified/reconciliation path. There is no XDG, APPDATA, platform-root, inherited `GH_CONFIG_DIR`, or case-normalization fallback.
+Factory execution never provisions these directories, logs in, copies credentials, or falls back to global configuration. Each account-bound child copies the parent environment, removes every case-insensitive spelling of `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN`, removes inherited case variants of the controlled GitHub host/configuration keys, and sets the derived `GH_CONFIG_DIR` plus `GH_HOST=github.com`, `GH_PROMPT_DISABLED=1`, `GH_PAGER=cat`, and `PAGER=cat`. It does not mutate the parent/operator environment or `process.env`. Missing, invalid, absent, or unusable prepared account state fails through the operation's existing classified/reconciliation path. There is no XDG, APPDATA, platform-root, inherited `GH_CONFIG_DIR`, or case-normalization fallback.
 
 ### Environment snapshots and PR recording
 
@@ -734,6 +734,22 @@ These commands update `run.json.debug_snapshot.created_with`, `last_resumed_with
 After the final steering drain/checkpoint, Gate 3 approval, and final push, establish the checked fence before creating the external PR:
 
 ```sh
+RUN_ID='your-run-id'
+CONFIG_DIR="$(
+  node -e '
+    const { readFileSync } = require("node:fs");
+    const { homedir } = require("node:os");
+    const { join } = require("node:path");
+    const run = JSON.parse(readFileSync(process.argv[1], "utf8"));
+    const account = run.github_account;
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(account)) process.exit(2);
+    const tokens = new Set(["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]);
+    if (Object.keys(process.env).some((key) => tokens.has(key.toUpperCase()) && key !== key.toUpperCase())) process.exit(3);
+    process.stdout.write(join(homedir(), ".config", "opencode-feature-factory", "gh", account));
+  ' ".opencode/factory/$RUN_ID/run.json"
+)" || exit 1
+test -n "$CONFIG_DIR" || exit 1
+
 feature-factory factory pr-fence <run-id> --json
 env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
   GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat PAGER=cat \
@@ -741,6 +757,7 @@ env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKE
 env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
   GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat PAGER=cat \
   gh pr view <url>
+unset CONFIG_DIR RUN_ID
 ```
 
 The fence response supplies `fence.token`; the durable fence supplies `{operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft}` all-or-none. `operation_id` is `ffpr-v1-` plus lowercase SHA-256 of canonical UTF-8 JSON `{"base_commit":...,"branch":...,"created_at":...,"repository":...,"run_id":...}` in lexical key order. Append exactly one standalone `<!-- opencode-feature-factory:pr-operation=<operation_id> -->` line to the external PR body. Fence creation rechecks canonical PR readiness under the run lock and blocks new steering and every other `run.json` writer so the checked state cannot churn between external creation and reconciliation.

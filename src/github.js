@@ -104,7 +104,7 @@ export function pullRequestOperationQueryArgs(identity, pageUrl = null) {
 }
 
 /**
- * Reconcile one fenced PR-create operation through the bounded account-switched
+ * Reconcile one fenced PR-create operation through the bounded account-scoped
  * GitHub adapter. The result is deliberately a disposition rather than an
  * exception: transport, authentication, pagination, and protocol uncertainty
  * must retain the caller's durable fence.
@@ -155,7 +155,6 @@ async function defaultObservePrOperationPage(input) {
     executable: input.executable,
     execute: input.execute,
     spawnImpl: input.spawnImpl,
-    lockOptions: input.lockOptions,
     args: input.args,
     limits: input.limits,
   });

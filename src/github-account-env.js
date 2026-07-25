@@ -1,12 +1,20 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const GITHUB_AUTH_ENV_KEYS = [
+const GITHUB_AUTH_ENV_KEYS = new Set([
   "GH_TOKEN",
   "GITHUB_TOKEN",
   "GH_ENTERPRISE_TOKEN",
   "GITHUB_ENTERPRISE_TOKEN",
-];
+]);
+const GITHUB_CHILD_ENV_KEYS = new Set([
+  ...GITHUB_AUTH_ENV_KEYS,
+  "GH_CONFIG_DIR",
+  "GH_HOST",
+  "GH_PROMPT_DISABLED",
+  "GH_PAGER",
+  "PAGER",
+]);
 
 export function githubAccountEnvironment(githubAccount, parentEnvironment = process.env) {
   if (typeof githubAccount !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(githubAccount)) {
@@ -17,7 +25,9 @@ export function githubAccountEnvironment(githubAccount, parentEnvironment = proc
   }
 
   const environment = { ...parentEnvironment };
-  for (const key of GITHUB_AUTH_ENV_KEYS) delete environment[key];
+  for (const key of Object.keys(environment)) {
+    if (GITHUB_CHILD_ENV_KEYS.has(key.toUpperCase())) delete environment[key];
+  }
   environment.GH_CONFIG_DIR = githubAccountConfigDirectory(githubAccount);
   environment.GH_HOST = "github.com";
   environment.GH_PROMPT_DISABLED = "1";

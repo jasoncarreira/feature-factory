@@ -681,7 +681,23 @@ For autonomous Gate 3 approval, apply the Live-Run Steering Drain Protocol after
 
 After Gate 3 approval only:
 
-1. Require `run.json.github_account` to be a valid exact GitHub login before any account-bound effect. Derive only `join(homedir(), ".config", "opencode-feature-factory", "gh", run.github_account)` and use that already prepared directory as `GH_CONFIG_DIR`; there is no XDG, APPDATA, platform-root, parent-directory, case-normalization, provisioning, or global configuration fallback. For each command below, create a fresh child environment, remove `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN`, and set `GH_CONFIG_DIR`, `GH_HOST=github.com`, `GH_PROMPT_DISABLED=1`, `GH_PAGER=cat`, and `PAGER=cat`. Never mutate the parent environment or `process.env`. Missing, invalid, absent, or unusable account configuration stops before the effect.
+1. Require `run.json.github_account` to be a valid exact GitHub login before any account-bound effect. Derive only `join(homedir(), ".config", "opencode-feature-factory", "gh", run.github_account)` and use that already prepared directory as `GH_CONFIG_DIR`; there is no XDG, APPDATA, platform-root, parent-directory, case-normalization, provisioning, or global configuration fallback. For each command below, create a fresh child environment, remove every case-insensitive spelling of `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN`, and set `GH_CONFIG_DIR`, `GH_HOST=github.com`, `GH_PROMPT_DISABLED=1`, `GH_PAGER=cat`, and `PAGER=cat`. Never mutate the parent environment or `process.env`. Missing, invalid, absent, or unusable account configuration stops before the effect. Immediately before the first effect, derive the directory from the durable run and reject alternate-case token aliases before relying on the POSIX `env -u` commands:
+   ```sh
+   CONFIG_DIR="$(
+     node -e '
+       const { readFileSync } = require("node:fs");
+       const { homedir } = require("node:os");
+       const { join } = require("node:path");
+       const run = JSON.parse(readFileSync(process.argv[1], "utf8"));
+       const account = run.github_account;
+       if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(account)) process.exit(2);
+       const tokens = new Set(["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]);
+       if (Object.keys(process.env).some((key) => tokens.has(key.toUpperCase()) && key !== key.toUpperCase())) process.exit(3);
+       process.stdout.write(join(homedir(), ".config", "opencode-feature-factory", "gh", account));
+     ' "$RUN/run.json"
+   )" || exit 1
+   test -n "$CONFIG_DIR" || exit 1
+   ```
 2. Verify account visibility of the canonical repository before pushing, using the scoped child only:
    ```sh
    env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
@@ -713,7 +729,7 @@ After Gate 3 approval only:
    ```
     The helper revalidates readiness and fenced Git identity, then performs the account-scoped, token-stripped, shell-free, maximum-10-page exact head/base `state=all` query. It strictly derives the universal operation/node/head/base tuple from GitHub before any completion or post-PR handoff; caller proof fields and booleans are not accepted.
 
-Never merge the PR. Never force-push unless the user explicitly approves.
+Unset `CONFIG_DIR` after reconciliation. Never merge the PR. Never force-push unless the user explicitly approves.
 
 ## Resuming
 

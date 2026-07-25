@@ -252,6 +252,7 @@ describe("account-scoped GitHub workflow contract", () => {
       for (const token of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]) {
         assert.match(text, literalPattern(token), `${path} must strip ${token} from account-bound children`);
       }
+      assert.match(text, /case-insensitive[\s\S]{0,120}(?:spelling|token)|(?:spelling|token)[\s\S]{0,120}case-insensitive/iu, `${path} must cover case-insensitive token aliases`);
       assert.match(text, /global (?:configuration )?fallback|falls? back to global configuration|fall back globally/iu, `${path} must forbid global fallback`);
       assert.match(text, /(?:parent|operator).*environment|process\.env/iu, `${path} must preserve the parent environment`);
     }
@@ -303,8 +304,16 @@ describe("account-scoped GitHub workflow contract", () => {
     assert.match(stepSix, /gh pr create/iu);
     assert.match(stepSix, /gh pr view/iu);
     assert.equal((stepSix.match(/env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN/gu) || []).length, 4);
+    assert.match(stepSix, /CONFIG_DIR="\$\([\s\S]*"\$RUN\/run\.json"[\s\S]*test -n "\$CONFIG_DIR"/u);
+    assert.match(stepSix, /tokens\.has\(key\.toUpperCase\(\)\)[\s\S]*key !== key\.toUpperCase\(\)/u);
+    assert.ok(stepSix.indexOf('CONFIG_DIR="$(') < stepSix.indexOf('GH_CONFIG_DIR="$CONFIG_DIR"'));
     assert.match(stepSix, /Never force-push unless the user explicitly approves/u);
     assert.match(stepSix, /pr-fence[\s\S]*gh pr create[\s\S]*gh pr view[\s\S]*pr-created/iu);
+
+    const readmePrRecording = markdownSection(README, "Environment snapshots and PR recording");
+    assert.match(readmePrRecording, /RUN_ID='your-run-id'[\s\S]*\.opencode\/factory\/\$RUN_ID\/run\.json[\s\S]*test -n "\$CONFIG_DIR"/u);
+    assert.match(readmePrRecording, /tokens\.has\(key\.toUpperCase\(\)\)[\s\S]*key !== key\.toUpperCase\(\)/u);
+    assert.ok(readmePrRecording.indexOf('CONFIG_DIR="$(') < readmePrRecording.indexOf('GH_CONFIG_DIR="$CONFIG_DIR"'));
   });
 
   it("executes the closed account/consumer/environment/outcome model without platform-root dimensions", () => {
