@@ -39,6 +39,26 @@ const BACKEND_BUILDER_PROMPT = readDoc("../assets/agent/backend-builder.md");
 const FRONTEND_BUILDER_PROMPT = readDoc("../assets/agent/frontend-builder.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
+const GITHUB_ACCOUNT_RUNTIME_SOURCES = Object.freeze({
+  "src/github-account-env.js": readDoc("../src/github-account-env.js"),
+  "src/post-pr-ci.js": readDoc("../src/post-pr-ci.js"),
+  "src/github.js": readDoc("../src/github.js"),
+  "src/cleanup-sweep-eligibility.js": readDoc("../src/cleanup-sweep-eligibility.js"),
+  "src/run-state.js": readDoc("../src/run-state.js"),
+  "src/cli.js": CLI,
+  "src/factory.js": readDoc("../src/factory.js"),
+});
+const GITHUB_ACCOUNT_ACTIVE_DOCS = Object.freeze({
+  "assets/skills/feature/SKILL.md": SKILL,
+  "assets/command/feature.md": COMMAND,
+  "assets/skills/feature/SCHEMA.md": SCHEMA,
+  "assets/agent/security-reviewer.md": SECURITY_REVIEWER_PROMPT,
+  "assets/agent/work-reviewer.md": WORK_REVIEWER_PROMPT,
+  "assets/agent/implementation-validator.md": IMPLEMENTATION_VALIDATOR_PROMPT,
+  "README.md": README,
+  "SPEC.md": SPEC,
+});
+const VALIDATE_SOURCE = readDoc("../src/validate.js");
 const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>";
 const BASE_ADVANCE_COMMAND = "feature-factory factory base-advance <run-id> --json";
 const BASE_ADVANCE_DOCS = Object.freeze({
@@ -171,6 +191,166 @@ const LIVE_DRAIN_BOUNDARIES = Object.freeze([
   "Before remediation",
   "Before terminalization or PR creation",
 ]);
+
+describe("account-scoped GitHub workflow contract", () => {
+  it("guards the finite runtime and active-document surface against executable account switching", () => {
+    assert.equal(Object.keys(GITHUB_ACCOUNT_RUNTIME_SOURCES).length, 7);
+    assert.equal(Object.keys(GITHUB_ACCOUNT_ACTIVE_DOCS).length, 8);
+    const executableSwitchPatterns = [
+      /\bgh\s+auth\s+switch\b/iu,
+      /["'`]gh["'`]\s*,\s*["'`]auth["'`]\s*,\s*["'`]switch["'`]/iu,
+      /(?:args|commandArgs)\s*[:=]\s*\[\s*["'`]auth["'`]\s*,\s*["'`]switch["'`]/iu,
+    ];
+    const staleActivePolicyPatterns = [
+      /\bgh\s+auth\s+status\b[^\n]{0,120}\b(?:before|for)\b[^\n]{0,60}\b(?:create|creation)\b[^\n]{0,30}\b(?:PR|pull request)\b/iu,
+      /\bGITHUB_TOKEN\b[^\n]{0,120}\b(?:available|credential|authorit(?:y|ative)|authoriz(?:e[sd]?|ation))\b[^\n]{0,80}\b(?:PR|pull request)\b/iu,
+      /\bgh\s+auth\b(?![^\n]{0,120}\bdiagnostic-only\b)[^\n]{0,120}\b(?:available|unavailable|authorit(?:y|ative)|authoriz(?:e[sd]?|ation))\b[^\n]{0,80}\b(?:PR|pull request)\b/iu,
+      /\baccount-switch\s+bypass\b/iu,
+      /\baccount-switches\b/iu,
+    ];
+    const staleActivePolicyExamples = [
+      "gh auth status succeeds before any run expected to create a PR",
+      "GITHUB_TOKEN or gh auth must be available before PR creation",
+      "missing: gh auth unavailable for PR creation",
+      "attempt account-switch bypass",
+      "reconciliation account-switches before observation",
+    ];
+    assert.equal(staleActivePolicyPatterns.length, 5);
+    assert.equal(staleActivePolicyExamples.length, 5);
+    for (const [index, example] of staleActivePolicyExamples.entries()) {
+      assert.match(example, staleActivePolicyPatterns[index], `stale policy example ${index + 1} must remain guarded`);
+    }
+    assert.match("ambient GITHUB_TOKEN is available as PR authority", staleActivePolicyPatterns[1]);
+    assert.match("generic gh auth is authority for PR creation", staleActivePolicyPatterns[2]);
+    assert.doesNotMatch("accountless gh auth status is diagnostic-only and never authorizes PR work", staleActivePolicyPatterns[2]);
+    for (const [path, text] of [...documentEntries(GITHUB_ACCOUNT_RUNTIME_SOURCES), ...documentEntries(GITHUB_ACCOUNT_ACTIVE_DOCS)]) {
+      for (const pattern of executableSwitchPatterns) assert.doesNotMatch(text, pattern, `${path} must not select a global GitHub account`);
+    }
+    for (const [path, text] of documentEntries(GITHUB_ACCOUNT_ACTIVE_DOCS)) {
+      for (const pattern of staleActivePolicyPatterns) assert.doesNotMatch(text, pattern, `${path} must not grant legacy or global GitHub authority`);
+    }
+
+    const acceptedHistoricalIdentifiers = [
+      "post-pr-account-switch-failed",
+      "account-switch-failed",
+      "gh-auth-switch",
+    ];
+    assert.match(GITHUB_ACCOUNT_RUNTIME_SOURCES["src/run-state.js"], literalPattern(acceptedHistoricalIdentifiers[0]));
+    assert.match(GITHUB_ACCOUNT_RUNTIME_SOURCES["src/run-state.js"], literalPattern(acceptedHistoricalIdentifiers[1]));
+    assert.match(VALIDATE_SOURCE, literalPattern(acceptedHistoricalIdentifiers[2]));
+    for (const identifier of acceptedHistoricalIdentifiers) {
+      for (const pattern of [...executableSwitchPatterns, ...staleActivePolicyPatterns]) {
+        assert.doesNotMatch(identifier, pattern, `${identifier} must remain an accepted historical identifier`);
+      }
+    }
+  });
+
+  it("keeps all eight active documents on the exact child-only directory and token policy", () => {
+    for (const [path, text] of documentEntries(GITHUB_ACCOUNT_ACTIVE_DOCS)) {
+      assert.match(text, /GH_CONFIG_DIR/u, `${path} must name the child directory variable`);
+      assert.match(text, /\.config[\s\S]{0,120}opencode-feature-factory[\s\S]{0,80}gh[\s\S]{0,80}(?:github_account|GitHub login|account)/iu, `${path} must describe the exact account directory`);
+      for (const token of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]) {
+        assert.match(text, literalPattern(token), `${path} must strip ${token} from account-bound children`);
+      }
+      assert.match(text, /global (?:configuration )?fallback|falls? back to global configuration|fall back globally/iu, `${path} must forbid global fallback`);
+      assert.match(text, /(?:parent|operator).*environment|process\.env/iu, `${path} must preserve the parent environment`);
+    }
+  });
+
+  it("documents the exact token-safe one-time browser preparation and verification block", () => {
+    const preparation = markdownSection(README, "Prepare isolated GitHub CLI account directories");
+    const expectedBlock = [
+      "ACCOUNT='your-exact-github-login'",
+      'CONFIG_DIR="$(',
+      "  node -e '",
+      '    const { homedir } = require("node:os");',
+      '    const { join } = require("node:path");',
+      "    const account = process.argv[1];",
+      "    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(account)) process.exit(2);",
+      '    process.stdout.write(join(homedir(), ".config", "opencode-feature-factory", "gh", account));',
+      "  ' \"$ACCOUNT\"",
+      ')" || exit 1',
+      "",
+      'mkdir -p "$CONFIG_DIR"',
+      "",
+      "env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \\",
+      '  GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com \\',
+      "  gh auth login --hostname github.com --git-protocol https --web",
+      "",
+      'ACTUAL="$(',
+      "  env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \\",
+      '    GH_CONFIG_DIR="$CONFIG_DIR" GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_PAGER=cat PAGER=cat \\',
+      "    gh api user --jq .login",
+      ')" || exit 1',
+      "",
+      'test "$ACTUAL" = "$ACCOUNT" || exit 1',
+      "printf 'verified isolated GitHub CLI configuration for %s\\n' \"$ACCOUNT\"",
+      "unset ACTUAL CONFIG_DIR ACCOUNT",
+    ].join("\n");
+    assert.equal(fencedBlocks(preparation).filter((block) => block.includes("your-exact-github-login"))[0], expectedBlock);
+    assert.match(preparation, /exact spelling.*persisted (?:in )?`run\.json\.github_account`/iu);
+    assert.match(preparation, /browser login.*without copying or printing a token/iu);
+    assert.match(preparation, /shell tracing|`set -x`/iu);
+    assert.match(preparation, /`--with-token`/u);
+    assert.match(preparation, /copying or pasting tokens/iu);
+    assert.match(preparation, /redirecting authentication-detail output/iu);
+  });
+
+  it("scopes every Step 6 effect and preserves fence, reconciliation, and non-force behavior", () => {
+    const stepSix = markdownSection(SKILL, "Step 6 - PR Creation");
+    assert.match(stepSix, /account visibility/iu);
+    assert.match(stepSix, /git push/iu);
+    assert.match(stepSix, /gh pr create/iu);
+    assert.match(stepSix, /gh pr view/iu);
+    assert.equal((stepSix.match(/env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN/gu) || []).length, 4);
+    assert.match(stepSix, /Never force-push unless the user explicitly approves/u);
+    assert.match(stepSix, /pr-fence[\s\S]*gh pr create[\s\S]*gh pr view[\s\S]*pr-created/iu);
+  });
+
+  it("executes the closed account/consumer/environment/outcome model without platform-root dimensions", () => {
+    const accountStates = ["valid", "missing", "invalid"];
+    const consumers = ["async-gh", "sync-cleanup-gh", "fenced-observer", "checkpoint-observer", "post-pr-git", "direct-workflow"];
+    const tokenVariables = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+    const childOutcomes = ["success", "classifiable-failure"];
+    const parentGhConfigDir = "/operator/global-gh";
+    let rows = 0;
+    for (const accountState of accountStates) for (const consumer of consumers) for (const tokenVariable of tokenVariables) for (const childOutcome of childOutcomes) {
+      const input = { accountState, consumer, parentGhConfigDir, tokenVariable, childOutcome };
+      const actual = accountScopedDeliveryModel(input);
+      const parent = { GH_CONFIG_DIR: parentGhConfigDir, [tokenVariable]: `ambient-${tokenVariable}` };
+      const expected = accountState === "valid" ? {
+        disposition: childOutcome,
+        spawn_count: 1,
+        consumer,
+        child_environment: {
+          GH_CONFIG_DIR: "/home/operator/.config/opencode-feature-factory/gh/Exact-Account",
+          GH_HOST: "github.com",
+          GH_PROMPT_DISABLED: "1",
+          GH_PAGER: "cat",
+          PAGER: "cat",
+          token_variables: [],
+        },
+        parent_environment: parent,
+        provisioned: false,
+        global_fallback: false,
+      } : {
+        disposition: "account-denied",
+        spawn_count: 0,
+        consumer,
+        child_environment: null,
+        parent_environment: parent,
+        provisioned: false,
+        global_fallback: false,
+      };
+      assert.deepEqual(actual, expected, JSON.stringify(input));
+      rows += 1;
+    }
+    assert.equal(rows, 144);
+    assert.deepEqual(Object.keys({ accountStates, consumers, parentGhConfigDir, tokenVariables, childOutcomes }).sort(), [
+      "accountStates", "childOutcomes", "consumers", "parentGhConfigDir", "tokenVariables",
+    ]);
+  });
+});
 
 describe("class-wide planning prompt contract", () => {
   it("aligns the spec writer with the reviewer's shared bar and separates producer self-checks", () => {
@@ -641,15 +821,15 @@ describe("class-wide planning prompt contract", () => {
     assert.match(contract, /ffpr-v1-.*lowercase SHA-256.*canonical UTF-8 JSON.*base_commit.*branch.*created_at.*repository.*run_id.*lexical key order/is);
     assert.match(contract, /exactly one standalone `?<!-- opencode-feature-factory:pr-operation=<(?:(?:operation_)?id)> -->`?/i);
     assert.match(contract, /GET repos\/\{repository\}\/pulls\?state=all&head=\{owner\}:\{head_ref\}&base=\{base_ref\}&per_page=100/i);
-    assert.match(contract, /account-switched.*shell-free.*(?:at most|maximum-)10.*Link/is);
+    assert.match(contract, /account-scoped.*token-stripped.*shell-free.*(?:at most|maximum-)10.*Link/is);
     assert.match(contract, /unique exact open.*unique exact merged.*closed-unmerged.*needs-human.*ambiguous.*unknown.*retain/is);
     assert.match(contract, /only complete checked absence.*clear/i);
     assert.match(contract, /legacy-pr-fence-operation-identity-missing.*retain/is);
     assert.match(contract, /\{pr_url,pr_number,pr_node_id,repository,operation_id,head_ref,head_sha,base_ref,base_sha,draft\}/i);
     assert.match(SCHEMA, /current canonical-source manifest has 196 variants[\s\S]*195 production-covered rows[\s\S]*`final-plan-descriptor`/i);
     assert.match(SCHEMA, /`steering-pr-fence`/i);
-    assert.match(WORK_REVIEWER_PROMPT, /deterministic marker identity.*account-switched GitHub observer/is);
-    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /deterministic operation identity.*account-switched observer/is);
+    assert.match(WORK_REVIEWER_PROMPT, /deterministic marker identity.*bounded account-scoped GitHub observer/is);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /deterministic operation identity.*bounded account-scoped observer/is);
     assert.match(SECURITY_REVIEWER_PROMPT, /caller-forged URL\/number\/repository\/draft\/SHA fields.*marker ambiguity.*pagination substitution/is);
   });
 
@@ -3017,7 +3197,8 @@ describe("public documentation contract", () => {
       const [prefix, suffix] = glob.split("**/*");
       return suffix !== undefined ? target.startsWith(prefix) && target.endsWith(suffix) : false;
     });
-    const links = [...README.matchAll(/\]\(([^)\s]+)\)/g)].map((match) => match[1]);
+    const prose = README.replace(/```[^\n]*\n[\s\S]*?\n```/gu, "");
+    const links = [...prose.matchAll(/\]\(([^)\s]+)\)/g)].map((match) => match[1]);
     for (const rawTarget of links) {
       if (/^[a-z][a-z0-9+.-]*:/i.test(rawTarget) || rawTarget.startsWith("#")) continue;
       const target = rawTarget.replace(/^\.\//, "").split("#")[0];
@@ -3028,6 +3209,37 @@ describe("public documentation contract", () => {
     }
   });
 });
+
+function accountScopedDeliveryModel({ accountState, consumer, parentGhConfigDir, tokenVariable, childOutcome }) {
+  const parentEnvironment = { GH_CONFIG_DIR: parentGhConfigDir, [tokenVariable]: `ambient-${tokenVariable}` };
+  if (accountState !== "valid") {
+    return {
+      disposition: "account-denied",
+      spawn_count: 0,
+      consumer,
+      child_environment: null,
+      parent_environment: parentEnvironment,
+      provisioned: false,
+      global_fallback: false,
+    };
+  }
+  return {
+    disposition: childOutcome,
+    spawn_count: 1,
+    consumer,
+    child_environment: {
+      GH_CONFIG_DIR: "/home/operator/.config/opencode-feature-factory/gh/Exact-Account",
+      GH_HOST: "github.com",
+      GH_PROMPT_DISABLED: "1",
+      GH_PAGER: "cat",
+      PAGER: "cat",
+      token_variables: [],
+    },
+    parent_environment: parentEnvironment,
+    provisioned: false,
+    global_fallback: false,
+  };
+}
 
 function documentEntries(map) {
   return Object.entries(map);
