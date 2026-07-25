@@ -59,6 +59,7 @@ export function createCleanupSweepFixture(name = "eligibility") {
         pr_number: 7,
         artifacts: {},
       },
+      github_account: "cleanup-account",
       ...overrides,
     };
     if (run.branch === undefined) delete run.branch;
