@@ -370,18 +370,25 @@ describe("post-PR workflow orchestration", () => {
       const result = await postPrRemediation(fixture.runId, 1, "complete", {
         cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", headSha: fixture.candidate, env: parentEnv, ...refs,
         executeGithub: async () => { throw new Error("post-PR Git must not use a synthetic GitHub wrapper"); },
-        executeGitOperation: async ({ operation, env }) => {
+        gitSpawnSync(file, args, options) {
+          assert.equal(file, "git");
+          const operation = args[0] === "push" ? "fast-forward-push" : "remote-head";
           gitOps.push(operation);
-          gitEnvs.push(env);
-          if (operation === "remote-head") return { exitCode: 0, stdout: `${remote}\trefs/heads/main\n`, stderr: "" };
+          gitEnvs.push(options.env);
+          if (operation === "remote-head") return { status: 0, stdout: `${remote}\trefs/heads/main\n`, stderr: "" };
           remote = fixture.candidate;
-          return { exitCode: 0, stdout: "", stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
         },
       });
       assert.equal(result.action, "observing");
       assert.equal(result.epoch, 2);
       assert.deepEqual(gitOps, ["remote-head", "fast-forward-push", "remote-head"]);
-      assert.deepEqual(gitEnvs, [expectedAccountEnvironment(parentEnv), expectedAccountEnvironment(parentEnv), expectedAccountEnvironment(parentEnv)]);
+      const expectedGitEnvironment = {
+        ...expectedAccountEnvironment(parentEnv),
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_PAGER: "cat",
+      };
+      assert.deepEqual(gitEnvs, [expectedGitEnvironment, expectedGitEnvironment, expectedGitEnvironment]);
       assert.deepEqual(parentEnv, accountParentEnvironment());
       const run = readRun(fixture);
       assert.equal(run.post_pr.observation.expected_head_sha, fixture.candidate);
@@ -972,6 +979,9 @@ function accountParentEnvironment() {
     GITHUB_TOKEN: "github-token",
     GH_ENTERPRISE_TOKEN: "gh-enterprise-token",
     GITHUB_ENTERPRISE_TOKEN: "github-enterprise-token",
+    gh_token: "lower-gh-token",
+    Github_Token: "mixed-github-token",
+    gh_config_dir: "/ambient/lower-config",
   };
 }
 

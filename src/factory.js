@@ -7623,14 +7623,24 @@ function postPrSummary(run) {
 }
 
 async function postPrRemoteBranchHead(repo, run, opts = {}) {
-  const result = await executePostPrGitOperation(run, "remote-head", opts, (env) => git(repo, ["ls-remote", "--heads", "origin", `refs/heads/${run.branch}`], { timeout: 30000, env }));
+  const result = await executePostPrGitOperation(run, "remote-head", opts, (env) => git(repo, ["ls-remote", "--heads", "origin", `refs/heads/${run.branch}`], {
+    timeout: 30000,
+    env,
+    replaceEnv: true,
+    spawnSync: opts.gitSpawnSync,
+  }));
   const value = result.stdout.trim().split(/\s+/u)[0];
   if (!/^[0-9a-f]{40}$/u.test(value || "")) throw new Error("remote branch head is missing or malformed");
   return value;
 }
 
 async function postPrFastForwardPush(run, candidate, opts = {}) {
-  await executePostPrGitOperation(run, "fast-forward-push", opts, (env) => git(run.worktree, ["push", "origin", `${candidate}:refs/heads/${run.branch}`], { timeout: 30000, env }));
+  await executePostPrGitOperation(run, "fast-forward-push", opts, (env) => git(run.worktree, ["push", "origin", `${candidate}:refs/heads/${run.branch}`], {
+    timeout: 30000,
+    env,
+    replaceEnv: true,
+    spawnSync: opts.gitSpawnSync,
+  }));
 }
 
 async function executePostPrGitOperation(run, operation, opts, gitOperation) {
