@@ -14,6 +14,59 @@ caveats from opencode's counter-review (integrated inline below). These govern
 how findings are dispositioned and how opencode should implement against this
 review.
 
+**P0 — Shipping-first priorities (set 2026-07-25; governs P1–P3 and every
+disposition).** The operator's priority ordering for the factory is:
+1) implementation correctness of the shipped product code, 2) shipping a PR,
+3) code quality, … 10) verifiable process. Process is valuable only insofar
+as it supports shipping a correct implementation, ideally with good quality.
+
+Evidence basis (three-agent shipping-first audit plus the week's live-run
+record, 2026-07-25): of ~32 critical-path gates, ~6 protect product-code
+correctness; all four real ship-blockages of the week (mid-build ownership
+abort, pre-PR base fence, fresh-run route gap, test-lane amendment pause)
+came from the other ~26 firing fail-closed on correct work; across 15
+dogfood runs plus this week there has been zero corrupted or forged durable
+record — while the correctness core has never killed a run. Correctness
+itself rests on two thin points (builder-authored tests under checked
+execution, and LLMs reading diffs); the only independent executed oracle is
+the test-verifier's acceptance tests.
+
+Accepted under P0:
+
+1. **Correctness hardening workstream (#127)** — oracle independence,
+   verifier-writes-assertions-first, reporter-level test/skip counts with
+   baseline deltas in receipts, AC-to-test-id binding, `scripts.check`
+   pinning, plus review pruning to behavior-vs-brief. The only part of the
+   program that directly serves priority 1; batches with #112.
+2. **Finish-and-disclose (#128)** — out-of-lane modifications are completed,
+   disclosed, and reviewer-ratified (`modified-extension`); the mid-build
+   hard stop remains only for privileged control-plane paths. Reverses the
+   B0-era abort posture after three strikes in one week on correct work.
+3. **#111 scope expansion** — six further deletions (~2,000–2,500 LOC):
+   derive-don't-echo ownership sets, dispatch-lease collapse, steering
+   generation/boundary removal, non-routed echo-field drops (including
+   `late_discovery_strike` as a schema requirement — the policy stays in
+   the prompt), history verified at consumption only, provenance deletion.
+   **Routed-fields rule:** a field agents must produce is either routed on
+   by the factory or it is not required.
+
+Declined under P0 (recorded to prevent re-litigation):
+
+- **Slice-scoped nonconvergence** (blocking only the failing slice and
+  shipping a partial PR): declined — a PR without the slice that later
+  slices depend on is not confidently meaningful; whole-run blocking with
+  carry-forward stands.
+- **Attempt-extension gate** (+1 operator-approved attempt): declined —
+  attempt extension was tried before (the `max_attempts: 4` WIP) and the
+  durable fix was capping slice size (P3 width budgets, max acceptance
+  rows), not granting more chances. The 3-attempt bound stands.
+
+What stays hard, so deletion never overreaches (the correctness core, none
+of which has ever false-fired): the merge proof (reviewed tree equals merged
+tree), checked test/artifact execution receipts, panel head-binding, exact
+ownership disclosure, the privileged-path policy, PR exactly-once
+reconciliation, and human-merges-the-PR.
+
 **P1 — No legacy: assume the current file format everywhere.** "No legacy"
 means no support for old file formats or superseded routes. Validators and
 transitions read exactly one (current) shape per record. No dual-shape
@@ -502,10 +555,12 @@ this doc does not duplicate per-issue detail, so it cannot rot against it.)
 
 | Step | Issue | Scope | Depends on |
 | --- | --- | --- | --- |
+| now | #126 + #124 (items 1–3) | Fresh-run checked execution route + pre-PR ancestor fence, batched so the fix's own merge cannot strand the parked runs; unblocks issue-120 and issue-103-reseed | — |
 | 0 | #109 | `GH_CONFIG_DIR`-isolated gh operations (1.2) — the one operationally dangerous race; independent, ship first | — |
 | 1 | #110 | Legacy retirement (Part 5, L1–L12); L3 decided in-PR (recommendation: option b, repair-by-continuation); removes the inverted probe (1.1) by deletion | #109 (soft); operationally after the re-seeded #103 completes (P1 skew rule: no schema-deleting merge while a run is active) |
 | 2a | #111 | P2 attestation-deletion sweep (keep/simplify/drop table: 1.3, 3.2, 2.3-simplify, 2.5, 3.4) plus reviewer/catalog-registration recalibration | #110 |
-| 2b | #112 | P3 width recalibration (simplification block, countable acceptance probes, width budget, scope-terminal routing) | adjacent to #111 (shared prompt files); width budget may land earlier |
+| 2b | #112 + #127 | P3 width recalibration + correctness hardening (#127: independent oracles, honest receipts, review pruning) — same prompt files, one batch | adjacent to #111 |
+| 2b′ | #128 | Finish-and-disclose ownership ratification (`modified-extension`) — coordinates with #111's derive-don't-echo item | #110/#111 window |
 | 3 | #117 | Validator family split: `src/validate/` per-record-family modules behind a re-export index — pure motion on the post-sweep survivor; removes the persistence lane choke point (evidence: the issue-103 fail-closed stop; the DAG's shared-file serialization table) | #111 |
 | 4 | #113 | Substrate extraction (constants, canonical JSON, claim/receipt engine, attribution, error codes); the one-owner-per-invariant guard migration deposits directly into the split family modules — guards move once | #111, #117 |
 | 5 | #114 | Catalog narrowing + tooling (3.1, code+path binding, `catalog:review`) | #113 |
