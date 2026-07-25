@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../src/delivery-envelope/checkpoint-routing.js";
@@ -705,6 +705,103 @@ describe("B4.3 normal checkpoint child start", () => {
     }
   });
 
+  it("scopes locked-lineage and recorded-entry PR observations to their persisted accounts", async () => {
+    const fixture = createFixture("account-scoped-observers");
+    const captures = [];
+    try {
+      await withAmbientGithubEnvironment(async () => {
+        await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo,
+          runId: "account-scoped-first",
+          ghAccount: "acme",
+          now: "2026-07-19T12:00:00.000Z",
+          foregroundLaunchFn: async () => ({ status: "launched" }),
+        });
+        terminalizeCheckpointChild(fixture, "account-scoped-first", 31);
+        await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-002", {
+          ...scopedCompletionOptions(fixture, "account-scoped-first", 31, captures),
+          runId: "account-scoped-second",
+          ghAccount: "acme",
+          foregroundLaunchFn: async () => ({ status: "launched" }),
+        });
+        terminalizeCheckpointChild(fixture, "account-scoped-second", 32);
+        await recordFactoryCheckpointMerged(
+          fixture.parentRunId,
+          "checkpoint-002",
+          scopedCompletionOptions(fixture, "account-scoped-second", 32, captures, "2026-07-19T12:20:00.000Z"),
+        );
+
+        const lineageCaptureCount = captures.length;
+        assert.equal(lineageCaptureCount, 6);
+        for (const runId of ["account-scoped-first", "account-scoped-second"]) removeCheckpointTargets(fixture, runId);
+        await closeFactoryCheckpointRoute(
+          fixture.parentRunId,
+          scopedCompletionOptions(fixture, "account-scoped-second", 32, captures, "2026-07-19T12:30:00.000Z"),
+        );
+        assert.equal(captures.length - lineageCaptureCount, 4);
+        assert.equal(process.env.GH_CONFIG_DIR, "/ambient/checkpoint-global-gh");
+      });
+
+      for (const capture of captures) {
+        assert.equal(capture.args[0], "api");
+        assert.equal(capture.gh_config_dir, join(homedir(), ".config", "opencode-feature-factory", "gh", "acme"));
+        assert.equal(capture.gh_host, "github.com");
+        assert.deepEqual(capture.auth_environment, {
+          GH_TOKEN: null,
+          GITHUB_TOKEN: null,
+          GH_ENTERPRISE_TOKEN: null,
+          GITHUB_ENTERPRISE_TOKEN: null,
+        });
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("denies missing and invalid recorded-entry accounts before spawning", async () => {
+    for (const [label, account] of [["missing", null], ["invalid", "invalid!"]]) {
+      const fixture = createFixture(`recorded-account-${label}`);
+      let spawns = 0;
+      try {
+        await launchCheckpoint(fixture, "checkpoint-001", `${label}-first`);
+        terminalizeCheckpointChild(fixture, `${label}-first`, 41);
+        await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-002", {
+          ...completionOptions(fixture, `${label}-first`, 41),
+          runId: `${label}-second`,
+          foregroundLaunchFn: async () => ({ status: "launched" }),
+        });
+        terminalizeCheckpointChild(fixture, `${label}-second`, 42);
+        await recordFactoryCheckpointMerged(fixture.parentRunId, "checkpoint-002", completionOptions(fixture, `${label}-second`, 42));
+        for (const runId of [`${label}-first`, `${label}-second`]) removeCheckpointTargets(fixture, runId);
+
+        const parentPath = join(fixture.parentRunDir, "run.json");
+        const parent = readJson(parentPath);
+        for (const entry of parent.checkpoint_progress.entries) {
+          entry.configuration.github_account = account;
+          entry.configuration_hash = hashCanonicalValue(entry.configuration);
+        }
+        writeJson(parentPath, parent);
+
+        const options = completionOptions(fixture, `${label}-second`, 42);
+        delete options.observeCheckpointPrOperation;
+        options.executeGithub = async () => {
+          spawns += 1;
+          return { exitCode: 0, signal: null, stdout: "unexpected spawn" };
+        };
+        await assert.rejects(
+          closeFactoryCheckpointRoute(fixture.parentRunId, options),
+          /freshly checked GitHub merged disposition/u,
+        );
+        assert.equal(spawns, 0);
+        const progress = readJson(parentPath).checkpoint_progress;
+        assert.equal(progress.status, "active");
+        assert.equal(progress.final_closure, null);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  });
+
   it("gates ordinary cleanup on the exact durable merged lineage identity", async () => {
     const fixture = createFixture("cleanup-authority");
     try {
@@ -813,6 +910,74 @@ function completionOptions(fixture, runId, prNumber, observedAt = "2026-07-19T12
     observeCheckpointRemoteMain: ({ ref }) => ({ ref, commit: fixture.baseCommit, observed_at: observedAt }),
     isCheckpointAncestor: () => true,
   };
+}
+
+function scopedCompletionOptions(fixture, runId, prNumber, captures, observedAt = "2026-07-19T12:10:00.000Z") {
+  const options = completionOptions(fixture, runId, prNumber, observedAt);
+  delete options.observeCheckpointPrOperation;
+  options.executeGithub = checkpointGithubExecutor(fixture, captures);
+  return options;
+}
+
+function checkpointGithubExecutor(fixture, captures) {
+  return async (input) => {
+    captures.push({
+      args: [...input.args],
+      gh_config_dir: input.env?.GH_CONFIG_DIR ?? null,
+      gh_host: input.env?.GH_HOST ?? null,
+      auth_environment: Object.fromEntries(["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+        .map((key) => [key, input.env?.[key] ?? null])),
+    });
+    const endpoint = new URL(input.args[4], "https://api.github.com/");
+    const qualifiedHead = endpoint.searchParams.get("head");
+    const headRef = qualifiedHead.slice(qualifiedHead.indexOf(":") + 1);
+    const tuple = checkpointPullRequestTuple(fixture, headRef);
+    const body = [{
+      html_url: tuple.pr_url,
+      number: tuple.pr_number,
+      node_id: tuple.pr_node_id,
+      draft: tuple.draft,
+      body: `<!-- opencode-feature-factory:pr-operation=${tuple.operation_id} -->`,
+      state: "closed",
+      merged_at: tuple.merged_at ?? (tuple.pr_number === 32 ? "2026-07-19T12:16:00.000Z" : "2026-07-19T12:06:00.000Z"),
+      merge_commit_sha: tuple.merge_commit ?? fixture.baseCommit,
+      head: { ref: tuple.head_ref, sha: tuple.head_sha, repo: { full_name: tuple.repository } },
+      base: { ref: tuple.base_ref, sha: tuple.base_sha, repo: { full_name: tuple.repository } },
+    }];
+    return {
+      exitCode: 0,
+      signal: null,
+      stdout: `HTTP/2 200 OK\r\ncontent-type: application/json\r\n\r\n${JSON.stringify(body)}`,
+    };
+  };
+}
+
+function checkpointPullRequestTuple(fixture, headRef) {
+  const parent = readJson(join(fixture.parentRunDir, "run.json"));
+  const recorded = parent.checkpoint_progress.entries.find((entry) => entry.pull_request?.head_ref === headRef)?.pull_request;
+  if (recorded) return recorded;
+  const run = readJson(join(fixture.repo, ".opencode", "factory", headRef, "run.json"));
+  return run.terminal_result;
+}
+
+async function withAmbientGithubEnvironment(fn) {
+  const values = {
+    GH_CONFIG_DIR: "/ambient/checkpoint-global-gh",
+    GH_TOKEN: "ambient-gh-token",
+    GITHUB_TOKEN: "ambient-github-token",
+    GH_ENTERPRISE_TOKEN: "ambient-gh-enterprise-token",
+    GITHUB_ENTERPRISE_TOKEN: "ambient-github-enterprise-token",
+  };
+  const prior = Object.fromEntries(Object.keys(values).map((key) => [key, Object.hasOwn(process.env, key) ? process.env[key] : undefined]));
+  try {
+    Object.assign(process.env, values);
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 }
 
 function removeCheckpointTargets(fixture, runId) {
