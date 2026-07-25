@@ -826,7 +826,7 @@ describe("simplified run-state transitions", () => {
       assert.equal(classifyWholeStoryTestRoute(fixture.runDir, {
         ...integrated.run,
         continuation: { schema_version: 2, kind: "blocked-run-continuation" },
-      }), "schema-v2", "combined schema-v2/conflict shape retains one checked executor route");
+      }), "schema-v2+delegated-conflict", "combined schema-v2/conflict shape retains one exclusive checked route");
       assert.equal(integrated.run.special_builder_dispatch, undefined);
       assert.equal(integrated.slice.integration_conflict.status, "pending-integrated-review");
       assert.equal(integrated.slice.integration_conflict.resolution_commit, resolutionHead);
@@ -1347,7 +1347,7 @@ describe("simplified run-state transitions", () => {
         const options = preparePrTestOptions(fixture.runDir);
         const gitFn = options.gitFn;
         options.gitFn = (cwd, args) => {
-          if (args[0] === "ls-remote") probes.push(args[3]);
+          if (args[0] === "ls-remote") probes.push(args.at(-1));
           return gitFn(cwd, args);
         };
 
@@ -1356,8 +1356,8 @@ describe("simplified run-state transitions", () => {
         assert.equal(fenced.fence.base_ref, "main", baseRef);
         assert.equal(fenced.fence.base_sha, run.base_commit, baseRef);
         assert.deepEqual(probes, [
-          "refs/heads/feature-branch", "refs/heads/main",
-          "refs/heads/feature-branch", "refs/heads/main",
+          "refs/heads/main", "refs/heads/feature-branch", "refs/heads/main",
+          "refs/heads/main", "refs/heads/feature-branch", "refs/heads/main",
         ], baseRef);
       } finally {
         cleanup(fixture.repo);
@@ -4717,10 +4717,15 @@ function preparePrTestOptions(runDir, requested = {}, options = {}) {
   const current = readJson(runPath);
   const repo = current.worktree;
   const gitFn = options.gitFn || ((cwd, args) => {
-    if (args.join(" ") === "config --get remote.origin.url") return { ok: true, status: 0, stdout: "https://github.com/jasoncarreira/opencode-feature-factory.git\n", stderr: "" };
+    if (args.join(" ") === "config --get remote.origin.url" || args.join(" ") === "config --get-all remote.origin.url") {
+      return { ok: true, status: 0, stdout: "https://github.com/jasoncarreira/opencode-feature-factory.git\n", stderr: "" };
+    }
+    if (args[0] === "fetch" && args.at(-1).startsWith("+refs/heads/main:")) {
+      return git(cwd, ["update-ref", args.at(-1).split(":").at(-1), current.base_commit]);
+    }
     if (args[0] === "ls-remote") {
-      const ref = args[3].slice("refs/heads/".length);
-      const sha = ref === current.base_ref ? current.base_commit : gitOutput(repo, ["rev-parse", `refs/heads/${ref}`]);
+      const ref = args.at(-1).slice("refs/heads/".length);
+      const sha = ref === "main" ? current.base_commit : gitOutput(repo, ["rev-parse", `refs/heads/${ref}`]);
       return { ok: true, status: 0, stdout: `${sha}\trefs/heads/${ref}\n`, stderr: "" };
     }
     return git(cwd, args);

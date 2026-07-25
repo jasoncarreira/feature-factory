@@ -1036,17 +1036,35 @@ function createFixture(runId, { nextPollAt = "2026-07-12T12:00:00.000Z", reviewe
 }
 
 function operationAuthorityOptions(fixture, currentBaseSha = SHA) {
+  const temporaryRefs = new Map();
   return {
     repoRoot: fixture.repo,
     gitFn(_cwd, args) {
-      if (args.join(" ") === "config --get remote.origin.url") return { ok: true, status: 0, stdout: "https://github.com/acme/widgets.git\n", stderr: "" };
+      if (args.join(" ") === "config --get remote.origin.url" || args.join(" ") === "config --get-all remote.origin.url") {
+        return { ok: true, status: 0, stdout: "https://github.com/acme/widgets.git\n", stderr: "" };
+      }
+      if (args[0] === "check-ref-format") return { ok: true, status: 0, stdout: "", stderr: "" };
+      if (args[0] === "show-ref") return temporaryRefs.has(args.at(-1))
+        ? { ok: true, status: 0, stdout: "", stderr: "" }
+        : { ok: false, status: 1, stdout: "", stderr: "" };
+      if (args[0] === "fetch") {
+        temporaryRefs.set(args.at(-1).split(":").at(-1), currentBaseSha);
+        return { ok: true, status: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "update-ref" && args[1] === "-d") {
+        temporaryRefs.delete(args[2]);
+        return { ok: true, status: 0, stdout: "", stderr: "" };
+      }
       if (args[0] === "ls-remote") {
-        const ref = args[3].slice("refs/heads/".length);
+        const ref = args.at(-1).slice("refs/heads/".length);
         const sha = ref === "main" ? currentBaseSha : SHA;
         return { ok: true, status: 0, stdout: `${sha}\trefs/heads/${ref}\n`, stderr: "" };
       }
       if (args[0] === "cat-file") return { ok: true, status: 0, stdout: "", stderr: "" };
-      if (args[0] === "rev-parse") return { ok: true, status: 0, stdout: `${SHA}\n`, stderr: "" };
+      if (args[0] === "rev-parse") {
+        const ref = String(args.at(-1)).replace(/\^\{commit\}$/u, "");
+        return { ok: true, status: 0, stdout: `${temporaryRefs.get(ref) || SHA}\n`, stderr: "" };
+      }
       if (args[0] === "symbolic-ref") return { ok: true, status: 0, stdout: "feature\n", stderr: "" };
       if (args[0] === "status") return { ok: true, status: 0, stdout: "", stderr: "" };
       if (args[0] === "merge-base") return { ok: true, status: 0, stdout: "", stderr: "" };

@@ -218,10 +218,78 @@ describe("active-run base advancement lifecycle compatibility", () => {
 
       await assert.rejects(
         transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }),
-        /run\.base_commit.*ancestor.*current origin base head/u,
+        (error) => error.code === "BASE_ADVANCE_NON_FAST_FORWARD" && /recorded base commit.*ancestor.*canonical origin\/main/u.test(error.message),
       );
     } finally {
       fixture.cleanup();
     }
   });
+
+  it("rejects draft mode when the selected route is ordinary-fresh-v1", async () => {
+    const fixture = createBaseAdvanceTransitionFixture("lifecycle-ordinary-draft");
+    try {
+      fixture.advance();
+      await advanceFactoryRunBase(fixture.runId, { cwd: fixture.repo });
+      const candidate = installApprovedLifecycleSlice(fixture);
+      await transitionSliceMerged(fixture.runDir, candidate.sliceId, { merge_commit: candidate.integrationHead }, { repoRoot: fixture.repo });
+      await completeFinalCheckedTest(fixture, candidate.integrationHead);
+      await publishIndependentPanels(fixture, candidate.integrationHead);
+      git(fixture.worktree, ["push", "-u", "origin", `HEAD:refs/heads/${fixture.runId}`]);
+      const run = fixture.readRun();
+      run.pr_mode = "draft";
+      writeFileSync(join(fixture.runDir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
+
+      await assert.rejects(
+        transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }),
+        /pr-fence denied: ordinary-fresh-ready-required/u,
+      );
+      assert.equal(fixture.readRun().steering?.pr_fence, undefined);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("routes unavailable, moving, and cleanup-failed PR main observations through the bounded canonical seam", async () => {
+    const cases = [
+      ["unavailable", "BASE_ADVANCE_ORIGIN_UNAVAILABLE", { gitOptions: { spawnSync: failCanonicalPrCommand("ls-remote") } }],
+      ["cleanup", "BASE_ADVANCE_TEMP_REF_CLEANUP_FAILED", { gitOptions: { spawnSync: failCanonicalPrCommand("cleanup") } }],
+      ["moving", "BASE_ADVANCE_TARGET_MOVED", null],
+    ];
+    for (const [name, code, staticOptions] of cases) {
+      const fixture = await createFenceReadyOrdinaryFixture(`lifecycle-pr-origin-${name}`);
+      try {
+        const canonicalOriginOptions = staticOptions || { beforeFinalAdvertisement: () => fixture.advance("moved during PR observation\n") };
+        await assert.rejects(
+          transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo, canonicalOriginOptions }),
+          (error) => error.code === code,
+          name,
+        );
+        assert.equal(fixture.readRun().steering?.pr_fence, undefined, name);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  });
 });
+
+async function createFenceReadyOrdinaryFixture(name) {
+  const fixture = createBaseAdvanceTransitionFixture(name);
+  fixture.advance();
+  await advanceFactoryRunBase(fixture.runId, { cwd: fixture.repo });
+  const candidate = installApprovedLifecycleSlice(fixture);
+  await transitionSliceMerged(fixture.runDir, candidate.sliceId, { merge_commit: candidate.integrationHead }, { repoRoot: fixture.repo });
+  await completeFinalCheckedTest(fixture, candidate.integrationHead);
+  await publishIndependentPanels(fixture, candidate.integrationHead);
+  git(fixture.worktree, ["push", "-u", "origin", `HEAD:refs/heads/${fixture.runId}`]);
+  return fixture;
+}
+
+function failCanonicalPrCommand(mode) {
+  return (file, args, options) => {
+    if (mode === "ls-remote" && args[0] === "ls-remote") return { status: 2, stdout: "", stderr: "unavailable" };
+    if (mode === "cleanup" && args[0] === "update-ref" && args[1] === "-d" && args[2].startsWith("refs/opencode/base-advance-origin/")) {
+      return { status: 128, stdout: "", stderr: "cleanup failed" };
+    }
+    return spawnSync(file, args, options);
+  };
+}

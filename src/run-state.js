@@ -10,7 +10,7 @@ import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
 import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
-import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
+import { computePrOperationId, observePullRequestOperation } from "./github.js";
 import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, integrationAmendmentId, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateIntegrationAmendmentReviewDispatchClaim, validateIntegrationAmendmentReviewDispatchClosure, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
@@ -37,6 +37,37 @@ const GATE_DECISION_STATUSES = new Set(["approved", "changes_requested", "stoppe
 const DEFAULT_LOCK_TIMEOUT_MS = 1000;
 const PLAN_SLICES_REF = "plan/slices.json";
 const TEST_EXECUTION_UNKNOWN_REASONS = new Set(["process-outcome-indeterminate", "authority-changed", "receipt-publication-indeterminate"]);
+const WHOLE_STORY_ROUTES = Object.freeze({
+  SCHEMA_V2: "schema-v2",
+  DELEGATED_CONFLICT: "delegated-conflict",
+  COMBINED: "schema-v2+delegated-conflict",
+  ORDINARY_FRESH: "ordinary-fresh-v1",
+  LEGACY: "legacy-unselected",
+});
+const CHECKED_WHOLE_STORY_ROUTES = new Set([
+  WHOLE_STORY_ROUTES.SCHEMA_V2,
+  WHOLE_STORY_ROUTES.DELEGATED_CONFLICT,
+  WHOLE_STORY_ROUTES.COMBINED,
+  WHOLE_STORY_ROUTES.ORDINARY_FRESH,
+]);
+const WHOLE_STORY_ROUTE_SELECTION_SINKS = Object.freeze({
+  SINK01: WHOLE_STORY_ROUTES.SCHEMA_V2,
+  SINK02: WHOLE_STORY_ROUTES.DELEGATED_CONFLICT,
+  SINK03: WHOLE_STORY_ROUTES.COMBINED,
+  SINK04: WHOLE_STORY_ROUTES.ORDINARY_FRESH,
+  SINK05: WHOLE_STORY_ROUTES.LEGACY,
+  SINK06: WHOLE_STORY_ROUTES.LEGACY,
+  SINK07: WHOLE_STORY_ROUTES.LEGACY,
+  SINK08: WHOLE_STORY_ROUTES.LEGACY,
+});
+const WHOLE_STORY_SINKS = new Set(Array.from({ length: 26 }, (_unused, index) => `SINK${String(index + 1).padStart(2, "0")}`));
+const WHOLE_STORY_STATE_VALUES = Object.freeze({
+  claim: new Set(["absent", "active", "unknown", "completed-pass", "completed-fail"]),
+  evidence: new Set(["absent", "exact-pass", "exact-fail", "legacy", "stale"]),
+  base: new Set(["equal", "ancestor", "non-ancestor", "unavailable", "moving", "cleanup-failed"]),
+  head: new Set(["equal", "dirty", "mismatch", "missing"]),
+  review: new Set(["fresh", "stale", "absent"]),
+});
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
 const DEFAULT_STALE_LOCK_MS = 60000;
 const DEFAULT_MISSING_OWNER_STEAL_MS = 5000;
@@ -1398,7 +1429,16 @@ export async function transitionPrePrFenceEstablished(runDir, options = {}) {
     if (current.continuation?.schema_version === 2) assertV2LocalPublishedAuthority(runDir, current, options);
     assertBoundaryClean(runDir, current, options, "pr-fence");
     const authority = assertPrCreatedReadiness(runDir, current);
-    const gitAuthority = observePrOperationGitAuthority(runDir, current, options, "pr-fence");
+    const route = classifyWholeStoryTestRoute(runDir, current, options);
+    if (route === WHOLE_STORY_ROUTES.ORDINARY_FRESH && current.pr_mode !== "ready") {
+      throw new Error("pr-fence denied: ordinary-fresh-ready-required");
+    }
+    const gitAuthority = await observePrOperationGitAuthority(runDir, current, options, "pr-fence");
+    const baseRelationship = gitAuthority.base_sha === current.base_commit ? "equal" : "ancestor";
+    if (route !== WHOLE_STORY_ROUTES.LEGACY) {
+      const fenceDecision = evaluateWholeStoryRouteSink({ route, sink: "SINK18", base: baseRelationship, head: "equal", review: "fresh", pr_mode: current.pr_mode });
+      if (!fenceDecision.allowed) throw new Error(`pr-fence denied: ${fenceDecision.reason}`);
+    }
     const createdAt = timestamp(options.now);
     const token = safeBoundaryToken(options.token || randomUUID());
     const base = {
@@ -1420,9 +1460,9 @@ export async function transitionPrePrFenceEstablished(runDir, options = {}) {
       draft: current.pr_mode === "draft",
     };
     const next = validateRun(base);
-    await writeProtectedRunJson(runDir, next, options, () => {
+    await writeProtectedRunJson(runDir, next, options, async () => {
       assertPrCreatedAuthorityCurrent(runDir, current, authority);
-      assertSamePrOperationGitAuthority(runDir, current, options, gitAuthority, "pr-fence");
+      await assertSamePrOperationGitAuthority(runDir, current, options, gitAuthority, "pr-fence");
     });
     return { updated: true, status: next.status, run: next, fence: cloneJson(next.steering.pr_fence) };
   }, options);
@@ -1465,7 +1505,7 @@ async function reconcilePrOperation(runDir, token, mode, options = {}) {
     if (!hasCompleteBinding(fence, PR_FENCE_IDENTITY_KEYS)) return terminalizeLegacyPrFenceLocked(runDir, current, options);
 
     const readiness = assertPrCreatedReadiness(runDir, current);
-    const gitAuthority = assertPrFenceGitAuthorityCurrent(runDir, current, fence, options);
+    const gitAuthority = await assertPrFenceGitAuthorityCurrent(runDir, current, fence, options);
     const observationIdentity = { ...fence, base_sha: gitAuthority.base_sha };
     const observation = await observeFencedPrOperation(current, observationIdentity, options, gitAuthority.head_sha);
     if (["unknown", "ambiguous"].includes(observation.disposition) || observation.disposition === "absent" && mode === "record") {
@@ -1531,7 +1571,7 @@ async function reconcilePrOperation(runDir, token, mode, options = {}) {
 
 async function assertPrReconciliationCurrent(runDir, current, fence, readiness, expectedObservation, options) {
   assertPrCreatedAuthorityCurrent(runDir, current, readiness);
-  const authority = assertPrFenceGitAuthorityCurrent(runDir, current, fence, options);
+  const authority = await assertPrFenceGitAuthorityCurrent(runDir, current, fence, options);
   const observed = await observeFencedPrOperation(current, { ...fence, base_sha: authority.base_sha }, options, authority.head_sha);
   if (!sameJson(observed, expectedObservation)) throw new Error("PR operation GitHub observation changed before publication");
 }
@@ -2902,6 +2942,7 @@ async function transitionRunStepChecked(runDir, stepSelector, updater, options, 
   assertCollectionUpdater(updater, "transitionRunStep");
   let stepIndex = -1;
   let decompositionAuthority = null;
+  let selectedTestRoute = null;
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft) => {
     const hadSteps = Array.isArray(draft.steps);
     const steps = hadSteps ? draft.steps : [];
@@ -2918,8 +2959,8 @@ async function transitionRunStepChecked(runDir, stepSelector, updater, options, 
       if (["running", "accepted"].includes(steps[stepIndex]?.status) && mergedSliceRepairFence(draft)) {
         throw new Error(`step '${steps[stepIndex].agent || formatSelector(stepSelector)}' cannot advance while a merged-slice repair is unresolved`);
       }
-      assertTestVerifierIntegrationGate(runDir, draft, steps[stepIndex], priorStep, options);
-      if (steps[stepIndex]?.agent === "test-verifier" && steps[stepIndex].status === "running" && draft.continuation?.schema_version !== 2) {
+      selectedTestRoute = assertTestVerifierIntegrationGate(runDir, draft, steps[stepIndex], priorStep, options) || selectedTestRoute;
+      if (steps[stepIndex]?.agent === "test-verifier" && steps[stepIndex].status === "running" && !isSchemaV2WholeStoryRoute(selectedTestRoute)) {
         decompositionAuthority = observeAcceptedDecompositionAuthority(runDir, draft, { requireForIntegrationGatePlan: true });
       }
       assertDraftSpecReuseAttempt(draft, steps[stepIndex], priorStep);
@@ -2943,6 +2984,7 @@ async function transitionRunStepChecked(runDir, stepSelector, updater, options, 
     integrationConflicts: "test-acceptance",
     beforeReplace: (next) => {
       if (decompositionAuthority) assertAcceptedDecompositionAuthorityCurrent(runDir, next, decompositionAuthority);
+      if (selectedTestRoute && classifyWholeStoryTestRoute(runDir, next, options) !== selectedTestRoute) throw new Error("whole-story test route changed before step publication");
       assertSliceIntegrationConflictsCurrent(runDir, next, options);
     },
   }), options);
@@ -3010,13 +3052,17 @@ function assertDraftSpecReuseAttempt(run, step, priorStep) {
 
 function assertTestVerifierIntegrationGate(runDir, run, step, priorStep, options = {}) {
   if (step?.agent !== "test-verifier") return;
-  if (step.status === "accepted" && classifyWholeStoryTestRoute(runDir, run, options) !== "legacy-unselected") {
+  const route = classifyWholeStoryTestRoute(runDir, run, options);
+  if (step.status === "accepted" && route !== WHOLE_STORY_ROUTES.LEGACY) {
     if (priorStep?.status !== "running" || !Number.isInteger(step.attempts) || step.attempts < 1 || step.attempts !== priorStep.attempts) {
-      throw new Error("checked test-verifier acceptance must transition from running at the same positive attempt");
+      throw new Error(route === WHOLE_STORY_ROUTES.ORDINARY_FRESH
+        ? "checked test-verifier acceptance must transition from running at the same positive attempt"
+        : "schema-v2 test-verifier acceptance must transition from running at the same positive attempt");
     }
-    return;
+    return route;
   }
-  if (step.status !== "running") return;
+  if (step.status !== "running") return null;
+  if (route !== WHOLE_STORY_ROUTES.LEGACY) assertWholeStorySinkAllowed({ route, sink: "SINK09", head: "equal" });
   const incomplete = Array.isArray(run.slices) ? run.slices.filter((slice) => slice?.status !== "merged") : [];
   if (incomplete.length > 0) {
     throw new Error(`test-verifier integration gate requires all slices merged: ${incomplete.map((slice) => slice?.id || "unknown").join(", ")}`);
@@ -3033,6 +3079,7 @@ function assertTestVerifierIntegrationGate(runDir, run, step, priorStep, options
   if (step.attempts !== expectedAttempts) {
     throw new Error(`test-verifier integration gate must advance from attempt ${priorAttempts} to ${expectedAttempts}`);
   }
+  return route;
 }
 
 // Bind the exact accepted bytes to the step at the acceptance transition, so a
@@ -3051,7 +3098,7 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
   if (!step) return null;
   delete step.acceptance;
   if (step.status !== "accepted") return null;
-  if (step.agent === "test-verifier" && classifyWholeStoryTestRoute(runDir, run, options) !== "legacy-unselected") {
+  if (step.agent === "test-verifier" && classifyWholeStoryTestRoute(runDir, run, options) !== WHOLE_STORY_ROUTES.LEGACY) {
     step.acceptance = observeCheckedTestVerifierAuthority(runDir, run, step, options).acceptance;
     return null;
   }
@@ -5192,7 +5239,19 @@ async function observePostPrCompletedIdentity(runDir, run, reason, options = {})
   const operation = run.post_pr?.pr_operation;
   if (!isRecord(operation)) throw new Error("post-PR completion requires the successor PR operation identity");
   const expectedHeadSha = requireNonEmptyString(run.post_pr?.observation?.expected_head_sha, "post-PR expected head");
-  const authority = observePrOperationGitAuthority(runDir, run, options, "post-PR completion");
+  const authority = await observePrOperationGitAuthority(runDir, run, options, "post-PR completion");
+  const route = classifyWholeStoryTestRoute(runDir, run, options);
+  if (route !== WHOLE_STORY_ROUTES.LEGACY) {
+    const decision = evaluateWholeStoryRouteSink({
+      route,
+      sink: "SINK23",
+      base: authority.base_sha === run.base_commit ? "equal" : "ancestor",
+      head: "equal",
+      review: "fresh",
+      pr_mode: run.pr_mode,
+    });
+    if (!decision.allowed) throw new Error(`post-PR completion denied: ${decision.reason}`);
+  }
   for (const [key, value] of Object.entries({ repository: authority.repository, head_ref: authority.head_ref, base_ref: authority.base_ref, draft: authority.draft })) {
     if (operation[key] !== value) throw new Error(`post-PR PR operation ${key} no longer matches local/origin authority`);
   }
@@ -5327,18 +5386,20 @@ function assertPrCreatedSliceState(runDir, run) {
 
 export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, policy = {}) {
   const route = classifyWholeStoryTestRoute(runDir, run, options);
-  const continuationEligible = route === "schema-v2";
-  const conflicts = integrationConflictSlices(run);
-  const conflictEligible = route === "delegated-conflict" || continuationEligible && conflicts.length > 0;
-  const ordinaryEligible = route === "ordinary-fresh-v1";
+  const continuationEligible = isSchemaV2WholeStoryRoute(route);
+  const conflictEligible = isDelegatedConflictWholeStoryRoute(route);
+  const ordinaryEligible = route === WHOLE_STORY_ROUTES.ORDINARY_FRESH;
   if (!continuationEligible && !conflictEligible && !ordinaryEligible) {
-    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact schema-v2 child, delegated integration conflict, or ordinary fresh all-merged run");
+    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact published schema-v2 child or delegated integration conflict");
   }
+  assertWholeStorySinkAllowed({ route, sink: "SINK10", head: "equal" });
   const repository = resolve(runDir, "../../..");
   const target = run.continuation?.target;
   if (resolve(runDir) !== resolve(directFactoryRoot(repository), run.run_id)
     || (continuationEligible && (target?.run_id !== run.run_id || target?.branch !== run.branch || resolve(target?.worktree || "") !== resolve(run.worktree || "")))) {
-    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution run identity does not match its selected route authority");
+    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", continuationEligible
+      ? "checked test execution run identity does not match the published schema-v2 target"
+      : "checked test execution run identity does not match its selected route authority");
   }
   if (run.status !== "running" && !(policy.allowTerminalCompleted === true && run.status === "completed")) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
   if (policy.skipLocalAuthority !== true) {
@@ -5384,21 +5445,83 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
 
 export function classifyWholeStoryTestRoute(runDir, run, options = {}) {
   const conflicts = integrationConflictSlices(run);
-  if (run?.continuation?.schema_version === 2 && run.continuation.kind === "blocked-run-continuation") return "schema-v2";
-  if (conflicts.length > 0) return "delegated-conflict";
-  if (run?.continuation || run?.checkpoint_source || run?.checkpoint_progress) return "legacy-unselected";
-  if (!Array.isArray(run?.slices) || run.slices.length === 0 || run.slices.some((slice) => slice?.status !== "merged")) return "legacy-unselected";
-  if (!existsSync(join(resolve(runDir), "plan", "slices.json"))) return "legacy-unselected";
+  const schemaV2 = run?.continuation?.schema_version === 2 && run.continuation.kind === "blocked-run-continuation";
+  const delegatedConflict = conflicts.length > 0;
+  if (schemaV2 && delegatedConflict) return WHOLE_STORY_ROUTES.COMBINED;
+  if (schemaV2) return WHOLE_STORY_ROUTES.SCHEMA_V2;
+  if (delegatedConflict) return WHOLE_STORY_ROUTES.DELEGATED_CONFLICT;
+  if (run?.continuation || run?.checkpoint_source || run?.checkpoint_progress) return WHOLE_STORY_ROUTES.LEGACY;
+  if (!Array.isArray(run?.slices) || run.slices.length === 0 || run.slices.some((slice) => slice?.status !== "merged")) return WHOLE_STORY_ROUTES.LEGACY;
+  if (!existsSync(join(resolve(runDir), "plan", "slices.json"))) return WHOLE_STORY_ROUTES.LEGACY;
   const decompositionSteps = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
-  if (decompositionSteps.length !== 1 || decompositionSteps[0].status !== "accepted" || !isRecord(decompositionSteps[0].acceptance)) return "legacy-unselected";
-  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, options);
-  if (!Array.isArray(decomposition.plan.slices) || decomposition.plan.slices.length === 0 || !isRecord(decomposition.plan.integration_gate)) return "legacy-unselected";
-  return "ordinary-fresh-v1";
+  if (decompositionSteps.length !== 1 || decompositionSteps[0].status !== "accepted" || !isRecord(decompositionSteps[0].acceptance)) return WHOLE_STORY_ROUTES.LEGACY;
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
+  if (!Array.isArray(decomposition.plan.slices) || decomposition.plan.slices.length === 0 || !isRecord(decomposition.plan.integration_gate)) return WHOLE_STORY_ROUTES.LEGACY;
+  return WHOLE_STORY_ROUTES.ORDINARY_FRESH;
+}
+
+export function evaluateWholeStoryRouteSink(input) {
+  if (!isRecord(input)) throw new Error("whole-story route-and-sink state must be an object");
+  const route = requireEnumValue(input.route, new Set(Object.values(WHOLE_STORY_ROUTES)), "whole-story route");
+  const sink = requireEnumValue(input.sink, WHOLE_STORY_SINKS, "whole-story sink");
+  const state = {
+    claim: requireEnumValue(input.claim ?? "absent", WHOLE_STORY_STATE_VALUES.claim, "whole-story claim state"),
+    evidence: requireEnumValue(input.evidence ?? "absent", WHOLE_STORY_STATE_VALUES.evidence, "whole-story evidence state"),
+    base: requireEnumValue(input.base ?? "equal", WHOLE_STORY_STATE_VALUES.base, "whole-story base relationship"),
+    head: requireEnumValue(input.head ?? "equal", WHOLE_STORY_STATE_VALUES.head, "whole-story head state"),
+    review: requireEnumValue(input.review ?? "fresh", WHOLE_STORY_STATE_VALUES.review, "whole-story review state"),
+    pr_mode: input.pr_mode ?? "ready",
+  };
+  if (!["ready", "draft"].includes(state.pr_mode)) throw new Error("whole-story pr_mode must be ready or draft");
+
+  const selectedRoute = WHOLE_STORY_ROUTE_SELECTION_SINKS[sink];
+  if (selectedRoute) return wholeStorySinkDecision(route, sink, route === selectedRoute, route === selectedRoute ? "selected-route" : "route-mismatch");
+  if (sink === "SINK25" || sink === "SINK26") return wholeStorySinkDecision(route, sink, true, "independent-contract");
+  if (!CHECKED_WHOLE_STORY_ROUTES.has(route)) return wholeStorySinkDecision(route, sink, false, "checked-route-required");
+  if (state.head !== "equal") return wholeStorySinkDecision(route, sink, false, `head-${state.head}`);
+  if (sink === "SINK12" && state.claim !== "active") return wholeStorySinkDecision(route, sink, false, "active-claim-required");
+  if (sink === "SINK13" && (state.claim !== "completed-fail" || state.evidence !== "exact-fail")) return wholeStorySinkDecision(route, sink, false, "failed-replay-required");
+  if (sink === "SINK14" && state.evidence !== "exact-pass") return wholeStorySinkDecision(route, sink, false, "checked-evidence-required");
+  if (["SINK15", "SINK16", "SINK17"].includes(sink)
+    && (state.claim !== "completed-pass" || state.evidence !== "exact-pass" || state.review !== "fresh")) {
+    return wholeStorySinkDecision(route, sink, false, "fresh-passing-authority-required");
+  }
+  if (["SINK18", "SINK19", "SINK20", "SINK21", "SINK22", "SINK23", "SINK24"].includes(sink)) {
+    if (!["equal", "ancestor"].includes(state.base)) return wholeStorySinkDecision(route, sink, false, `base-${state.base}`);
+    if (state.review !== "fresh") return wholeStorySinkDecision(route, sink, false, `review-${state.review}`);
+    if (route === WHOLE_STORY_ROUTES.ORDINARY_FRESH && state.pr_mode !== "ready") return wholeStorySinkDecision(route, sink, false, "ordinary-fresh-ready-required");
+  }
+  return wholeStorySinkDecision(route, sink, true, "allowed");
+}
+
+function requireEnumValue(value, allowed, label) {
+  if (!allowed.has(value)) throw new Error(`${label} is invalid`);
+  return value;
+}
+
+function wholeStorySinkDecision(route, sink, allowed, reason) {
+  return Object.freeze({ route, sink, allowed, reason });
+}
+
+function assertWholeStorySinkAllowed(input) {
+  const decision = evaluateWholeStoryRouteSink(input);
+  if (!decision.allowed) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", `whole-story ${decision.sink} denied: ${decision.reason}`);
+  return decision;
+}
+
+function isSchemaV2WholeStoryRoute(route) {
+  return route === WHOLE_STORY_ROUTES.SCHEMA_V2 || route === WHOLE_STORY_ROUTES.COMBINED;
+}
+
+function isDelegatedConflictWholeStoryRoute(route) {
+  return route === WHOLE_STORY_ROUTES.DELEGATED_CONFLICT || route === WHOLE_STORY_ROUTES.COMBINED;
 }
 
 export function observeCompletedCheckedTestExecutionAuthority(runDir, run, step = uniqueTestVerifierStep(run), authority = null, options = {}) {
+  const route = classifyWholeStoryTestRoute(runDir, run, options);
+  const authorityLabel = route === WHOLE_STORY_ROUTES.ORDINARY_FRESH ? "checked" : "schema-v2";
   const claim = step?.execution_claim;
-  if (!isRecord(claim) || claim.state !== "completed") throw new Error("checked test authority requires a completed checked execution claim");
+  if (!isRecord(claim) || claim.state !== "completed") throw new Error(`${authorityLabel} test authority requires a completed checked execution claim`);
   if (step.execution_claim_hash !== hashValue(claim)) throw new Error("completed checked execution claim hash is stale");
   const currentAuthority = authority || observeCheckedTestExecutionAuthority(runDir, run, { ...options, runDir }, { allowCompleted: true, skipLocalAuthority: true, allowTerminalCompleted: options.allowTerminalCompleted === true });
   if (claim.run_id !== run.run_id || claim.attempt !== step.attempts || claim.plan_ref !== currentAuthority.plan_ref
@@ -5479,15 +5602,16 @@ function testExecutionError(code, message) {
 
 function assertCheckedFreshDownstreamAuthority(runDir, run, sink, expected = null) {
   const route = classifyWholeStoryTestRoute(runDir, run, { runDir });
-  if (route === "legacy-unselected") return null;
+  if (route === WHOLE_STORY_ROUTES.LEGACY) return null;
+  const authorityLabel = isSchemaV2WholeStoryRoute(route) ? "schema-v2" : route;
   const incomplete = (run.slices || []).filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
-  if (incomplete.length) throw new Error(`${route} downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
+  if (incomplete.length) throw new Error(`${authorityLabel} downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
   const step = (run.steps || []).find((candidate) => candidate?.agent === "test-verifier");
   if (!step || step.status !== "accepted" || !Number.isInteger(step.attempts) || step.attempts < 1 || !isRecord(step.acceptance)) {
-    throw new Error(`${route} downstream authority requires fresh accepted test-verifier authority before ${sink}`);
+    throw new Error(`${authorityLabel} downstream authority requires fresh accepted test-verifier authority before ${sink}`);
   }
   const authority = observeCheckedTestVerifierAuthority(runDir, run, step, { runDir });
-  if (!sameJson(step.acceptance, authority.acceptance)) throw new Error(`${route} test-verifier acceptance bytes or head are stale`);
+  if (!sameJson(step.acceptance, authority.acceptance)) throw new Error(`${authorityLabel} test-verifier acceptance bytes or head are stale`);
   const observed = { step: cloneJson(step), ...authority };
   if (expected && !sameJson(observed, expected)) throw new Error(`checked downstream authority changed before ${sink} publication`);
   return observed;
@@ -5495,28 +5619,30 @@ function assertCheckedFreshDownstreamAuthority(runDir, run, sink, expected = nul
 
 function observeCheckedTestVerifierAuthority(runDir, run, step, options = {}) {
   const route = classifyWholeStoryTestRoute(runDir, run, options);
-  if (route === "legacy-unselected") throw new Error("checked test-verifier acceptance requires a selected checked route");
+  if (route === WHOLE_STORY_ROUTES.LEGACY) throw new Error("checked test-verifier acceptance requires a selected checked route");
+  const authorityLabel = route === WHOLE_STORY_ROUTES.ORDINARY_FRESH ? "checked" : "schema-v2";
+  assertWholeStorySinkAllowed({ route, sink: "SINK15", claim: "completed-pass", evidence: "exact-pass", head: "equal", review: "fresh" });
   for (const [key, label] of [["artifact_ref", "artifact"], ["evidence_ref", "evidence"], ["review_ref", "review"]]) {
-    if (!stringValue(step?.[key])) throw new Error(`checked test-verifier acceptance requires ${label}_ref`);
+    if (!stringValue(step?.[key])) throw new Error(`${authorityLabel} test-verifier acceptance requires ${label}_ref`);
   }
-  if (step.artifact_ref !== "artifacts/test-report.md") throw new Error("checked test-verifier acceptance requires artifacts/test-report.md");
+  if (step.artifact_ref !== "artifacts/test-report.md") throw new Error(`${authorityLabel} test-verifier acceptance requires artifacts/test-report.md`);
   const artifact = resolveArtifactRef(runDir, step.artifact_ref);
   const evidence = resolveEvidenceRef(runDir, step.evidence_ref);
   const review = resolveReviewRef(runDir, step.review_ref);
   const checked = observeCompletedCheckedTestExecutionAuthority(runDir, run, step, null, options);
-  const evidenceValue = validateTestExecutionReceipt(parseJsonObjectFile(evidence.path, "checked test-verifier receipt"));
-  const reviewValue = parseJsonObjectFile(review.path, "checked test-verifier review");
-  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "checked test-verifier acceptance");
-  if (step.evidence_ref !== checked.claim.receipt_ref || hashFile(evidence.path, { mode: "raw" }) !== checked.receipt_hash || !sameJson(evidenceValue, checked.receipt)) throw new Error("checked test-verifier evidence must be the exact completed checked receipt");
-  if (checked.claim.status !== "pass" || evidenceValue.status !== "pass" || evidenceValue.review_ready !== true) throw new Error("checked test-verifier acceptance requires a completed passing checked receipt");
+  const evidenceValue = validateTestExecutionReceipt(parseJsonObjectFile(evidence.path, `${authorityLabel} test-verifier receipt`));
+  const reviewValue = parseJsonObjectFile(review.path, `${authorityLabel} test-verifier review`);
+  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, `${authorityLabel} test-verifier acceptance`);
+  if (step.evidence_ref !== checked.claim.receipt_ref || hashFile(evidence.path, { mode: "raw" }) !== checked.receipt_hash || !sameJson(evidenceValue, checked.receipt)) throw new Error(`${authorityLabel} test-verifier evidence must be the exact completed checked receipt`);
+  if (checked.claim.status !== "pass" || evidenceValue.status !== "pass" || evidenceValue.review_ready !== true) throw new Error(`${authorityLabel} test-verifier acceptance requires a completed passing checked receipt`);
   const planAuthority = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
   const expectedCommands = planAuthority.plan.integration_gate.required_commands;
-  if (evidenceValue.commands.length !== expectedCommands.length || evidenceValue.commands.some((result, index) => result.program !== expectedCommands[index].program || !sameJson(result.args, expectedCommands[index].args) || result.status !== "pass")) throw new Error("checked test-verifier receipt commands must exactly pass every accepted plan command in order");
-  if (evidenceValue.head_sha !== integration.head) throw new Error("checked test-verifier evidence head_sha must equal the current clean child/integration HEAD");
+  if (evidenceValue.commands.length !== expectedCommands.length || evidenceValue.commands.some((result, index) => result.program !== expectedCommands[index].program || !sameJson(result.args, expectedCommands[index].args) || result.status !== "pass")) throw new Error(`${authorityLabel} test-verifier receipt commands must exactly pass every accepted plan command in order`);
+  if (evidenceValue.head_sha !== integration.head) throw new Error(`${authorityLabel} test-verifier evidence head_sha must equal the current clean child branch/worktree HEAD`);
   if (reviewValue.subject !== "test-verifier" || reviewValue.attempt !== step.attempts || String(reviewValue.verdict || "").toUpperCase() !== "APPROVE") {
-    throw new Error("checked test-verifier review must bind subject, attempt, and APPROVE verdict");
+    throw new Error(`${authorityLabel} test-verifier review must bind subject, attempt, and APPROVE verdict`);
   }
-  if (reviewValue.reviewed_head_sha !== integration.head) throw new Error("checked test-verifier review reviewed_head_sha must equal the current clean child/integration HEAD");
+  if (reviewValue.reviewed_head_sha !== integration.head) throw new Error(`${authorityLabel} test-verifier review reviewed_head_sha must equal the current clean child branch/worktree HEAD`);
   return {
     acceptance: {
       artifact_ref: step.artifact_ref, artifact_hash: hashFile(artifact.path),
@@ -5532,16 +5658,16 @@ function observeCheckedTestVerifierAuthority(runDir, run, step, options = {}) {
 
 function assertCheckedPrePrGateAuthority(runDir, run, sink, expected = null) {
   const route = classifyWholeStoryTestRoute(runDir, run, { runDir });
-  if (route === "legacy-unselected") return null;
+  if (route === WHOLE_STORY_ROUTES.LEGACY) return null;
   const freshTestAuthority = assertCheckedFreshDownstreamAuthority(runDir, run, sink);
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict) || !PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
-    throw new Error(`checked pre-PR gate requires fresh passing panels before ${sink}`);
+    throw new Error(`${route === WHOLE_STORY_ROUTES.ORDINARY_FRESH ? "checked" : "schema-v2"} pre-PR gate requires fresh passing panels before ${sink}`);
   }
   const observed = {
     fresh_test_authority: freshTestAuthority,
     panels: assertPanelReviewBindingsCurrent(runDir, run),
   };
-  if (expected && !sameJson(observed, expected)) throw new Error(`checked downstream authority changed before ${sink} publication`);
+  if (expected && !sameJson(observed, expected)) throw new Error(`${route === WHOLE_STORY_ROUTES.ORDINARY_FRESH ? "checked" : "schema-v2"} downstream authority changed before ${sink} publication`);
   return observed;
 }
 
@@ -9787,37 +9913,51 @@ function resolveAuthorityRepository(runDir, run, options = {}) {
   return result.stdout.trim();
 }
 
-function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR operation") {
+async function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR operation") {
   const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, `${label} authority`);
-  const origin = authorityGit(options, integration.repository, ["config", "--get", "remote.origin.url"]);
-  if (!origin.ok || !stringValue(origin.stdout) || origin.stdout.trim().includes("\n")) throw new Error(`${label} requires exactly one canonical GitHub origin`);
-  const repository = canonicalGithubRepositoryFromOrigin(origin.stdout.trim());
   const headRef = requireNonEmptyString(run.branch, "run.branch");
   const baseRef = localPrBaseRef(run);
+  if (baseRef !== "main") throw new Error(`${label} requires canonical origin/main as the PR base`);
   if (!run.pr_mode || !["draft", "ready"].includes(run.pr_mode)) throw new Error(`${label} requires persisted run.pr_mode`);
-  const headSha = observeExactRemoteHead(options, integration.repository, headRef, label);
-  const baseSha = observeExactRemoteHead(options, integration.repository, baseRef, label);
-  if (headSha !== integration.head) throw new Error(`${label} requires local, worktree, and origin head equality`);
   const recordedBase = requireNonEmptyString(run.base_commit, "run.base_commit");
-  if (baseSha !== recordedBase) ensureObservedRemoteCommitAvailable(options, integration.repository, baseRef, baseSha, label);
-  if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", recordedBase, headSha]).ok) throw new Error(`${label} requires run.base_commit to be an ancestor of the origin head`);
-  if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", recordedBase, baseSha]).ok) throw new Error(`${label} requires run.base_commit to be an ancestor of the current origin base head`);
-  return { repository, origin: origin.stdout.trim(), head_ref: headRef, head_sha: headSha, base_ref: baseRef, base_sha: baseSha, draft: run.pr_mode === "draft", integration };
+  return withCanonicalOriginMain(integration.repository, recordedBase, (canonical) => {
+    const headSha = observeExactRemoteHead(options, integration.repository, headRef, label);
+    if (headSha !== integration.head) throw new Error(`${label} requires local, worktree, and origin head equality`);
+    if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", recordedBase, headSha]).ok) throw new Error(`${label} requires run.base_commit to be an ancestor of the origin head`);
+    return {
+      repository: canonical.repository,
+      origin: canonical.origin,
+      head_ref: headRef,
+      head_sha: headSha,
+      base_ref: baseRef,
+      base_sha: canonical.commit,
+      draft: run.pr_mode === "draft",
+      integration,
+    };
+  }, canonicalOriginOptions(options));
 }
 
-function ensureObservedRemoteCommitAvailable(options, repository, ref, commit, label) {
-  if (authorityGit(options, repository, ["cat-file", "-e", `${commit}^{commit}`]).ok) return;
-  const temporaryRef = `refs/opencode-feature-factory/pr-base-observation/${randomUUID()}`;
-  try {
-    const fetched = authorityGit(options, repository, ["fetch", "--no-tags", "--quiet", "origin", `refs/heads/${ref}:${temporaryRef}`]);
-    if (!fetched.ok) throw new Error(`${label} cannot fetch the observed origin base head`);
-    const resolved = authorityGit(options, repository, ["rev-parse", "--verify", `${temporaryRef}^{commit}`]);
-    if (!resolved.ok || resolved.stdout.trim() !== commit) throw new Error(`${label} fetched origin base head differs from its observation`);
-    if (observeExactRemoteHead(options, repository, ref, label) !== commit) throw new Error(`${label} origin base head moved during observation`);
-  } finally {
-    const removed = authorityGit(options, repository, ["update-ref", "-d", temporaryRef]);
-    if (!removed.ok) throw new Error(`${label} could not remove its private origin base observation ref`);
+function canonicalOriginOptions(options) {
+  const configured = isRecord(options.canonicalOriginOptions) ? { ...options.canonicalOriginOptions } : {};
+  if (configured.gitOptions === undefined) {
+    if (isRecord(options.gitOptions)) configured.gitOptions = options.gitOptions;
+    else if (typeof options.gitFn === "function") configured.gitOptions = { spawnSync: gitFnSpawnAdapter(options.gitFn) };
   }
+  return configured;
+}
+
+function gitFnSpawnAdapter(gitFn) {
+  return (_file, args, spawnOptions = {}) => {
+    const result = gitFn(spawnOptions.cwd, args);
+    if (!isRecord(result) || typeof result.ok !== "boolean" || typeof result.stdout !== "string") {
+      return { status: 128, stdout: "", stderr: "git authority observer returned an invalid result" };
+    }
+    return {
+      status: Number.isInteger(result.status) ? result.status : result.ok ? 0 : 1,
+      stdout: result.stdout,
+      stderr: typeof result.stderr === "string" ? result.stderr : "",
+    };
+  };
 }
 
 function localPrBaseRef(run) {
@@ -9837,14 +9977,26 @@ function observeExactRemoteHead(options, repository, ref, label) {
   return match[1];
 }
 
-function assertSamePrOperationGitAuthority(runDir, run, options, expected, label) {
-  const current = observePrOperationGitAuthority(runDir, run, options, label);
+async function assertSamePrOperationGitAuthority(runDir, run, options, expected, label) {
+  const current = await observePrOperationGitAuthority(runDir, run, options, label);
   if (!sameJson(current, expected)) throw new Error(`${label} Git authority changed before publication`);
   return current;
 }
 
-function assertPrFenceGitAuthorityCurrent(runDir, run, fence, options = {}) {
-  const authority = observePrOperationGitAuthority(runDir, run, options, "PR operation reconciliation");
+async function assertPrFenceGitAuthorityCurrent(runDir, run, fence, options = {}) {
+  const authority = await observePrOperationGitAuthority(runDir, run, options, "PR operation reconciliation");
+  const route = classifyWholeStoryTestRoute(runDir, run, options);
+  if (route !== WHOLE_STORY_ROUTES.LEGACY) {
+    const decision = evaluateWholeStoryRouteSink({
+      route,
+      sink: "SINK21",
+      base: authority.base_sha === run.base_commit ? "equal" : "ancestor",
+      head: "equal",
+      review: "fresh",
+      pr_mode: run.pr_mode,
+    });
+    if (!decision.allowed) throw new Error(`PR operation reconciliation denied: ${decision.reason}`);
+  }
   const expected = {
     repository: authority.repository,
     head_ref: authority.head_ref,
