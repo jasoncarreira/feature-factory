@@ -503,12 +503,14 @@ this doc does not duplicate per-issue detail, so it cannot rot against it.)
 | Step | Issue | Scope | Depends on |
 | --- | --- | --- | --- |
 | 0 | #109 | `GH_CONFIG_DIR`-isolated gh operations (1.2) — the one operationally dangerous race; independent, ship first | — |
-| 1 | #110 | Legacy retirement (Part 5, L1–L12); L3 decided in-PR (recommendation: option b, repair-by-continuation); removes the inverted probe (1.1) by deletion | #109 (soft; keeps hotspot PRs serial) |
+| 1 | #110 | Legacy retirement (Part 5, L1–L12); L3 decided in-PR (recommendation: option b, repair-by-continuation); removes the inverted probe (1.1) by deletion | #109 (soft); operationally after the re-seeded #103 completes (P1 skew rule: no schema-deleting merge while a run is active) |
 | 2a | #111 | P2 attestation-deletion sweep (keep/simplify/drop table: 1.3, 3.2, 2.3-simplify, 2.5, 3.4) plus reviewer/catalog-registration recalibration | #110 |
 | 2b | #112 | P3 width recalibration (simplification block, countable acceptance probes, width budget, scope-terminal routing) | adjacent to #111 (shared prompt files); width budget may land earlier |
-| 3 | #113 | Substrate extraction (constants, canonical JSON, claim/receipt engine, attribution, error codes; one owner per invariant) | #111 |
-| 4 | #114 | Catalog narrowing + tooling (3.1, code+path binding, `catalog:review`) | #113 |
-| 5 | #104 | Post-refactor durable wait state + truncated-output recovery, built on the new substrate | #113, #114 |
+| 3 | #117 | Validator family split: `src/validate/` per-record-family modules behind a re-export index — pure motion on the post-sweep survivor; removes the persistence lane choke point (evidence: the issue-103 fail-closed stop; the DAG's shared-file serialization table) | #111 |
+| 4 | #113 | Substrate extraction (constants, canonical JSON, claim/receipt engine, attribution, error codes); the one-owner-per-invariant guard migration deposits directly into the split family modules — guards move once | #111, #117 |
+| 5 | #114 | Catalog narrowing + tooling (3.1, code+path binding, `catalog:review`) | #113 |
+| 6 | #118 | Run-state family split: core write pipeline + per-family transition modules behind a re-export index | #110, #111, #113, #117 |
+| 7 | #104 | Post-refactor durable wait state + truncated-output recovery, built on the new substrate (wait-state records land in their own family module) | #113, #114, #118 |
 | — | #103 | Pre-refactor operational hardening — independent; re-seed with the mandated split after its two width-blocked runs (the P3 evidence) | — |
 
 Sequencing rationale: steps 1 and 2 are deletion-dominant and interact — in
