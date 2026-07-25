@@ -1553,7 +1553,6 @@ async function observeFencedPrOperation(run, fence, options, expectedHeadSha) {
       executable: options.ghExecutable,
       execute: options.executeGithub,
       spawnImpl: options.spawnImpl,
-      lockOptions: options.githubLockOptions,
       observePage: options.observePrOperationPage,
     });
   } catch (error) {
