@@ -279,19 +279,38 @@ export function approvePreservedCandidate(fixture, inventory) {
 }
 
 export async function completeFinalCheckedTest(fixture, expectedHead) {
-  const evidenceRef = "evidence/test-verifier.attempt-1.json";
+  const claimed = await claimCheckedTestExecution(fixture.runDir, { now: LIFECYCLE_NOW, nonce: "123e4567-e89b-42d3-a456-426614174024" });
+  const emptyStream = { captured_bytes: 0, sha256: hashBytes(""), truncated: false };
   const receipt = {
     schema_version: 1,
-    kind: "ordinary-integration-test-evidence",
+    kind: "checked-test-execution-receipt",
     subject: "test-verifier",
     run_id: fixture.runId,
     attempt: 1,
+    claim_nonce: claimed.claim.nonce,
+    plan_ref: claimed.claim.plan_ref,
+    plan_hash: claimed.claim.plan_hash,
     head_sha: expectedHead,
+    timeout_ms: claimed.claim.timeout_ms,
+    started_at: LIFECYCLE_NOW,
+    completed_at: LIFECYCLE_NOW,
+    duration_ms: 0,
     status: "pass",
     review_ready: true,
-    commands: [{ program: "npm", args: ["run", "check"], status: "pass", exit_code: 0, head_sha: expectedHead }],
+    commands: claimed.authority.commands.map((command, index) => ({
+      index,
+      ...command,
+      outcome: "exited",
+      status: "pass",
+      exit_code: 0,
+      signal: null,
+      error_code: null,
+      duration_ms: 0,
+      stdout: emptyStream,
+      stderr: emptyStream,
+    })),
   };
-  writeJson(join(fixture.runDir, evidenceRef), receipt);
+  const completed = await completeCheckedTestExecution(fixture.runDir, claimed.claim, claimed.authority, receipt, { now: LIFECYCLE_NOW });
   writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "advanced lifecycle final checks pass\n");
   const reviewRef = "reviews/test-verifier.attempt-1.json";
   writeJson(join(fixture.runDir, reviewRef), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: expectedHead, required_fixes: [] });
@@ -299,10 +318,10 @@ export async function completeFinalCheckedTest(fixture, expectedHead) {
     status: "accepted",
     attempts: 1,
     artifact_ref: "artifacts/test-report.md",
-    evidence_ref: evidenceRef,
+    evidence_ref: claimed.claim.receipt_ref,
     review_ref: reviewRef,
   }, { mustExist: true });
-  return { completed: receipt, accepted };
+  return { claimed, completed, receipt, accepted };
 }
 
 export async function completeIntegratedConflictCheckedTest(fixture, expectedHead) {
