@@ -1276,11 +1276,19 @@ export function validateRunDir(runDir) {
 export function checkRunConsistency(runDir, run) {
   const checks = [];
   let validRun = null;
+  let carryForwardOwnershipSource = null;
   checks.push(runCheck("run.schema", () => {
     validRun = validateRun(run);
     return { run_id: validRun.run_id };
   }));
   if (!validRun) return { ok: false, checks };
+
+  if (requiresCarryForwardOwnershipSource(validRun)) {
+    checks.push(runCheck("run.continuation.carry_forward.ownership_source", () => {
+      carryForwardOwnershipSource = observeCarryForwardOwnershipSource(runDir, validRun);
+      return { parent_run_id: carryForwardOwnershipSource.run.run_id };
+    }));
+  }
 
   for (const [gateName, gate] of Object.entries(validRun.gates || {})) {
     if (!isRecord(gate)) continue;
@@ -1405,7 +1413,9 @@ export function checkRunConsistency(runDir, run) {
         const reviewed = resolveReviewRef(runDir, review.review_ref);
         if (hashFile(evidence.path) !== review.evidence_hash) fail([{ path: `run.slices[${index}].attempt_reviews[${reviewIndex}].evidence_hash`, message: "must match evidence_ref bytes" }]);
         if (hashFile(reviewed.path) !== review.review_hash) fail([{ path: `run.slices[${index}].attempt_reviews[${reviewIndex}].review_hash`, message: "must match review_ref bytes" }]);
-        const expectedOwnership = observePersistedSliceAttemptOwnership(runDir, validRun, slice, review);
+        const expectedOwnership = observePersistedSliceAttemptOwnership(runDir, validRun, slice, review, {
+          carryForwardOwnershipSource,
+        });
         if (!attemptOwnershipEquals(review, expectedOwnership)) {
           fail([{ path: `run.slices[${index}].attempt_reviews[${reviewIndex}]`, message: "persisted ownership authority is stale" }]);
         }
@@ -2023,14 +2033,102 @@ function assertConsistencySafeModification(runDir, sliceId, path, baseline, revi
   }
 }
 
+function requiresCarryForwardOwnershipSource(run) {
+  return run.continuation?.schema_version === 2 && (run.slices || []).some((slice) =>
+    (slice.attempt_reviews || []).some((entry) =>
+      (entry.modified_extensions || []).some((extension) => extension?.authority === "non-conflicting-sibling")));
+}
+
+function observeCarryForwardOwnershipSource(runDir, run) {
+  const continuation = run.continuation;
+  const repository = git(runDir, ["rev-parse", "--show-toplevel"]);
+  if (!repository.ok) throw new Error("carry-forward ownership source repository cannot be observed");
+  const repo = resolve(repository.stdout.trim());
+  const parentFile = resolve(repo, continuation.parent.run_ref);
+  assertConsistencyRegularFile(repo, parentFile, "carry-forward ownership parent run.json");
+  if (hashFile(parentFile) !== continuation.parent.run_hash) {
+    throw new Error("carry-forward ownership parent run.json hash is stale");
+  }
+  const parentRun = validateRun(readInventoryJson(parentFile, "carry-forward ownership parent run.json"));
+  for (const key of ["run_id", "status", "branch", "worktree"]) {
+    if (parentRun[key] !== continuation.parent[key]) throw new Error(`carry-forward ownership parent ${key} is stale or cross-bound`);
+  }
+  const parentBranch = git(repo, ["rev-parse", "--verify", `refs/heads/${continuation.parent.branch}^{commit}`]);
+  if (!parentBranch.ok || parentBranch.stdout.trim() !== continuation.parent.commit
+    || continuation.carry_forward.start_commit !== continuation.parent.commit) {
+    throw new Error("carry-forward ownership parent branch/commit is stale or cross-bound");
+  }
+  const parentRunDir = dirname(parentFile);
+  if (hashFile(join(parentRunDir, PLAN_SLICES_REF)) !== continuation.carry_forward.plan_hash
+    || hashFile(join(runDir, PLAN_SLICES_REF)) !== continuation.carry_forward.plan_hash) {
+    throw new Error("carry-forward ownership plan bytes are stale or cross-bound");
+  }
+
+  const parentById = new Map((parentRun.slices || []).map((slice) => [slice.id, slice]));
+  const childById = new Map((run.slices || []).map((slice) => [slice.id, slice]));
+  const acceptedIds = new Set();
+  for (const adopted of continuation.carry_forward.accepted_slices) {
+    const parentSlice = parentById.get(adopted.id);
+    const childSlice = childById.get(adopted.id);
+    if (acceptedIds.has(adopted.id) || parentSlice?.status !== "merged" || childSlice?.status !== "merged"
+      || !isDeepStrictEqual(carryForwardOwnershipProjection(parentSlice), adopted)
+      || !isDeepStrictEqual(carryForwardOwnershipProjection(childSlice), adopted)) {
+      throw new Error(`carry-forward ownership source slice '${adopted.id}' is stale or cross-bound`);
+    }
+    acceptedIds.add(adopted.id);
+  }
+  return { run_dir: parentRunDir, run: parentRun, accepted_ids: acceptedIds };
+}
+
+function carryForwardOwnershipProjection(slice) {
+  if (!isRecord(slice)) return null;
+  return {
+    id: slice.id,
+    declared_paths: slice.declared_paths,
+    effective_paths: slice.effective_paths,
+    attempts: slice.attempts,
+    evidence_ref: slice.evidence_ref,
+    evidence_hash: slice.evidence_hash,
+    review_ref: slice.review_ref,
+    review_hash: slice.review_hash,
+    reviewed_commit: slice.reviewed_commit,
+    merge_commit: slice.merge_commit,
+    attempt_reviews: slice.attempt_reviews,
+    ...(slice.integration_conflict ? { integration_conflict: slice.integration_conflict } : {}),
+  };
+}
+
+function assertConsistencyRegularFile(root, file, label) {
+  const relativePath = relative(root, file);
+  if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    throw new Error(`${label} escapes the repository`);
+  }
+  let current = root;
+  for (const part of relativePath.split(sep)) {
+    current = join(current, part);
+    if (!existsSync(current)) throw new Error(`${label} is missing`);
+    const entry = lstatSync(current);
+    if (entry.isSymbolicLink()) throw new Error(`${label} must not contain symlinks`);
+  }
+  if (!lstatSync(file).isFile()) throw new Error(`${label} must be a regular file`);
+}
+
 function observeConsistencySiblingAuthority(runDir, run, modifyingSliceId, path, rationale, ownerSliceId, plan, options = {}) {
-  const owner = (run.slices || []).find((candidate) => candidate.id === ownerSliceId);
-  const ownerEntry = owner?.attempt_reviews?.at(-1);
-  if (!owner || !["review", "merged"].includes(owner.status) || !ownerEntry || ownerEntry.attempt !== owner.attempts) {
+  const inheritedSource = options.carryForwardOwnershipSource;
+  const useInheritedSource = inheritedSource?.accepted_ids.has(modifyingSliceId) === true;
+  if (useInheritedSource && !inheritedSource.accepted_ids.has(ownerSliceId)) {
     throw new Error(`slice '${modifyingSliceId}' persisted sibling owner '${ownerSliceId}' is unavailable`);
   }
-  const evidencePath = resolveEvidenceRef(runDir, ownerEntry.evidence_ref).path;
-  const reviewPath = resolveReviewRef(runDir, ownerEntry.review_ref).path;
+  const authorityRunDir = useInheritedSource ? inheritedSource.run_dir : runDir;
+  const authorityRun = useInheritedSource ? inheritedSource.run : run;
+  const owner = (authorityRun.slices || []).find((candidate) => candidate.id === ownerSliceId);
+  const ownerEntry = owner?.attempt_reviews?.at(-1);
+  if (!owner || !["review", "merged"].includes(owner.status) || useInheritedSource && owner.status !== "merged"
+    || !ownerEntry || ownerEntry.attempt !== owner.attempts) {
+    throw new Error(`slice '${modifyingSliceId}' persisted sibling owner '${ownerSliceId}' is unavailable`);
+  }
+  const evidencePath = resolveEvidenceRef(authorityRunDir, ownerEntry.evidence_ref).path;
+  const reviewPath = resolveReviewRef(authorityRunDir, ownerEntry.review_ref).path;
   const ownerEvidence = readInventoryJson(evidencePath, `slice '${ownerSliceId}' owner evidence`);
   const ownerReview = readInventoryJson(reviewPath, `slice '${ownerSliceId}' owner review`);
   const ownerResult = validateSliceReviewResult(ownerReview, { sliceId: ownerSliceId });
@@ -2042,21 +2140,29 @@ function observeConsistencySiblingAuthority(runDir, run, modifyingSliceId, path,
     || ownerEntry.evidence_hash !== owner.evidence_hash || ownerEntry.review_hash !== owner.review_hash) {
     throw new Error(`slice '${modifyingSliceId}' persisted sibling owner '${ownerSliceId}' review authority is stale`);
   }
-  assertConsistencyInvariantFamilyAuthority(runDir, run, plan, owner, ownerReview);
-  assertConsistencyOwnerAttemptHistory(runDir, run, owner, plan, {
+  assertConsistencyInvariantFamilyAuthority(authorityRunDir, authorityRun, plan, owner, ownerReview, {
+    copiedRunDir: useInheritedSource ? runDir : null,
+  });
+  assertConsistencyOwnerAttemptHistory(authorityRunDir, authorityRun, owner, plan, {
     ...options,
     ownershipObservationStack: new Set([...(options.ownershipObservationStack || []), modifyingSliceId]),
   });
-  const dispatch = observeConsistencySliceDispatch(runDir, run, owner, ownerEntry);
-  const claimPath = resolve(runDir, dispatch.dispatch_claim_ref);
-  const closurePath = resolve(runDir, dispatch.dispatch_closure_ref);
-  assertConsistencyReviewedSliceHead(runDir, owner);
+  const dispatch = observeConsistencySliceDispatch(authorityRunDir, authorityRun, owner, ownerEntry);
+  const claimPath = resolve(authorityRunDir, dispatch.dispatch_claim_ref);
+  const closurePath = resolve(authorityRunDir, dispatch.dispatch_closure_ref);
+  if (useInheritedSource) {
+    assertConsistencyCopiedArtifact(runDir, authorityRunDir, dispatch.dispatch_claim_ref,
+      ownerEntry.dispatch_claim_hash, `slice '${ownerSliceId}' copied dispatch claim`);
+    assertConsistencyCopiedArtifact(runDir, authorityRunDir, dispatch.dispatch_closure_ref,
+      ownerEntry.dispatch_closure_hash, `slice '${ownerSliceId}' copied dispatch closure`);
+  }
+  assertConsistencyReviewedSliceHead(authorityRunDir, owner);
   const first = owner.attempt_reviews[0];
-  const firstClaim = readInventoryJson(resolve(runDir, first.dispatch_claim_ref), `slice '${ownerSliceId}' first dispatch claim`);
-  if (firstClaim.head !== ownerEntry.diff_base_commit || !git(runDir, ["merge-base", "--is-ancestor", ownerEntry.diff_base_commit, owner.reviewed_commit]).ok) {
+  const firstClaim = readInventoryJson(resolve(authorityRunDir, first.dispatch_claim_ref), `slice '${ownerSliceId}' first dispatch claim`);
+  if (firstClaim.head !== ownerEntry.diff_base_commit || !git(authorityRunDir, ["merge-base", "--is-ancestor", ownerEntry.diff_base_commit, owner.reviewed_commit]).ok) {
     throw new Error(`slice '${modifyingSliceId}' persisted sibling owner '${ownerSliceId}' baseline is stale`);
   }
-  const ownerPaths = observeConsistencyPathSet(runDir, ownerEntry.diff_base_commit, owner.reviewed_commit, `slice '${ownerSliceId}' persisted sibling diff`);
+  const ownerPaths = observeConsistencyPathSet(authorityRunDir, ownerEntry.diff_base_commit, owner.reviewed_commit, `slice '${ownerSliceId}' persisted sibling diff`);
   if (ownerPaths.has(path)) throw new Error(`slice '${modifyingSliceId}' persisted sibling owner '${ownerSliceId}' touches '${path}'`);
   return {
     kind: "modified-extension", path, rationale, authority: "non-conflicting-sibling",
@@ -2155,13 +2261,13 @@ function assertConsistencyReviewedSliceHead(runDir, slice) {
   }
 }
 
-function assertConsistencyInvariantFamilyAuthority(runDir, run, plan, owner, review) {
+function assertConsistencyInvariantFamilyAuthority(runDir, run, plan, owner, review, options = {}) {
   const planHash = hashFile(join(runDir, PLAN_SLICES_REF));
   const extension = validateReviewExtensionResult(evaluateInvariantFamilyReview({
     plan,
     sliceId: owner.id,
     review,
-    observeEvidence(ref) {
+    observeEvidence(ref, disposition) {
       const receiptPath = resolveEvidenceRef(runDir, ref).path;
       const receiptHash = hashFile(receiptPath);
       const receipt = validateVerificationArtifactExecutionReceipt(readInventoryJson(receiptPath, `slice '${owner.id}' invariant-family receipt`));
@@ -2177,11 +2283,30 @@ function assertConsistencyInvariantFamilyAuthority(runDir, run, plan, owner, rev
         || pairKeys.some((key) => JSON.stringify(claim[key]) !== JSON.stringify(receipt[key]))) {
         throw new Error(`slice '${owner.id}' invariant-family checked receipt authority is stale or cross-bound`);
       }
+      if (options.copiedRunDir) {
+        assertConsistencyCopiedArtifact(options.copiedRunDir, runDir, ref, disposition.evidence_hash,
+          `slice '${owner.id}' copied invariant-family receipt`);
+        assertConsistencyCopiedArtifact(options.copiedRunDir, runDir, claimRef, hashFile(claimPath),
+          `slice '${owner.id}' copied invariant-family claim`);
+      }
       return { ref, hash: receiptHash, receipt, claim_ref: claimRef, claim };
     },
   }));
   if (plan.delivery_envelope !== undefined && (extension.status !== "active" || extension.decision !== "approve" || extension.grants_b4_authority !== true)) {
     throw new Error(`slice '${owner.id}' persisted sibling owner invariant-family authority is not approving`);
+  }
+}
+
+function assertConsistencyCopiedArtifact(copiedRunDir, authorityRunDir, ref, expectedHash, label) {
+  const authorityPath = resolve(authorityRunDir, ref);
+  const copiedPath = resolve(copiedRunDir, ref);
+  assertConsistencyRegularFile(authorityRunDir, authorityPath, `${label} authority`);
+  assertConsistencyRegularFile(copiedRunDir, copiedPath, label);
+  const authorityBytes = readFileSync(authorityPath);
+  const copiedBytes = readFileSync(copiedPath);
+  if (hashFile(authorityPath) !== expectedHash || hashFile(copiedPath) !== expectedHash
+    || !copiedBytes.equals(authorityBytes)) {
+    throw new Error(`${label} bytes are stale or cross-bound`);
   }
 }
 

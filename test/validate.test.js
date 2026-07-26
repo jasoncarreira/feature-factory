@@ -1,11 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { spawnSync } from "./helpers/git-fixture.js";
 import { createReviewRecord, createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
 import { hashValue } from "../src/refs.js";
@@ -1041,6 +1043,43 @@ describe("run schema and consistency", () => {
     assert.throws(() => validateRun(rewrittenAccepted), /adopted carry-forward row is immutable/u);
   });
 
+  it("rejects every missing or byte-drifted child-local sibling authority copy after publication", () => {
+    const fixture = publishedSiblingAuthorityFixture();
+    try {
+      const baseline = checkRunConsistency(fixture.childRunDir, fixture.childRun);
+      assert.equal(baseline.ok, true, `the exact published child is consistent: ${JSON.stringify(baseline.checks.filter((check) => !check.ok))}`);
+      const cases = [
+        { name: "missing invariant receipt", artifact: "invariantReceipt", mutation: "missing", message: /copied invariant-family receipt is missing/u },
+        { name: "drifted invariant receipt", artifact: "invariantReceipt", mutation: "drift", message: /copied invariant-family receipt bytes are stale or cross-bound/u },
+        { name: "missing invariant claim", artifact: "invariantClaim", mutation: "missing", message: /copied invariant-family claim is missing/u },
+        { name: "drifted invariant claim", artifact: "invariantClaim", mutation: "drift", message: /copied invariant-family claim bytes are stale or cross-bound/u },
+        { name: "missing dispatch claim", artifact: "dispatchClaim", mutation: "missing", message: /copied dispatch claim is missing/u },
+        { name: "drifted dispatch claim", artifact: "dispatchClaim", mutation: "drift", message: /copied dispatch claim bytes are stale or cross-bound/u },
+        { name: "missing dispatch closure", artifact: "dispatchClosure", mutation: "missing", message: /copied dispatch closure is missing/u },
+        { name: "drifted dispatch closure", artifact: "dispatchClosure", mutation: "drift", message: /copied dispatch closure bytes are stale or cross-bound/u },
+      ];
+      for (const item of cases) {
+        const artifact = fixture.artifacts[item.artifact];
+        const childPath = join(fixture.childRunDir, artifact.ref);
+        if (item.mutation === "missing") rmSync(childPath);
+        else writeFileSync(childPath, Buffer.concat([artifact.bytes, Buffer.from(" ")]));
+
+        const result = checkRunConsistency(fixture.childRunDir, fixture.childRun);
+        const failed = result.checks.find((check) => check.name === "run.slices[1].attempt_reviews[0]");
+        assert.equal(result.ok, false, item.name);
+        assert.equal(failed?.ok, false, `${item.name} must fail the copied consumer authority check`);
+        assert.match(failed.errors.map(({ message }) => message).join("\n"), item.message, item.name);
+        assert.equal(hashFile(join(fixture.parentRunDir, artifact.ref)), artifact.hash, `${item.name} must retain parent authority bytes`);
+
+        mkdirSync(dirname(childPath), { recursive: true });
+        writeFileSync(childPath, artifact.bytes);
+      }
+      assert.equal(checkRunConsistency(fixture.childRunDir, fixture.childRun).ok, true, "restoring every exact copy restores consistency");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects merged rows before advisory checks when review authority is absent", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo, "consistency");
@@ -1364,6 +1403,230 @@ function createRunDir(repo, runId) {
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(runDir, { recursive: true });
   return runDir;
+}
+
+function publishedSiblingAuthorityFixture() {
+  const repo = tempRepo();
+  runGit(repo, ["init", "-b", "main"]);
+  runGit(repo, ["config", "user.email", "test@example.com"]);
+  runGit(repo, ["config", "user.name", "Test"]);
+  mkdirSync(join(repo, "src", "owner"), { recursive: true });
+  writeFileSync(join(repo, ".gitignore"), ".opencode/\n");
+  writeFileSync(join(repo, "src", "owner", "shared.js"), "export const shared = 1;\n");
+  runGit(repo, ["add", ".gitignore", "src/owner/shared.js"]);
+  runGit(repo, ["commit", "-m", "seed sibling authority fixture"]);
+  const base = gitOutput(repo, ["rev-parse", "HEAD"]);
+  runGit(repo, ["branch", "owner-branch", base]);
+  runGit(repo, ["branch", "consumer-branch", base]);
+  const worktreesDir = join(repo, ".opencode", "worktrees");
+  const ownerWorktree = join(worktreesDir, "owner-branch");
+  const consumerWorktree = join(worktreesDir, "consumer-branch");
+  mkdirSync(worktreesDir, { recursive: true });
+  runGit(repo, ["worktree", "add", ownerWorktree, "owner-branch"]);
+  runGit(repo, ["worktree", "add", consumerWorktree, "consumer-branch"]);
+  writeFileSync(join(ownerWorktree, "src", "owner", "owned.js"), "export const owned = true;\n");
+  runGit(ownerWorktree, ["add", "src/owner/owned.js"]);
+  runGit(ownerWorktree, ["commit", "-m", "build owner slice"]);
+  const ownerReviewedCommit = gitOutput(ownerWorktree, ["rev-parse", "HEAD"]);
+  writeFileSync(join(consumerWorktree, "src", "owner", "shared.js"), "export const shared = 2;\n");
+  runGit(consumerWorktree, ["add", "src/owner/shared.js"]);
+  runGit(consumerWorktree, ["commit", "-m", "build consumer slice"]);
+  const consumerReviewedCommit = gitOutput(consumerWorktree, ["rev-parse", "HEAD"]);
+  runGit(repo, ["checkout", "-b", "parent-run", base]);
+  runGit(repo, ["merge", "--no-ff", "owner-branch", "-m", "merge owner slice"]);
+  const ownerMergeCommit = gitOutput(repo, ["rev-parse", "HEAD"]);
+  runGit(repo, ["merge", "--no-ff", "consumer-branch", "-m", "merge consumer slice"]);
+  const parentCommit = gitOutput(repo, ["rev-parse", "HEAD"]);
+
+  const parentRunDir = createRunDir(repo, "parent-run");
+  for (const directory of ["artifacts", "plan", "evidence", "reviews", "dispatch"]) mkdirSync(join(parentRunDir, directory), { recursive: true });
+  const plan = withDeliveryEnvelope({
+    integration_gate: { required_commands: [
+      { program: "node", args: ["--test", "test/integration.test.js"] },
+      { program: "npm", args: ["run", "check"] },
+    ] },
+    slices: [
+      { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["owner works"], test_plan: ["node --test test/owner.test.js"] },
+      { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["consumer works"], test_plan: ["node --test test/consumer.test.js"] },
+      { id: "remaining", stack: "backend", paths: ["src/remaining/**"], depends_on: ["consumer"], acceptance: ["remaining works"], test_plan: ["node --test test/remaining.test.js"] },
+    ],
+  });
+  writeJson(join(parentRunDir, "plan", "slices.json"), plan);
+  writeFileSync(join(parentRunDir, "artifacts", "technical-brief.md"), "Sibling authority fixture brief.\n");
+  writeJson(join(parentRunDir, "reviews", "spec-writer.json"), { subject: "spec-writer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+  writeJson(join(parentRunDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+  const ownerFamily = writeVerificationArtifactReceipt({
+    runDir: parentRunDir, runId: "parent-run", plan, sliceId: "owner", attempt: 1, reviewedCommit: ownerReviewedCommit,
+    artifactId: "fixture-artifact-1", evidenceRef: "evidence/owner-family.json",
+    result: { type: "verification-result", outcome: "pass", summary: "Verify owner behavior passed" },
+  });
+  const consumerFamily = writeVerificationArtifactReceipt({
+    runDir: parentRunDir, runId: "parent-run", plan, sliceId: "consumer", attempt: 1, reviewedCommit: consumerReviewedCommit,
+    artifactId: "fixture-artifact-2", evidenceRef: "evidence/consumer-family.json",
+    result: { type: "verification-result", outcome: "pass", summary: "Verify consumer behavior passed" },
+  });
+  const rationale = "The consumer must update the sibling-owned shared compatibility module.";
+  writeJson(join(parentRunDir, "evidence", "owner.json"), {
+    subject: "owner", attempt: 1, status: "pass", review_ready: true, head_sha: ownerReviewedCommit, ownership_disclosure: [],
+  });
+  writeJson(join(parentRunDir, "evidence", "consumer.json"), {
+    subject: "consumer", attempt: 1, status: "pass", review_ready: true, head_sha: consumerReviewedCommit,
+    ownership_disclosure: [{ path: "src/owner/shared.js", rationale }],
+  });
+  const ownerReview = createSliceReviewRecord({ subject: "owner", attempt: 1, reviewedCommit: ownerReviewedCommit });
+  ownerReview.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
+  ownerReview.invariant_family_ledger = passingInvariantFamilyLedger({
+    plan, sliceId: "owner", reviewedCommit: ownerReviewedCommit, evidenceRef: ownerFamily.ref, evidenceHash: ownerFamily.hash,
+  });
+  writeJson(join(parentRunDir, "reviews", "owner.json"), ownerReview);
+  const consumerReview = createSliceReviewRecord({ subject: "consumer", attempt: 1, reviewedCommit: consumerReviewedCommit });
+  consumerReview.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
+  consumerReview.invariant_family_ledger = passingInvariantFamilyLedger({
+    plan, sliceId: "consumer", reviewedCommit: consumerReviewedCommit, evidenceRef: consumerFamily.ref, evidenceHash: consumerFamily.hash,
+  });
+  writeJson(join(parentRunDir, "reviews", "consumer.json"), consumerReview);
+  const ownerDispatch = writeSliceDispatch(parentRunDir, "parent-run", "owner", "owner-branch", ownerWorktree, base, ownerReviewedCommit);
+  const consumerDispatch = writeSliceDispatch(parentRunDir, "parent-run", "consumer", "consumer-branch", consumerWorktree, base, consumerReviewedCommit);
+  const ownerAttempt = {
+    attempt: 1, evidence_ref: "evidence/owner.json", evidence_hash: hashFile(join(parentRunDir, "evidence", "owner.json")),
+    review_ref: "reviews/owner.json", review_hash: hashFile(join(parentRunDir, "reviews", "owner.json")),
+    reviewed_commit: ownerReviewedCommit, diff_base_commit: base, ownership_schema_version: 2, ratified_paths: [], modified_extensions: [],
+    verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0, ...ownerDispatch,
+  };
+  const siblingExtension = {
+    kind: "modified-extension", path: "src/owner/shared.js", rationale, authority: "non-conflicting-sibling",
+    owner_slice_id: "owner", owner_attempt: 1, owner_evidence_ref: ownerAttempt.evidence_ref, owner_evidence_hash: ownerAttempt.evidence_hash,
+    owner_review_ref: ownerAttempt.review_ref, owner_review_hash: ownerAttempt.review_hash,
+    owner_dispatch_claim_ref: ownerDispatch.dispatch_claim_ref, owner_dispatch_claim_hash: ownerDispatch.dispatch_claim_hash,
+    owner_dispatch_closure_ref: ownerDispatch.dispatch_closure_ref, owner_dispatch_closure_hash: ownerDispatch.dispatch_closure_hash,
+    owner_reviewed_commit: ownerReviewedCommit, owner_diff_base_commit: base,
+  };
+  const consumerAttempt = {
+    attempt: 1, evidence_ref: "evidence/consumer.json", evidence_hash: hashFile(join(parentRunDir, "evidence", "consumer.json")),
+    review_ref: "reviews/consumer.json", review_hash: hashFile(join(parentRunDir, "reviews", "consumer.json")),
+    reviewed_commit: consumerReviewedCommit, diff_base_commit: base, ownership_schema_version: 2,
+    ratified_paths: ["src/owner/shared.js"], modified_extensions: [siblingExtension],
+    verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0, ...consumerDispatch,
+  };
+  const ownerSlice = mergedParentSlice({
+    id: "owner", depends_on: [], declared_paths: ["src/owner/**"], effective_paths: ["src/owner/**"], branch: "owner-branch",
+    worktree: ownerWorktree, attempt: ownerAttempt, mergeCommit: ownerMergeCommit,
+  });
+  const consumerSlice = mergedParentSlice({
+    id: "consumer", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**", "src/owner/shared.js"],
+    branch: "consumer-branch", worktree: consumerWorktree, attempt: consumerAttempt, mergeCommit: parentCommit,
+  });
+  const planHash = hashFile(join(parentRunDir, "plan", "slices.json"));
+  const decompositionReviewHash = hashFile(join(parentRunDir, "reviews", "work-decomposer.json"));
+  const parentRun = {
+    schema_version: 1, run_id: "parent-run", status: "blocked", branch: "parent-run", worktree: repo, gates: {}, slices: [
+      ownerSlice,
+      consumerSlice,
+      { id: "remaining", stack: "backend", depends_on: ["consumer"], declared_paths: ["src/remaining/**"], effective_paths: ["src/remaining/**"], status: "pending", attempts: 0 },
+    ],
+    steps: [{ agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+      acceptance: { artifact_ref: "plan/slices.json", artifact_hash: planHash, review_ref: "reviews/work-decomposer.json", review_hash: decompositionReviewHash } }],
+    terminal_result: { status: "blocked", run_id: "parent-run", pr_url: null, reason: "carry-forward-required", summary: "Continue remaining work.", artifacts: {} },
+  };
+  writeJson(join(parentRunDir, "run.json"), parentRun);
+
+  const childRunId = "child-run";
+  const childRunDir = createRunDir(repo, childRunId);
+  for (const directory of ["artifacts", "plan", "evidence", "reviews", "dispatch"]) cpSync(join(parentRunDir, directory), join(childRunDir, directory), { recursive: true });
+  const acceptedSlices = [ownerSlice, consumerSlice].map(carryForwardSliceProjection);
+  const policy = { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } };
+  const continuation = continuationMetadata(childRunId);
+  continuation.schema_version = 2;
+  continuation.parent = {
+    run_id: "parent-run", status: "blocked", run_ref: ".opencode/factory/parent-run/run.json",
+    run_hash: hashFile(join(parentRunDir, "run.json")), branch: "parent-run", commit: parentCommit, worktree: repo,
+  };
+  continuation.target = { run_id: childRunId, branch: childRunId, worktree: join(worktreesDir, childRunId), base_ref: "refs/remotes/origin/main", base_commit: base };
+  continuation.carry_forward = { scope: "full-remaining-plan", plan_ref: "plan/slices.json", plan_hash: planHash, start_commit: parentCommit, accepted_slices: acceptedSlices, remaining_slice_ids: ["remaining"] };
+  const specArtifactHash = hashFile(join(parentRunDir, "artifacts", "technical-brief.md"));
+  const specReviewHash = hashFile(join(parentRunDir, "reviews", "spec-writer.json"));
+  continuation.planning_reuse = {
+    eligible: true, spec_review_ref: "reviews/spec-writer.json", spec_review_hash: specReviewHash,
+    spec_artifact_ref: "artifacts/technical-brief.md", spec_artifact_hash: specArtifactHash, child_spec_review_ref: "reviews/spec-writer.json",
+  };
+  continuation.configuration = { mode: "headless", github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, post_pr_policy: policy };
+  const childSlices = acceptedSlices.map((accepted, index) => ({
+    id: accepted.id, stack: "backend", depends_on: index === 0 ? [] : ["owner"], declared_paths: accepted.declared_paths,
+    effective_paths: accepted.effective_paths, status: "merged", attempts: accepted.attempts, evidence_ref: accepted.evidence_ref,
+    evidence_hash: accepted.evidence_hash, review_ref: accepted.review_ref, review_hash: accepted.review_hash,
+    reviewed_commit: accepted.reviewed_commit, merge_commit: accepted.merge_commit, attempt_reviews: accepted.attempt_reviews,
+  }));
+  childSlices.push({ id: "remaining", stack: "backend", depends_on: ["consumer"], declared_paths: ["src/remaining/**"], effective_paths: ["src/remaining/**"], status: "pending", attempts: 0 });
+  const childRun = {
+    schema_version: 1, run_id: childRunId, status: "running", mode: "headless", branch: childRunId, worktree: continuation.target.worktree,
+    github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, continuation, gates: {}, slices: childSlices,
+    post_pr: { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
+  };
+  writeJson(join(childRunDir, "run.json"), childRun);
+  const artifacts = {
+    invariantReceipt: copiedArtifact(parentRunDir, ownerFamily.ref),
+    invariantClaim: copiedArtifact(parentRunDir, ownerFamily.claim_ref),
+    dispatchClaim: copiedArtifact(parentRunDir, ownerDispatch.dispatch_claim_ref),
+    dispatchClosure: copiedArtifact(parentRunDir, ownerDispatch.dispatch_closure_ref),
+  };
+  return { repo, parentRunDir, childRunDir, childRun, artifacts };
+}
+
+function writeSliceDispatch(runDir, runId, sliceId, branch, worktree, head, completionHead) {
+  const stem = createHash("sha256").update(`${runId}\0${sliceId}\0${1}`, "utf8").digest("hex");
+  const claimRef = `dispatch/${stem}.json`;
+  const closureRef = `dispatch/${stem}.closed.json`;
+  const completionToken = `${sliceId}-completion-token`;
+  writeJson(join(runDir, claimRef), {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-claim", run_id: runId, slice_id: sliceId, attempt: 1,
+    agent: "backend-builder", branch, worktree, head, context_hash: HASH,
+    completion_token_hash: `sha256:${createHash("sha256").update(completionToken).digest("hex")}`,
+    claimed_at: "2026-07-08T12:00:00.000Z", closure_ref: closureRef,
+  });
+  const claimHash = hashFile(join(runDir, claimRef));
+  writeJson(join(runDir, closureRef), {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-closure", claim_ref: claimRef, claim_hash: claimHash,
+    run_id: runId, slice_id: sliceId, attempt: 1, agent: "backend-builder", branch, worktree, head, completion_head: completionHead,
+    context_hash: HASH, completion_token: completionToken, returned_at: "2026-07-08T12:01:00.000Z",
+  });
+  return {
+    dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash,
+    dispatch_closure_ref: closureRef, dispatch_closure_hash: hashFile(join(runDir, closureRef)),
+  };
+}
+
+function mergedParentSlice({ id, depends_on, declared_paths, effective_paths, branch, worktree, attempt, mergeCommit }) {
+  return {
+    id, stack: "backend", depends_on, declared_paths, effective_paths, status: "merged", branch, worktree, attempts: 1,
+    dispatch_required: true, dispatch_claim_ref: attempt.dispatch_claim_ref, dispatch_claim_hash: attempt.dispatch_claim_hash,
+    dispatch_closure_ref: attempt.dispatch_closure_ref, dispatch_closure_hash: attempt.dispatch_closure_hash,
+    evidence_ref: attempt.evidence_ref, evidence_hash: attempt.evidence_hash, review_ref: attempt.review_ref,
+    review_hash: attempt.review_hash, reviewed_commit: attempt.reviewed_commit, attempt_reviews: [attempt], merge_commit: mergeCommit,
+  };
+}
+
+function carryForwardSliceProjection(slice) {
+  return {
+    id: slice.id, declared_paths: slice.declared_paths, effective_paths: slice.effective_paths, attempts: slice.attempts,
+    evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash, review_ref: slice.review_ref, review_hash: slice.review_hash,
+    reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit, attempt_reviews: slice.attempt_reviews,
+  };
+}
+
+function copiedArtifact(parentRunDir, ref) {
+  const bytes = readFileSync(join(parentRunDir, ref));
+  return { ref, bytes, hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
+}
+
+function runGit(cwd, args) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+}
+
+function gitOutput(cwd, args) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return result.stdout.trim();
 }
 
 function writeJson(file, value) {
