@@ -62,6 +62,11 @@ const WHOLE_STORY_ROUTE_SELECTION_SINKS = Object.freeze({
 });
 const WHOLE_STORY_SINKS = new Set(Array.from({ length: 26 }, (_unused, index) => `SINK${String(index + 1).padStart(2, "0")}`));
 const WHOLE_STORY_STATE_VALUES = Object.freeze({
+  continuation: new Set(["absent", "v1", "v2"]),
+  checkpoint_source: new Set(["absent", "present"]),
+  checkpoint_progress: new Set(["absent", "present"]),
+  conflict: new Set(["absent", "present"]),
+  slice_projection: new Set(["empty", "all-merged", "incomplete"]),
   claim: new Set(["absent", "active", "unknown", "completed-pass", "completed-fail"]),
   evidence: new Set(["absent", "exact-pass", "exact-fail", "legacy", "stale"]),
   base: new Set(["equal", "ancestor", "non-ancestor", "unavailable", "moving", "cleanup-failed"]),
@@ -1428,16 +1433,17 @@ export async function transitionPrePrFenceEstablished(runDir, options = {}) {
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (current.continuation?.schema_version === 2) assertV2LocalPublishedAuthority(runDir, current, options);
     assertBoundaryClean(runDir, current, options, "pr-fence");
-    const authority = assertPrCreatedReadiness(runDir, current);
     const route = classifyWholeStoryTestRoute(runDir, current, options);
     if (route === WHOLE_STORY_ROUTES.ORDINARY_FRESH && current.pr_mode !== "ready") {
       throw new Error("pr-fence denied: ordinary-fresh-ready-required");
     }
+    const authority = assertPrCreatedReadiness(runDir, current);
     const gitAuthority = await observePrOperationGitAuthority(runDir, current, options, "pr-fence");
     const baseRelationship = gitAuthority.base_sha === current.base_commit ? "equal" : "ancestor";
     if (route !== WHOLE_STORY_ROUTES.LEGACY) {
       const fenceDecision = evaluateWholeStoryRouteSink({ route, sink: "SINK18", base: baseRelationship, head: "equal", review: "fresh", pr_mode: current.pr_mode });
       if (!fenceDecision.allowed) throw new Error(`pr-fence denied: ${fenceDecision.reason}`);
+      assertWholeStorySinkAllowed({ route, sink: "SINK19", base: baseRelationship, head: "equal", review: "fresh", pr_mode: current.pr_mode });
     }
     const createdAt = timestamp(options.now);
     const token = safeBoundaryToken(options.token || randomUUID());
@@ -1846,6 +1852,7 @@ export async function claimCheckedTestExecution(runDir, options = {}) {
     }
     requireRunningTestVerifierStep(current);
     const authority = observeCheckedTestExecutionAuthority(runDir, current, options);
+    assertWholeStorySinkAllowed({ route: classifyWholeStoryTestRoute(runDir, current, options), sink: "SINK12", claim: "active", head: "equal" });
     const receiptRef = `evidence/test-verifier.attempt-${step.attempts}.json`;
     const receipt = resolveEvidenceRef(runDir, receiptRef, { mustExist: false });
     if (existsSync(receipt.path)) throw testExecutionError("TEST_EXECUTION_UNCLAIMED_RECEIPT", "fixed test execution receipt already exists without a claim");
@@ -1887,6 +1894,7 @@ export async function completeCheckedTestExecution(runDir, expectedClaim, expect
     try {
       authority = observeCheckedTestExecutionAuthority(runDir, current, options);
       assertSameCheckedExecutionAuthority(authority, expectedAuthority);
+      assertWholeStorySinkAllowed({ route: classifyWholeStoryTestRoute(runDir, current, options), sink: "SINK12", claim: "active", head: "equal" });
     } catch (error) {
       await persistUnknownTestExecutionLocked(runDir, current, step, expectedClaim, "authority-changed", options);
       throw operatorReconciliationRequired(`checked test execution authority changed before receipt publication: ${error.message}`);
@@ -2133,6 +2141,9 @@ async function persistUnknownTestExecutionLocked(runDir, current, step, expected
 function replayCheckedTestExecutionLocked(runDir, current, step, options) {
   const authority = observeCheckedTestExecutionAuthority(runDir, current, options, { allowCompleted: true });
   const observed = observeCompletedCheckedTestExecutionAuthority(runDir, current, step, authority);
+  if (step.execution_claim.status === "fail") {
+    assertWholeStorySinkAllowed({ route: classifyWholeStoryTestRoute(runDir, current, options), sink: "SINK13", claim: "completed-fail", evidence: "exact-fail", head: "equal" });
+  }
   return { replayed: true, run: current, step: cloneJson(step), claim: cloneJson(step.execution_claim), authority, result: checkedTestExecutionEnvelope(current, step, observed.receipt_hash, true) };
 }
 
@@ -3473,6 +3484,7 @@ async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = 
     assertNoUnresolvedSliceDispatches(runDir, current);
     assertCheckpointRoutingPreImplementation(current);
     assertCheckpointRoutingAuthorityCurrent(runDir, current, decompositionAuthority, manifest, artifact, options);
+    assertWholeStorySinkAllowed({ route: WHOLE_STORY_ROUTES.LEGACY, sink: "SINK26" });
     const terminalBoundaryAuthority = observeCheckpointTerminalBoundaryAuthority(runDir, current, options);
     await publishCheckpointRoutingArtifact(runDir, current, manifest, artifact, decompositionAuthority, options);
 
@@ -3922,6 +3934,8 @@ export async function transitionPanelVerdicts(runDir, input, options = {}) {
       assertSliceIntegrationConflictsCurrent(runDir, current, options);
     }
     v2Authority = assertCheckedFreshDownstreamAuthority(runDir, current, "panel publication");
+    const route = classifyWholeStoryTestRoute(runDir, current, options);
+    if (route !== WHOLE_STORY_ROUTES.LEGACY) assertWholeStorySinkAllowed({ route, sink: "SINK16", claim: "completed-pass", evidence: "exact-pass", head: "equal", review: "fresh" });
     const exactReplay = panelBaseEquals(current.validator, request.validator) && panelBaseEquals(current.security_review, request.security_review);
     const legacyValidator = isRecord(current.validator) && !hasCompleteBinding(current.validator, VALIDATOR_BINDING_KEYS);
     const legacySecurity = isRecord(current.security_review) && !hasCompleteBinding(current.security_review, SECURITY_BINDING_KEYS);
@@ -4033,6 +4047,7 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   assertGateDecisionTransitions(current, nextValue, hooks);
   assertStepTransitions(current, nextValue, hooks);
   const next = validateRun(nextValue);
+  assertWholeStorySinkAllowed({ route: WHOLE_STORY_ROUTES.LEGACY, sink: "SINK25" });
   assertRunIdentityTransition(current, next);
   assertV2ImmutablePublicationTransition(current, next);
   assertScopedAuthorityTransitions(current, next, hooks);
@@ -4099,7 +4114,7 @@ export function assertV2LocalPublishedAuthority(runDir, run, options = {}, expec
     return { id: slice.id, merge_commit: slice.merge_commit, resolved_sha: resolvedSha };
   });
   const testStep = (run.steps || []).find((step) => step?.agent === "test-verifier");
-  if (testStep?.status === "accepted") assertCheckedFreshDownstreamAuthority(runDir, run, "checked route mutation");
+  if (testStep?.status === "accepted") assertCheckedFreshDownstreamAuthority(runDir, run, "checked v2 mutation");
   const observed = {
     continuation_hash: hashValue(run.continuation),
     plan_hash: run.continuation.carry_forward.plan_hash,
@@ -5258,6 +5273,7 @@ async function observePostPrCompletedIdentity(runDir, run, reason, options = {})
   if (authority.head_sha !== expectedHeadSha) throw new Error("post-PR completion requires local, worktree, origin, and expected remediation head equality");
   const stableOperationId = computePrOperationId({ base_commit: run.base_commit, branch: operation.head_ref, created_at: operation.created_at, repository: operation.repository, run_id: run.run_id });
   if (operation.operation_id !== stableOperationId) throw new Error("post-PR operation_id is stale or malformed");
+  if (route !== WHOLE_STORY_ROUTES.LEGACY) assertWholeStorySinkAllowed({ route, sink: "SINK24", base: authority.base_sha === run.base_commit ? "equal" : "ancestor", head: "equal", review: "fresh", pr_mode: run.pr_mode });
   const observation = await observeFencedPrOperation(run, { ...operation, base_sha: authority.base_sha }, options, expectedHeadSha);
   const requiredDisposition = reason === "post-pr-external-merge" ? "merged" : "open";
   if (observation.disposition !== requiredDisposition) throw new Error(`post-PR completion GitHub observation is ${observation.disposition}, expected ${requiredDisposition}`);
@@ -5362,6 +5378,8 @@ function assertPrCreatedReadiness(runDir, run) {
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) throw new Error("pr-created requires validator verdict GO or GO-WITH-NITS");
   if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");
   const freshTestAuthority = assertCheckedFreshDownstreamAuthority(runDir, run, "pre-PR admission");
+  const route = classifyWholeStoryTestRoute(runDir, run, { runDir });
+  if (route !== WHOLE_STORY_ROUTES.LEGACY) assertWholeStorySinkAllowed({ route, sink: "SINK20", claim: "completed-pass", evidence: "exact-pass", base: "equal", head: "equal", review: "fresh", pr_mode: run.pr_mode });
   return {
     fresh_test_authority: freshTestAuthority,
     slices: assertPrCreatedSliceState(runDir, run),
@@ -5426,6 +5444,7 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
     if (!ancestry.ok) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", `merged slice '${slice.id}' merge_commit is not an ancestor of exact child HEAD`);
     return { id: slice.id, merge_commit: slice.merge_commit, resolved_sha: resolvedSha };
   });
+  assertWholeStorySinkAllowed({ route, sink: "SINK11", head: "equal" });
   return {
     run_id: run.run_id,
     attempt: step.attempts,
@@ -5446,23 +5465,44 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
 export function classifyWholeStoryTestRoute(runDir, run, options = {}) {
   const conflicts = integrationConflictSlices(run);
   const schemaV2 = run?.continuation?.schema_version === 2 && run.continuation.kind === "blocked-run-continuation";
-  const delegatedConflict = conflicts.length > 0;
-  if (schemaV2 && delegatedConflict) return WHOLE_STORY_ROUTES.COMBINED;
-  if (schemaV2) return WHOLE_STORY_ROUTES.SCHEMA_V2;
-  if (delegatedConflict) return WHOLE_STORY_ROUTES.DELEGATED_CONFLICT;
-  if (run?.continuation || run?.checkpoint_source || run?.checkpoint_progress) return WHOLE_STORY_ROUTES.LEGACY;
-  if (!Array.isArray(run?.slices) || run.slices.length === 0 || run.slices.some((slice) => slice?.status !== "merged")) return WHOLE_STORY_ROUTES.LEGACY;
-  if (!existsSync(join(resolve(runDir), "plan", "slices.json"))) return WHOLE_STORY_ROUTES.LEGACY;
-  const decompositionSteps = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
-  if (decompositionSteps.length !== 1 || decompositionSteps[0].status !== "accepted" || !isRecord(decompositionSteps[0].acceptance)) return WHOLE_STORY_ROUTES.LEGACY;
-  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
-  if (!Array.isArray(decomposition.plan.slices) || decomposition.plan.slices.length === 0 || !isRecord(decomposition.plan.integration_gate)) return WHOLE_STORY_ROUTES.LEGACY;
-  return WHOLE_STORY_ROUTES.ORDINARY_FRESH;
+  const slices = Array.isArray(run?.slices) ? run.slices : [];
+  const state = {
+    continuation: schemaV2 ? "v2" : run?.continuation ? "v1" : "absent",
+    checkpoint_source: run?.checkpoint_source ? "present" : "absent",
+    checkpoint_progress: run?.checkpoint_progress ? "present" : "absent",
+    conflict: conflicts.length > 0 ? "present" : "absent",
+    slice_projection: slices.length === 0 ? "empty" : slices.some((slice) => slice?.status !== "merged") ? "incomplete" : "all-merged",
+  };
+  let route = deriveWholeStoryRoute(state);
+  if (route === WHOLE_STORY_ROUTES.ORDINARY_FRESH) {
+    const decompositionSteps = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
+    if (!existsSync(join(resolve(runDir), "plan", "slices.json")) || decompositionSteps.length !== 1
+      || decompositionSteps[0].status !== "accepted" || !isRecord(decompositionSteps[0].acceptance)) {
+      state.slice_projection = "incomplete";
+      route = deriveWholeStoryRoute(state);
+    } else {
+      const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
+      if (!Array.isArray(decomposition.plan.slices) || decomposition.plan.slices.length === 0 || !isRecord(decomposition.plan.integration_gate)) {
+        state.slice_projection = "incomplete";
+        route = deriveWholeStoryRoute(state);
+      }
+    }
+  }
+  const sink = wholeStorySelectionSink(state, route);
+  const decision = evaluateWholeStoryRouteSink({ ...state, route, sink });
+  if (!decision.allowed) throw new Error(`whole-story route selection denied: ${decision.reason}`);
+  return decision.route;
 }
 
 export function evaluateWholeStoryRouteSink(input) {
   if (!isRecord(input)) throw new Error("whole-story route-and-sink state must be an object");
-  const route = requireEnumValue(input.route, new Set(Object.values(WHOLE_STORY_ROUTES)), "whole-story route");
+  const routeState = wholeStoryRouteState(input);
+  const derivedRoute = routeState ? deriveWholeStoryRoute(routeState) : null;
+  const route = input.route === undefined
+    ? derivedRoute
+    : requireEnumValue(input.route, new Set(Object.values(WHOLE_STORY_ROUTES)), "whole-story route");
+  if (!route) throw new Error("whole-story route or complete route state is required");
+  if (derivedRoute && route !== derivedRoute) throw new Error("whole-story route does not match derived route state");
   const sink = requireEnumValue(input.sink, WHOLE_STORY_SINKS, "whole-story sink");
   const state = {
     claim: requireEnumValue(input.claim ?? "absent", WHOLE_STORY_STATE_VALUES.claim, "whole-story claim state"),
@@ -5475,13 +5515,16 @@ export function evaluateWholeStoryRouteSink(input) {
   if (!["ready", "draft"].includes(state.pr_mode)) throw new Error("whole-story pr_mode must be ready or draft");
 
   const selectedRoute = WHOLE_STORY_ROUTE_SELECTION_SINKS[sink];
-  if (selectedRoute) return wholeStorySinkDecision(route, sink, route === selectedRoute, route === selectedRoute ? "selected-route" : "route-mismatch");
+  if (selectedRoute) {
+    const selected = routeState ? sink === wholeStorySelectionSink(routeState, route) : route === selectedRoute;
+    return wholeStorySinkDecision(route, sink, selected, selected ? "selected-route" : "route-mismatch");
+  }
   if (sink === "SINK25" || sink === "SINK26") return wholeStorySinkDecision(route, sink, true, "independent-contract");
   if (!CHECKED_WHOLE_STORY_ROUTES.has(route)) return wholeStorySinkDecision(route, sink, false, "checked-route-required");
   if (state.head !== "equal") return wholeStorySinkDecision(route, sink, false, `head-${state.head}`);
   if (sink === "SINK12" && state.claim !== "active") return wholeStorySinkDecision(route, sink, false, "active-claim-required");
   if (sink === "SINK13" && (state.claim !== "completed-fail" || state.evidence !== "exact-fail")) return wholeStorySinkDecision(route, sink, false, "failed-replay-required");
-  if (sink === "SINK14" && state.evidence !== "exact-pass") return wholeStorySinkDecision(route, sink, false, "checked-evidence-required");
+  if (sink === "SINK14" && (state.claim !== "completed-pass" || state.evidence !== "exact-pass")) return wholeStorySinkDecision(route, sink, false, "checked-evidence-required");
   if (["SINK15", "SINK16", "SINK17"].includes(sink)
     && (state.claim !== "completed-pass" || state.evidence !== "exact-pass" || state.review !== "fresh")) {
     return wholeStorySinkDecision(route, sink, false, "fresh-passing-authority-required");
@@ -5492,6 +5535,37 @@ export function evaluateWholeStoryRouteSink(input) {
     if (route === WHOLE_STORY_ROUTES.ORDINARY_FRESH && state.pr_mode !== "ready") return wholeStorySinkDecision(route, sink, false, "ordinary-fresh-ready-required");
   }
   return wholeStorySinkDecision(route, sink, true, "allowed");
+}
+
+function wholeStoryRouteState(input) {
+  const keys = ["continuation", "checkpoint_source", "checkpoint_progress", "conflict", "slice_projection"];
+  if (!keys.some((key) => Object.hasOwn(input, key))) return null;
+  return {
+    continuation: requireEnumValue(input.continuation, WHOLE_STORY_STATE_VALUES.continuation, "whole-story continuation state"),
+    checkpoint_source: requireEnumValue(input.checkpoint_source, WHOLE_STORY_STATE_VALUES.checkpoint_source, "whole-story checkpoint_source state"),
+    checkpoint_progress: requireEnumValue(input.checkpoint_progress, WHOLE_STORY_STATE_VALUES.checkpoint_progress, "whole-story checkpoint_progress state"),
+    conflict: requireEnumValue(input.conflict, WHOLE_STORY_STATE_VALUES.conflict, "whole-story conflict state"),
+    slice_projection: requireEnumValue(input.slice_projection, WHOLE_STORY_STATE_VALUES.slice_projection, "whole-story slice_projection state"),
+  };
+}
+
+function deriveWholeStoryRoute(state) {
+  if (state.continuation === "v2" && state.conflict === "present") return WHOLE_STORY_ROUTES.COMBINED;
+  if (state.continuation === "v2") return WHOLE_STORY_ROUTES.SCHEMA_V2;
+  if (state.conflict === "present") return WHOLE_STORY_ROUTES.DELEGATED_CONFLICT;
+  if (state.continuation === "v1" || state.checkpoint_source === "present" || state.checkpoint_progress === "present") return WHOLE_STORY_ROUTES.LEGACY;
+  return state.slice_projection === "all-merged" ? WHOLE_STORY_ROUTES.ORDINARY_FRESH : WHOLE_STORY_ROUTES.LEGACY;
+}
+
+function wholeStorySelectionSink(state, route) {
+  if (route === WHOLE_STORY_ROUTES.SCHEMA_V2) return "SINK01";
+  if (route === WHOLE_STORY_ROUTES.DELEGATED_CONFLICT) return "SINK02";
+  if (route === WHOLE_STORY_ROUTES.COMBINED) return "SINK03";
+  if (route === WHOLE_STORY_ROUTES.ORDINARY_FRESH) return "SINK04";
+  if (state.continuation === "v1") return "SINK05";
+  if (state.checkpoint_source === "present") return "SINK06";
+  if (state.checkpoint_progress === "present") return "SINK07";
+  return "SINK08";
 }
 
 function requireEnumValue(value, allowed, label) {
@@ -5535,6 +5609,7 @@ export function observeCompletedCheckedTestExecutionAuthority(runDir, run, step 
   if (receiptValue.status !== claim.status || receiptValue.review_ready !== (claim.status === "pass")) throw new Error("completed checked execution receipt status is cross-bound");
   if (claim.status === "fail" && step.status !== "rejected") throw new Error("completed failed checked execution must leave test-verifier rejected");
   if (claim.status === "pass" && !["running", "accepted"].includes(step.status)) throw new Error("completed passing checked execution must leave test-verifier running or accepted");
+  if (claim.status === "pass") assertWholeStorySinkAllowed({ route, sink: "SINK14", claim: "completed-pass", evidence: "exact-pass", head: "equal" });
   return { claim: cloneJson(claim), receipt: receiptValue, receipt_hash: receiptHash, authority: currentAuthority };
 }
 
@@ -5613,7 +5688,7 @@ function assertCheckedFreshDownstreamAuthority(runDir, run, sink, expected = nul
   const authority = observeCheckedTestVerifierAuthority(runDir, run, step, { runDir });
   if (!sameJson(step.acceptance, authority.acceptance)) throw new Error(`${authorityLabel} test-verifier acceptance bytes or head are stale`);
   const observed = { step: cloneJson(step), ...authority };
-  if (expected && !sameJson(observed, expected)) throw new Error(`checked downstream authority changed before ${sink} publication`);
+  if (expected && !sameJson(observed, expected)) throw new Error(`${authorityLabel} downstream authority changed before ${sink} publication`);
   return observed;
 }
 
@@ -5661,8 +5736,9 @@ function assertCheckedPrePrGateAuthority(runDir, run, sink, expected = null) {
   if (route === WHOLE_STORY_ROUTES.LEGACY) return null;
   const freshTestAuthority = assertCheckedFreshDownstreamAuthority(runDir, run, sink);
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict) || !PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
-    throw new Error(`${route === WHOLE_STORY_ROUTES.ORDINARY_FRESH ? "checked" : "schema-v2"} pre-PR gate requires fresh passing panels before ${sink}`);
+    throw new Error(`${route === WHOLE_STORY_ROUTES.ORDINARY_FRESH ? "checked" : "schema-v2"} pre-PR gate requires fresh passing child panels before ${sink}`);
   }
+  assertWholeStorySinkAllowed({ route, sink: "SINK17", claim: "completed-pass", evidence: "exact-pass", head: "equal", review: "fresh" });
   const observed = {
     fresh_test_authority: freshTestAuthority,
     panels: assertPanelReviewBindingsCurrent(runDir, run),
@@ -10007,6 +10083,7 @@ async function assertPrFenceGitAuthorityCurrent(runDir, run, fence, options = {}
   for (const [key, value] of Object.entries(expected)) if (fence[key] !== value) throw new Error(`pre-PR fence ${key} no longer matches local/origin authority`);
   const operationId = computePrOperationId({ base_commit: run.base_commit, branch: fence.head_ref, created_at: fence.created_at, repository: fence.repository, run_id: run.run_id });
   if (fence.operation_id !== operationId) throw new Error("pre-PR fence operation_id is stale or malformed");
+  if (route !== WHOLE_STORY_ROUTES.LEGACY) assertWholeStorySinkAllowed({ route, sink: "SINK22", base: authority.base_sha === run.base_commit ? "equal" : "ancestor", head: "equal", review: "fresh", pr_mode: run.pr_mode });
   if (run.validator?.reviewed_head_sha !== fence.head_sha || run.security_review?.reviewed_head_sha !== fence.head_sha) throw new Error("pre-PR fence head no longer equals both reviewed panel heads");
   return authority;
 }

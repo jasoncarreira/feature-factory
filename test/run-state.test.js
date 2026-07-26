@@ -832,7 +832,7 @@ describe("simplified run-state transitions", () => {
       assert.equal(integrated.slice.integration_conflict.resolution_commit, resolutionHead);
       await assert.rejects(
         transitionPanelVerdicts(fixture.runDir, { validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" }, security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" } }),
-        /require fresh integrated conflict tests and review/u,
+        (error) => error?.message === "panel verdicts require fresh integrated conflict tests and review",
       );
 
       await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 });
@@ -852,6 +852,13 @@ describe("simplified run-state transitions", () => {
       }, { mustExist: true });
       assert.equal(accepted.run.slices[0].integration_conflict.status, "accepted");
       assert.equal(accepted.run.slices[0].integration_conflict.test_acceptance.reviewed_head_sha, resolutionHead);
+      assert.deepEqual(accepted.run.slices[0].integration_conflict.test_acceptance, accepted.step.acceptance);
+      assert.deepEqual(accepted.run.slices[0].integration_conflict.test_execution_claim, accepted.step.execution_claim);
+      assert.equal(accepted.run.slices[0].integration_conflict.test_execution_claim_hash, accepted.step.execution_claim_hash);
+      assert.deepEqual(accepted.run.slices[0].integration_conflict.test_artifact_snapshot, {
+        ref: `artifacts/integration-conflicts/${createHash("sha256").update(`slice\0${resolutionHead}`, "utf8").digest("hex")}.test-report.md`,
+        hash: accepted.step.acceptance.artifact_hash,
+      });
 
       writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n");
       writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "main", attempt: 1, reviewedHeadSha: resolutionHead, verdict: "GO" }));
@@ -862,6 +869,67 @@ describe("simplified run-state transitions", () => {
       });
       assert.equal(panels.run.validator.reviewed_head_sha, resolutionHead);
       assert.equal(panels.run.security_review.reviewed_head_sha, resolutionHead);
+
+      const originalPlanBytes = readFileSync(join(fixture.runDir, "plan", "slices.json"));
+      const originalPlanHash = `sha256:${createHash("sha256").update(originalPlanBytes).digest("hex")}`;
+      const combined = makeSyntheticV2Run(fixture.runDir, panels.run, { accepted: [], remaining: ["slice"] });
+      writeFileSync(join(fixture.runDir, "plan", "slices.json"), originalPlanBytes);
+      combined.continuation.carry_forward.plan_hash = originalPlanHash;
+      combined.steps.find(({ agent }) => agent === "work-decomposer").acceptance.artifact_hash = originalPlanHash;
+      const acceptedConflict = structuredClone(panels.run.slices[0].integration_conflict);
+      const combinedPlannedSlice = JSON.parse(originalPlanBytes).slices[0];
+      combined.slices[0].stack = combinedPlannedSlice.stack;
+      combined.slices[0].depends_on = structuredClone(combinedPlannedSlice.depends_on);
+      combined.slices[0].declared_paths = structuredClone(combinedPlannedSlice.paths);
+      combined.slices[0].effective_paths = structuredClone(combinedPlannedSlice.paths);
+      combined.slices[0].integration_conflict = structuredClone(acceptedConflict);
+      combined.steps.push({ agent: "test-verifier", status: "blocked", attempts: 1 });
+      writeJson(join(fixture.runDir, "run.json"), combined);
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, combined), "schema-v2+delegated-conflict");
+
+      const startedCombined = await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 2 }, { mustExist: true });
+      assert.equal(startedCombined.step.status, "running");
+      assert.equal(startedCombined.step.attempts, 2);
+
+      const parentCommit = combined.continuation.parent.commit;
+      const movedParent = gitOutput(fixture.repo, ["commit-tree", `${resolutionHead}^{tree}`, "-p", resolutionHead, "-m", "move combined parent"]);
+      runGit(fixture.repo, ["branch", "-f", combined.continuation.parent.branch, movedParent]);
+      await assert.rejects(
+        claimCheckedTestExecution(fixture.runDir, { now: NOW, nonce: "123e4567-e89b-42d3-a456-426614174002" }),
+        (error) => error?.message === "schema-v2 parent branch no longer matches continuation parent commit",
+      );
+      runGit(fixture.repo, ["branch", "-f", combined.continuation.parent.branch, parentCommit]);
+
+      const combinedBytes = readFileSync(join(fixture.runDir, "run.json"));
+      const staleConflict = readJson(join(fixture.runDir, "run.json"));
+      staleConflict.slices[0].integration_conflict.closure_hash = `sha256:${"f".repeat(64)}`;
+      writeJson(join(fixture.runDir, "run.json"), staleConflict);
+      await assert.rejects(
+        claimCheckedTestExecution(fixture.runDir, { now: NOW, nonce: "123e4567-e89b-42d3-a456-426614174003" }),
+        (error) => error?.message === "integration-conflict durable dispatch binding is stale",
+      );
+      writeFileSync(join(fixture.runDir, "run.json"), combinedBytes);
+
+      const combinedClaim = await claimCheckedTestExecution(fixture.runDir, { now: NOW, nonce: "123e4567-e89b-42d3-a456-426614174004" });
+      assert.equal(combinedClaim.claim.state, "active");
+      const combinedReceipt = {
+        schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: fixture.runId, attempt: 2,
+        claim_nonce: combinedClaim.claim.nonce, plan_ref: combinedClaim.claim.plan_ref, plan_hash: combinedClaim.claim.plan_hash,
+        head_sha: resolutionHead, timeout_ms: combinedClaim.claim.timeout_ms, started_at: NOW, completed_at: NOW, duration_ms: 0,
+        status: "pass", review_ready: true,
+        commands: combinedClaim.authority.commands.map((command, index) => ({ index, ...command, outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 0, stdout: emptyStream, stderr: emptyStream })),
+      };
+      const combinedCompletion = await completeCheckedTestExecution(fixture.runDir, combinedClaim.claim, combinedClaim.authority, combinedReceipt, { now: NOW });
+      assert.equal(combinedCompletion.status, "pass");
+      writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "combined route tests pass\n");
+      writeJson(join(fixture.runDir, "reviews", "test-verifier.attempt-2.json"), { subject: "test-verifier", attempt: 2, verdict: "APPROVE", reviewed_head_sha: resolutionHead, required_fixes: [] });
+      const combinedAcceptance = await transitionRunStep(fixture.runDir, "test-verifier", {
+        status: "accepted", attempts: 2, artifact_ref: "artifacts/test-report.md",
+        evidence_ref: combinedClaim.claim.receipt_ref, review_ref: "reviews/test-verifier.attempt-2.json",
+      }, { mustExist: true });
+      assert.equal(combinedAcceptance.step.execution_claim.status, "pass");
+      assert.equal(combinedAcceptance.step.acceptance.evidence_hash, combinedCompletion.receipt_hash);
+      assert.equal(combinedAcceptance.step.acceptance.reviewed_head_sha, resolutionHead);
     } finally {
       cleanup(fixture.repo);
     }
@@ -1582,6 +1650,24 @@ describe("simplified run-state transitions", () => {
         evidence_ref: evidenceRef, evidence_hash: hashFile(join(fixture.runDir, evidenceRef)),
         review_ref: reviewRef, review_hash: hashFile(join(fixture.runDir, reviewRef)), reviewed_head_sha: head,
       });
+
+      const acceptedV2RunBytes = readFileSync(join(fixture.runDir, "run.json"));
+      const incompleteAfterAcceptance = readJson(join(fixture.runDir, "run.json"));
+      incompleteAfterAcceptance.slices[0].status = "review";
+      delete incompleteAfterAcceptance.slices[0].merge_commit;
+      writeJson(join(fixture.runDir, "run.json"), incompleteAfterAcceptance);
+      await assert.rejects(
+        transitionRunJson(fixture.runDir, (draft) => { draft.review_tier = "strict"; }),
+        (error) => error?.message === "schema-v2 downstream authority requires all child slices merged before checked v2 mutation: slice",
+      );
+      writeFileSync(join(fixture.runDir, "run.json"), acceptedV2RunBytes);
+
+      const beforeMissingPanels = readFileSync(join(fixture.runDir, "run.json"));
+      await assert.rejects(
+        transitionGateDecision(fixture.runDir, "pre_pr", { status: "pending", artifact: "artifacts/story.md", question_ref: "gates/story.question.md" }),
+        (error) => error?.message === "schema-v2 pre-PR gate requires fresh passing child panels before pre_pr pending",
+      );
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), beforeMissingPanels);
 
       const panelInput = {
         validator: { verdict: "GO", report: "artifacts/story.md", review_ref: "reviews/implementation-validator.json" },

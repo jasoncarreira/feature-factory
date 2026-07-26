@@ -34,40 +34,81 @@ const LATER = "2026-07-17T12:00:01.000Z";
 const CLI_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 
 describe("checked test execution receipt", () => {
-  it("evaluates the complete DMC1 route-and-sink matrix with one exact route and allow-or-deny result", () => {
-    const passing = { claim: "absent", evidence: "absent", base: "equal", head: "equal", review: "fresh", pr_mode: "ready" };
-    const rows = [
-      ["SINK01", "schema-v2", {}, true, "selected-route"],
-      ["SINK02", "delegated-conflict", {}, true, "selected-route"],
-      ["SINK03", "schema-v2+delegated-conflict", {}, true, "selected-route"],
-      ["SINK04", "ordinary-fresh-v1", {}, true, "selected-route"],
-      ["SINK05", "legacy-unselected", {}, true, "selected-route"],
-      ["SINK06", "legacy-unselected", {}, true, "selected-route"],
-      ["SINK07", "legacy-unselected", {}, true, "selected-route"],
-      ["SINK08", "legacy-unselected", {}, true, "selected-route"],
-      ["SINK09", "ordinary-fresh-v1", {}, true, "allowed"],
-      ["SINK10", "schema-v2", {}, true, "allowed"],
-      ["SINK11", "delegated-conflict", {}, true, "allowed"],
-      ["SINK12", "schema-v2+delegated-conflict", { claim: "active" }, true, "allowed"],
-      ["SINK13", "ordinary-fresh-v1", { claim: "completed-fail", evidence: "exact-fail" }, true, "allowed"],
-      ["SINK14", "ordinary-fresh-v1", { evidence: "legacy" }, false, "checked-evidence-required"],
-      ["SINK15", "schema-v2", { claim: "completed-pass", evidence: "exact-pass" }, true, "allowed"],
-      ["SINK16", "delegated-conflict", { claim: "completed-pass", evidence: "exact-pass" }, true, "allowed"],
-      ["SINK17", "schema-v2+delegated-conflict", { claim: "completed-pass", evidence: "exact-pass" }, true, "allowed"],
-      ["SINK18", "ordinary-fresh-v1", { base: "ancestor" }, true, "allowed"],
-      ["SINK19", "ordinary-fresh-v1", { pr_mode: "draft" }, false, "ordinary-fresh-ready-required"],
-      ["SINK20", "schema-v2", { base: "ancestor" }, true, "allowed"],
-      ["SINK21", "delegated-conflict", { base: "moving" }, false, "base-moving"],
-      ["SINK22", "schema-v2+delegated-conflict", { review: "stale" }, false, "review-stale"],
-      ["SINK23", "ordinary-fresh-v1", { base: "unavailable" }, false, "base-unavailable"],
-      ["SINK24", "schema-v2", { head: "mismatch" }, false, "head-mismatch"],
-      ["SINK25", "legacy-unselected", { claim: "unknown", evidence: "stale", base: "non-ancestor", head: "dirty", review: "absent", pr_mode: "draft" }, true, "independent-contract"],
-      ["SINK26", "legacy-unselected", { base: "cleanup-failed" }, true, "independent-contract"],
+  it("evaluates every DMC1 dimension across all 26 real route-and-sink enforcement seams", () => {
+    const routeState = { continuation: "absent", checkpoint_source: "absent", checkpoint_progress: "absent", conflict: "absent", slice_projection: "all-merged" };
+    const routeCases = [
+      ["ordinary", {}, "ordinary-fresh-v1", "SINK04"],
+      ["schema-v1 continuation", { continuation: "v1" }, "legacy-unselected", "SINK05"],
+      ["schema-v2 continuation", { continuation: "v2" }, "schema-v2", "SINK01"],
+      ["checkpoint source", { checkpoint_source: "present" }, "legacy-unselected", "SINK06"],
+      ["checkpoint progress", { checkpoint_progress: "present" }, "legacy-unselected", "SINK07"],
+      ["delegated conflict", { conflict: "present" }, "delegated-conflict", "SINK02"],
+      ["combined", { continuation: "v2", conflict: "present" }, "schema-v2+delegated-conflict", "SINK03"],
+      ["empty projection", { slice_projection: "empty" }, "legacy-unselected", "SINK08"],
+      ["incomplete projection", { slice_projection: "incomplete" }, "legacy-unselected", "SINK08"],
     ];
-    assert.equal(rows.length, 26);
-    for (const [sink, route, overrides, allowed, reason] of rows) {
-      const decision = evaluateWholeStoryRouteSink({ ...passing, ...overrides, route, sink });
-      assert.deepEqual(decision, { route, sink, allowed, reason }, sink);
+    for (const [label, overrides, route, selectedSink] of routeCases) {
+      for (let index = 1; index <= 8; index += 1) {
+        const sink = `SINK${String(index).padStart(2, "0")}`;
+        const selected = sink === selectedSink;
+        assert.deepEqual(
+          evaluateWholeStoryRouteSink({ ...routeState, ...overrides, sink }),
+          { route, sink, allowed: selected, reason: selected ? "selected-route" : "route-mismatch" },
+          `${label} ${sink}`,
+        );
+      }
+    }
+
+    const passing = { ...routeState, claim: "absent", evidence: "absent", base: "equal", head: "equal", review: "fresh", pr_mode: "ready" };
+    const sinkRows = [
+      ["SINK09", {}, true, "allowed"],
+      ["SINK10", {}, true, "allowed"],
+      ["SINK11", {}, true, "allowed"],
+      ["SINK12", { claim: "active" }, true, "allowed"],
+      ["SINK13", { claim: "completed-fail", evidence: "exact-fail" }, true, "allowed"],
+      ["SINK14", { claim: "completed-pass", evidence: "legacy" }, false, "checked-evidence-required"],
+      ["SINK15", { claim: "completed-pass", evidence: "exact-pass" }, true, "allowed"],
+      ["SINK16", { claim: "completed-pass", evidence: "exact-pass" }, true, "allowed"],
+      ["SINK17", { claim: "completed-pass", evidence: "exact-pass" }, true, "allowed"],
+      ["SINK18", { base: "ancestor" }, true, "allowed"],
+      ["SINK19", { pr_mode: "draft" }, false, "ordinary-fresh-ready-required"],
+      ["SINK20", { base: "ancestor" }, true, "allowed"],
+      ["SINK21", { base: "moving" }, false, "base-moving"],
+      ["SINK22", { review: "stale" }, false, "review-stale"],
+      ["SINK23", { base: "unavailable" }, false, "base-unavailable"],
+      ["SINK24", { head: "mismatch" }, false, "head-mismatch"],
+      ["SINK25", { claim: "unknown", evidence: "stale", base: "non-ancestor", head: "dirty", review: "absent", pr_mode: "draft" }, true, "independent-contract"],
+      ["SINK26", { base: "cleanup-failed" }, true, "independent-contract"],
+    ];
+    assert.equal(sinkRows.length, 18);
+    for (const [sink, overrides, allowed, reason] of sinkRows) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, ...overrides, sink }), { route: "ordinary-fresh-v1", sink, allowed, reason }, sink);
+    }
+
+    for (const claim of ["absent", "active", "unknown", "completed-pass", "completed-fail"]) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK12", claim }), {
+        route: "ordinary-fresh-v1", sink: "SINK12", allowed: claim === "active", reason: claim === "active" ? "allowed" : "active-claim-required",
+      }, `claim ${claim}`);
+    }
+    for (const evidence of ["absent", "exact-pass", "exact-fail", "legacy", "stale"]) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK14", claim: "completed-pass", evidence }), {
+        route: "ordinary-fresh-v1", sink: "SINK14", allowed: evidence === "exact-pass", reason: evidence === "exact-pass" ? "allowed" : "checked-evidence-required",
+      }, `evidence ${evidence}`);
+    }
+    for (const base of ["equal", "ancestor", "non-ancestor", "unavailable", "moving", "cleanup-failed"]) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK18", base }), {
+        route: "ordinary-fresh-v1", sink: "SINK18", allowed: ["equal", "ancestor"].includes(base), reason: ["equal", "ancestor"].includes(base) ? "allowed" : `base-${base}`,
+      }, `base ${base}`);
+    }
+    for (const head of ["equal", "dirty", "mismatch", "missing"]) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK09", head }), {
+        route: "ordinary-fresh-v1", sink: "SINK09", allowed: head === "equal", reason: head === "equal" ? "allowed" : `head-${head}`,
+      }, `head ${head}`);
+    }
+    for (const review of ["fresh", "stale", "absent"]) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK22", review }), {
+        route: "ordinary-fresh-v1", sink: "SINK22", allowed: review === "fresh", reason: review === "fresh" ? "allowed" : `review-${review}`,
+      }, `review ${review}`);
     }
   });
 
