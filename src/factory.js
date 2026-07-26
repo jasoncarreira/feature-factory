@@ -2885,10 +2885,10 @@ export function probeFactorySlices(runId, opts = {}) {
   return probeSlicesPlanAdmission(runDir, opts);
 }
 
-function observeFactoryAmendmentAuthority(runDir, run) {
+function observeFactoryAmendmentAuthority(runDir, run, options = {}) {
   const inventory = inspectIntegrationAmendmentInventory(runDir, run);
   const amendment = run.integration_amendment;
-  if (amendment?.status === "merged") assertIntegrationAmendmentConsistency(runDir, run);
+  if (amendment?.status === "merged") assertIntegrationAmendmentConsistency(runDir, run, options);
   return { inventory, amendment };
 }
 
@@ -2913,8 +2913,8 @@ function assertFactoryAmendmentContinuationAbsent(runDir, run) {
   if (inventory.classification !== "all-absent") throw new Error("integration-amendment-continuation-unsupported");
 }
 
-function assertFactoryAmendmentCleanupAuthority(runDir, run) {
-  const { inventory, amendment } = observeFactoryAmendmentAuthority(runDir, run);
+function assertFactoryAmendmentCleanupAuthority(runDir, run, options = {}) {
+  const { inventory, amendment } = observeFactoryAmendmentAuthority(runDir, run, options);
   if (inventory.classification === "all-absent" || amendment?.status === "merged") return;
   throw new Error(`cleanup rejected: integration amendment authority is ${amendment?.status || inventory.classification}`);
 }
@@ -3718,29 +3718,36 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
     removed_run_dir: false,
     run_dir: runDir,
   };
+  const cleanupRemovedWorktrees = [];
+  const assertCleanupAuthority = () => assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")), {
+    cleanup_removed_worktrees: cleanupRemovedWorktrees,
+    cleanup_deleted_branches: result.deleted_branches,
+  });
 
   for (const worktree of targets.worktrees) {
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     opts.cleanupHooks?.beforeWorktreeRemove?.({ runDir, worktree: { ...worktree } });
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
+    const removedCount = result.removed_worktrees.length;
     removeWorktree(repo, worktree, result, opts);
+    if (result.removed_worktrees.length > removedCount) cleanupRemovedWorktrees.push(resolve(worktree.worktree));
   }
   for (const branch of targets.branches) {
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     opts.cleanupHooks?.beforeBranchDelete?.({ runDir, branch });
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     deleteBranch(repo, branch, result, opts);
   }
 
   if (!opts.dryRun) {
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     opts.cleanupHooks?.beforeRunDirectoryRemove?.({ runDir });
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     rmSync(runDir, { recursive: true, force: true });
   }

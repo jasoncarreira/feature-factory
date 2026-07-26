@@ -2213,7 +2213,7 @@ async function createRealAmendmentReviewerFixture(label) {
   const family = writeVerificationArtifactReceipt({
     runDir, runId: REAL_AMENDMENT_RUN_ID, plan, sliceId: "owner", attempt: 1, reviewedCommit,
     artifactId: "fixture-artifact-1", evidenceRef: "evidence/owner-family.json",
-    result: { type: "verification-result", outcome: "pass", summary: "owner passed" },
+    result: { type: "verification-result", outcome: "pass", summary: "Verify owner behavior passed" },
   });
   writeJson(join(runDir, "evidence", "owner.json"), { subject: "owner", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit, ownership_disclosure: [] });
   const ownerReview = createSliceReviewRecord({ subject: "owner", attempt: 1, reviewedCommit });

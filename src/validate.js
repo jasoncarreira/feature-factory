@@ -1729,7 +1729,7 @@ export function assertIntegrationAmendmentConsistency(runDir, run, options = {})
   if (inventory.classification !== "completed-nonzero-receipt-matching-manifest") throw new Error("integration amendment report authority is not exactly consumed");
   const identity = inventory.report_claim.identity;
   if (identity.run_id !== run.run_id || identity.defect_path !== amendment.defect_path || JSON.stringify(identity.admission) !== JSON.stringify(amendment.admission)) throw new Error("integration amendment report identity is cross-bound");
-  assertIntegrationAmendmentAcceptedAuthority(runDir, run, amendment);
+  assertIntegrationAmendmentAcceptedAuthority(runDir, run, amendment, options);
   const failure = amendment.failure_execution;
   if (failure.claim_ref !== "evidence/integration-amendment.report.claim.json" || failure.claim_hash !== inventory.report_claim_hash
     || failure.receipt_ref !== `evidence/integration-amendment-${amendment.amendment_id}.report.receipt.json` || failure.receipt_hash !== inventory.report_receipt_hash) throw new Error("integration amendment failure execution binding is stale");
@@ -1759,7 +1759,7 @@ export function assertIntegrationAmendmentConsistency(runDir, run, options = {})
   assertIntegrationAmendmentGitConsistency(runDir, run, amendment, options);
 }
 
-function assertIntegrationAmendmentAcceptedAuthority(runDir, run, amendment) {
+function assertIntegrationAmendmentAcceptedAuthority(runDir, run, amendment, options = {}) {
   const planPath = join(runDir, PLAN_SLICES_REF);
   const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: PLAN_SLICES_REF, enforceDependencyDepth: false, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
   const steps = (run.steps || []).filter((entry) => entry?.agent === "work-decomposer");
@@ -1786,7 +1786,7 @@ function assertIntegrationAmendmentAcceptedAuthority(runDir, run, amendment) {
   }
   assertConsistencyInvariantFamilyAuthority(runDir, run, plan, owner, ownerReview);
   assertConsistencyOwnerAttemptHistory(runDir, run, owner, plan);
-  assertConsistencyReviewedSliceHead(runDir, owner);
+  assertConsistencyReviewedSliceHead(runDir, owner, options);
   for (const slice of run.slices || []) {
     const planned = plannedById.get(slice.id);
     if (!planned || slice.stack !== planned.stack || JSON.stringify(slice.depends_on) !== JSON.stringify(planned.depends_on)
@@ -2248,15 +2248,24 @@ function observeConsistencySliceDispatch(runDir, run, slice, entry) {
   return Object.fromEntries(keys.map((key) => [key, entry[key]]));
 }
 
-function assertConsistencyReviewedSliceHead(runDir, slice) {
+function assertConsistencyReviewedSliceHead(runDir, slice, options = {}) {
   const repository = git(runDir, ["rev-parse", "--show-toplevel"]);
   const branch = repository.ok ? git(repository.stdout.trim(), ["rev-parse", "--verify", `refs/heads/${slice.branch}^{commit}`]) : null;
+  const commit = repository.ok ? git(repository.stdout.trim(), ["rev-parse", "--verify", `${slice.reviewed_commit}^{commit}`]) : null;
+  const removedWorktrees = new Set((options.cleanup_removed_worktrees || []).map((worktree) => resolve(worktree)));
+  const deletedBranches = new Set(options.cleanup_deleted_branches || []);
+  const worktreeWasRemoved = removedWorktrees.has(resolve(slice.worktree));
+  const branchWasDeleted = deletedBranches.has(slice.branch);
   const identity = repository?.ok && branch?.ok
     ? checkWorktreeIdentity(repository.stdout.trim(), slice.worktree, { branch: slice.branch, head: slice.reviewed_commit })
     : { ok: false };
   const clean = git(slice.worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-  if (!FULL_GIT_SHA_PATTERN.test(slice.reviewed_commit || "") || branch?.stdout.trim() !== slice.reviewed_commit
-    || !identity.ok || !clean.ok || clean.stdout !== "") {
+  const branchIsCurrent = branchWasDeleted ? branch?.ok === false : branch?.stdout.trim() === slice.reviewed_commit;
+  const worktreeIsCurrent = worktreeWasRemoved
+    ? !existsSync(resolve(slice.worktree))
+    : identity.ok && clean.ok && clean.stdout === "";
+  if (!FULL_GIT_SHA_PATTERN.test(slice.reviewed_commit || "") || commit?.stdout.trim() !== slice.reviewed_commit
+    || !branchIsCurrent || !worktreeIsCurrent) {
     throw new Error(`slice '${slice.id}' persisted sibling owner reviewed branch/worktree head is stale`);
   }
 }

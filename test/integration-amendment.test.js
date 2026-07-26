@@ -1021,7 +1021,7 @@ describe("generic integration amendment", () => {
               writeJson(join(fixture.runDir, "run.json"), verified.run);
             },
           },
-        }), /cleanup rejected: integration amendment authority is verified|integration amendment.*stale|does not resolve/u, name);
+        }), /cleanup rejected: integration amendment authority is verified|integration amendment.*stale|persisted sibling owner reviewed branch\/worktree head is stale|does not resolve/u, name);
         assert.equal(fired, true, name);
         assert.equal(existsSync(fixture.runDir), true, name);
       } finally { cleanup(fixture); }
@@ -2213,7 +2213,7 @@ function createFixture({ managedFeatureWorktree = false, publishReport = true, o
   for (const unit of plan.delivery_envelope.delivery_units) unit.verification_artifacts[0].timeout_ms = 1000;
   writeJson(join(runDir, "plan", "slices.json"), plan);
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
-  const family = writeVerificationArtifactReceipt({ runDir, runId: RUN_ID, plan, sliceId: "owner", attempt: 1, reviewedCommit, artifactId: "fixture-artifact-1", evidenceRef: "evidence/owner-family.json", result: { type: "verification-result", outcome: "pass", summary: "owner passed" } });
+  const family = writeVerificationArtifactReceipt({ runDir, runId: RUN_ID, plan, sliceId: "owner", attempt: 1, reviewedCommit, artifactId: "fixture-artifact-1", evidenceRef: "evidence/owner-family.json", result: { type: "verification-result", outcome: "pass", summary: "Verify owner behavior passed" } });
   writeJson(join(runDir, "evidence", "owner.json"), { subject: "owner", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit, ownership_disclosure: [] });
   const ownerReview = createSliceReviewRecord({ subject: "owner", attempt: 1, reviewedCommit });
   ownerReview.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "owner", reviewedCommit, evidenceRef: family.ref, evidenceHash: family.hash });
@@ -2423,6 +2423,7 @@ async function advanceMergedAmendmentConsumer(fixture, { assertCurrentDispatchTa
   const reviewRef = "reviews/consumer.json";
   writeJson(join(fixture.runDir, evidenceRef), { subject: "consumer", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit, ownership_disclosure: [] });
   const review = createSliceReviewRecord({ subject: "consumer", attempt: 1, reviewedCommit });
+  review.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
   review.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "consumer", reviewedCommit, evidenceRef: family.ref, evidenceHash: family.hash });
   writeJson(join(fixture.runDir, reviewRef), review);
   const reviewedResult = await transitionRunSlice(fixture.runDir, "consumer", {
@@ -2475,6 +2476,7 @@ async function publishConsumerReview(fixture, { attempt, reviewedCommit, verdict
     subject: "consumer", attempt, reviewedCommit, verdict, requiredFixes,
     likelyPaths: ["src/consumer/index.js"], fixOwner: "consumer",
   });
+  review.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
   review.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "consumer", reviewedCommit, evidenceRef: family.ref, evidenceHash: family.hash });
   writeJson(join(fixture.runDir, reviewRef), review);
   return transitionRunSlice(fixture.runDir, "consumer", { status: "review", attempts: attempt, evidence_ref: evidenceRef, review_ref: reviewRef }, { mustExist: true, now: NOW });
