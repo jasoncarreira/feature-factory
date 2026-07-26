@@ -125,6 +125,91 @@ describe("run schema and consistency", () => {
     assert.throws(() => validateSliceReviewResult(rejected), /must be empty for REJECT/u);
   });
 
+  it("accepts immutable v1 review history but closes new pathless v2 ownership shapes", () => {
+    const v2 = createSliceReviewRecord();
+    v2.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
+    assert.deepEqual(validateSliceReviewResult(v2), {
+      verdict: "APPROVE",
+      convergence: "converging",
+      late_discovery_strike: false,
+      remaining_fix_count: 0,
+      ownership_schema_version: 2,
+      ratified_paths: [],
+      task_context: "fresh",
+    });
+
+    for (const [label, ownership, expected] of [
+      ["paths", { ...v2.ownership_ratification, paths: ["docs/a.md"] }, /paths: is not allowed/u],
+      ["unknown", { ...v2.ownership_ratification, rationale: "caller supplied" }, /rationale: is not allowed/u],
+      ["kind", { schema_version: 2, kind: "reviewer-derived" }, /must equal factory-derived-modified-extension/u],
+      ["version", { schema_version: 3, kind: "factory-derived-modified-extension" }, /must equal 1 or 2/u],
+    ]) {
+      assert.throws(() => validateSliceReviewResult({ ...v2, ownership_ratification: ownership }), expected, label);
+    }
+
+    const sha = "a".repeat(40);
+    const legacy = createSliceAttemptReview({
+      attempt: 1, evidenceRef: "evidence/one.json", evidenceHash: HASH, reviewRef: "reviews/one.json", reviewHash: HASH,
+      reviewedCommit: sha, verdict: "REJECT",
+    });
+    const successor = {
+      ...createSliceAttemptReview({
+        attempt: 2, evidenceRef: "evidence/two.json", evidenceHash: HASH, reviewRef: "reviews/two.json", reviewHash: HASH,
+        reviewedCommit: sha, ratifiedPaths: ["docs/adjacent.md"],
+      }),
+      ownership_schema_version: 2,
+      modified_extensions: [{
+        kind: "modified-extension",
+        path: "docs/adjacent.md",
+        rationale: "The adjacent file is required by this slice.",
+        authority: "unowned",
+      }],
+    };
+    const slice = {
+      id: "slice", status: "review", attempts: 2, declared_paths: ["src/**"], effective_paths: ["src/**", "docs/adjacent.md"],
+      evidence_ref: successor.evidence_ref, evidence_hash: successor.evidence_hash, review_ref: successor.review_ref,
+      review_hash: successor.review_hash, reviewed_commit: successor.reviewed_commit, attempt_reviews: [legacy, successor],
+    };
+    assert.equal(validateRun({ ...runningRun(), slices: [slice] }).slices[0].attempt_reviews[0], legacy);
+    assert.deepEqual(validateRun({ ...runningRun(), slices: [slice] }).slices[0].attempt_reviews[1].modified_extensions, successor.modified_extensions);
+
+    const siblingSlice = structuredClone(slice);
+    siblingSlice.attempt_reviews[1].modified_extensions[0] = {
+      ...siblingSlice.attempt_reviews[1].modified_extensions[0],
+      authority: "non-conflicting-sibling",
+      owner_slice_id: "owner",
+      owner_attempt: 1,
+      owner_evidence_ref: "evidence/owner.json",
+      owner_evidence_hash: HASH,
+      owner_review_ref: "reviews/owner.json",
+      owner_review_hash: HASH,
+      owner_dispatch_claim_ref: "dispatch/owner.json",
+      owner_dispatch_claim_hash: HASH,
+      owner_dispatch_closure_ref: "dispatch/owner.closed.json",
+      owner_dispatch_closure_hash: HASH,
+      owner_reviewed_commit: sha,
+      owner_diff_base_commit: sha,
+    };
+    assert.deepEqual(
+      validateRun({ ...runningRun(), slices: [siblingSlice] }).slices[0].attempt_reviews[1].modified_extensions,
+      siblingSlice.attempt_reviews[1].modified_extensions,
+    );
+    const partialSibling = structuredClone(siblingSlice);
+    delete partialSibling.attempt_reviews[1].modified_extensions[0].owner_review_hash;
+    assert.throws(() => validateRun({ ...runningRun(), slices: [partialSibling] }), /owner_review_hash: must be a sha256 hash/u);
+
+    for (const [label, mutate, expected] of [
+      ["missing version", (entry) => { delete entry.ownership_schema_version; }, /ownership_schema_version: must be an integer/u],
+      ["projection", (entry) => { entry.ratified_paths = []; }, /must exactly equal modified_extensions paths/u],
+      ["rationale", (entry) => { entry.modified_extensions[0].rationale = " not normalized "; }, /trimmed NFC-normalized text/u],
+      ["unknown", (entry) => { entry.modified_extensions[0].reviewer_path = true; }, /reviewer_path: is not allowed/u],
+    ]) {
+      const malformed = structuredClone(slice);
+      mutate(malformed.attempt_reviews[1]);
+      assert.throws(() => validateRun({ ...runningRun(), slices: [malformed] }), expected, label);
+    }
+  });
+
   it("requires durable ownership and derives effective paths only from the current APPROVE", () => {
     const sha = "a".repeat(40);
     const first = createSliceAttemptReview({ attempt: 1, evidenceRef: "evidence/one.json", evidenceHash: HASH, reviewRef: "reviews/one.json", reviewHash: HASH, reviewedCommit: sha, verdict: "REJECT" });

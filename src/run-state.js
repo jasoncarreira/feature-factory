@@ -11,7 +11,7 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, integrationAmendmentId, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateIntegrationAmendmentReviewDispatchClaim, validateIntegrationAmendmentReviewDispatchClosure, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, integrationAmendmentId, isCanonicalConcreteRepositoryPath, observePersistedSliceAttemptOwnership, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateIntegrationAmendmentReviewDispatchClaim, validateIntegrationAmendmentReviewDispatchClosure, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
@@ -6032,7 +6032,8 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
   if (dispatch && dispatch.completion_head !== gitAuthority.head) throw new Error(`slice '${sliceId}' reviewed head must equal the checked Task completion head`);
   const reviewExtension = observeInvariantFamilyReviewAuthority(runDir, run, decomposition, sliceId, observed.review);
   assertPublishingInvariantFamilyReviewAuthority(decomposition.plan, sliceId, observed.review, reviewExtension);
-  const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, gitAuthority, decomposition, options);
+  const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, gitAuthority, decomposition, { ...options, publication: true });
+  const { ownership_schema_version: _ownershipSchemaVersion, ratified_paths: _reviewRatifiedPaths, ...reviewResult } = result;
   return {
     ...observed,
     binding: { ...observed.binding, reviewed_commit: gitAuthority.head },
@@ -6044,8 +6045,12 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
       review_hash: observed.binding.review_hash,
       reviewed_commit: gitAuthority.head,
       diff_base_commit: ownership.diff_base_commit,
-      ratified_paths: ownership.ratified_paths,
-      ...result,
+      ...(ownership.ownership_schema_version === 2 ? {
+        ownership_schema_version: 2,
+        ratified_paths: ownership.ratified_paths,
+        modified_extensions: ownership.modified_extensions,
+      } : { ratified_paths: ownership.ratified_paths }),
+      ...reviewResult,
       ...(dispatch ? {
         dispatch_claim_ref: dispatch.claim_ref,
         dispatch_claim_hash: dispatch.claim_hash,
@@ -6207,38 +6212,166 @@ function observeSliceOwnershipAuthority(runDir, run, sliceId, slice, review, evi
   }
   const declaredLanes = planned.paths.map(ownershipLane);
   const unexpected = changedPaths.filter((path) => !declaredLanes.some((lane) => ownershipLaneContains(lane, path)));
-  const ownershipDisclosure = normalizeOwnershipDisclosure(evidence?.ownership_disclosure, sliceId, unexpected);
-  const { ratified_paths: ratifiedPaths, verdict } = validateSliceReviewResult(review, { sliceId });
-  const expectedRatified = verdict === "APPROVE" ? unexpected : [];
-  if (!sameJson(ratifiedPaths, expectedRatified)) {
-    throw new Error(`slice '${sliceId}' ownership ratification must exactly equal every changed path outside declared ownership`);
+  const reviewResult = validateSliceReviewResult(review, { sliceId });
+  const { ownership_schema_version: ownershipSchemaVersion, verdict } = reviewResult;
+  const ownershipDisclosure = ownershipSchemaVersion === 1 ? [] : normalizeOwnershipDisclosure(evidence?.ownership_disclosure, sliceId, unexpected);
+  if (options.publication === true && ownershipSchemaVersion !== 2) {
+    throw new Error(`slice '${sliceId}' new checked review publication requires pathless ownership_ratification schema_version 2`);
   }
+  const disclosedByPath = new Map(ownershipDisclosure.map((entry) => [entry.path, entry]));
+  const planLanes = decomposition.plan.slices.map((candidate) => ({ id: candidate.id, lanes: candidate.paths.map(ownershipLane) }));
+  const changeKinds = observeChangedPathKinds(gitAuthority.repository, diffBaseCommit, gitAuthority.head, options);
+  const modifiedExtensions = [];
+  let ratifiedPaths = [];
   if (verdict === "APPROVE") {
-    const planLanes = decomposition.plan.slices.map((candidate) => ({ id: candidate.id, lanes: candidate.paths.map(ownershipLane) }));
-    const changeKinds = observeChangedPathKinds(gitAuthority.repository, diffBaseCommit, gitAuthority.head, options);
+    ratifiedPaths = ownershipSchemaVersion === 1 ? reviewResult.ratified_paths : unexpected;
+    if (!sameJson(ratifiedPaths, unexpected)) {
+      throw new Error(`slice '${sliceId}' ownership ratification must exactly equal every changed path outside declared ownership`);
+    }
     for (const path of ratifiedPaths) {
       const owners = planLanes.filter((candidate) => candidate.lanes.some((lane) => ownershipLaneContains(lane, path))).map((candidate) => candidate.id);
       if (owners.length > 1) throw new Error(`slice '${sliceId}' cannot ratify path '${path}' because it has ambiguous plan ownership: ${owners.join(", ")}`);
-      if (owners.length !== 0) throw new Error(`slice '${sliceId}' cannot ratify path '${path}' because it has declared plan ownership`);
       const privilegedReason = privilegedControlPlanePathReason(path);
       if (privilegedReason) throw new Error(`slice '${sliceId}' cannot ratify privileged control-plane path '${path}' (${privilegedReason}); it requires explicit declared plan ownership`);
-      if (changeKinds.get(path) !== "added") throw new Error(`slice '${sliceId}' unowned extension '${path}' must be a newly added private regular file`);
-      const baselineEntry = authorityGit(options, gitAuthority.repository, ["ls-tree", "-z", diffBaseCommit, "--", `:(literal)${path}`]);
-      const reviewedEntry = authorityGit(options, gitAuthority.repository, ["ls-tree", "-z", gitAuthority.head, "--", `:(literal)${path}`]);
-      if (!baselineEntry.ok || !reviewedEntry.ok) throw new Error(`slice '${sliceId}' cannot observe ratification tree entry '${path}'`);
-      if (baselineEntry.stdout !== "") throw new Error(`slice '${sliceId}' unowned extension '${path}' must be absent at the first checked dispatch baseline`);
-      if (!/^(100644|100755) blob [0-9a-f]{40}\t/u.test(reviewedEntry.stdout)) {
-        throw new Error(`slice '${sliceId}' cannot ratify symlink or submodule path '${path}'; unowned extensions must be private regular files`);
+      const changeKind = changeKinds.get(path);
+      if (ownershipSchemaVersion === 1) {
+        if (owners.length !== 0) throw new Error(`slice '${sliceId}' cannot ratify path '${path}' because it has declared plan ownership`);
+        assertSafeAddedExtension(gitAuthority.repository, sliceId, path, diffBaseCommit, gitAuthority.head, changeKind, options);
+        continue;
+      }
+      const disclosure = disclosedByPath.get(path);
+      if (changeKind === "added") {
+        if (owners.length !== 0) throw new Error(`slice '${sliceId}' added extension '${path}' cannot be inside a sibling ownership lane`);
+        assertSafeAddedExtension(gitAuthority.repository, sliceId, path, diffBaseCommit, gitAuthority.head, changeKind, options);
+        modifiedExtensions.push({ kind: "modified-extension", path, rationale: disclosure.rationale, authority: "unowned" });
+      } else if (changeKind === "modified") {
+        assertSafeContentModification(gitAuthority.repository, sliceId, path, diffBaseCommit, gitAuthority.head, options);
+        if (owners.length === 0) {
+          modifiedExtensions.push({ kind: "modified-extension", path, rationale: disclosure.rationale, authority: "unowned" });
+        } else {
+          modifiedExtensions.push(observeNonConflictingSiblingExtensionAuthority(runDir, run, sliceId, path, disclosure.rationale, owners[0], decomposition, options));
+        }
+      } else {
+        throw new Error(`slice '${sliceId}' modified extension '${path}' has unsafe Git change kind '${changeKind || "unobservable"}'`);
       }
     }
   }
+  if (ownershipSchemaVersion === 2 && options.publication !== true) {
+    const current = Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews.at(-1) : null;
+    if (!current || current.ownership_schema_version !== 2 || !sameJson(current.ratified_paths, ratifiedPaths)
+      || !sameJson(current.modified_extensions, modifiedExtensions)) {
+      throw new Error(`slice '${sliceId}' persisted modified-extension authority is stale`);
+    }
+  }
   return {
+    ownership_schema_version: ownershipSchemaVersion,
     diff_base_commit: diffBaseCommit,
     ratified_paths: [...ratifiedPaths],
+    modified_extensions: modifiedExtensions,
     effective_paths: [...slice.declared_paths, ...ratifiedPaths],
     changed_paths: changedPaths,
     ownership_disclosure: ownershipDisclosure,
     plan_hash: decomposition.plan_hash,
+  };
+}
+
+function assertSafeAddedExtension(repository, sliceId, path, baseline, reviewed, changeKind, options) {
+  if (changeKind !== "added") throw new Error(`slice '${sliceId}' unowned extension '${path}' must be a newly added private regular file`);
+  const baselineEntry = observeLiteralTreeEntry(repository, baseline, path, options, sliceId);
+  const reviewedEntry = observeLiteralTreeEntry(repository, reviewed, path, options, sliceId);
+  if (baselineEntry !== null) throw new Error(`slice '${sliceId}' unowned extension '${path}' must be absent at the first checked dispatch baseline`);
+  if (!isPrivateRegularTreeEntry(reviewedEntry)) {
+    throw new Error(`slice '${sliceId}' cannot ratify symlink or submodule path '${path}'; unowned extensions must be private regular files`);
+  }
+}
+
+function assertSafeContentModification(repository, sliceId, path, baseline, reviewed, options) {
+  const baselineEntry = observeLiteralTreeEntry(repository, baseline, path, options, sliceId);
+  const reviewedEntry = observeLiteralTreeEntry(repository, reviewed, path, options, sliceId);
+  if (!isPrivateRegularTreeEntry(baselineEntry) || !isPrivateRegularTreeEntry(reviewedEntry)) {
+    throw new Error(`slice '${sliceId}' modified extension '${path}' must remain a private regular file`);
+  }
+  if (baselineEntry.mode !== reviewedEntry.mode) {
+    throw new Error(`slice '${sliceId}' modified extension '${path}' must be content-only with unchanged mode`);
+  }
+  if (baselineEntry.oid === reviewedEntry.oid) {
+    throw new Error(`slice '${sliceId}' modified extension '${path}' must change exact blob content`);
+  }
+}
+
+function observeLiteralTreeEntry(repository, commit, path, options, sliceId) {
+  const result = authorityGit(options, repository, ["ls-tree", "-z", commit, "--", `:(literal)${path}`]);
+  if (!result.ok) throw new Error(`slice '${sliceId}' cannot observe ratification tree entry '${path}'`);
+  if (result.stdout === "") return null;
+  const match = /^(\d{6}) ([^ ]+) ([0-9a-f]{40})\t([^\0]+)\0$/u.exec(result.stdout);
+  if (!match || match[4] !== path) throw new Error(`slice '${sliceId}' ratification tree entry '${path}' is malformed or ambiguous`);
+  return { mode: match[1], type: match[2], oid: match[3] };
+}
+
+function isPrivateRegularTreeEntry(entry) {
+  return Boolean(entry && ["100644", "100755"].includes(entry.mode) && entry.type === "blob" && /^[0-9a-f]{40}$/u.test(entry.oid));
+}
+
+function observeNonConflictingSiblingExtensionAuthority(runDir, run, modifyingSliceId, path, rationale, ownerSliceId, decomposition, options) {
+  if (ownerSliceId === modifyingSliceId) throw new Error(`slice '${modifyingSliceId}' cannot use itself as sibling authority for '${path}'`);
+  const owner = (run.slices || []).find((candidate) => candidate?.id === ownerSliceId);
+  if (!owner || !["review", "merged"].includes(owner.status)) {
+    throw new Error(`slice '${modifyingSliceId}' cannot ratify sibling-owned path '${path}': owner '${ownerSliceId}' is not in review or merged`);
+  }
+  if (options.publication !== true && owner.status !== "merged") {
+    throw new Error(`slice '${modifyingSliceId}' cannot merge sibling-owned path '${path}' while owner '${ownerSliceId}' remains in review`);
+  }
+  const observed = assertSliceReviewBindingCurrent(runDir, ownerSliceId, owner);
+  if (observed.review.verdict !== "APPROVE") {
+    throw new Error(`slice '${modifyingSliceId}' cannot ratify sibling-owned path '${path}': owner '${ownerSliceId}' review is not APPROVE`);
+  }
+  const ownerReviewExtension = observeInvariantFamilyReviewAuthority(runDir, run, decomposition, ownerSliceId, observed.review);
+  assertApprovingInvariantFamilyReviewAuthority(decomposition.plan, ownerSliceId, observed.review, ownerReviewExtension, "sibling ownership");
+  const ownerGit = observeSliceHeadAuthority(runDir, run, ownerSliceId, owner, options);
+  if (ownerGit.head !== owner.reviewed_commit) throw new Error(`slice '${modifyingSliceId}' sibling owner '${ownerSliceId}' head is stale`);
+  const ownerEntry = owner.attempt_reviews?.at(-1);
+  if (!ownerEntry || ownerEntry.attempt !== owner.attempts || !/^[0-9a-f]{40}$/u.test(ownerEntry.diff_base_commit || "")) {
+    throw new Error(`slice '${modifyingSliceId}' sibling owner '${ownerSliceId}' history is partial`);
+  }
+  const ownerFirstEntry = owner.attempt_reviews?.[0];
+  const firstBoundOwner = ownerFirstEntry ? {
+    ...owner,
+    attempts: ownerFirstEntry.attempt,
+    dispatch_required: true,
+    ...pickBinding(ownerFirstEntry, SLICE_DISPATCH_BINDING_KEYS),
+  } : null;
+  const firstClaim = firstBoundOwner
+    ? observeSliceDispatchClaim(runDir, run.run_id, firstBoundOwner, ownerFirstEntry.attempt, { requireRunBinding: true })
+    : null;
+  if (!firstClaim || firstClaim.claim.head !== ownerEntry.diff_base_commit) {
+    throw new Error(`slice '${modifyingSliceId}' sibling owner '${ownerSliceId}' history is cross-bound`);
+  }
+  if (!authorityGit(options, ownerGit.repository, ["merge-base", "--is-ancestor", ownerEntry.diff_base_commit, owner.reviewed_commit]).ok) {
+    throw new Error(`slice '${modifyingSliceId}' sibling owner '${ownerSliceId}' reviewed ancestry is unobservable`);
+  }
+  const ownerPaths = observeNoRenamePathSet(ownerGit.repository, ownerEntry.diff_base_commit, owner.reviewed_commit, options, `slice '${ownerSliceId}' full sibling reviewed diff`);
+  if (ownerPaths.has(path)) throw new Error(`slice '${modifyingSliceId}' cannot ratify path '${path}' because sibling owner '${ownerSliceId}' reviewed diff touches it`);
+  const dispatch = pickBinding(ownerEntry, SLICE_DISPATCH_BINDING_KEYS);
+  if (!hasCompleteBinding(dispatch, SLICE_DISPATCH_BINDING_KEYS)) {
+    throw new Error(`slice '${modifyingSliceId}' sibling owner '${ownerSliceId}' dispatch history is partial`);
+  }
+  return {
+    kind: "modified-extension",
+    path,
+    rationale,
+    authority: "non-conflicting-sibling",
+    owner_slice_id: ownerSliceId,
+    owner_attempt: owner.attempts,
+    owner_evidence_ref: owner.evidence_ref,
+    owner_evidence_hash: owner.evidence_hash,
+    owner_review_ref: owner.review_ref,
+    owner_review_hash: owner.review_hash,
+    owner_dispatch_claim_ref: dispatch.dispatch_claim_ref,
+    owner_dispatch_claim_hash: dispatch.dispatch_claim_hash,
+    owner_dispatch_closure_ref: dispatch.dispatch_closure_ref,
+    owner_dispatch_closure_hash: dispatch.dispatch_closure_hash,
+    owner_reviewed_commit: owner.reviewed_commit,
+    owner_diff_base_commit: ownerEntry.diff_base_commit,
   };
 }
 
@@ -6256,11 +6389,27 @@ function observeChangedPathKinds(repository, from, to, options = {}) {
     if (status.startsWith("R") || status.startsWith("C")) {
       const second = records[index++];
       if (!second) throw new Error("slice ownership change kinds contain an invalid paired path");
-      kinds.set(first, status.startsWith("R") ? "renamed" : "copied");
-      kinds.set(second, status.startsWith("R") ? "renamed" : "copied");
-    } else kinds.set(first, status === "D" ? "deleted" : status === "T" ? "type-changed" : status === "A" ? "added" : "modified");
+      recordChangedPathKind(kinds, first, status.startsWith("R") ? "renamed" : "copied");
+      recordChangedPathKind(kinds, second, status.startsWith("R") ? "renamed" : "copied");
+    } else {
+      recordChangedPathKind(kinds, first, {
+        A: "added",
+        M: "modified",
+        D: "deleted",
+        T: "type-changed",
+        U: "unmerged",
+        X: "unknown",
+        B: "broken",
+      }[status]);
+    }
   }
   return kinds;
+}
+
+function recordChangedPathKind(kinds, path, kind) {
+  const existing = kinds.get(path);
+  if (["renamed", "copied"].includes(existing) && !["renamed", "copied"].includes(kind)) return;
+  kinds.set(path, kind);
 }
 
 function normalizeOwnershipDisclosure(value, sliceId, unexpectedPaths) {
@@ -6278,7 +6427,7 @@ function normalizeOwnershipDisclosure(value, sliceId, unexpectedPaths) {
       throw new Error(`slice '${sliceId}' ownership_disclosure[${index}].path must be a canonical concrete repository path`);
     }
     const rationale = typeof entry.rationale === "string" ? entry.rationale : "";
-    if (!rationale || rationale !== rationale.trim() || rationale !== rationale.normalize("NFC") || /[\0-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(rationale)) {
+    if (!rationale || rationale !== rationale.trim() || rationale !== rationale.normalize("NFC") || /[\x00-\x1f\x7f-\x9f]/u.test(rationale)) {
       throw new Error(`slice '${sliceId}' ownership_disclosure[${index}].rationale must be nonempty normalized text`);
     }
     return { path: entry.path, rationale };
@@ -6322,6 +6471,7 @@ export function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
   if (!current) throw new Error(`slice '${sliceId}' current review is missing from append-only attempt history`);
   const result = observeAttemptReviewResult(sliceId, observed.review);
   const dispatch = observeAttemptReviewDispatch(runDir, sliceId, slice, current);
+  const { ownership_schema_version: _ownershipSchemaVersion, ratified_paths: _reviewRatifiedPaths, ...reviewResult } = result;
   const expected = {
     attempt: slice.attempts,
     evidence_ref: slice.evidence_ref,
@@ -6330,8 +6480,8 @@ export function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
     review_hash: slice.review_hash,
     reviewed_commit: slice.reviewed_commit,
     diff_base_commit: current.diff_base_commit,
-    ratified_paths: result.ratified_paths,
-    ...result,
+    ...attemptReviewOwnershipFields(result, current),
+    ...reviewResult,
     ...dispatch,
   };
   if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' current review differs from append-only attempt history`);
@@ -8120,6 +8270,7 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
     && slice.attempt_reviews[0].diff_base_commit !== slice.authorized_baseline_commit) {
     throw new Error(`slice '${sliceId}' first review baseline differs from its authorized baseline`);
   }
+  const run = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
   const priorReviews = [];
   for (const entry of Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews : []) {
     const observed = observeSliceReviewSidecars(runDir, sliceId, {
@@ -8130,6 +8281,8 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
     });
     const result = observeAttemptReviewResult(sliceId, observed.review, { priorReviews });
     const dispatch = observeAttemptReviewDispatch(runDir, sliceId, slice, entry);
+    const ownership = observePersistedSliceAttemptOwnership(runDir, run, slice, entry);
+    const { ownership_schema_version: _ownershipSchemaVersion, ratified_paths: _reviewRatifiedPaths, ...reviewResult } = result;
     const current = {
       attempt: entry.attempt,
       evidence_ref: entry.evidence_ref,
@@ -8138,8 +8291,12 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
       review_hash: observed.binding.review_hash,
       reviewed_commit: observed.review.reviewed_commit,
       diff_base_commit: entry.diff_base_commit,
-      ratified_paths: result.ratified_paths,
-      ...result,
+      ...(ownership.ownership_schema_version === 2 ? {
+        ownership_schema_version: 2,
+        ratified_paths: ownership.ratified_paths,
+        modified_extensions: ownership.modified_extensions,
+      } : { ratified_paths: ownership.ratified_paths }),
+      ...reviewResult,
       ...dispatch,
     };
     if (observed.evidence.head_sha !== current.reviewed_commit || !sameJson(current, entry)) {
@@ -8147,6 +8304,17 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
     }
     priorReviews.push(current);
   }
+}
+
+function attemptReviewOwnershipFields(result, entry) {
+  if (result.ownership_schema_version === 2) {
+    return {
+      ownership_schema_version: 2,
+      ratified_paths: Array.isArray(entry.ratified_paths) ? cloneJson(entry.ratified_paths) : undefined,
+      modified_extensions: Array.isArray(entry.modified_extensions) ? cloneJson(entry.modified_extensions) : undefined,
+    };
+  }
+  return { ratified_paths: result.ratified_paths };
 }
 
 function observeAttemptReviewDispatch(runDir, sliceId, slice, entry) {

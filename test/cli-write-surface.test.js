@@ -279,7 +279,7 @@ describe("cli write surface", () => {
       });
       writeJson(join(runDir, "reviews", "slice.json"), {
         subject: "slice", verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0, required_fixes: [],
-        ownership_ratification: { schema_version: 1, paths: ["extension/slice.txt"] }, remediation_context: { schema_version: 2, fixes: [] }, attempt: 1, reviewed_commit: reviewedHead,
+        ownership_ratification: { schema_version: 2, kind: "factory-derived-modified-extension" }, remediation_context: { schema_version: 2, fixes: [] }, attempt: 1, reviewed_commit: reviewedHead,
         invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: reviewedHead, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
       });
       runFactory(repo, ["slice-status", RUN_ID, "slice", "review", "--evidence-ref", "evidence/slice.json", "--review-ref", "reviews/slice.json", "--json"]);
