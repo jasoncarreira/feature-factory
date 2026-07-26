@@ -2958,6 +2958,15 @@ describe("simplified run-state transitions", () => {
       history.ratified_paths = ["extension/slice.txt"];
       delete history.ownership_schema_version;
       delete history.modified_extensions;
+      const evidencePath = join(fixture.runDir, "evidence", "slice.json");
+      const evidence = readJson(evidencePath);
+      evidence.ownership_disclosure = [{
+        path: "extension/slice.txt",
+        rationale: "The historical review disclosed its newly added unowned extension.",
+      }];
+      writeJson(evidencePath, evidence);
+      slice.evidence_hash = hashFile(evidencePath);
+      history.evidence_hash = slice.evidence_hash;
       review.ownership_ratification = { schema_version: 1, paths: ["extension/slice.txt"] };
       const unit = plan.delivery_envelope.delivery_units.find((candidate) => candidate.slice_id === "slice");
       const familyEvidence = writeVerificationArtifactReceipt({
@@ -2974,6 +2983,32 @@ describe("simplified run-state transitions", () => {
       slice.review_hash = hashFile(reviewPath);
       history.review_hash = slice.review_hash;
       writeJson(runPath, run);
+
+      const validRunBytes = readFileSync(runPath);
+      const validEvidenceBytes = readFileSync(evidencePath);
+      for (const [label, ownershipDisclosure] of [
+        ["missing", undefined],
+        ["inaccurate", [{ path: "extension/other.txt", rationale: "This path was not in the reviewed diff." }]],
+      ]) {
+        const invalidEvidence = readJson(evidencePath);
+        if (ownershipDisclosure === undefined) delete invalidEvidence.ownership_disclosure;
+        else invalidEvidence.ownership_disclosure = ownershipDisclosure;
+        writeJson(evidencePath, invalidEvidence);
+        const invalidRun = readJson(runPath);
+        const invalidSlice = invalidRun.slices.find((candidate) => candidate.id === "slice");
+        invalidSlice.evidence_hash = hashFile(evidencePath);
+        invalidSlice.attempt_reviews[0].evidence_hash = invalidSlice.evidence_hash;
+        writeJson(runPath, invalidRun);
+        const before = readFileSync(runPath);
+        await assert.rejects(
+          transitionSliceMerged(fixture.runDir, "slice", { merge_commit: prepared.mergeCommit }),
+          /ownership_disclosure/u,
+          label,
+        );
+        assert.deepEqual(readFileSync(runPath), before, label);
+        writeFileSync(evidencePath, validEvidenceBytes);
+        writeFileSync(runPath, validRunBytes);
+      }
 
       const merged = await transitionSliceMerged(fixture.runDir, "slice", { merge_commit: prepared.mergeCommit });
       assert.equal(merged.slice.status, "merged");

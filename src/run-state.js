@@ -6277,7 +6277,7 @@ function observeSliceOwnershipAuthority(runDir, run, sliceId, slice, review, evi
   const unexpected = changedPaths.filter((path) => !declaredLanes.some((lane) => ownershipLaneContains(lane, path)));
   const reviewResult = validateSliceReviewResult(review, { sliceId });
   const { ownership_schema_version: ownershipSchemaVersion, verdict } = reviewResult;
-  const ownershipDisclosure = ownershipSchemaVersion === 1 ? [] : normalizeOwnershipDisclosure(evidence?.ownership_disclosure, sliceId, unexpected);
+  const ownershipDisclosure = normalizeOwnershipDisclosure(evidence?.ownership_disclosure, sliceId, unexpected);
   if (options.publication === true && ownershipSchemaVersion !== 2) {
     throw new Error(`slice '${sliceId}' new checked review publication requires pathless ownership_ratification schema_version 2`);
   }
