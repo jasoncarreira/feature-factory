@@ -2,7 +2,7 @@ import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -2169,8 +2169,22 @@ function restoreRuntimeFiles(root, snapshot) {
   }
 }
 
-function createFixture({ managedFeatureWorktree = false, publishReport = true, ownerPaths = ["src/owner/**"], consumerPaths = ["src/consumer/**"], extraSlices = [] } = {}) {
-  const repo = mkdtempSync(join(tmpdir(), "feature-factory-amendment-"));
+// The git topology — base commit, owner-build worktree carrying the reviewed
+// owner commit, the no-ff merge onto the feature branch, and optionally a
+// managed feature worktree — is identical for every fixture sharing the same
+// managedFeatureWorktree flag; every other parameter shapes only the JSON
+// written afterwards. Build each variant once per process and cpSync per
+// fixture. Worktree metadata stores absolute paths, so one `git worktree
+// repair` per clone relinks the copies; commit SHAs are byte-copied and reused
+// from the template. Templates are registered in `fixtures`, which is swept
+// once at process end.
+const amendmentGitTemplates = new Map();
+
+function amendmentGitTemplate(managedFeatureWorktree) {
+  const key = managedFeatureWorktree ? "managed" : "plain";
+  const cached = amendmentGitTemplates.get(key);
+  if (cached) return cached;
+  const repo = mkdtempSync(join(tmpdir(), "feature-factory-amendment-template-"));
   fixtures.push(repo);
   git(repo, ["init", "-b", "main"]);
   git(repo, ["config", "user.email", "test@example.com"]);
@@ -2194,12 +2208,25 @@ function createFixture({ managedFeatureWorktree = false, publishReport = true, o
   git(repo, ["merge", "--no-ff", "owner-build", "-m", "merge owner"]);
   const baseline = git(repo, ["rev-parse", "HEAD"]).trim();
   const baselineTree = git(repo, ["rev-parse", `${baseline}^{tree}`]).trim();
-  let featureWorktree = repo;
   if (managedFeatureWorktree) {
     git(repo, ["checkout", "main"]);
-    featureWorktree = join(repo, ".opencode", "worktrees", FEATURE_BRANCH);
-    git(repo, ["worktree", "add", featureWorktree, FEATURE_BRANCH]);
+    git(repo, ["worktree", "add", join(repo, ".opencode", "worktrees", FEATURE_BRANCH), FEATURE_BRANCH]);
   }
+  const template = { repo, base, reviewedCommit, baseline, baselineTree };
+  amendmentGitTemplates.set(key, template);
+  return template;
+}
+
+function createFixture({ managedFeatureWorktree = false, publishReport = true, ownerPaths = ["src/owner/**"], consumerPaths = ["src/consumer/**"], extraSlices = [] } = {}) {
+  const template = amendmentGitTemplate(managedFeatureWorktree);
+  const repo = mkdtempSync(join(tmpdir(), "feature-factory-amendment-"));
+  fixtures.push(repo);
+  cpSync(template.repo, repo, { recursive: true });
+  const ownerWorktree = join(repo, ".opencode", "worktrees", "owner-build");
+  let featureWorktree = repo;
+  if (managedFeatureWorktree) featureWorktree = join(repo, ".opencode", "worktrees", FEATURE_BRANCH);
+  git(repo, ["worktree", "repair", ownerWorktree, ...(managedFeatureWorktree ? [featureWorktree] : [])]);
+  const { base, reviewedCommit, baseline, baselineTree } = template;
   const runDir = join(repo, ".opencode", "factory", RUN_ID);
   for (const dir of ["plan", "evidence", "reviews", "dispatch"]) mkdirSync(join(runDir, dir), { recursive: true });
   const plan = withDeliveryEnvelope({
