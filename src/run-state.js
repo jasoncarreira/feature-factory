@@ -6390,8 +6390,14 @@ function observeNonConflictingSiblingExtensionAuthority(runDir, run, modifyingSl
   }
   const ownerReviewExtension = observeInvariantFamilyReviewAuthority(runDir, run, decomposition, ownerSliceId, observed.review);
   assertApprovingInvariantFamilyReviewAuthority(decomposition.plan, ownerSliceId, observed.review, ownerReviewExtension, "sibling ownership");
-  const ownerGit = observeSliceHeadAuthority(runDir, run, ownerSliceId, owner, options);
-  if (ownerGit.head !== owner.reviewed_commit) throw new Error(`slice '${modifyingSliceId}' sibling owner '${ownerSliceId}' head is stale`);
+  const repository = resolveAuthorityRepository(runDir, run, options);
+  if (owner.status === "merged") {
+    observeReviewedMergeProof(repository, ownerSliceId,
+      requireNonEmptyString(owner.merge_commit, `slice '${ownerSliceId}' merge_commit`), owner.reviewed_commit, options);
+  } else {
+    const ownerGit = observeSliceHeadAuthority(runDir, run, ownerSliceId, owner, options);
+    if (ownerGit.head !== owner.reviewed_commit) throw new Error(`slice '${modifyingSliceId}' sibling owner '${ownerSliceId}' head is stale`);
+  }
   const ownerEntry = owner.attempt_reviews?.at(-1);
   if (!ownerEntry || ownerEntry.attempt !== owner.attempts || !/^[0-9a-f]{40}$/u.test(ownerEntry.diff_base_commit || "")) {
     throw new Error(`slice '${modifyingSliceId}' sibling owner '${ownerSliceId}' history is partial`);
@@ -6409,10 +6415,10 @@ function observeNonConflictingSiblingExtensionAuthority(runDir, run, modifyingSl
   if (!firstClaim || firstClaim.claim.head !== ownerEntry.diff_base_commit) {
     throw new Error(`slice '${modifyingSliceId}' sibling owner '${ownerSliceId}' history is cross-bound`);
   }
-  if (!authorityGit(options, ownerGit.repository, ["merge-base", "--is-ancestor", ownerEntry.diff_base_commit, owner.reviewed_commit]).ok) {
+  if (!authorityGit(options, repository, ["merge-base", "--is-ancestor", ownerEntry.diff_base_commit, owner.reviewed_commit]).ok) {
     throw new Error(`slice '${modifyingSliceId}' sibling owner '${ownerSliceId}' reviewed ancestry is unobservable`);
   }
-  const ownerPaths = observeNoRenamePathSet(ownerGit.repository, ownerEntry.diff_base_commit, owner.reviewed_commit, options, `slice '${ownerSliceId}' full sibling reviewed diff`);
+  const ownerPaths = observeNoRenamePathSet(repository, ownerEntry.diff_base_commit, owner.reviewed_commit, options, `slice '${ownerSliceId}' full sibling reviewed diff`);
   if (ownerPaths.has(path)) throw new Error(`slice '${modifyingSliceId}' cannot ratify path '${path}' because sibling owner '${ownerSliceId}' reviewed diff touches it`);
   const dispatch = pickBinding(ownerEntry, SLICE_DISPATCH_BINDING_KEYS);
   if (!hasCompleteBinding(dispatch, SLICE_DISPATCH_BINDING_KEYS)) {

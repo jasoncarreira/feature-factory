@@ -3065,6 +3065,8 @@ describe("simplified run-state transitions", () => {
       const ownerIntegration = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
       const ownerMerged = await transitionSliceMerged(fixture.runDir, "owner", { merge_commit: ownerIntegration });
       assert.equal(ownerMerged.slice.status, "merged");
+      runGit(fixture.repo, ["worktree", "remove", prepared.ownerWorktree]);
+      runGit(fixture.repo, ["branch", "-D", "owner-branch"]);
       runGit(fixture.repo, ["merge", "--no-ff", "modifier-branch", "-m", "integrate modifier after owner"]);
       const combinedIntegration = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
       const modifierMerged = await transitionSliceMerged(fixture.runDir, "modifier", { merge_commit: combinedIntegration });
@@ -3080,10 +3082,26 @@ describe("simplified run-state transitions", () => {
   it("publishes the same frozen sibling provenance when the sole owner is already merged", async () => {
     const fixture = createFixture("ownership-modified-sibling-owner-merged");
     try {
-      await prepareSiblingModificationFixture(fixture, { publishModifier: false });
+      const prepared = await prepareSiblingModificationFixture(fixture, { publishModifier: false });
       runGit(fixture.repo, ["merge", "--no-ff", "owner-branch", "-m", "integrate owner before modifier review"]);
       const ownerMerge = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
       await transitionSliceMerged(fixture.runDir, "owner", { merge_commit: ownerMerge });
+      runGit(fixture.repo, ["worktree", "remove", prepared.ownerWorktree]);
+      runGit(fixture.repo, ["branch", "-D", "owner-branch"]);
+      const runPath = join(fixture.runDir, "run.json");
+      const validRun = readFileSync(runPath);
+      const invalid = readJson(runPath);
+      invalid.slices.find((slice) => slice.id === "owner").merge_commit = prepared.baseline;
+      writeJson(runPath, invalid);
+      const before = readFileSync(runPath);
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "modifier", {
+          status: "review", attempts: 1, evidence_ref: "evidence/modifier.json", review_ref: "reviews/modifier.json",
+        }),
+        /merge commit must have exactly two ordered parents/u,
+      );
+      assert.deepEqual(readFileSync(runPath), before);
+      writeFileSync(runPath, validRun);
       const published = await transitionRunSlice(fixture.runDir, "modifier", {
         status: "review", attempts: 1, evidence_ref: "evidence/modifier.json", review_ref: "reviews/modifier.json",
       });
@@ -3511,6 +3529,9 @@ describe("simplified run-state transitions", () => {
       assert.equal(original.integration_amendment.status, "reported");
       assert.equal(originalOwner.attempt_reviews[0].modified_extensions[0].authority, "unowned");
       assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, original));
+      runGit(fixture.repo, ["worktree", "remove", originalOwner.worktree]);
+      runGit(fixture.repo, ["branch", "-D", originalOwner.branch]);
+      assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, original));
 
       for (const [name, mutate] of persistedV2FieldMutationCases({ sibling: false })) {
         const candidate = structuredClone(original);
@@ -3537,8 +3558,12 @@ describe("simplified run-state transitions", () => {
       const runPath = join(fixture.runDir, "run.json");
       const original = readJson(runPath);
       const originalConsumer = original.slices.find((slice) => slice.id === "consumer");
+      const originalOwner = original.slices.find((slice) => slice.id === "owner");
       assert.equal(originalConsumer.status, "running");
       assert.equal(originalConsumer.attempt_reviews[0].modified_extensions[0].authority, "non-conflicting-sibling");
+      assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, original));
+      runGit(fixture.repo, ["worktree", "remove", originalOwner.worktree]);
+      runGit(fixture.repo, ["branch", "-D", originalOwner.branch]);
       assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, original));
 
       for (const [name, mutate] of persistedV2FieldMutationCases({ sibling: true })) {
@@ -3568,6 +3593,9 @@ describe("simplified run-state transitions", () => {
         const run = readJson(runPath);
         const owner = run.slices.find((slice) => slice.id === "owner");
         assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, run), `${name}:baseline`);
+        runGit(fixture.repo, ["worktree", "remove", owner.worktree]);
+        runGit(fixture.repo, ["branch", "-D", owner.branch]);
+        assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, run), `${name}:cleaned`);
         mutate(fixture, run, owner);
         const before = readFileSync(runPath, "utf8");
         assert.throws(
@@ -5324,9 +5352,6 @@ function persistedSiblingSourceMutationCases() {
       closure.completion_head = entry.diff_base_commit;
       writeJson(path, closure);
     }],
-    ["owner-reviewed-worktree-head", (fixture, _run, owner) => {
-      writeFileSync(join(owner.worktree, "unreviewed-source.txt"), "unreviewed\n");
-    }],
   ];
 }
 
@@ -5937,6 +5962,17 @@ function writeReadyPrRun(fixture, overrides = {}) {
       return modern;
     })
     : [slice];
+  mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
+  writeJson(join(fixture.runDir, "plan", "slices.json"), {
+    slices: slices.map((candidate) => ({
+      id: candidate.id,
+      stack: candidate.stack || "backend",
+      paths: candidate.declared_paths || ["src/**"],
+      depends_on: candidate.depends_on || [],
+      acceptance: [`${candidate.id} works`],
+      test_plan: [`test ${candidate.id}`],
+    })),
+  });
   writeJson(join(fixture.runDir, "run.json"), {
     ...baseRun(fixture.runId),
     branch,

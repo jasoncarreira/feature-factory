@@ -1046,6 +1046,10 @@ describe("run schema and consistency", () => {
   it("rejects every missing or byte-drifted child-local sibling authority copy after publication", () => {
     const fixture = publishedSiblingAuthorityFixture();
     try {
+      for (const slice of fixture.parentRun.slices.filter((candidate) => candidate.status === "merged")) {
+        runGit(fixture.repo, ["worktree", "remove", slice.worktree]);
+        runGit(fixture.repo, ["branch", "-D", slice.branch]);
+      }
       const baseline = checkRunConsistency(fixture.childRunDir, fixture.childRun);
       assert.equal(baseline.ok, true, `the exact published child is consistent: ${JSON.stringify(baseline.checks.filter((check) => !check.ok))}`);
       const cases = [
@@ -1075,6 +1079,21 @@ describe("run schema and consistency", () => {
         writeFileSync(childPath, artifact.bytes);
       }
       assert.equal(checkRunConsistency(fixture.childRunDir, fixture.childRun).ok, true, "restoring every exact copy restores consistency");
+
+      assert.equal(checkRunConsistency(fixture.parentRunDir, fixture.parentRun).ok, true, "the plan-backed parent authority is consistent");
+      const invalidMerge = structuredClone(fixture.parentRun);
+      const invalidOwner = invalidMerge.slices.find((slice) => slice.id === "owner");
+      invalidOwner.merge_commit = invalidOwner.reviewed_commit;
+      const staleMerge = checkRunConsistency(fixture.parentRunDir, invalidMerge);
+      const failedConsumer = staleMerge.checks.find((check) => check.name === "run.slices[1].attempt_reviews[0]");
+      assert.equal(staleMerge.ok, false, "a cleaned owner's stale merge proof must fail closed");
+      assert.equal(failedConsumer?.ok, false, "the sibling consumer must re-observe its cleaned owner's merge proof");
+
+      rmSync(join(fixture.parentRunDir, "plan", "slices.json"));
+      const planless = checkRunConsistency(fixture.parentRunDir, fixture.parentRun);
+      const failedOwnership = planless.checks.find((check) => check.name === "run.slices[0].attempt_reviews[0]");
+      assert.equal(planless.ok, false, "v2 history cannot survive without its accepted plan");
+      assert.equal(failedOwnership?.ok, false, "planless v2 must fail the ownership authority check");
     } finally {
       cleanup(fixture.repo);
     }
@@ -1569,7 +1588,7 @@ function publishedSiblingAuthorityFixture() {
     dispatchClaim: copiedArtifact(parentRunDir, ownerDispatch.dispatch_claim_ref),
     dispatchClosure: copiedArtifact(parentRunDir, ownerDispatch.dispatch_closure_ref),
   };
-  return { repo, parentRunDir, childRunDir, childRun, artifacts };
+  return { repo, parentRunDir, parentRun, childRunDir, childRun, artifacts };
 }
 
 function writeSliceDispatch(runDir, runId, sliceId, branch, worktree, head, completionHead) {

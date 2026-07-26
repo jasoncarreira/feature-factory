@@ -1873,10 +1873,6 @@ export function observePersistedSliceAttemptOwnership(runDir, run, slice, entry,
   }
 
   const planPath = join(runDir, PLAN_SLICES_REF);
-  if (!existsSync(planPath) && Array.isArray(entry.ratified_paths) && entry.ratified_paths.length === 0
-    && Array.isArray(entry.modified_extensions) && entry.modified_extensions.length === 0) {
-    return { ownership_schema_version: 2, ratified_paths: [], modified_extensions: [] };
-  }
   const plan = parseSlicesPlanBytes(readFileSync(planPath), {
     label: PLAN_SLICES_REF,
     enforceDependencyDepth: false,
@@ -2250,6 +2246,10 @@ function observeConsistencySliceDispatch(runDir, run, slice, entry) {
 
 function assertConsistencyReviewedSliceHead(runDir, slice, options = {}) {
   const repository = git(runDir, ["rev-parse", "--show-toplevel"]);
+  if (slice.status === "merged") {
+    assertConsistencyReviewedMergeProof(repository, slice);
+    return;
+  }
   const branch = repository.ok ? git(repository.stdout.trim(), ["rev-parse", "--verify", `refs/heads/${slice.branch}^{commit}`]) : null;
   const commit = repository.ok ? git(repository.stdout.trim(), ["rev-parse", "--verify", `${slice.reviewed_commit}^{commit}`]) : null;
   const removedWorktrees = new Set((options.cleanup_removed_worktrees || []).map((worktree) => resolve(worktree)));
@@ -2267,6 +2267,39 @@ function assertConsistencyReviewedSliceHead(runDir, slice, options = {}) {
   if (!FULL_GIT_SHA_PATTERN.test(slice.reviewed_commit || "") || commit?.stdout.trim() !== slice.reviewed_commit
     || !branchIsCurrent || !worktreeIsCurrent) {
     throw new Error(`slice '${slice.id}' persisted sibling owner reviewed branch/worktree head is stale`);
+  }
+}
+
+function assertConsistencyReviewedMergeProof(repository, slice) {
+  if (!repository.ok || !FULL_GIT_SHA_PATTERN.test(slice.reviewed_commit || "") || !FULL_GIT_SHA_PATTERN.test(slice.merge_commit || "")) {
+    throw new Error(`slice '${slice.id}' persisted sibling owner merge authority is incomplete`);
+  }
+  const repo = repository.stdout.trim();
+  const parentsResult = git(repo, ["rev-list", "--parents", "-n", "1", slice.merge_commit]);
+  const parents = parentsResult.ok ? parentsResult.stdout.trim().split(/\s+/u) : [];
+  if (parents.length !== 3 || parents[0] !== slice.merge_commit || parents[2] !== slice.reviewed_commit) {
+    throw new Error(`slice '${slice.id}' persisted sibling owner merge parents are stale`);
+  }
+  const firstParent = parents[1];
+  const basesResult = git(repo, ["merge-base", "--all", firstParent, slice.reviewed_commit]);
+  const bases = basesResult.ok ? basesResult.stdout.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean) : [];
+  if (bases.length !== 1 || !FULL_GIT_SHA_PATTERN.test(bases[0]) || bases[0] === slice.reviewed_commit
+    || !git(repo, ["merge-base", "--is-ancestor", bases[0], firstParent]).ok
+    || !git(repo, ["merge-base", "--is-ancestor", bases[0], slice.reviewed_commit]).ok) {
+    throw new Error(`slice '${slice.id}' persisted sibling owner merge base is stale`);
+  }
+  const reviewedPaths = observeConsistencyPathSet(repo, bases[0], slice.reviewed_commit, `slice '${slice.id}' persisted sibling reviewed diff`);
+  const mergedPaths = observeConsistencyPathSet(repo, firstParent, slice.merge_commit, `slice '${slice.id}' persisted sibling merged diff`);
+  if (!isDeepStrictEqual([...reviewedPaths].sort(), [...mergedPaths].sort())) {
+    throw new Error(`slice '${slice.id}' persisted sibling owner merged path set is stale`);
+  }
+  for (const path of reviewedPaths) {
+    const pathspec = `:(literal)${path}`;
+    const reviewedEntry = git(repo, ["ls-tree", "-z", slice.reviewed_commit, "--", pathspec]);
+    const mergedEntry = git(repo, ["ls-tree", "-z", slice.merge_commit, "--", pathspec]);
+    if (!reviewedEntry.ok || !mergedEntry.ok || reviewedEntry.stdout !== mergedEntry.stdout) {
+      throw new Error(`slice '${slice.id}' persisted sibling owner merged tree identity is stale`);
+    }
   }
 }
 

@@ -2859,7 +2859,7 @@ describe("issue128FinishAndDiscloseAuthorityOracle", () => {
     assert.deepEqual(validated, ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS.filter((id) => !id.includes("carry-forward-accepted-slice")));
   });
 
-  it("materializes exact empty-v2 sidecars and rejects ref, hash, and external-byte drift through production consistency", () => {
+  it("rejects planless empty-v2 authority through production consistency", () => {
     const root = mkdtempSync(join(tmpdir(), "issue128-empty-authority-"));
     try {
       for (const id of ISSUE128_EMPTY_AUTHORITY_RECORD_IDS) {
@@ -2867,28 +2867,11 @@ describe("issue128FinishAndDiscloseAuthorityOracle", () => {
         const runDir = join(root, id);
         mkdirSync(runDir, { recursive: true });
         const run = materializeIssue128EmptyAuthority(runDir, createIssue128DurableRunBaseline(row));
-        assert.equal(checkRunConsistency(runDir, run).ok, true, `${id} baseline`);
-
-        const target = run.slices.find(({ id: sliceId }) => sliceId === "consumer");
-        const entry = target.attempt_reviews.at(-1);
-        const refDrift = structuredClone(run);
-        const refTarget = refDrift.slices.find(({ id: sliceId }) => sliceId === "consumer");
-        refTarget.attempt_reviews.at(-1).review_ref = "reviews/missing.json";
-        if (["review", "merged"].includes(refTarget.status)) refTarget.review_ref = "reviews/missing.json";
-        assert.equal(checkRunConsistency(runDir, refDrift).ok, false, `${id} ref drift`);
-
-        const hashDrift = structuredClone(run);
-        const hashTarget = hashDrift.slices.find(({ id: sliceId }) => sliceId === "consumer");
-        hashTarget.attempt_reviews.at(-1).review_hash = `sha256:${"0".repeat(64)}`;
-        if (["review", "merged"].includes(hashTarget.status)) hashTarget.review_hash = `sha256:${"0".repeat(64)}`;
-        assert.equal(checkRunConsistency(runDir, hashDrift).ok, false, `${id} hash drift`);
-
-        const reviewPath = join(runDir, entry.review_ref);
-        const reviewBytes = readFileSync(reviewPath);
-        writeFileSync(reviewPath, "{}\n");
-        assert.equal(checkRunConsistency(runDir, run).ok, false, `${id} external review bytes`);
-        writeFileSync(reviewPath, reviewBytes);
-        assert.equal(checkRunConsistency(runDir, run).ok, true, `${id} restored baseline`);
+        const result = checkRunConsistency(runDir, run);
+        const targetIndex = run.slices.findIndex(({ id: sliceId }) => sliceId === "consumer");
+        const failed = result.checks.find((check) => check.name === `run.slices[${targetIndex}].attempt_reviews[0]`);
+        assert.equal(result.ok, false, id);
+        assert.equal(failed?.ok, false, `${id} must fail its v2 ownership authority check`);
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
