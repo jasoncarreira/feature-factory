@@ -2,7 +2,7 @@ import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -13,7 +13,7 @@ import { DURABLE_AUTHORITY_CATALOG, DURABLE_AUTHORITY_REQUIRED_RECORD_IDS, emitD
 import { hashFile, hashValue } from "../src/refs.js";
 import { completeIntegrationAmendmentReviewTaskDispatch, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, createPostPrState, hasInFlightHeartbeatWork, heartbeatOnce, inspectContinuationRouteSchema, prepareIntegrationAmendmentReviewTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionContinuationAdoption, transitionGateDecision, transitionIntegrationAmendment, transitionMergedSliceRepair, transitionPanelVerdicts, transitionPostPrState, transitionPrCreated, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
 import { checkRunConsistency, inspectIntegrationAmendmentInventory, integrationAmendmentId, validateIntegrationAmendment, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateRun } from "../src/validate.js";
-import { buildContinuation, cleanupRun, continueFactory, executeIntegrationAmendment, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startHeartbeat, stopHeartbeat } from "../src/factory.js";
+import { buildContinuation, cleanupRun, collectCleanupTargets, continueFactory, executeIntegrationAmendment, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startHeartbeat, stopHeartbeat } from "../src/factory.js";
 import plugin from "../src/plugin.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 
@@ -1026,6 +1026,37 @@ describe("generic integration amendment", () => {
         assert.equal(existsSync(fixture.runDir), true, name);
       } finally { cleanup(fixture); }
     }
+  });
+
+  it("previews merged amendment cleanup without deleting candidate worktrees, branches, or run authority", async () => {
+    const fixture = createFixture();
+    try {
+      await reachMerged(fixture);
+      const run = readRun(fixture);
+      const targets = collectCleanupTargets(run);
+      const runBytes = readFileSync(join(fixture.runDir, "run.json"));
+
+      const preview = await cleanupRun(RUN_ID, {
+        cwd: fixture.repo,
+        force: true,
+        dryRun: true,
+        now: NOW,
+      });
+
+      assert.equal(preview.dry_run, true);
+      assert.equal(preview.removed_run_dir, false);
+      assert.equal(preview.removed_worktrees.length > 0, true, "preview reports removable worktrees");
+      assert.equal(preview.deleted_branches.length > 0, true, "preview reports deletable branches");
+      const ownerWorktree = targets.worktrees.find(({ branch }) => branch === "owner-build").worktree;
+      assert.equal(preview.removed_worktrees.includes(realpathSync(ownerWorktree)), true);
+      assert.equal(preview.deleted_branches.includes("owner-build"), true);
+      assert.equal(existsSync(fixture.runDir), true);
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), runBytes);
+      for (const { branch, worktree } of targets.worktrees) {
+        assert.equal(existsSync(worktree), true, worktree);
+        assert.equal(git(fixture.repo, ["show-ref", "--verify", `refs/heads/${branch}`]).trim().length > 0, true, branch);
+      }
+    } finally { cleanup(fixture); }
   });
 
   it("fences heartbeat stop/tick/publication and generic semantic-writer commit races", async () => {

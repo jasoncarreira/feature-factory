@@ -3719,9 +3719,10 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
     run_dir: runDir,
   };
   const cleanupRemovedWorktrees = [];
+  const cleanupDeletedBranches = [];
   const assertCleanupAuthority = () => assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")), {
     cleanup_removed_worktrees: cleanupRemovedWorktrees,
-    cleanup_deleted_branches: result.deleted_branches,
+    cleanup_deleted_branches: cleanupDeletedBranches,
   });
 
   for (const worktree of targets.worktrees) {
@@ -3732,7 +3733,7 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     const removedCount = result.removed_worktrees.length;
     removeWorktree(repo, worktree, result, opts);
-    if (result.removed_worktrees.length > removedCount) cleanupRemovedWorktrees.push(resolve(worktree.worktree));
+    if (!opts.dryRun && result.removed_worktrees.length > removedCount) cleanupRemovedWorktrees.push(resolve(worktree.worktree));
   }
   for (const branch of targets.branches) {
     assertCleanupAuthority();
@@ -3740,7 +3741,9 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
     opts.cleanupHooks?.beforeBranchDelete?.({ runDir, branch });
     assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
+    const deletedCount = result.deleted_branches.length;
     deleteBranch(repo, branch, result, opts);
+    if (!opts.dryRun && result.deleted_branches.length > deletedCount) cleanupDeletedBranches.push(result.deleted_branches.at(-1));
   }
 
   if (!opts.dryRun) {

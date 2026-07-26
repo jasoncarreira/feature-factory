@@ -3379,6 +3379,35 @@ const ISSUE128_READERS = Object.freeze({
   D: ["validateRun", "checkRunConsistency", "named checked transition or consumer"],
 });
 
+const ISSUE128_PRODUCTION_TESTS = Object.freeze({
+  "slice-attempt-review-v2-reject": "test/run-state.test.js :: executes the closed issue-128 publication model and exact REJECT disclosure boundary",
+  "slice-attempt-review-v2-approve-empty": "test/validate.test.js :: requires durable ownership and derives effective paths only from the current APPROVE",
+  "slice-attempt-review-v2-approve-unowned": "test/run-state.test.js :: derives exact v2 authority for a disclosed content-only modification of a pre-existing unowned file",
+  "slice-attempt-review-v2-approve-sibling": "test/run-state.test.js :: freezes sole non-touching sibling authority and defers modifying merge until that owner merges unchanged",
+  "slice-modified-extension-unowned-v2": "test/run-state.test.js :: derives exact v2 authority for a disclosed content-only modification of a pre-existing unowned file",
+  "slice-modified-extension-sibling-v2": "test/run-state.test.js :: re-derives every persisted v2 sibling authority field in history and consistency readers",
+  "slice-running-with-v2-history": "test/run-state.test.js :: enforces slice lifecycle identity, attempts, rejected retries, blocking, and current sidecars",
+  "slice-review-v2-reject": "test/run-state.test.js :: publishes a complete failing REJECT ledger without granting merge authority",
+  "slice-review-v2-approve-empty": "test/validate.test.js :: requires durable ownership and derives effective paths only from the current APPROVE",
+  "slice-review-v2-approve-unowned": "test/run-state.test.js :: derives exact v2 authority for a disclosed content-only modification of a pre-existing unowned file",
+  "slice-review-v2-approve-sibling": "test/run-state.test.js :: freezes sole non-touching sibling authority and defers modifying merge until that owner merges unchanged",
+  "slice-merged-v2-approve-empty": "test/run-state.test.js :: records slice merge after transition-time preconditions",
+  "slice-merged-v2-unowned": "test/run-state.test.js :: derives exact v2 authority for a disclosed content-only modification of a pre-existing unowned file",
+  "slice-merged-v2-sibling": "test/run-state.test.js :: freezes sole non-touching sibling authority and defers modifying merge until that owner merges unchanged",
+  "slice-blocked-ordinary-v2-history": "test/run-state.test.js :: resets approved ratified ownership on review-to-blocked while rejecting caller-authored ownership",
+  "slice-blocked-nonconvergent-v2-history": "test/slice-attempt-budget.test.js :: terminalizes an attempted retry from the exact nonconvergent review into checked carry-forward",
+  "terminal-nonconvergence-v2-source-review": "test/slice-attempt-budget.test.js :: terminalizes an attempted retry from the exact nonconvergent review into checked carry-forward",
+  "continuation-carry-forward-accepted-slice-v2": "test/factory-continue.test.js :: preserves an ordinary merged A2/S2 row only with its same-binding merged owner",
+  "checkpoint-carry-forward-accepted-slice-v2": "test/factory-continue.test.js :: preserves a checkpoint-bound merged A2/S2 owner pair and rejects owner drift before publication",
+  "amendment-owner-snapshot-v2-history": "test/run-state.test.js :: denies every applicable owner U2 field drift in integration amendment consistency",
+});
+
+function issue128ProductionTests(id) {
+  const test = ISSUE128_PRODUCTION_TESTS[id];
+  if (!test) throw new TypeError(`issue #128 row '${id}' has no production consumer test`);
+  return [test];
+}
+
 function issue128Readers(...groups) {
   return [...new Set(groups.flatMap((group) => ISSUE128_READERS[group]))];
 }
@@ -3538,7 +3567,7 @@ function buildIssue128FinishAndDiscloseCatalog() {
   ];
   const rows = definitions.map(([id, authorityClass, variant, canonicalPath, shape, writer, readers, source]) => issue128Row({
     id, authorityClass, variant, canonicalPath, shape, writer, readers,
-    tests: ["test/durable-record-mutations.test.js :: issue128FinishAndDiscloseAuthorityOracle", "production validator baseline and mutation rejection"],
+    tests: issue128ProductionTests(id),
     source: structuredClone(source), externalSources: structuredClone(external), dispositions: issue128Dispositions({ ownRefs: !id.startsWith("slice-modified-extension-") }),
     facts: [
       { path: ["canonical_path"], expected: canonicalPath },
@@ -3555,7 +3584,7 @@ function buildIssue128FinishAndDiscloseCatalog() {
   };
   rows.push(issue128Row({
     id: "terminal-nonconvergence-v2-source-review", authorityClass: "run-envelope-terminal-result", variant: "terminal nonconvergence bound to latest A2", canonicalPath: "run.terminal_result.nonconvergence", shape: "N+A2", writer: "nonconvergence terminalization", readers: issue128Readers("N", "C", "D"),
-    tests: ["test/durable-record-mutations.test.js :: terminal nonconvergence v2 source review"], source: terminalSource, externalSources: structuredClone(external), dispositions: issue128Dispositions(), facts: [{ path: ["source", "slice_id"], expected: "consumer" }],
+    tests: issue128ProductionTests("terminal-nonconvergence-v2-source-review"), source: terminalSource, externalSources: structuredClone(external), dispositions: issue128Dispositions(), facts: [{ path: ["source", "slice_id"], expected: "consumer" }],
   }));
   for (const checkpoint of [false, true]) {
     const id = checkpoint ? "checkpoint-carry-forward-accepted-slice-v2" : "continuation-carry-forward-accepted-slice-v2";
@@ -3563,12 +3592,12 @@ function buildIssue128FinishAndDiscloseCatalog() {
     delete accepted.status;
     rows.push(issue128Row({
       id, authorityClass: "continuation-planning-draft-reuse", variant: checkpoint ? "checkpoint CF2 with A2/S2 owner pair" : "ordinary CF2 with A2/S2 owner pair", canonicalPath: "continuation.carry_forward.accepted_slices[i]", shape: "CF2+A2+S2", writer: checkpoint ? "checked checkpoint-bound factory continue" : "checked ordinary factory continue", readers: issue128Readers("C", "P", "D"),
-      tests: [`test/factory-continue.test.js :: ${checkpoint ? "checkpoint" : "ordinary"} v2 sibling carry-forward`], source: accepted, externalSources: { ...structuredClone(external), owner: issue128ExternalSources("owner") }, dispositions: issue128Dispositions(), facts: [{ path: ["source", "effective_paths"], expected: [ISSUE128_DECLARED_PATH, ISSUE128_SIBLING_PATH] }, { path: ["source", "attempt_reviews", 0, "modified_extensions", 0, "authority"], expected: "non-conflicting-sibling" }],
+      tests: issue128ProductionTests(id), source: accepted, externalSources: { ...structuredClone(external), owner: issue128ExternalSources("owner") }, dispositions: issue128Dispositions(), facts: [{ path: ["source", "effective_paths"], expected: [ISSUE128_DECLARED_PATH, ISSUE128_SIBLING_PATH] }, { path: ["source", "attempt_reviews", 0, "modified_extensions", 0, "authority"], expected: "non-conflicting-sibling" }],
     }));
   }
   rows.push(issue128Row({
     id: "amendment-owner-snapshot-v2-history", authorityClass: "pr79-merged-slice-repair", variant: "integration-amendment owner snapshot with A2/U2", canonicalPath: "run.integration_amendment.admission.owner", shape: "amendment-owner+A2+U2", writer: "checked integration-amendment admission", readers: issue128Readers("A", "P", "D"),
-    tests: ["test/durable-record-mutations.test.js :: amendment owner snapshot v2 history"], source: issue128Slice("merged", approveUnowned, { id: "owner", merged: true }), externalSources: { ...structuredClone(external), owner: issue128ExternalSources("owner") }, dispositions: issue128Dispositions(), facts: [{ path: ["source", "id"], expected: "owner" }, { path: ["source", "attempt_reviews", 0, "ownership_schema_version"], expected: 2 }],
+    tests: issue128ProductionTests("amendment-owner-snapshot-v2-history"), source: issue128Slice("merged", approveUnowned, { id: "owner", merged: true }), externalSources: { ...structuredClone(external), owner: issue128ExternalSources("owner") }, dispositions: issue128Dispositions(), facts: [{ path: ["source", "id"], expected: "owner" }, { path: ["source", "attempt_reviews", 0, "ownership_schema_version"], expected: 2 }],
   }));
   return rows;
 }
@@ -3578,26 +3607,26 @@ export const ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG = deepFreeze(buildIs
 // These independent digests deliberately do not derive from the catalog during
 // validation. Update them only after reviewing the complete oracle snapshot.
 const ISSUE128_FINISH_AND_DISCLOSE_ORACLE_DIGESTS = Object.freeze([
-  ["slice-attempt-review-v2-reject", "f182d809021b50a5a31e79230f7928887dc9f356532d87ef70081fa07b817c81", "2db41ef3bc51d037f6784b725d1b5abc9a908dd9c1a1dac80e980f1e5b927a8a", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-attempt-review-v2-approve-empty", "a3ce362bca4655c4c84400647a59007b374c3bd4fd3feab167c4b22de7a43856", "cd2cbc4de09c181ce9d48238b0d56b1eacc7d9d22f1cb14b7fc5ec59449f4906", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-attempt-review-v2-approve-unowned", "738882b4ee604fee1473ea56b28956c23528ad5d2207608338a0fff9679cd97c", "1de0899cbb2741c9ea7d6d2a5c0a611e81c55e492303bc8a9cf02a856782226a", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-attempt-review-v2-approve-sibling", "90a983ea27678379c26f2f6795a2998ad575db8a22556aa79ddf58dca0b52211", "3491709d12932ce903647f1dc5a14c1e71012dfac823ca84fdee7b28fb252b57", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-modified-extension-unowned-v2", "fda6c96dc5e1ffef891aad9ca9afc75e8471ae4db19a5bae6636b56a3b3d45d1", "aeadfdbb1379b3791699122dad2325aaff1ea712339cd2b4dd8b2168555a3238", "b5ec5a73b12a5945e3e0ef81e757d3631f8119a1a6a30be0b925eac6ffb8d8d0"],
-  ["slice-modified-extension-sibling-v2", "4f13840a7edede4cf4c09119472e1de61baeb57ab086f7012effecfefb1654ff", "262e51d70b65786ab718a2ef1df956198cdc2e052970d488a1176d7dd0799c8a", "b5ec5a73b12a5945e3e0ef81e757d3631f8119a1a6a30be0b925eac6ffb8d8d0"],
-  ["slice-running-with-v2-history", "edb7dca7444285964e5954b50aaf68f5b38869fc129ca35dcb9da80e1efa56cd", "f79c9d6a5b42fc3c953ee96b75c00232a26610217128518c26ad7b9f7455b497", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-review-v2-reject", "43a6f633f7f8dcae9bc6fb2af8556f00c7267385681b3c4c990773a0998d4609", "8f1369cd8e75c72d53258472b7e09907b10424d2974ae18e417d9b064d9c6832", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-review-v2-approve-empty", "d5370348a69225d89dfbe8603b5ef37b8c8964f7eb9780a32714cb37a1bd9fc1", "d854ebb4b6903f15bd243ec17caca963cdfb8c49b319052a7e1ea9c982a36d54", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-review-v2-approve-unowned", "b4cba9a9861174c1b1fc03904784a0251f244270474372dc0b676814a219cf70", "9ae5b8b73c6869af900b1488e22c723a04c535d7783b482503869db680db66c7", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-review-v2-approve-sibling", "cf73645847acc86e4cf3185595dfee7ffad6706e7c92495e4e02b93530db734d", "e73ed4e752784713d8ac961b1cf7f425dd9581a562517c8c46fb7d30ee4c9c88", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-merged-v2-approve-empty", "2f5bd2086873acda256b243850633e6c7c22b524fb7774d98072467b7796a9c6", "0d80d408629cef4889c78c70cac65c41e7a691c24c4aed4189ecbc9da4246fbe", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-merged-v2-unowned", "993b8b079767fbfb8f29c1c0a8264bf3318cd637a2d2900bc1420c8981f515e7", "ec2292836ce42b17725a250596a211ba76f6b4281205063480bd568e133bfcee", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-merged-v2-sibling", "9a81bc713627fa3a184be6f0abd43bb55ef26fcc06e3c8dfd9f511734b2cc7d2", "83adcf7de6882a26d1c03f80c2555c3c636da851fc922c329b274b33c56c056a", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-blocked-ordinary-v2-history", "87a68ff2993d28d0e1adbfb93fee12aec94e13bab1d9c18bdd9c513774a16ce3", "638b66b02e83685c608e4c1aad11d9560f2c50e7b570dc4e9a3a93de93effd82", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-blocked-nonconvergent-v2-history", "7101f6a0ed28ca50fb2297b9eead349f5bc83e4c9fa4f3e281c78770d2614bc0", "6e588cc8e215509415f5195ffecbb04492522db235c3789f84c4318999285f8e", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["terminal-nonconvergence-v2-source-review", "1343f7c995fc5b347915766724c723a605c30ae7fe5b8be8df08cf5e98516b69", "1bb6f389b5f15e7c004ac1223967741cc3e5b9724f7e2a945c54241e7315ff94", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["continuation-carry-forward-accepted-slice-v2", "e23ec115854678b0096d3e1c49ff0a6d3f8a5a11f26de0d9eb16f28c92e60d7e", "69597345abd36c54f8480efbb64820aae4f7c1a5842ac6841ab3e1f846b247e6", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["checkpoint-carry-forward-accepted-slice-v2", "8ae199e16ffc232e85fb919bc12adfc27eab403d6b54d7c50571879a76d532ea", "69597345abd36c54f8480efbb64820aae4f7c1a5842ac6841ab3e1f846b247e6", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["amendment-owner-snapshot-v2-history", "d1d61b859d9dd86fb76b4f90a7242977e29d4a4299a861a1d36b0d855f92b361", "ffdf7bba06ff789c2cd8e73897e7a3e2395c2af3fca6690c33343165e14a0746", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-attempt-review-v2-reject", "37d833621d5d3063036324443b2739a792727ed3f604c376816bd959fa40a077", "2db41ef3bc51d037f6784b725d1b5abc9a908dd9c1a1dac80e980f1e5b927a8a", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-attempt-review-v2-approve-empty", "1112bf934e4b4bb34047f0ab4dd22478ef8b8557d06fb742cd97af6fd13f8019", "cd2cbc4de09c181ce9d48238b0d56b1eacc7d9d22f1cb14b7fc5ec59449f4906", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-attempt-review-v2-approve-unowned", "69616301f1cfb17cdfa788314ffe849a77e8b5842c7123acb299fb2be0670eb5", "1de0899cbb2741c9ea7d6d2a5c0a611e81c55e492303bc8a9cf02a856782226a", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-attempt-review-v2-approve-sibling", "23729b362ae4fb9478a7bd7653154b9d8fd75c4b4293b1a3fdaa026eca73bb0a", "3491709d12932ce903647f1dc5a14c1e71012dfac823ca84fdee7b28fb252b57", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-modified-extension-unowned-v2", "1f74f6c9d862b3385b3bf9cae7c0a132272a0bd9ffdb25f58ba8675cc0cb90aa", "aeadfdbb1379b3791699122dad2325aaff1ea712339cd2b4dd8b2168555a3238", "b5ec5a73b12a5945e3e0ef81e757d3631f8119a1a6a30be0b925eac6ffb8d8d0"],
+  ["slice-modified-extension-sibling-v2", "fa3a6f2664f8c5b8a4bd9ab9f85d5309331002c1c30b5773651f5363bcfa5ddf", "262e51d70b65786ab718a2ef1df956198cdc2e052970d488a1176d7dd0799c8a", "b5ec5a73b12a5945e3e0ef81e757d3631f8119a1a6a30be0b925eac6ffb8d8d0"],
+  ["slice-running-with-v2-history", "89068e2d1e883882f9b542a61a3727c625d7ab7ecc3dddc80e692572dc32413d", "f79c9d6a5b42fc3c953ee96b75c00232a26610217128518c26ad7b9f7455b497", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-review-v2-reject", "102310055c7fa2abc6b2e46890e793f05bdccce62ac2235c0a6995636e308730", "8f1369cd8e75c72d53258472b7e09907b10424d2974ae18e417d9b064d9c6832", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-review-v2-approve-empty", "b42a7984c3b8ec55b747bcd75bcab997d1bec34294397eb7d14283758617be5f", "d854ebb4b6903f15bd243ec17caca963cdfb8c49b319052a7e1ea9c982a36d54", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-review-v2-approve-unowned", "90f74854bdc2996b98abcd5cdc75850110acc33093e8220e37c3b8f5fe4de02a", "9ae5b8b73c6869af900b1488e22c723a04c535d7783b482503869db680db66c7", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-review-v2-approve-sibling", "79ea82fb8dd87777449788fa5fd3d64a07f8c3fe6922ca13ad0155a814065dab", "e73ed4e752784713d8ac961b1cf7f425dd9581a562517c8c46fb7d30ee4c9c88", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-merged-v2-approve-empty", "2176dd79c4151df78057f82f630d3d22fef75dba61f9d018b195040c8de6dadc", "0d80d408629cef4889c78c70cac65c41e7a691c24c4aed4189ecbc9da4246fbe", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-merged-v2-unowned", "e82025b07582aedf85cfcb37851c695c83ce4ab6bab4f5de7d2b992b3c5b9133", "ec2292836ce42b17725a250596a211ba76f6b4281205063480bd568e133bfcee", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-merged-v2-sibling", "0e39f7947cef51f314dc0821d2753123deabe48cb8f59f7a07b473fa56b707ba", "83adcf7de6882a26d1c03f80c2555c3c636da851fc922c329b274b33c56c056a", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-blocked-ordinary-v2-history", "5ba31480ba4732fd6056c4f7eef5c1de0b0b31f2172f498a5bc9cdcfeb7b6497", "638b66b02e83685c608e4c1aad11d9560f2c50e7b570dc4e9a3a93de93effd82", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-blocked-nonconvergent-v2-history", "880c51c472c9d996172f4ebbd304e9c21127ff6beb0aeafbd9d15d2499a1535e", "6e588cc8e215509415f5195ffecbb04492522db235c3789f84c4318999285f8e", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["terminal-nonconvergence-v2-source-review", "b02c8ee1d2a58e1a86b6bdb7831f0973d95eb5b3213335122a09cb3dc8281053", "1bb6f389b5f15e7c004ac1223967741cc3e5b9724f7e2a945c54241e7315ff94", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["continuation-carry-forward-accepted-slice-v2", "6dc73d0ad5b6473b4ed0c4a94967383729a5aacdd2f3006f97d72d38f2bf6a1a", "69597345abd36c54f8480efbb64820aae4f7c1a5842ac6841ab3e1f846b247e6", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["checkpoint-carry-forward-accepted-slice-v2", "7bb9fdaeaa09c62c31366bcb64108db1b24fad3a3283b9d8ca015cf733bd8b51", "69597345abd36c54f8480efbb64820aae4f7c1a5842ac6841ab3e1f846b247e6", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["amendment-owner-snapshot-v2-history", "bc3058f7fd9bee9165de32300fddcd12e12e54fa864efb95ca4b5c536eaa3e21", "ffdf7bba06ff789c2cd8e73897e7a3e2395c2af3fca6690c33343165e14a0746", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
 ]);
 
 function issue128OracleSnapshot(row) {

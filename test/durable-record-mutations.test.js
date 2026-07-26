@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "./helpers/git-fixture.js";
 import { createReviewRecord } from "./helpers/review-record-fixture.js";
 import { publishSyntheticV2Parent } from "./helpers/v2-parent-fixture.js";
@@ -79,6 +80,18 @@ const AUTHORITY_CLASS_IDS = Object.freeze([
 ]);
 const CLAIM_NOW = "2026-07-16T12:00:00.000Z";
 const CLAIM_NONCE = "123e4567-e89b-42d3-a456-426614174000";
+const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+const ISSUE128_EMPTY_AUTHORITY_RECORD_IDS = Object.freeze([
+  "slice-attempt-review-v2-reject",
+  "slice-attempt-review-v2-approve-empty",
+  "slice-running-with-v2-history",
+  "slice-review-v2-reject",
+  "slice-review-v2-approve-empty",
+  "slice-merged-v2-approve-empty",
+  "slice-blocked-ordinary-v2-history",
+  "slice-blocked-nonconvergent-v2-history",
+  "terminal-nonconvergence-v2-source-review",
+]);
 
 const TARGET_FIELDS_BY_FAMILY = Object.freeze({
   "missing-key": ["path", "label"],
@@ -2825,6 +2838,13 @@ describe("issue128FinishAndDiscloseAuthorityOracle", () => {
       assert.equal(row.readers.length > 0, true, `${row.id} must bind complete production readers`);
       assert.equal(row.tests.length > 0, true, `${row.id} must bind named tests`);
       assert.equal(Object.keys(row.external_sources).length > 0, true, `${row.id} must bind external source boundaries`);
+      for (const testRef of row.tests) {
+        const match = /^(test\/[^:]+) :: (.+)$/u.exec(testRef);
+        assert.ok(match, `${row.id} must use an exact test-file and title reference`);
+        const [, relativePath, title] = match;
+        const source = readFileSync(join(TEST_DIR, relativePath.slice("test/".length)), "utf8");
+        assert.equal(source.includes(`it("${title}"`), true, `${row.id} must name an existing exact production test title`);
+      }
     }
   });
 
@@ -2837,6 +2857,42 @@ describe("issue128FinishAndDiscloseAuthorityOracle", () => {
       validated.push(row.id);
     }
     assert.deepEqual(validated, ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS.filter((id) => !id.includes("carry-forward-accepted-slice")));
+  });
+
+  it("materializes exact empty-v2 sidecars and rejects ref, hash, and external-byte drift through production consistency", () => {
+    const root = mkdtempSync(join(tmpdir(), "issue128-empty-authority-"));
+    try {
+      for (const id of ISSUE128_EMPTY_AUTHORITY_RECORD_IDS) {
+        const row = ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.find((candidate) => candidate.id === id);
+        const runDir = join(root, id);
+        mkdirSync(runDir, { recursive: true });
+        const run = materializeIssue128EmptyAuthority(runDir, createIssue128DurableRunBaseline(row));
+        assert.equal(checkRunConsistency(runDir, run).ok, true, `${id} baseline`);
+
+        const target = run.slices.find(({ id: sliceId }) => sliceId === "consumer");
+        const entry = target.attempt_reviews.at(-1);
+        const refDrift = structuredClone(run);
+        const refTarget = refDrift.slices.find(({ id: sliceId }) => sliceId === "consumer");
+        refTarget.attempt_reviews.at(-1).review_ref = "reviews/missing.json";
+        if (["review", "merged"].includes(refTarget.status)) refTarget.review_ref = "reviews/missing.json";
+        assert.equal(checkRunConsistency(runDir, refDrift).ok, false, `${id} ref drift`);
+
+        const hashDrift = structuredClone(run);
+        const hashTarget = hashDrift.slices.find(({ id: sliceId }) => sliceId === "consumer");
+        hashTarget.attempt_reviews.at(-1).review_hash = `sha256:${"0".repeat(64)}`;
+        if (["review", "merged"].includes(hashTarget.status)) hashTarget.review_hash = `sha256:${"0".repeat(64)}`;
+        assert.equal(checkRunConsistency(runDir, hashDrift).ok, false, `${id} hash drift`);
+
+        const reviewPath = join(runDir, entry.review_ref);
+        const reviewBytes = readFileSync(reviewPath);
+        writeFileSync(reviewPath, "{}\n");
+        assert.equal(checkRunConsistency(runDir, run).ok, false, `${id} external review bytes`);
+        writeFileSync(reviewPath, reviewBytes);
+        assert.equal(checkRunConsistency(runDir, run).ok, true, `${id} restored baseline`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("rejects omission, substitution, relocation, contradiction, synthetic keys, source loss, disposition substitution, and target mutation without changing the oracle", () => {
@@ -2859,6 +2915,70 @@ describe("issue128FinishAndDiscloseAuthorityOracle", () => {
     assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).some(({ id }) => id === ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS[0]), false, "the pre-existing global catalog remains byte-for-byte independent");
   });
 });
+
+function materializeIssue128EmptyAuthority(runDir, run) {
+  for (const slice of run.slices) {
+    for (const entry of slice.attempt_reviews || []) {
+      entry.evidence_ref = `evidence/${slice.id}.attempt-${entry.attempt}.json`;
+      entry.review_ref = `reviews/${slice.id}.attempt-${entry.attempt}.json`;
+      const nonconvergent = entry.convergence === "nonconvergent";
+      const rejected = entry.verdict === "REJECT";
+      const requiredFixes = rejected ? [nonconvergent ? "Replace the nonconvergent approach" : "Repair the rejected implementation"] : [];
+      const evidence = {
+        subject: slice.id,
+        attempt: entry.attempt,
+        status: "pass",
+        review_ready: true,
+        head_sha: entry.reviewed_commit,
+        ownership_disclosure: [],
+      };
+      const review = {
+        subject: slice.id,
+        attempt: entry.attempt,
+        reviewed_commit: entry.reviewed_commit,
+        verdict: entry.verdict,
+        convergence: entry.convergence,
+        late_discovery_strike: entry.late_discovery_strike,
+        remaining_fix_count: requiredFixes.length,
+        required_fixes: requiredFixes,
+        ownership_ratification: { schema_version: 2, kind: "factory-derived-modified-extension" },
+        remediation_context: {
+          schema_version: 2,
+          fixes: requiredFixes.map((_fix, required_fix_index) => ({
+            required_fix_index,
+            classification: nonconvergent ? "nonconvergent" : "narrow-correction",
+            scope_effect: "in-lane",
+            likely_paths: [`src/${slice.id}/fix.js`],
+            fix_owner: slice.id,
+          })),
+        },
+      };
+      mkdirSync(dirname(join(runDir, entry.evidence_ref)), { recursive: true });
+      mkdirSync(dirname(join(runDir, entry.review_ref)), { recursive: true });
+      writeFileSync(join(runDir, entry.evidence_ref), `${JSON.stringify(evidence, null, 2)}\n`);
+      writeFileSync(join(runDir, entry.review_ref), `${JSON.stringify(review, null, 2)}\n`);
+      entry.evidence_hash = hashFileBytes(join(runDir, entry.evidence_ref));
+      entry.review_hash = hashFileBytes(join(runDir, entry.review_ref));
+    }
+    if (["review", "merged"].includes(slice.status)) {
+      const current = slice.attempt_reviews.at(-1);
+      slice.evidence_ref = current.evidence_ref;
+      slice.evidence_hash = current.evidence_hash;
+      slice.review_ref = current.review_ref;
+      slice.review_hash = current.review_hash;
+      slice.reviewed_commit = current.reviewed_commit;
+    }
+  }
+  const nonconvergent = run.terminal_result?.nonconvergence;
+  if (nonconvergent) {
+    const current = run.slices.find(({ id }) => id === nonconvergent.slice_id).attempt_reviews.at(-1);
+    nonconvergent.source_review = structuredClone(current);
+    const reviewIndex = nonconvergent.continuation.args.indexOf("--review") + 1;
+    nonconvergent.continuation.args[reviewIndex] = current.review_ref;
+  }
+  validateRun(run);
+  return run;
+}
 
 async function consumeB0M3Mutation(root, record, mutationCase) {
   const safeName = mutationCase.name.replaceAll(/[^a-z0-9]+/giu, "-");
