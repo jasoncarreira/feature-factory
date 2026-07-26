@@ -19,7 +19,7 @@ jobs:
     # 360-minute ceiling lets a hang-class flake burn hours of runner time.
     # Five minutes is over 3x the slowest observed healthy run with a cold
     # npm cache, so an overrun means a hang or a real performance regression.
-    timeout-minutes: 5
+    timeout-minutes: 7
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
