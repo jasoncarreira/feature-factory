@@ -619,11 +619,15 @@ describe("TUI factory scanner", () => {
     }
   });
 
-  it("TUI-P10 projects an active PR fence ahead of approved pre-PR state", () => {
+  it("TUI-P10 distinguishes active PR creation from a legacy fence that needs reconciliation", () => {
     assert.equal(projectedCurrent({
       gates: { pre_pr: { status: "approved" } },
       steering: { pr_fence: prFence() },
     }, "tui-p10-pr-fence"), "PR creation running");
+    assert.equal(projectedCurrent({
+      gates: { pre_pr: { status: "approved" } },
+      steering: { pr_fence: legacyPrFence() },
+    }, "tui-p10-legacy-pr-fence"), "PR creation needs reconciliation");
   });
 
   it("TUI-P11 projects legacy, disabled-policy, and awaiting-start PR authority", () => {
@@ -734,7 +738,7 @@ describe("TUI factory scanner", () => {
     const partialDispatch = specialDispatch("merged-slice-repair", { closed: true });
     delete partialDispatch.closure_hash;
     const partialFence = prFence();
-    partialFence.operation_id = `ffpr-v1-${"e".repeat(64)}`;
+    delete partialFence.repository;
     const variants = [
       ["unknown post-PR phase", { post_pr: postPrFixture("future-phase", 0) }],
       ["invalid post-PR attempt", { post_pr: postPrFixture("observing", -1) }],
@@ -1379,7 +1383,20 @@ function prFence() {
     generation: 0,
     state_hash: `sha256:${"d".repeat(64)}`,
     created_at: "2026-07-05T00:00:00.000Z",
+    operation_id: `ffpr-v1-${"a".repeat(64)}`,
+    repository: "example/repo",
+    head_ref: "feature",
+    head_sha: "b".repeat(40),
+    base_ref: "main",
+    base_sha: "c".repeat(40),
+    draft: false,
   };
+}
+
+function legacyPrFence() {
+  const fence = prFence();
+  for (const key of ["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]) delete fence[key];
+  return fence;
 }
 
 function combineProjectionInputs(...inputs) {

@@ -472,6 +472,7 @@ function projectPrFence(run) {
     || typeof fence.state_hash !== "string" || fence.state_hash.length === 0 || typeof fence.created_at !== "string" || fence.created_at.length === 0) return UNKNOWN_WORKFLOW;
   const identityCount = PR_FENCE_IDENTITY_KEYS.filter((key) => Object.hasOwn(fence, key)).length;
   if (identityCount !== 0 && identityCount !== PR_FENCE_IDENTITY_KEYS.length) return UNKNOWN_WORKFLOW;
+  if (identityCount === 0) return "PR creation needs reconciliation";
   if (identityCount === PR_FENCE_IDENTITY_KEYS.length) {
     const stringKeys = PR_FENCE_IDENTITY_KEYS.filter((key) => key !== "draft");
     if (!stringKeys.every((key) => typeof fence[key] === "string" && fence[key].length > 0) || typeof fence.draft !== "boolean") return UNKNOWN_WORKFLOW;
