@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { factoryRoots, findFactoryRoots, projectTuiDiagnosticData, readRuns, selectVisibleRuns } from "../src/tui-data.js";
+import { hashValue } from "../src/refs.js";
 
 describe("sidebar run visibility", () => {
   const run = (run_id, status, diagnostic_status = "ok") => ({ run_id, status, diagnostic_status });
@@ -427,7 +428,7 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
-  it("infers pre-PR panel progress after test-verifier acceptance", () => {
+  it("projects authoritative panel state without inferring activity from accepted tests", () => {
     const repo = tempDir();
     writeRun(repo, "panel-run", {
       status: "running",
@@ -460,9 +461,351 @@ describe("TUI factory scanner", () => {
     const securityRun = runs.find((run) => run.run_id === "security-run");
     const remediationRun = runs.find((run) => run.run_id === "remediation-run");
 
-    assert.equal(panelRun.current, "pre-PR panel running");
-    assert.equal(securityRun.current, "security-reviewer running");
-    assert.equal(remediationRun.current, "panel remediation running");
+    assert.equal(panelRun.current, null);
+    assert.equal(securityRun.current, "security-reviewer pending");
+    assert.equal(remediationRun.current, "panel remediation pending");
+    cleanup(repo);
+  });
+
+  it("TUI-P1 projects authoritative story intake from the running step", () => {
+    assert.equal(projectedCurrent({
+      steps: [{ agent: "story-reader", status: "running", attempts: 1 }],
+    }), "story-reader running a1");
+  });
+
+  it("TUI-P2 orders claim-bound running, legacy running, and review slices", () => {
+    const variants = [
+      {
+        name: "claim-bound running outranks earlier legacy running and review rows",
+        slices: [
+          { id: "legacy-running", status: "running", attempts: 1 },
+          { id: "review-row", status: "review", attempts: 3 },
+          claimBoundSlice("claim-bound", 2),
+        ],
+        expected: "claim-bound running a2",
+      },
+      { name: "legacy running remains displayable", slices: [{ id: "legacy-running", status: "running", attempts: 1 }], expected: "legacy-running running a1" },
+      { name: "review remains displayable", slices: [{ id: "review-row", status: "review", attempts: 2 }], expected: "review-row review a2" },
+    ];
+    for (const variant of variants) {
+      assert.equal(projectedCurrent({
+        slices: variant.slices,
+        steps: [{ agent: "story-reader", status: "running", attempts: 1 }],
+      }, `tui-p2-${variant.name.replaceAll(" ", "-")}`), variant.expected, variant.name);
+    }
+  });
+
+  it("TUI-P3 maps every open and closed build-oriented special dispatch", () => {
+    const labels = {
+      "merged-slice-repair": ["merged-slice repair running", "merged-slice repair awaiting integration"],
+      "integration-amendment": ["integration amendment running", "integration amendment awaiting integration"],
+      "integration-conflict": ["integration conflict repair running", "integration conflict repair awaiting integration"],
+    };
+    for (const [route, expected] of Object.entries(labels)) {
+      for (const closed of [false, true]) {
+        assert.equal(projectedCurrent({
+          special_builder_dispatch: specialDispatch(route, { closed }),
+          slices: [{ id: "stale-slice", status: "running", attempts: 1 }],
+        }, `tui-p3-${route}-${closed ? "closed" : "open"}`), expected[Number(closed)]);
+      }
+    }
+  });
+
+  it("TUI-P4 lets an active checked whole-story claim outrank a simultaneous story-reader", () => {
+    const runId = "tui-p4-active-claim";
+    assert.equal(projectedCurrent({
+      steps: [
+        { agent: "story-reader", status: "running", attempts: 1 },
+        checkedExecutionStep(runId, { state: "active", attempt: 2 }),
+      ],
+    }, runId), "whole-story tests running a2");
+  });
+
+  it("TUI-P5 keeps active execution stable across receipt publication and maps every claim result", () => {
+    const repo = tempDir();
+    const runId = "tui-p5-receipt-flight";
+    const input = {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      gates: {},
+      steps: [
+        { agent: "story-reader", status: "running", attempts: 1 },
+        checkedExecutionStep(runId, { state: "active", attempt: 2 }),
+      ],
+    };
+    writeRun(repo, runId, input);
+    const current = () => readRuns(findFactoryRoots(repo), { diagnostics: false })[0].current;
+    assert.equal(current(), "whole-story tests running a2");
+    const evidenceDir = join(repo, ".opencode", "factory", runId, "evidence");
+    const receipt = join(evidenceDir, "test-verifier.attempt-2.json");
+    mkdirSync(evidenceDir, { recursive: true });
+    writeFileSync(receipt, "receipt secret bytes that projection must not read\n");
+    assert.equal(current(), "whole-story tests running a2");
+    cleanup(repo);
+
+    const variants = [
+      { state: "unknown", expected: "whole-story tests needs reconciliation a2" },
+      { state: "completed", status: "pass", expected: "whole-story tests passed a2" },
+      { state: "completed", status: "fail", expected: "whole-story tests failed a2" },
+    ];
+    for (const variant of variants) {
+      const id = `tui-p5-${variant.state}-${variant.status || "none"}`;
+      assert.equal(projectedCurrent({
+        steps: [
+          { agent: "story-reader", status: "running", attempts: 1 },
+          checkedExecutionStep(id, { ...variant, attempt: 2 }),
+        ],
+      }, id), variant.expected);
+    }
+  });
+
+  it("TUI-P6 projects named active panel work ahead of completed verification", () => {
+    for (const [agent, attempt] of [["implementation-validator", 2], ["security-reviewer", 3]]) {
+      const runId = `tui-p6-${agent}`;
+      assert.equal(projectedCurrent({
+        steps: [
+          { agent: "story-reader", status: "running", attempts: 1 },
+          checkedExecutionStep(runId, { state: "completed", status: "pass", attempt: 1 }),
+          { agent, status: "running", attempts: attempt },
+        ],
+      }, runId), `${agent} running a${attempt}`);
+    }
+  });
+
+  it("TUI-P7 covers the complete validator/security verdict partition and legacy partial rows", () => {
+    const validators = ["GO", "GO-WITH-NITS", "NO-GO"];
+    const securities = ["PASS", "BLOCK"];
+    for (const validator of validators) {
+      for (const security of securities) {
+        const expected = validator !== "NO-GO" && security === "PASS" ? "panels passed" : "panel remediation pending";
+        assert.equal(projectedCurrent({
+          validator: { verdict: validator },
+          security_review: { verdict: security },
+          steps: [{ agent: "implementation-validator", status: "running", attempts: 4 }],
+        }, `tui-p7-${validator.toLowerCase()}-${security.toLowerCase()}`), expected);
+      }
+    }
+    assert.equal(projectedCurrent({ validator: { verdict: "GO" } }, "tui-p7-validator-only"), "security-reviewer pending");
+    assert.equal(projectedCurrent({ security_review: { verdict: "PASS" } }, "tui-p7-security-only"), "implementation-validator pending");
+  });
+
+  it("TUI-P8 distinguishes open and closed panel remediation authority", () => {
+    for (const [closed, expected] of [
+      [false, "panel remediation running"],
+      [true, "panel remediation awaiting panel publication"],
+    ]) {
+      assert.equal(projectedCurrent({
+        special_builder_dispatch: specialDispatch("panel-remediation", { closed }),
+        validator: { verdict: "NO-GO" },
+        security_review: { verdict: "BLOCK" },
+      }, `tui-p8-${closed ? "closed" : "open"}`), expected);
+    }
+  });
+
+  it("TUI-P9 maps every pre-PR gate status ahead of retained panels and steps", () => {
+    const variants = {
+      pending: "pre-PR approval pending",
+      approved: "pre-PR approved",
+      changes_requested: "pre-PR changes requested",
+      stopped: "pre-PR stopped",
+    };
+    for (const [status, expected] of Object.entries(variants)) {
+      assert.equal(projectedCurrent({
+        gates: { pre_pr: { status } },
+        validator: { verdict: "GO" },
+        security_review: { verdict: "PASS" },
+        steps: [{ agent: "story-reader", status: "running", attempts: 1 }],
+      }, `tui-p9-${status}`), expected);
+    }
+  });
+
+  it("TUI-P10 distinguishes active PR creation from a legacy fence that needs reconciliation", () => {
+    assert.equal(projectedCurrent({
+      gates: { pre_pr: { status: "approved" } },
+      steering: { pr_fence: prFence() },
+    }, "tui-p10-pr-fence"), "PR creation running");
+    assert.equal(projectedCurrent({
+      gates: { pre_pr: { status: "approved" } },
+      steering: { pr_fence: legacyPrFence() },
+    }, "tui-p10-legacy-pr-fence"), "PR creation needs reconciliation");
+  });
+
+  it("TUI-P11 projects legacy, disabled-policy, and awaiting-start PR authority", () => {
+    const variants = [
+      { name: "legacy", input: { pr_url: "https://github.com/example/repo/pull/1" }, expected: "PR created" },
+      { name: "disabled", input: { post_pr: postPrFixture("disabled", 0, { pr_operation: prOperation() }) }, expected: "PR created" },
+      { name: "awaiting", input: { post_pr: postPrFixture("awaiting-pr", 0, { pr_operation: prOperation() }) }, expected: "PR created; post-PR awaiting start" },
+    ];
+    for (const variant of variants) assert.equal(projectedCurrent(variant.input, `tui-p11-${variant.name}`), variant.expected);
+  });
+
+  it("TUI-P12 keeps dormant disabled and awaiting post-PR state below earlier work", () => {
+    for (const phase of ["disabled", "awaiting-pr"]) {
+      assert.equal(projectedCurrent({
+        post_pr: postPrFixture(phase, 0),
+        steps: [{ agent: "story-reader", status: "running", attempts: 1 }],
+      }, `tui-p12-${phase}`), "story-reader running a1");
+    }
+  });
+
+  it("TUI-P13 maps every active and terminal post-PR phase at zero and positive attempts", () => {
+    const labels = {
+      observing: "post-PR checks running",
+      "failure-recording": "post-PR failure recording",
+      "remediation-planned": "post-PR remediation planned",
+      "remediation-running": "post-PR remediation running",
+      "changes-observed": "post-PR changes observed",
+      committed: "post-PR remediation committed",
+      revalidating: "post-PR revalidation running",
+      validated: "post-PR revalidation passed",
+      "push-pending": "post-PR push pending",
+      "remote-confirmed": "post-PR remote confirmed",
+      succeeded: "post-PR succeeded",
+      blocked: "post-PR blocked",
+      "needs-human": "post-PR needs human",
+    };
+    for (const [phase, label] of Object.entries(labels)) {
+      for (const attempt of [0, 2]) {
+        const status = phase === "succeeded" ? "completed" : ["blocked", "needs-human"].includes(phase) ? phase : "running";
+        assert.equal(projectedCurrent({
+          status,
+          post_pr: postPrFixture(phase, attempt),
+          pr_url: "https://github.com/example/repo/pull/1",
+          steps: [{ agent: "story-reader", status: "running", attempts: 1 }],
+        }, `tui-p13-${phase}-${attempt}`), `${label}${attempt > 0 ? ` a${attempt}` : ""}`);
+      }
+    }
+  });
+
+  it("TUI-P14 enforces adjacent precedence and terminal post-PR over a complete overlap", () => {
+    const runId = "tui-p14-adjacent";
+    const tiers = [
+      { name: "active-post-pr", input: { post_pr: postPrFixture("observing", 1), pr_url: "https://github.com/example/repo/pull/1" }, expected: "post-PR checks running a1" },
+      { name: "pr-created", input: { pr_url: "https://github.com/example/repo/pull/1" }, expected: "PR created" },
+      { name: "pr-fence", input: { steering: { pr_fence: prFence() } }, expected: "PR creation running" },
+      { name: "pre-pr", input: { gates: { pre_pr: { status: "approved" } } }, expected: "pre-PR approved" },
+      { name: "panel", input: { validator: { verdict: "GO" }, security_review: { verdict: "PASS" } }, expected: "panels passed" },
+      { name: "checked-tests", input: { steps: [checkedExecutionStep(runId, { state: "completed", status: "pass", attempt: 1 })] }, expected: "whole-story tests passed a1" },
+      { name: "build-special", input: { special_builder_dispatch: specialDispatch("merged-slice-repair") }, expected: "merged-slice repair running" },
+      { name: "active-slice", input: { slices: [{ id: "active-slice", status: "running", attempts: 1 }] }, expected: "active-slice running a1" },
+      { name: "running-step", input: { steps: [{ agent: "story-reader", status: "running", attempts: 1 }] }, expected: "story-reader running a1" },
+      { name: "blocked-slice", input: { slices: [{ id: "blocked-slice", status: "blocked", attempts: 1 }] }, expected: "blocked-slice blocked a1" },
+      { name: "pending-step", input: { steps: [{ agent: "next-step", status: "pending", attempts: 0 }] }, expected: "next-step pending" },
+    ];
+    for (let index = 0; index < tiers.length - 1; index += 1) {
+      const higher = tiers[index];
+      const lower = tiers[index + 1];
+      assert.equal(projectedCurrent(combineProjectionInputs(higher.input, lower.input), runId), higher.expected, `${higher.name} must outrank ${lower.name}`);
+    }
+
+    assert.equal(projectedCurrent(combineProjectionInputs(
+      { status: "completed", post_pr: postPrFixture("succeeded", 2) },
+      ...tiers.slice(1).map((tier) => tier.input),
+    ), runId), "post-PR succeeded a2");
+
+    assert.equal(projectedCurrent({ status: "blocked", post_pr: postPrFixture("blocked", 0), pr_url: "https://github.com/example/repo/pull/1" }, "tui-p14-terminal-exclusive"), "post-PR blocked");
+    assert.equal(projectedCurrent(tiers[0].input, "tui-p14-active-exclusive"), "post-PR checks running a1");
+
+    const malformedLowerDispatch = specialDispatch("merged-slice-repair", { closed: true });
+    delete malformedLowerDispatch.closure_hash;
+    assert.equal(projectedCurrent({
+      validator: { verdict: "GO" },
+      security_review: { verdict: "PASS" },
+      special_builder_dispatch: malformedLowerDispatch,
+    }, "tui-p14-higher-masks-malformed-lower"), "panels passed");
+  });
+
+  it("TUI-P15 preserves generic fallbacks and suppresses zero-attempt blocked placeholders", () => {
+    const variants = [
+      { name: "running-step", input: { steps: [{ agent: "story-reader", status: "running", attempts: 1 }] }, expected: "story-reader running a1" },
+      { name: "slice-review", input: { slices: [{ id: "review-slice", status: "review", attempts: 2 }] }, expected: "review-slice review a2" },
+      { name: "blocked-slice", input: { slices: [{ id: "blocked-slice", status: "blocked", attempts: 1 }] }, expected: "blocked-slice blocked a1" },
+      { name: "blocked-step", input: { steps: [{ agent: "work-decomposer", status: "blocked", attempts: 1 }] }, expected: "work-decomposer blocked a1" },
+      { name: "placeholder", input: { steps: [{ agent: "work-decomposer", status: "blocked", attempts: 0 }] }, expected: null },
+    ];
+    for (const variant of variants) assert.equal(projectedCurrent(variant.input, `tui-p15-${variant.name}`), variant.expected);
+  });
+
+  it("TUI-P16 fails closed without throwing for every malformed authority kind", () => {
+    const runId = "tui-p16-malformed";
+    const badHashStep = checkedExecutionStep(runId, { state: "active", attempt: 1 });
+    badHashStep.execution_claim_hash = `sha256:${"f".repeat(64)}`;
+    const duplicateClaim = checkedExecutionStep(runId, { state: "active", attempt: 1 });
+    const nonRunningClaim = checkedExecutionStep(runId, { state: "active", attempt: 1 });
+    nonRunningClaim.status = "accepted";
+    const mismatchedCompleted = checkedExecutionStep(runId, { state: "completed", status: "pass", attempt: 1 });
+    mismatchedCompleted.status = "rejected";
+    const partialDispatch = specialDispatch("merged-slice-repair", { closed: true });
+    delete partialDispatch.closure_hash;
+    const partialFence = prFence();
+    delete partialFence.repository;
+    const variants = [
+      ["unknown post-PR phase", { post_pr: postPrFixture("future-phase", 0) }],
+      ["invalid post-PR attempt", { post_pr: postPrFixture("observing", -1) }],
+      ["active post-PR without PR authority", { post_pr: postPrFixture("observing", 1) }],
+      ["mismatched claim hash", { steps: [badHashStep] }],
+      ["duplicate claim-bearing verifiers", { steps: [duplicateClaim, structuredClone(duplicateClaim)] }],
+      ["active claim on non-running work", { steps: [nonRunningClaim] }],
+      ["completed claim status mismatch", { steps: [mismatchedCompleted] }],
+      ["unknown validator verdict", { validator: { verdict: "MAYBE" } }],
+      ["unknown security verdict", { security_review: { verdict: "WARN" } }],
+      ["partial special dispatch", { special_builder_dispatch: partialDispatch }],
+      ["partial slice dispatch", { slices: [{ id: "slice", status: "running", attempts: 1, dispatch_required: true, dispatch_claim_ref: "dispatch/claim.json" }] }],
+      ["partial PR operation", { post_pr: postPrFixture("disabled", 0, { pr_operation: { operation_id: "partial" } }) }],
+      ["partial successor PR fence", { steering: { pr_fence: partialFence } }],
+    ];
+    for (const [name, input] of variants) {
+      let current;
+      assert.doesNotThrow(() => { current = projectedCurrent(input, runId); }, name);
+      assert.equal(current, "workflow state unknown", name);
+    }
+  });
+
+  it("TUI-P17 keeps current terminal-safe and excludes credential, ref, and sidecar bytes", () => {
+    const repo = tempDir();
+    const runId = "tui-p17-terminal-safe";
+    const secret = "dXNlcjpwYXNzd29yZA==";
+    writeRun(repo, runId, {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      gates: {},
+      slices: [{
+        id: `worker\u001b[2J Authorization: Basic ${secret}`,
+        status: "running",
+        attempts: 1,
+        review_ref: `reviews/${secret}.json`,
+      }],
+    });
+    const sidecarDir = join(repo, ".opencode", "factory", runId, "dispatch");
+    mkdirSync(sidecarDir, { recursive: true });
+    writeFileSync(join(sidecarDir, "unused.json"), `sidecar ${secret}\n`);
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+    assert.equal(run.current, "worker\\u001B[2J Authorization: Basic [redacted] running a1");
+    assert.equal(hasTerminalControl(run.current), false);
+    assert.equal(run.current.includes(secret), false);
+    assert.equal(run.current.includes("reviews/"), false);
+    assert.equal(run.current.includes("sidecar"), false);
+    cleanup(repo);
+  });
+
+  it("TUI-P18 preserves invalid fallback rows with current null under normal diagnostics", () => {
+    const repo = tempDir();
+    writeRawRun(repo, "bad-json-current", "{\n");
+    writeRun(repo, "bad-phase-current", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      gates: {},
+      post_pr: postPrFixture("unknown-phase", 0),
+    });
+
+    const runs = readRuns(findFactoryRoots(repo));
+    for (const id of ["bad-json-current", "bad-phase-current"]) {
+      const run = runs.find((candidate) => candidate.run_id === id);
+      assert.equal(run.status, "invalid", id);
+      assert.equal(run.current, null, id);
+      assert.equal(run.diagnostic_classification, "invalid", id);
+    }
     cleanup(repo);
   });
 
@@ -526,7 +869,8 @@ describe("TUI factory scanner", () => {
 
     assert.equal(serialized.includes("dXNlcjpwYXNzd29yZA=="), false, serialized);
     assert.equal(diagnosticStrings(run).some(hasTerminalControl), false);
-    for (const value of [run.run_id, run.gate, run.current, run.branch, run.pr_url, run.panel, run.terminal_reason, run.steering.pending.ref]) {
+    assert.equal(run.current, "PR created");
+    for (const value of [run.run_id, run.gate, run.branch, run.pr_url, run.panel, run.terminal_reason, run.steering.pending.ref]) {
       assert.equal(value.includes("[redacted]"), true);
     }
     cleanup(repo);
@@ -756,7 +1100,9 @@ function writeRun(repo, id, input) {
   if (input.steps !== undefined) run.steps = input.steps;
   if (input.validator !== undefined) run.validator = input.validator;
   if (input.security_review !== undefined) run.security_review = input.security_review;
+  if (input.special_builder_dispatch !== undefined) run.special_builder_dispatch = input.special_builder_dispatch;
   if (input.steering !== undefined) run.steering = input.steering;
+  if (input.post_pr !== undefined) run.post_pr = input.post_pr;
   if (input.cost_attribution !== undefined) run.cost_attribution = input.cost_attribution;
   if (input.terminal_result !== undefined) run.terminal_result = input.terminal_result;
   if (["completed", "blocked", "partial", "needs-human"].includes(input.status)) {
@@ -913,4 +1259,155 @@ function diagnosticStrings(value) {
   if (Array.isArray(value)) return value.flatMap(diagnosticStrings);
   if (!value || typeof value !== "object") return [];
   return Object.values(value).flatMap(diagnosticStrings);
+}
+
+function projectedCurrent(input, runId = "tui-phase-projection") {
+  const repo = tempDir();
+  try {
+    writeRun(repo, runId, {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      gates: {},
+      ...input,
+    });
+    return readRuns(findFactoryRoots(repo), { diagnostics: false })[0].current;
+  } finally {
+    cleanup(repo);
+  }
+}
+
+function checkedExecutionStep(runId, { state, status = null, attempt = 1 } = {}) {
+  const claim = {
+    schema_version: 1,
+    kind: "checked-test-execution-claim",
+    state,
+    nonce: "123e4567-e89b-42d3-a456-426614174000",
+    run_id: runId,
+    attempt,
+    plan_ref: "plan/slices.json",
+    plan_hash: `sha256:${"1".repeat(64)}`,
+    head_sha: "2".repeat(40),
+    timeout_ms: 600000,
+    receipt_ref: `evidence/test-verifier.attempt-${attempt}.json`,
+    claimed_at: "2026-07-05T00:00:00.000Z",
+  };
+  if (state === "unknown") {
+    claim.failed_at = "2026-07-05T00:01:00.000Z";
+    claim.reason = "process-outcome-indeterminate";
+  }
+  if (state === "completed") {
+    claim.completed_at = "2026-07-05T00:01:00.000Z";
+    claim.status = status;
+    claim.receipt_hash = `sha256:${"3".repeat(64)}`;
+  }
+  const stepStatus = state === "completed" ? status === "pass" ? "accepted" : "rejected" : "running";
+  return {
+    agent: "test-verifier",
+    status: stepStatus,
+    attempts: attempt,
+    execution_claim: claim,
+    execution_claim_hash: hashValue(claim),
+  };
+}
+
+function claimBoundSlice(id, attempts) {
+  return {
+    id,
+    status: "running",
+    attempts,
+    dispatch_required: true,
+    dispatch_claim_ref: `dispatch/${"4".repeat(64)}.json`,
+    dispatch_claim_hash: `sha256:${"5".repeat(64)}`,
+  };
+}
+
+function specialDispatch(route, { closed = false } = {}) {
+  return {
+    schema_version: 1,
+    route,
+    instance: `${route}:fixture`,
+    agent: "frontend-builder",
+    claim_ref: `dispatch/${"6".repeat(64)}.special.json`,
+    claim_hash: `sha256:${"7".repeat(64)}`,
+    ...(closed ? {
+      closure_ref: `dispatch/${"6".repeat(64)}.special.closed.json`,
+      closure_hash: `sha256:${"8".repeat(64)}`,
+      completion_head: "9".repeat(40),
+    } : {}),
+  };
+}
+
+function postPrFixture(phase, attempt, overrides = {}) {
+  return {
+    schema_version: 1,
+    policy: {
+      enabled: phase !== "disabled",
+      wait_ms: 3600000,
+      initial_poll_ms: 30000,
+      max_poll_ms: 120000,
+      check_start_grace_ms: 300000,
+      max_transient_errors: 12,
+      review: { required: false, reviewer_login: null, source: "none" },
+    },
+    phase,
+    attempt,
+    observation: null,
+    remediation: null,
+    evidence_refs: [],
+    continuation_review: null,
+    terminal_fact: null,
+    pr_operation: null,
+    ...overrides,
+  };
+}
+
+function prOperation() {
+  return {
+    operation_id: `ffpr-v1-${"a".repeat(64)}`,
+    repository: "example/repo",
+    created_at: "2026-07-05T00:00:00.000Z",
+    head_ref: "feature",
+    head_sha: "b".repeat(40),
+    base_ref: "main",
+    base_sha: "c".repeat(40),
+    draft: false,
+    pr_url: "https://github.com/example/repo/pull/1",
+    pr_number: 1,
+    pr_node_id: "PR_fixture",
+  };
+}
+
+function prFence() {
+  return {
+    token: "fence-token",
+    generation: 0,
+    state_hash: `sha256:${"d".repeat(64)}`,
+    created_at: "2026-07-05T00:00:00.000Z",
+    operation_id: `ffpr-v1-${"a".repeat(64)}`,
+    repository: "example/repo",
+    head_ref: "feature",
+    head_sha: "b".repeat(40),
+    base_ref: "main",
+    base_sha: "c".repeat(40),
+    draft: false,
+  };
+}
+
+function legacyPrFence() {
+  const fence = prFence();
+  for (const key of ["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]) delete fence[key];
+  return fence;
+}
+
+function combineProjectionInputs(...inputs) {
+  const combined = {};
+  for (const input of inputs) {
+    if (!input) continue;
+    for (const [key, value] of Object.entries(input)) {
+      if (key === "steps" || key === "slices") combined[key] = [...(combined[key] || []), ...value];
+      else if (key === "gates" || key === "steering") combined[key] = { ...(combined[key] || {}), ...value };
+      else combined[key] = value;
+    }
+  }
+  return combined;
 }

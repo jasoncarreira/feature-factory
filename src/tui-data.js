@@ -24,6 +24,7 @@ import {
   renderTerminalSegmentsOrFallback,
 } from "./hardening/output-policy.js";
 import { REDACTED_VALUE } from "./hardening/sensitive-data.js";
+import { hashValue } from "./refs.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache", ".next"]);
 const MAX_SCAN_DIRS = 2000;
@@ -37,6 +38,45 @@ const DIAGNOSTIC_IDENTITIES = Object.freeze({
   status: new Set(DIAGNOSTIC_STATUSES),
 });
 const rootCache = new Map();
+const UNKNOWN_WORKFLOW = Symbol("unknown-workflow");
+const UNKNOWN_WORKFLOW_LABEL = "workflow state unknown";
+const PRE_PR_GATE_LABELS = Object.freeze({
+  pending: "pre-PR approval pending",
+  approved: "pre-PR approved",
+  changes_requested: "pre-PR changes requested",
+  stopped: "pre-PR stopped",
+});
+const ACTIVE_POST_PR_LABELS = Object.freeze({
+  observing: "post-PR checks running",
+  "failure-recording": "post-PR failure recording",
+  "remediation-planned": "post-PR remediation planned",
+  "remediation-running": "post-PR remediation running",
+  "changes-observed": "post-PR changes observed",
+  committed: "post-PR remediation committed",
+  revalidating: "post-PR revalidation running",
+  validated: "post-PR revalidation passed",
+  "push-pending": "post-PR push pending",
+  "remote-confirmed": "post-PR remote confirmed",
+});
+const TERMINAL_POST_PR_LABELS = Object.freeze({
+  succeeded: "post-PR succeeded",
+  blocked: "post-PR blocked",
+  "needs-human": "post-PR needs human",
+});
+const POST_PR_PHASES = new Set(["disabled", "awaiting-pr", ...Object.keys(ACTIVE_POST_PR_LABELS), ...Object.keys(TERMINAL_POST_PR_LABELS)]);
+const VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS", "NO-GO"]);
+const SECURITY_VERDICTS = new Set(["PASS", "BLOCK"]);
+const PANEL_AGENTS = new Set(["implementation-validator", "security-reviewer"]);
+const BUILD_SPECIAL_LABELS = Object.freeze({
+  "merged-slice-repair": ["merged-slice repair running", "merged-slice repair awaiting integration"],
+  "integration-amendment": ["integration amendment running", "integration amendment awaiting integration"],
+  "integration-conflict": ["integration conflict repair running", "integration conflict repair awaiting integration"],
+});
+const SPECIAL_DISPATCH_ROUTES = new Set([...Object.keys(BUILD_SPECIAL_LABELS), "panel-remediation", "post-pr-remediation"]);
+const PR_OPERATION_KEYS = Object.freeze(["operation_id", "repository", "created_at", "head_ref", "head_sha", "base_ref", "base_sha", "draft", "pr_url", "pr_number", "pr_node_id"]);
+const PR_FENCE_CONTROL_KEYS = Object.freeze(["token", "generation", "state_hash", "created_at"]);
+const PR_FENCE_IDENTITY_KEYS = Object.freeze(["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]);
+const TEST_EXECUTION_CLAIM_KEYS = Object.freeze(["schema_version", "kind", "state", "nonce", "run_id", "attempt", "plan_ref", "plan_hash", "head_sha", "receipt_ref", "claimed_at"]);
 
 export function factoryRoots(api, options = {}) {
   const starts = tuiStartPaths(api);
@@ -358,18 +398,215 @@ function sliceSummary(run) {
 }
 
 function currentSummary(run) {
-  const activeSlice = firstByStatus(run.slices, ["running", "review"]);
-  if (activeSlice) return summarizeWorkItem(activeSlice.id, activeSlice.status, activeSlice.attempts);
-  const activeStep = firstByStatus(run.steps, ["running", "review"]);
-  if (activeStep) return summarizeWorkItem(activeStep.agent, activeStep.status, activeStep.attempts);
-  const blockedSlice = firstByStatus(run.slices, ["blocked"]);
-  if (blockedSlice) return summarizeWorkItem(blockedSlice.id, blockedSlice.status, blockedSlice.attempts);
+  for (const project of [
+    projectPostPrPhase,
+    projectPrAuthority,
+    projectPrFence,
+    projectPrePrGate,
+    projectPanelAuthority,
+    projectCheckedTestExecution,
+    projectBuildSpecialDispatch,
+    projectActiveSlice,
+    projectRunningStep,
+    projectBlockedSlice,
+  ]) {
+    const projected = project(run);
+    if (projected === UNKNOWN_WORKFLOW) return UNKNOWN_WORKFLOW_LABEL;
+    if (projected !== undefined) return projected;
+  }
   const displayableSteps = Array.isArray(run.steps) ? run.steps.filter(isDisplayableFallbackStep) : [];
   const step = firstByStatus(displayableSteps, ["blocked", "pending"]);
   if (step) return summarizeWorkItem(step.agent, step.status, step.attempts);
-  const panel = inferredPrePrPanelSummary(run);
-  if (panel) return panel;
   return null;
+}
+
+function projectPostPrPhase(run) {
+  const postPr = run?.post_pr;
+  if (postPr === undefined || postPr === null) return undefined;
+  if (!isRecord(postPr) || !POST_PR_PHASES.has(postPr.phase) || !isNonNegativeInteger(postPr.attempt)) return UNKNOWN_WORKFLOW;
+  const operation = projectPrOperation(postPr.pr_operation);
+  const prUrl = projectPrUrl(run?.pr_url);
+  if (operation === UNKNOWN_WORKFLOW || prUrl === UNKNOWN_WORKFLOW) return UNKNOWN_WORKFLOW;
+  const terminal = TERMINAL_POST_PR_LABELS[postPr.phase];
+  if (terminal) {
+    const expectedStatus = postPr.phase === "succeeded" ? "completed" : postPr.phase;
+    if (run?.status !== expectedStatus || operation !== true && prUrl !== true) return UNKNOWN_WORKFLOW;
+    return `${terminal}${positiveAttemptSuffix(postPr.attempt)}`;
+  }
+  const active = ACTIVE_POST_PR_LABELS[postPr.phase];
+  if (active) {
+    if (run?.status !== "running" || operation !== true && prUrl !== true) return UNKNOWN_WORKFLOW;
+    return `${active}${positiveAttemptSuffix(postPr.attempt)}`;
+  }
+  return undefined;
+}
+
+function projectPrAuthority(run) {
+  const prUrl = projectPrUrl(run?.pr_url);
+  if (prUrl === UNKNOWN_WORKFLOW) return UNKNOWN_WORKFLOW;
+  const operation = projectPrOperation(run?.post_pr?.pr_operation);
+  if (operation === UNKNOWN_WORKFLOW) return UNKNOWN_WORKFLOW;
+  if (prUrl !== true && operation !== true) return undefined;
+  return run?.post_pr?.phase === "awaiting-pr" ? "PR created; post-PR awaiting start" : "PR created";
+}
+
+function projectPrUrl(value) {
+  if (value === undefined || value === null) return false;
+  return typeof value === "string" && value.length > 0 ? true : UNKNOWN_WORKFLOW;
+}
+
+function projectPrOperation(operation) {
+  if (operation === undefined || operation === null) return false;
+  if (!isRecord(operation) || !PR_OPERATION_KEYS.every((key) => Object.hasOwn(operation, key))) return UNKNOWN_WORKFLOW;
+  const stringKeys = ["operation_id", "repository", "created_at", "head_ref", "head_sha", "base_ref", "base_sha", "pr_url", "pr_node_id"];
+  if (!stringKeys.every((key) => typeof operation[key] === "string" && operation[key].length > 0)
+    || !Number.isInteger(operation.pr_number) || operation.pr_number <= 0 || typeof operation.draft !== "boolean") return UNKNOWN_WORKFLOW;
+  return true;
+}
+
+function projectPrFence(run) {
+  const fence = run?.steering?.pr_fence;
+  if (fence === undefined || fence === null) return undefined;
+  if (!isRecord(fence) || !PR_FENCE_CONTROL_KEYS.every((key) => Object.hasOwn(fence, key))
+    || typeof fence.token !== "string" || fence.token.length === 0 || !isNonNegativeInteger(fence.generation)
+    || typeof fence.state_hash !== "string" || fence.state_hash.length === 0 || typeof fence.created_at !== "string" || fence.created_at.length === 0) return UNKNOWN_WORKFLOW;
+  const identityCount = PR_FENCE_IDENTITY_KEYS.filter((key) => Object.hasOwn(fence, key)).length;
+  if (identityCount !== 0 && identityCount !== PR_FENCE_IDENTITY_KEYS.length) return UNKNOWN_WORKFLOW;
+  if (identityCount === 0) return "PR creation needs reconciliation";
+  if (identityCount === PR_FENCE_IDENTITY_KEYS.length) {
+    const stringKeys = PR_FENCE_IDENTITY_KEYS.filter((key) => key !== "draft");
+    if (!stringKeys.every((key) => typeof fence[key] === "string" && fence[key].length > 0) || typeof fence.draft !== "boolean") return UNKNOWN_WORKFLOW;
+  }
+  return "PR creation running";
+}
+
+function projectPrePrGate(run) {
+  const gate = run?.gates?.pre_pr;
+  if (gate === undefined || gate === null) return undefined;
+  if (!isRecord(gate) || !Object.hasOwn(PRE_PR_GATE_LABELS, gate.status)) return UNKNOWN_WORKFLOW;
+  return PRE_PR_GATE_LABELS[gate.status];
+}
+
+function projectPanelAuthority(run) {
+  const rawDispatch = run?.special_builder_dispatch;
+  if (rawDispatch !== undefined && rawDispatch !== null && (!isRecord(rawDispatch) || !SPECIAL_DISPATCH_ROUTES.has(rawDispatch.route))) return UNKNOWN_WORKFLOW;
+  if (rawDispatch?.route === "panel-remediation") {
+    const dispatch = projectSpecialDispatch(run);
+    if (dispatch === UNKNOWN_WORKFLOW) return UNKNOWN_WORKFLOW;
+    return dispatch.closed ? "panel remediation awaiting panel publication" : "panel remediation running";
+  }
+
+  const validator = projectPanelVerdict(run?.validator, VALIDATOR_VERDICTS);
+  const security = projectPanelVerdict(run?.security_review, SECURITY_VERDICTS);
+  if (validator === UNKNOWN_WORKFLOW || security === UNKNOWN_WORKFLOW) return UNKNOWN_WORKFLOW;
+  if (validator !== undefined && security !== undefined) {
+    return validator !== "NO-GO" && security === "PASS" ? "panels passed" : "panel remediation pending";
+  }
+  if (validator !== undefined) return "security-reviewer pending";
+  if (security !== undefined) return "implementation-validator pending";
+
+  const step = Array.isArray(run?.steps) ? run.steps.find((candidate) => candidate?.status === "running" && PANEL_AGENTS.has(candidate?.agent)) : null;
+  return step ? summarizeWorkItem(step.agent, step.status, step.attempts) : undefined;
+}
+
+function projectPanelVerdict(value, allowed) {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value) || !allowed.has(value.verdict)) return UNKNOWN_WORKFLOW;
+  return value.verdict;
+}
+
+function projectCheckedTestExecution(run) {
+  const steps = Array.isArray(run?.steps) ? run.steps : [];
+  const claimSteps = steps.filter((step) => step && (step.execution_claim !== undefined && step.execution_claim !== null || step.execution_claim_hash !== undefined && step.execution_claim_hash !== null));
+  if (claimSteps.length === 0) return undefined;
+  if (claimSteps.length !== 1) return UNKNOWN_WORKFLOW;
+  const step = claimSteps[0];
+  const claim = step.execution_claim;
+  if (step.agent !== "test-verifier" || !isRecord(claim) || !TEST_EXECUTION_CLAIM_KEYS.every((key) => Object.hasOwn(claim, key))
+    || claim.schema_version !== 1 || claim.kind !== "checked-test-execution-claim"
+    || typeof step.execution_claim_hash !== "string" || step.execution_claim_hash !== hashValue(claim)) return UNKNOWN_WORKFLOW;
+  if (!Number.isInteger(claim.attempt) || claim.attempt <= 0 || step.attempts !== claim.attempt || claim.run_id !== run?.run_id) return UNKNOWN_WORKFLOW;
+  if (claim.state === "active" || claim.state === "unknown") {
+    if (claim.state === "unknown" && (!Object.hasOwn(claim, "failed_at") || !Object.hasOwn(claim, "reason"))) return UNKNOWN_WORKFLOW;
+    if (step.status !== "running" || run?.status !== "running") return UNKNOWN_WORKFLOW;
+    return claim.state === "active"
+      ? `whole-story tests running a${claim.attempt}`
+      : `whole-story tests needs reconciliation a${claim.attempt}`;
+  }
+  if (claim.state !== "completed") return UNKNOWN_WORKFLOW;
+  if (!["completed_at", "status", "receipt_hash"].every((key) => Object.hasOwn(claim, key))) return UNKNOWN_WORKFLOW;
+  if (claim.status === "pass" && ["running", "accepted"].includes(step.status)) return `whole-story tests passed a${claim.attempt}`;
+  if (claim.status === "fail" && step.status === "rejected") return `whole-story tests failed a${claim.attempt}`;
+  return UNKNOWN_WORKFLOW;
+}
+
+function projectBuildSpecialDispatch(run) {
+  const dispatch = projectSpecialDispatch(run);
+  if (dispatch === undefined) return undefined;
+  if (dispatch === UNKNOWN_WORKFLOW || dispatch.route === "post-pr-remediation") return UNKNOWN_WORKFLOW;
+  const labels = BUILD_SPECIAL_LABELS[dispatch.route];
+  return labels ? labels[Number(dispatch.closed)] : undefined;
+}
+
+function projectSpecialDispatch(run) {
+  const dispatch = run?.special_builder_dispatch;
+  if (dispatch === undefined || dispatch === null) return undefined;
+  if (!isRecord(dispatch) || !SPECIAL_DISPATCH_ROUTES.has(dispatch.route)) return UNKNOWN_WORKFLOW;
+  const claimKeys = ["claim_ref", "claim_hash"];
+  const closureKeys = ["closure_ref", "closure_hash", "completion_head"];
+  const claimCount = claimKeys.filter((key) => Object.hasOwn(dispatch, key)).length;
+  const closureCount = closureKeys.filter((key) => Object.hasOwn(dispatch, key)).length;
+  if (claimCount !== claimKeys.length || ![0, closureKeys.length].includes(closureCount)
+    || !claimKeys.every((key) => typeof dispatch[key] === "string" && dispatch[key].length > 0)
+    || closureCount > 0 && !closureKeys.every((key) => typeof dispatch[key] === "string" && dispatch[key].length > 0)) return UNKNOWN_WORKFLOW;
+  return { route: dispatch.route, closed: closureCount === closureKeys.length };
+}
+
+function projectActiveSlice(run) {
+  const active = Array.isArray(run?.slices) ? run.slices.filter((slice) => ["running", "review"].includes(slice?.status)) : [];
+  const ranked = active.map((slice) => ({ slice, dispatch: projectSliceDispatch(slice) }));
+  if (ranked.some((entry) => entry.dispatch === UNKNOWN_WORKFLOW)) return UNKNOWN_WORKFLOW;
+  const selected = ranked.find((entry) => entry.slice.status === "running" && entry.dispatch === true)
+    || ranked.find((entry) => entry.slice.status === "running")
+    || ranked.find((entry) => entry.slice.status === "review");
+  return selected ? summarizeWorkItem(selected.slice.id, selected.slice.status, selected.slice.attempts) : undefined;
+}
+
+function projectSliceDispatch(slice) {
+  const claimKeys = ["dispatch_claim_ref", "dispatch_claim_hash"];
+  const closureKeys = ["dispatch_closure_ref", "dispatch_closure_hash"];
+  const claimCount = claimKeys.filter((key) => Object.hasOwn(slice, key)).length;
+  const closureCount = closureKeys.filter((key) => Object.hasOwn(slice, key)).length;
+  if (![0, 2].includes(claimCount) || ![0, 2].includes(closureCount) || closureCount === 2 && claimCount !== 2) return UNKNOWN_WORKFLOW;
+  if (claimCount === 2 && !claimKeys.every((key) => typeof slice[key] === "string" && slice[key].length > 0)) return UNKNOWN_WORKFLOW;
+  if (closureCount === 2 && !closureKeys.every((key) => typeof slice[key] === "string" && slice[key].length > 0)) return UNKNOWN_WORKFLOW;
+  if (claimCount === 2 && slice.dispatch_required !== true) return UNKNOWN_WORKFLOW;
+  if (slice.dispatch_required === true && claimCount !== 2) return UNKNOWN_WORKFLOW;
+  return claimCount === 2;
+}
+
+function projectRunningStep(run) {
+  const step = Array.isArray(run?.steps) ? run.steps.find((candidate) => candidate?.status === "running") : null;
+  return step ? summarizeWorkItem(step.agent, step.status, step.attempts) : undefined;
+}
+
+function projectBlockedSlice(run) {
+  const slice = firstByStatus(run?.slices, ["blocked"]);
+  if (!slice) return undefined;
+  if (projectSliceDispatch(slice) === UNKNOWN_WORKFLOW) return UNKNOWN_WORKFLOW;
+  return summarizeWorkItem(slice.id, slice.status, slice.attempts);
+}
+
+function positiveAttemptSuffix(attempt) {
+  return attempt > 0 ? ` a${attempt}` : "";
+}
+
+function isNonNegativeInteger(value) {
+  return Number.isInteger(value) && value >= 0;
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function isDisplayableFallbackStep(step) {
@@ -442,20 +679,6 @@ function costSummary(costAttribution) {
   if (!costAttribution || typeof costAttribution !== "object" || Array.isArray(costAttribution)) return null;
   const summary = projectPublicStrings(publicCostAttributionSummary(costAttribution));
   return { ...summary, label: formatProjectedCostSummary(summary) };
-}
-
-function inferredPrePrPanelSummary(run) {
-  if (run?.status !== "running" || pendingGate(run)) return null;
-  const testAccepted = Array.isArray(run.steps) && run.steps.some((step) => step?.agent === "test-verifier" && step?.status === "accepted");
-  if (!testAccepted) return null;
-  const validatorVerdict = stringOrNull(run.validator?.verdict);
-  const securityVerdict = stringOrNull(run.security_review?.verdict);
-  if (!validatorVerdict && !securityVerdict) return "pre-PR panel running";
-  if (validatorVerdict === "NO-GO" || securityVerdict === "BLOCK") return "panel remediation running";
-  if (!validatorVerdict) return "implementation-validator running";
-  if (!securityVerdict) return "security-reviewer running";
-  if (!run.pr_url) return "PR pending";
-  return null;
 }
 
 function firstByStatus(items, statuses) {
