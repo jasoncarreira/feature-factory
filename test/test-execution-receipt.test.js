@@ -13,7 +13,10 @@ import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
 import {
   claimCheckedTestExecution,
+  classifyWholeStoryTestRoute,
+  evaluateWholeStoryRouteSink,
   markCheckedTestExecutionUnknown,
+  transitionPanelVerdicts,
   transitionRecoverOrphan,
   transitionRunJson,
   transitionRunStep,
@@ -32,10 +35,169 @@ const LATER = "2026-07-17T12:00:01.000Z";
 const CLI_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 
 describe("checked test execution receipt", () => {
+  it("evaluates every DMC1 dimension across all 26 real route-and-sink enforcement seams", () => {
+    const routeState = { continuation: "absent", checkpoint_source: "absent", checkpoint_progress: "absent", conflict: "absent", slice_projection: "all-merged" };
+    const routeCases = [
+      ["ordinary", {}, "ordinary-fresh-v1", "SINK04"],
+      ["schema-v1 continuation", { continuation: "v1" }, "legacy-unselected", "SINK05"],
+      ["schema-v2 continuation", { continuation: "v2" }, "schema-v2", "SINK01"],
+      ["checkpoint source", { checkpoint_source: "present" }, "legacy-unselected", "SINK06"],
+      ["checkpoint progress", { checkpoint_progress: "present" }, "legacy-unselected", "SINK07"],
+      ["delegated conflict", { conflict: "present" }, "delegated-conflict", "SINK02"],
+      ["combined", { continuation: "v2", conflict: "present" }, "schema-v2+delegated-conflict", "SINK03"],
+      ["empty projection", { slice_projection: "empty" }, "legacy-unselected", "SINK08"],
+      ["incomplete projection", { slice_projection: "incomplete" }, "legacy-unselected", "SINK08"],
+    ];
+    for (const [label, overrides, route, selectedSink] of routeCases) {
+      for (let index = 1; index <= 8; index += 1) {
+        const sink = `SINK${String(index).padStart(2, "0")}`;
+        const selected = sink === selectedSink;
+        assert.deepEqual(
+          evaluateWholeStoryRouteSink({ ...routeState, ...overrides, sink }),
+          { route, sink, allowed: selected, reason: selected ? "selected-route" : "route-mismatch" },
+          `${label} ${sink}`,
+        );
+      }
+    }
+
+    const passing = { ...routeState, claim: "absent", evidence: "absent", base: "equal", head: "equal", review: "fresh", pr_mode: "ready" };
+    const sinkRows = [
+      ["SINK09", {}, true, "allowed"],
+      ["SINK10", {}, true, "allowed"],
+      ["SINK11", {}, true, "allowed"],
+      ["SINK12", { claim: "active" }, true, "allowed"],
+      ["SINK13", { claim: "completed-fail", evidence: "exact-fail" }, true, "allowed"],
+      ["SINK14", { claim: "completed-pass", evidence: "legacy" }, false, "checked-evidence-required"],
+      ["SINK15", { claim: "completed-pass", evidence: "exact-pass" }, true, "allowed"],
+      ["SINK16", { claim: "completed-pass", evidence: "exact-pass" }, true, "allowed"],
+      ["SINK17", { claim: "completed-pass", evidence: "exact-pass" }, true, "allowed"],
+      ["SINK18", { base: "ancestor" }, true, "allowed"],
+      ["SINK19", { pr_mode: "draft" }, false, "ordinary-fresh-ready-required"],
+      ["SINK20", { base: "ancestor" }, true, "allowed"],
+      ["SINK21", { base: "moving" }, false, "base-moving"],
+      ["SINK22", { review: "stale" }, false, "review-stale"],
+      ["SINK23", { base: "unavailable" }, false, "base-unavailable"],
+      ["SINK24", { head: "mismatch" }, false, "head-mismatch"],
+      ["SINK25", { claim: "unknown", evidence: "stale", base: "non-ancestor", head: "dirty", review: "absent", pr_mode: "draft" }, true, "independent-contract"],
+      ["SINK26", { base: "cleanup-failed" }, true, "independent-contract"],
+    ];
+    assert.equal(sinkRows.length, 18);
+    for (const [sink, overrides, allowed, reason] of sinkRows) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, ...overrides, sink }), { route: "ordinary-fresh-v1", sink, allowed, reason }, sink);
+    }
+
+    for (const claim of ["absent", "active", "unknown", "completed-pass", "completed-fail"]) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK12", claim }), {
+        route: "ordinary-fresh-v1", sink: "SINK12", allowed: claim === "active", reason: claim === "active" ? "allowed" : "active-claim-required",
+      }, `claim ${claim}`);
+    }
+    for (const evidence of ["absent", "exact-pass", "exact-fail", "legacy", "stale"]) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK14", claim: "completed-pass", evidence }), {
+        route: "ordinary-fresh-v1", sink: "SINK14", allowed: evidence === "exact-pass", reason: evidence === "exact-pass" ? "allowed" : "checked-evidence-required",
+      }, `evidence ${evidence}`);
+    }
+    for (const base of ["equal", "ancestor", "non-ancestor", "unavailable", "moving", "cleanup-failed"]) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK18", base }), {
+        route: "ordinary-fresh-v1", sink: "SINK18", allowed: ["equal", "ancestor"].includes(base), reason: ["equal", "ancestor"].includes(base) ? "allowed" : `base-${base}`,
+      }, `base ${base}`);
+    }
+    for (const head of ["equal", "dirty", "mismatch", "missing"]) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK09", head }), {
+        route: "ordinary-fresh-v1", sink: "SINK09", allowed: head === "equal", reason: head === "equal" ? "allowed" : `head-${head}`,
+      }, `head ${head}`);
+    }
+    for (const review of ["fresh", "stale", "absent"]) {
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK22", review }), {
+        route: "ordinary-fresh-v1", sink: "SINK22", allowed: review === "fresh", reason: review === "fresh" ? "allowed" : `review-${review}`,
+      }, `review ${review}`);
+    }
+  });
+
+  it("selects ordinary fresh exactly once and rejects legacy evidence as a parallel whole-story answer", async () => {
+    const fixture = createExecutionFixture("checked-ordinary-fresh", undefined, { ordinary: true, testStatus: "blocked", testAttempts: 0 });
+    try {
+      const initial = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, initial), "ordinary-fresh-v1");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, continuation: { schema_version: 1 } }), "legacy-unselected");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, checkpoint_source: {} }), "legacy-unselected");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, checkpoint_progress: {} }), "legacy-unselected");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, slices: initial.slices.map((slice) => ({ ...slice, status: "review" })) }), "legacy-unselected");
+      assert.throws(
+        () => classifyWholeStoryTestRoute(fixture.runDir, { ...initial, run_id: "different-run" }),
+        /canonical factory run directory/u,
+      );
+      assert.equal(
+        classifyWholeStoryTestRoute(fixture.runDir, { ...initial, steps: initial.steps.filter((step) => step.agent !== "work-decomposer") }),
+        "legacy-unselected",
+      );
+      writeJson(join(fixture.runDir, "run.json"), { ...initial, slices: [] });
+      await assert.rejects(transitionPanelVerdicts(fixture.runDir, {
+        validator: { verdict: "GO", report: "artifacts/missing.md", review_ref: "reviews/implementation-validator.json" },
+        security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
+      }), /all child slices merged before panel publication: <unseeded>/u);
+      writeJson(join(fixture.runDir, "run.json"), initial);
+      const started = await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }, { mustExist: true });
+      assert.equal(started.step.status, "running");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, started.run), "ordinary-fresh-v1");
+
+      for (const status of ["rejected", "blocked", "running"]) {
+        await assert.rejects(
+          transitionRunStep(fixture.runDir, "work-decomposer", { status, attempts: status === "running" ? 2 : 1 }, { mustExist: true }),
+          /accepted work-decomposer authority cannot regress/u,
+          status,
+        );
+      }
+      await assert.rejects(
+        transitionRunStep(fixture.runDir, { index: 999, agent: "work-decomposer" }, { status: "running", attempts: 2 }, { mustExist: true }),
+        /step 'work-decomposer' not found/u,
+      );
+
+      writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "caller-authored legacy evidence\n");
+      writeJson(join(fixture.runDir, "evidence", "legacy.json"), { subject: "test-verifier", status: "pass" });
+      writeJson(join(fixture.runDir, "reviews", "test-verifier.attempt-1.json"), {
+        subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: fixture.head, required_fixes: [],
+      });
+      await assert.rejects(transitionRunStep(fixture.runDir, "test-verifier", {
+        status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md",
+        evidence_ref: "evidence/legacy.json", review_ref: "reviews/test-verifier.attempt-1.json",
+      }, { mustExist: true }), /completed checked execution claim/u);
+
+      const calls = [];
+      const completed = await executeCheckedTestExecution(fixture.runDir, executionOptions([{}, {}], calls));
+      assert.equal(completed.status, "pass");
+      assert.deepEqual(calls.map(({ program, args }) => [program, args]), [
+        ["node", ["--test", "test/acceptance.test.js"]],
+        ["npm", ["run", "check"]],
+      ]);
+      const accepted = await transitionRunStep(fixture.runDir, "test-verifier", {
+        status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md",
+        evidence_ref: completed.receipt_ref, review_ref: "reviews/test-verifier.attempt-1.json",
+      }, { mustExist: true });
+      assert.equal(accepted.step.acceptance.evidence_hash, completed.receipt_hash);
+      assert.equal(accepted.step.acceptance.reviewed_head_sha, fixture.head);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("preserves the established schema-v2 acceptance error contract", async () => {
+    const fixture = createExecutionFixture("checked-schema-v2-error-contract");
+    try {
+      writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "legacy evidence must not pass\n");
+      writeJson(join(fixture.runDir, "evidence", "legacy.json"), { subject: "test-verifier", status: "pass" });
+      writeJson(join(fixture.runDir, "reviews", "test-verifier.attempt-1.json"), {
+        subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: fixture.head, required_fixes: [],
+      });
+      await assert.rejects(transitionRunStep(fixture.runDir, "test-verifier", {
+        status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md",
+        evidence_ref: "evidence/legacy.json", review_ref: "reviews/test-verifier.attempt-1.json",
+      }, { mustExist: true }), /schema-v2 test authority requires a completed checked execution claim/u);
+    } finally { cleanup(fixture.repo); }
+  });
+
   it("claims before sequential shell-free execution, publishes a passing receipt, and exact-replays without process or write", async () => {
     const fixture = createExecutionFixture("checked-pass");
     const calls = [];
     try {
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, readJson(join(fixture.runDir, "run.json"))), "schema-v2");
       const result = await executeCheckedTestExecution(fixture.runDir, executionOptions([
         { stdout: "acceptance ok\n" },
         { stderr: "check ok\n" },
@@ -272,7 +434,7 @@ describe("checked test execution receipt", () => {
   });
 });
 
-function createExecutionFixture(runId, commands = [{ program: "node", args: ["--test", "test/acceptance.test.js"] }, { program: "npm", args: ["run", "check"] }]) {
+function createExecutionFixture(runId, commands = [{ program: "node", args: ["--test", "test/acceptance.test.js"] }, { program: "npm", args: ["run", "check"] }], options = {}) {
   const repo = mkdtempSync(join(tmpdir(), "feature-factory-checked-execution-"));
   runGit(repo, ["init", "-b", "main"]);
   runGit(repo, ["config", "user.email", "test@example.com"]);
@@ -327,16 +489,17 @@ function createExecutionFixture(runId, commands = [{ program: "node", args: ["--
   };
   const run = {
     schema_version: 1, run_id: runId, mode: "headless", status: "running", base_ref: "main", base_commit: head, branch: runId, worktree: repo,
-    github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, gates: {}, continuation,
+    github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, gates: {}, ...(options.ordinary ? {} : { continuation }),
     post_pr: { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
     slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["README.md"], effective_paths: ["README.md"], status: "merged", attempts: 1, attempt_reviews: [sliceAttemptReview], evidence_ref: sliceEvidenceRef, evidence_hash: sliceEvidenceHash, review_ref: sliceReviewRef, review_hash: sliceReviewHash, reviewed_commit: head, merge_commit: head }],
     steps: [
       { agent: "spec-writer", status: "accepted", attempts: 0, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json", acceptance: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: briefHash, review_ref: "reviews/spec-writer.json", review_hash: specReviewHash }, inherited_acceptance: { from_run_id: "parent", parent_spec_review_ref: "reviews/spec-writer.json", artifact_hash: briefHash, review_hash: specReviewHash } },
       { agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json", acceptance: { artifact_ref: "plan/slices.json", artifact_hash: planHash, review_ref: "reviews/work-decomposer.json", review_hash: decompositionReviewHash } },
-      { agent: "test-verifier", status: "running", attempts: 1 },
+      { agent: "test-verifier", status: options.testStatus || "running", attempts: options.testAttempts ?? 1 },
     ],
   };
-  publishSyntheticV2Parent(runDir, continuation);
+  if (options.ordinary) delete run.steps[0].inherited_acceptance;
+  if (!options.ordinary) publishSyntheticV2Parent(runDir, continuation);
   writeJson(join(runDir, "run.json"), validateRun(run));
   return { repo, runDir, runId, head };
 }

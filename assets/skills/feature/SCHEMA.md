@@ -1246,7 +1246,7 @@ Allowed security-reviewer verdicts are `PASS` and `BLOCK`. The `subject` is the 
 
 Protected gates are `story`, `brief`, and `pre_pr`.
 
-`pending_snapshot` captures the exact pending material the answer is allowed to consume: `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, `created_at`, and optional `answer_ref`/`answer_hash`.
+`pending_snapshot` captures the exact pending material the answer is allowed to consume: `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, `created_at`, and optional `answer_ref`/`answer_hash`. Checked `pre_pr` gates also carry `checked_authority_hash`, which binds the current checked test acceptance and panel hashes before approval.
 
 Before an approved, changes_requested, or stopped gate decision consumes an external answer, the factory re-hashes the current pending question, artifact, and answer material. Missing files, escaped refs, stale hashes, question/answer overlap, or mismatched `pending_snapshot` fields fail closed.
 
