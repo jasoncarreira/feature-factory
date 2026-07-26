@@ -18,11 +18,15 @@ import {
   DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS,
   DURABLE_AUTHORITY_REQUIRED_RECORD_IDS,
   DURABLE_MUTATION_FAMILIES,
+  ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG,
+  ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS,
   assertDurableAuthorityCatalogComplete,
+  createIssue128DurableRunBaseline,
   createDurableCatalogBaseline,
   createPostPrCatalogBaseline,
   createRepairCatalogBaseline,
   emitDurableRecordMutations,
+  issue128FinishAndDiscloseAuthorityOracle,
   renderDurableAuthorityOracleReviewSnapshot,
 } from "./helpers/durable-record-mutations.js";
 import { checkRunConsistency, validateCheckpointChildPublication, validateCheckpointProgress, validateCheckpointSource, validateDeliveryCheckpointFinalClosure, validateIntegrationAmendment, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateIntegrationAmendmentReviewDispatchClaim, validateIntegrationAmendmentReviewDispatchClosure, validateRun, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "../src/validate.js";
@@ -2807,6 +2811,53 @@ describe("per-record durable authority mutation matrices", () => {
       });
     }
   }
+});
+
+describe("issue128FinishAndDiscloseAuthorityOracle", () => {
+  it("independently binds the exact 20-row successor authority inventory", () => {
+    assert.equal(issue128FinishAndDiscloseAuthorityOracle(), true);
+    assert.deepEqual(ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.map(({ id }) => id), ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS);
+    assert.equal(ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.length, 20);
+    assert.equal(Object.isFrozen(ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG), true);
+    for (const row of ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG) {
+      assert.deepEqual(Object.keys(row.dispositions).filter((key) => key.length === 1).sort(), ["B", "D", "H", "I", "K", "R", "V", "X"], row.id);
+      assert.equal(row.facts.length > 0, true, `${row.id} must bind path-plus-expected-value facts`);
+      assert.equal(row.readers.length > 0, true, `${row.id} must bind complete production readers`);
+      assert.equal(row.tests.length > 0, true, `${row.id} must bind named tests`);
+      assert.equal(Object.keys(row.external_sources).length > 0, true, `${row.id} must bind external source boundaries`);
+    }
+  });
+
+  it("passes every non-continuation baseline through the production run validator", () => {
+    const validated = [];
+    for (const row of ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG) {
+      if (row.id.includes("carry-forward-accepted-slice")) continue;
+      const run = createIssue128DurableRunBaseline(row);
+      assert.equal(validateRun(run), run, row.id);
+      validated.push(row.id);
+    }
+    assert.deepEqual(validated, ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS.filter((id) => !id.includes("carry-forward-accepted-slice")));
+  });
+
+  it("rejects omission, substitution, relocation, contradiction, synthetic keys, source loss, disposition substitution, and target mutation without changing the oracle", () => {
+    const mutations = [
+      ["omission", (rows) => { rows.splice(3, 1); }],
+      ["substitution", (rows) => { rows[0].id = "slice-attempt-review-v2-substitute"; }],
+      ["relocation", (rows) => { [rows[0], rows[1]] = [rows[1], rows[0]]; }],
+      ["contradiction", (rows) => { rows[2].facts[0].expected = "run.other"; }],
+      ["synthetic key", (rows) => { rows[3].source.sidecar_bytes = "untrusted"; }],
+      ["source boundary loss", (rows) => { delete rows[4].external_sources.review; }],
+      ["disposition substitution", (rows) => { rows[5].dispositions.R = { disposition: "target", path: ["source", "invented_ref"], expected: "reviews/invented.json" }; }],
+      ["target mutation", (rows) => { rows[6].dispositions.I.path = ["source", "merge_commit"]; }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const candidate = structuredClone(ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG);
+      mutate(candidate);
+      assert.throws(() => issue128FinishAndDiscloseAuthorityOracle(candidate), /issue #128/u, label);
+    }
+    assert.equal(issue128FinishAndDiscloseAuthorityOracle(), true);
+    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).some(({ id }) => id === ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS[0]), false, "the pre-existing global catalog remains byte-for-byte independent");
+  });
 });
 
 async function consumeB0M3Mutation(root, record, mutationCase) {
