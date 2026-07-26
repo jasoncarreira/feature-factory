@@ -33,11 +33,16 @@ the test-verifier's acceptance tests.
 
 Accepted under P0:
 
-1. **Correctness hardening workstream (#127)** — oracle independence,
-   verifier-writes-assertions-first, reporter-level test/skip counts with
-   baseline deltas in receipts, AC-to-test-id binding, `scripts.check`
-   pinning, plus review pruning to behavior-vs-brief. The only part of the
-   program that directly serves priority 1; batches with #112.
+1. **Correctness hardening** — the only part of the program that directly
+   serves priority 1. Split by hazard boundary (2026-07-26): **#127** is
+   prompt-only (reviewer traces expected values to the brief; verifier
+   authors assertions before reading the implementation; triple security
+   pass collapsed) and safe to land any time, batching with #112 which
+   rewrites the same reviewer prompt. **#135** carries the durable-schema
+   items (reporter-level receipt counts with baseline deltas, AC-to-test-id
+   binding, `scripts.check` pinning) and merges only in a between-runs
+   window per P1, after #111. Two echo-removal prunings moved to #111,
+   where the validator relaxation they need already lives.
 2. **Finish-and-disclose (#128)** — out-of-lane modifications are completed,
    disclosed, and reviewer-ratified (`modified-extension`); the mid-build
    hard stop remains only for privileged control-plane paths. Reverses the
@@ -560,7 +565,8 @@ this doc does not duplicate per-issue detail, so it cannot rot against it.)
 | 0 | #109 | `GH_CONFIG_DIR`-isolated gh operations (1.2) — the one operationally dangerous race; independent, ship first | — |
 | 1 | #110 | Legacy retirement (Part 5, L1–L12); L3 decided in-PR (recommendation: option b, repair-by-continuation); removes the inverted probe (1.1) by deletion | #109 (soft); operationally after the re-seeded #103 completes (P1 skew rule: no schema-deleting merge while a run is active) |
 | 2a | #111 | P2 attestation-deletion sweep (keep/simplify/drop table: 1.3, 3.2, 2.3-simplify, 2.5, 3.4) plus reviewer/catalog-registration recalibration | #110 |
-| 2b | #112 + #127 | P3 width recalibration + correctness hardening (#127: independent oracles, honest receipts, review pruning) — same prompt files, one batch | adjacent to #111 |
+| 2b | #112 + #127 | P3 width recalibration + oracle independence (prompt-only: reviewer/verifier rules, security-pass collapse) — same reviewer prompt, one batch, one conflict resolution | adjacent to #111; after #128 |
+| 2c | #135 | Correctness evidence schema: reporter-level receipt counts, AC-to-test-id binding, pinned `scripts.check` — durable record shape, so a between-runs window per P1 | #111; AC binding also #112 |
 | 2b′ | #128 | Finish-and-disclose ownership ratification (`modified-extension`) — coordinates with #111's derive-don't-echo item | #110/#111 window |
 | 3 | #117 | Validator family split: `src/validate/` per-record-family modules behind a re-export index — pure motion on the post-sweep survivor; removes the persistence lane choke point (evidence: the issue-103 fail-closed stop; the DAG's shared-file serialization table) | #111 |
 | 4 | #113 | Substrate extraction (constants, canonical JSON, claim/receipt engine, attribution, error codes); the one-owner-per-invariant guard migration deposits directly into the split family modules — guards move once | #111, #117 |
