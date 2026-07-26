@@ -1184,7 +1184,10 @@ Slice review shape:
   "convergence": "converging",
   "remaining_fix_count": 1,
   "required_fixes": ["Preserve the API error code when retrying the request."],
-  "ownership_ratification": { "schema_version": 1, "paths": [] },
+  "ownership_ratification": {
+    "schema_version": 2,
+    "kind": "factory-derived-modified-extension"
+  },
   "remediation_context": {
     "schema_version": 2,
     "fixes": [
