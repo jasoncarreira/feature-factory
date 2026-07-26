@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPanelReviewRecord, createSliceAttemptReview, createSliceReviewRecord } from "../review-record-fixture.js";
 import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "../delivery-envelope-fixture.js";
-import { claimCheckedTestExecution, completeCheckedTestExecution, createPostPrState, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunStep } from "../../../src/run-state.js";
+import { claimCheckedTestExecution, completeCheckedTestExecution, createPostPrState, transitionGateDecision, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunStep, transitionSteeringBoundaryOpened } from "../../../src/run-state.js";
 import { postPrObserve } from "../../../src/factory.js";
 import { observePullRequestOperation, prOperationMarker } from "../../../src/github.js";
 import { git, output, writeJson } from "../base-advance-transition/fixture.js";
@@ -138,7 +138,6 @@ export function installApprovedLifecycleSlice(fixture, { path = "src/lifecycle.j
   git(fixture.worktree, ["merge", "--no-ff", branch, "-m", "integrate advanced lifecycle candidate"]);
   const integrationHead = output(fixture.worktree, ["rev-parse", "HEAD"]);
   const run = fixture.readRun();
-  run.gates.pre_pr = { status: "approved" };
   run.slices = [{
     id: sliceId,
     stack: "backend",
@@ -382,6 +381,21 @@ export async function publishIndependentPanels(fixture, expectedHead) {
     validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: validatorRef },
     security_review: { verdict: "PASS", review_ref: securityRef },
   }, { repoRoot: fixture.repo, now: LIFECYCLE_NOW });
+}
+
+export async function publishPrePrApproval(fixture) {
+  const artifactRef = "artifacts/validation-report.md";
+  const questionRef = "gates/pre_pr.question.md";
+  mkdirSync(join(fixture.runDir, "gates"), { recursive: true });
+  writeFileSync(join(fixture.runDir, questionRef), "approve the reviewed implementation?\n");
+  const pending = await transitionGateDecision(fixture.runDir, "pre_pr", {
+    status: "pending", artifact: artifactRef, question_ref: questionRef,
+  }, { now: LIFECYCLE_NOW });
+  const opened = await transitionSteeringBoundaryOpened(fixture.runDir, "gate", { now: LIFECYCLE_NOW });
+  const approved = await transitionGateDecision(fixture.runDir, "pre_pr", {
+    status: "approved", artifact: artifactRef, question_ref: questionRef, answer: "approve",
+  }, { now: LIFECYCLE_NOW, boundaryToken: opened.boundary.token });
+  return { pending, approved };
 }
 
 export async function recordOpenReadyPr(fixture, expectedBase, expectedHead) {

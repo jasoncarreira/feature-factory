@@ -946,22 +946,30 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
   const answerArchives = [];
   const publishedArchives = [];
   let v2Authority = null;
+  const requireGateBinding = nextGate.status !== "pending";
   const result = await withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    if (gateName === "pre_pr" && ["pending", "approved"].includes(nextGate.status)) v2Authority = assertCheckedPrePrGateAuthority(runDir, current, `pre_pr ${nextGate.status}`);
+    if (gateName === "pre_pr" && current.continuation?.schema_version === 2 && ["pending", "approved"].includes(nextGate.status)) {
+      v2Authority = assertCheckedPrePrGateAuthority(runDir, current, `pre_pr ${nextGate.status}`, null, { requireGateBinding });
+    }
     if (nextGate.status === "approved" && mergedSliceRepairFence(current)) {
       throw new Error(`gate '${gateName}' cannot be approved while a merged-slice repair is unresolved`);
     }
     if (nextGate.status === "approved" && current.gates?.[gateName]?.status === "approved") {
+      if (gateName === "pre_pr") assertCheckedPrePrGateAuthority(runDir, current, `pre_pr ${nextGate.status}`, null, { requireGateBinding });
       return reconcileApprovedGateRedelivery(runDir, current, gateName, nextGate, redeliveryInput);
     }
     try {
       return await transitionRunJsonLocked(
         runDir,
-        (draft) => {
+        (draft, { current: lockedCurrent }) => {
+          if (!v2Authority && gateName === "pre_pr" && ["pending", "approved"].includes(nextGate.status)) {
+            v2Authority = assertCheckedPrePrGateAuthority(runDir, lockedCurrent, `pre_pr ${nextGate.status}`, null, { requireGateBinding });
+          }
           if (nextGate.status === "approved") consumeSteeringBoundary(draft, "gate", options.boundaryToken);
           draft.gates = normalizeGateMap(draft.gates);
           const prepared = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate, (archive) => answerArchives.push(archive));
+          if (gateName === "pre_pr" && v2Authority) prepared.pending_snapshot.checked_authority_hash = checkedPrePrAuthorityHash(v2Authority);
           if (nextGate.status === "approved" && draft.mode === "interactive") {
             prepared.handoff_receipt = createApprovalHandoffReceipt(runDir, gateName, prepared, draft);
           }
@@ -974,7 +982,9 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
             await archiveConsumedGateAnswer(archive);
             publishedArchives.push(archive);
           }
-        }, beforeReplace: v2Authority ? (_next, observed) => assertCheckedPrePrGateAuthority(runDir, observed, `pre_pr ${nextGate.status}`, v2Authority) : null },
+        }, beforeReplace: gateName === "pre_pr" ? (_next, observed) => {
+          if (v2Authority) assertCheckedPrePrGateAuthority(runDir, observed, `pre_pr ${nextGate.status}`, v2Authority, { requireGateBinding });
+        } : null },
       );
     } catch (error) {
       await restoreConsumedGateAnswers(publishedArchives);
@@ -2957,8 +2967,8 @@ async function transitionRunStepChecked(runDir, stepSelector, updater, options, 
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft) => {
     const hadSteps = Array.isArray(draft.steps);
     const steps = hadSteps ? draft.steps : [];
-    if (options.mustExist && !collectionHasItem(steps, stepSelector, "agent")) throw new Error(`step '${formatSelector(stepSelector)}' not found`);
     const priorIndex = selectCollectionItemIndex(steps, stepSelector, "step selector", "agent");
+    if (options.mustExist && priorIndex < 0) throw new Error(`step '${formatSelector(stepSelector)}' not found`);
     const priorStep = priorIndex >= 0 ? cloneJson(steps[priorIndex]) : null;
     const update = await applyCollectionItemUpdate({ items: steps, selector: stepSelector, updater, selectorLabel: "step selector", seed: seedRunStep(stepSelector), identityKey: "agent" });
     stepIndex = update.index;
@@ -5381,11 +5391,11 @@ function assertPrCreatedReadiness(runDir, run) {
   if (run.gates?.pre_pr?.status !== "approved") throw new Error("pr-created requires approved pre_pr gate");
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) throw new Error("pr-created requires validator verdict GO or GO-WITH-NITS");
   if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");
-  const freshTestAuthority = assertCheckedFreshDownstreamAuthority(runDir, run, "pre-PR admission");
+  const prePrAuthority = assertCheckedPrePrGateAuthority(runDir, run, "pre-PR admission");
   const route = classifyWholeStoryTestRoute(runDir, run, { runDir });
   if (route !== WHOLE_STORY_ROUTES.LEGACY) assertWholeStorySinkAllowed({ route, sink: "SINK20", claim: "completed-pass", evidence: "exact-pass", base: "equal", head: "equal", review: "fresh", pr_mode: run.pr_mode });
   return {
-    fresh_test_authority: freshTestAuthority,
+    fresh_test_authority: prePrAuthority?.fresh_test_authority || null,
     slices: assertPrCreatedSliceState(runDir, run),
     panels: assertPanelReviewBindingsCurrent(runDir, run),
   };
@@ -5480,9 +5490,11 @@ export function classifyWholeStoryTestRoute(runDir, run, options = {}) {
   let route = deriveWholeStoryRoute(state);
   if (route === WHOLE_STORY_ROUTES.ORDINARY_FRESH) {
     const decompositionSteps = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
-    if (!existsSync(join(resolve(runDir), "plan", "slices.json")) || decompositionSteps.length !== 1) {
+    if (!existsSync(join(resolve(runDir), "plan", "slices.json")) || decompositionSteps.length === 0) {
       state.slice_projection = "incomplete";
       route = deriveWholeStoryRoute(state);
+    } else if (decompositionSteps.length !== 1) {
+      throw new Error("ordinary fresh whole-story route requires exactly one work-decomposer authority");
     } else if (decompositionSteps[0].status !== "accepted" || !isRecord(decompositionSteps[0].acceptance)) {
       throw new Error("ordinary fresh whole-story route requires exact accepted work-decomposer authority");
     } else {
@@ -5690,10 +5702,10 @@ function assertCheckedFreshDownstreamAuthority(runDir, run, sink, expected = nul
     const decompositionSteps = (run?.steps || []).filter((step) => step?.agent === "work-decomposer");
     const ordinaryDirect = !run?.continuation && !run?.checkpoint_source && !run?.checkpoint_progress
       && integrationConflictSlices(run).length === 0
-      && existsSync(join(resolve(runDir), "plan", "slices.json")) && decompositionSteps.length === 1;
-    if (ordinaryDirect && slices.length > 0) {
+      && existsSync(join(resolve(runDir), "plan", "slices.json")) && decompositionSteps.length > 0;
+    if (ordinaryDirect) {
       const incomplete = slices.filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
-      throw new Error(`ordinary fresh downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
+      throw new Error(`ordinary fresh downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ") || "<unseeded>"}`);
     }
     return null;
   }
@@ -5750,10 +5762,10 @@ function observeCheckedTestVerifierAuthority(runDir, run, step, options = {}) {
   };
 }
 
-function assertCheckedPrePrGateAuthority(runDir, run, sink, expected = null) {
+function assertCheckedPrePrGateAuthority(runDir, run, sink, expected = null, policy = {}) {
+  const freshTestAuthority = assertCheckedFreshDownstreamAuthority(runDir, run, sink);
   const route = classifyWholeStoryTestRoute(runDir, run, { runDir });
   if (route === WHOLE_STORY_ROUTES.LEGACY) return null;
-  const freshTestAuthority = assertCheckedFreshDownstreamAuthority(runDir, run, sink);
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict) || !PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
     throw new Error(`${route === WHOLE_STORY_ROUTES.ORDINARY_FRESH ? "checked" : "schema-v2"} pre-PR gate requires fresh passing child panels before ${sink}`);
   }
@@ -5762,8 +5774,22 @@ function assertCheckedPrePrGateAuthority(runDir, run, sink, expected = null) {
     fresh_test_authority: freshTestAuthority,
     panels: assertPanelReviewBindingsCurrent(runDir, run),
   };
+  const gate = run.gates?.pre_pr;
+  if (policy.requireGateBinding !== false && ["pending", "approved"].includes(gate?.status)
+    && gate.pending_snapshot?.checked_authority_hash !== checkedPrePrAuthorityHash(observed)) {
+    throw new Error(`checked pre-PR gate authority is not bound to current tests and panels before ${sink}`);
+  }
   if (expected && !sameJson(observed, expected)) throw new Error(`${route === WHOLE_STORY_ROUTES.ORDINARY_FRESH ? "checked" : "schema-v2"} downstream authority changed before ${sink} publication`);
   return observed;
+}
+
+function checkedPrePrAuthorityHash(authority) {
+  return hashValue({
+    test_execution_claim_hash: authority.fresh_test_authority.step.execution_claim_hash,
+    test_acceptance: authority.fresh_test_authority.step.acceptance,
+    validator: authority.panels.validator_binding,
+    security_review: authority.panels.security_binding,
+  });
 }
 
 export function assertPanelReviewBindingsCurrent(runDir, run) {

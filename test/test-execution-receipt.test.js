@@ -16,6 +16,7 @@ import {
   classifyWholeStoryTestRoute,
   evaluateWholeStoryRouteSink,
   markCheckedTestExecutionUnknown,
+  transitionPanelVerdicts,
   transitionRecoverOrphan,
   transitionRunJson,
   transitionRunStep,
@@ -125,6 +126,16 @@ describe("checked test execution receipt", () => {
         () => classifyWholeStoryTestRoute(fixture.runDir, { ...initial, run_id: "different-run" }),
         /canonical factory run directory/u,
       );
+      assert.equal(
+        classifyWholeStoryTestRoute(fixture.runDir, { ...initial, steps: initial.steps.filter((step) => step.agent !== "work-decomposer") }),
+        "legacy-unselected",
+      );
+      writeJson(join(fixture.runDir, "run.json"), { ...initial, slices: [] });
+      await assert.rejects(transitionPanelVerdicts(fixture.runDir, {
+        validator: { verdict: "GO", report: "artifacts/missing.md", review_ref: "reviews/implementation-validator.json" },
+        security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
+      }), /all child slices merged before panel publication: <unseeded>/u);
+      writeJson(join(fixture.runDir, "run.json"), initial);
       const started = await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }, { mustExist: true });
       assert.equal(started.step.status, "running");
       assert.equal(classifyWholeStoryTestRoute(fixture.runDir, started.run), "ordinary-fresh-v1");
@@ -136,6 +147,10 @@ describe("checked test execution receipt", () => {
           status,
         );
       }
+      await assert.rejects(
+        transitionRunStep(fixture.runDir, { index: 999, agent: "work-decomposer" }, { status: "running", attempts: 2 }, { mustExist: true }),
+        /step 'work-decomposer' not found/u,
+      );
 
       writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "caller-authored legacy evidence\n");
       writeJson(join(fixture.runDir, "evidence", "legacy.json"), { subject: "test-verifier", status: "pass" });

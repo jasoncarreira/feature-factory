@@ -88,7 +88,7 @@ const TERMINAL_NONCONVERGENCE_KEYS = new Set(["schema_version", "kind", "slice_i
 const TERMINAL_NONCONVERGENCE_CONTINUATION_KEYS = new Set(["program", "args"]);
 const DURABLE_REF_ROOTS = new Set(["artifacts", "evidence", "reviews", "gates", "steering"]);
 const GATE_KEYS = new Set(["status", "artifact", "question_ref", "answer_ref", "answered_at", "answer", "decision_note", "approval_source", "pending_snapshot", "handoff_receipt"]);
-const PENDING_SNAPSHOT_KEYS = new Set(["question_ref", "question_hash", "artifact_ref", "artifact_hash", "answer_ref", "answer_hash", "created_at"]);
+const PENDING_SNAPSHOT_KEYS = new Set(["question_ref", "question_hash", "artifact_ref", "artifact_hash", "answer_ref", "answer_hash", "created_at", "checked_authority_hash"]);
 const HANDOFF_RECEIPT_KEYS = new Set(["schema_version", "kind", "gate", "approval_fingerprint", "pending_snapshot_hash", "answer_hash", "steering_generation", "accepted_at"]);
 const STEP_KEYS = new Set(["agent", "status", "attempts", "artifact_ref", "review_ref", "evidence_ref", "acceptance", "inherited_acceptance", "execution_claim", "execution_claim_hash"]);
 const STEP_ACCEPTANCE_KEYS = new Set(["artifact_ref", "artifact_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_head_sha"]);
@@ -3948,6 +3948,7 @@ function validatePendingSnapshot(errors, pendingSnapshot, path) {
   requiredHash(errors, pendingSnapshot, "artifact_hash", `${path}.artifact_hash`);
   optionalString(errors, pendingSnapshot, "answer_ref", `${path}.answer_ref`);
   optionalHash(errors, pendingSnapshot, "answer_hash", `${path}.answer_hash`);
+  optionalHash(errors, pendingSnapshot, "checked_authority_hash", `${path}.checked_authority_hash`);
   requiredTimestamp(errors, pendingSnapshot, "created_at", `${path}.created_at`);
   validateDurableRef(errors, pendingSnapshot.question_ref, "gates", `${path}.question_ref`);
   validateDurableRef(errors, pendingSnapshot.artifact_ref, "artifacts", `${path}.artifact_ref`);

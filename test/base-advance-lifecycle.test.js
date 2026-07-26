@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { advanceFactoryRunBase, resumeFactory } from "../src/factory.js";
-import { classifyWholeStoryTestRoute, completeSpecialBuilderTaskDispatch, claimCheckedTestExecution, prepareSpecialBuilderTaskDispatch, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionSliceMerged } from "../src/run-state.js";
+import { classifyWholeStoryTestRoute, completeSpecialBuilderTaskDispatch, claimCheckedTestExecution, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionSliceMerged, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 import { computePrOperationId } from "../src/github.js";
 import { captureRepresentativeAuthorityInventory, createBaseAdvanceTransitionFixture, git, installRepresentativeAuthorityInventory, output } from "./helpers/base-advance-transition/fixture.js";
-import { approvePreservedCandidate, completeFinalCheckedTest, completeIntegratedConflictCheckedTest, configureReadyPostPrReview, installApprovedLifecycleSlice, LIFECYCLE_REVIEWER, publishIndependentPanels, recordOpenReadyPr, requestConfiguredReviewer } from "./helpers/base-advance-lifecycle/fixture.js";
+import { approvePreservedCandidate, completeFinalCheckedTest, completeIntegratedConflictCheckedTest, configureReadyPostPrReview, installApprovedLifecycleSlice, LIFECYCLE_REVIEWER, publishIndependentPanels, publishPrePrApproval, recordOpenReadyPr, requestConfiguredReviewer } from "./helpers/base-advance-lifecycle/fixture.js";
 import { spawnSync } from "./helpers/git-fixture.js";
 
 describe("active-run base advancement lifecycle compatibility", () => {
@@ -119,6 +119,18 @@ describe("active-run base advancement lifecycle compatibility", () => {
       assert.equal(launches, 1);
       assert.deepEqual(fixture.readRun().post_pr, postPr);
 
+      mkdirSync(join(fixture.runDir, "artifacts"), { recursive: true });
+      mkdirSync(join(fixture.runDir, "gates"), { recursive: true });
+      writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "premature review\n");
+      writeFileSync(join(fixture.runDir, "gates", "pre_pr.question.md"), "approve prematurely?\n");
+      await transitionGateDecision(fixture.runDir, "pre_pr", {
+        status: "pending", artifact: "artifacts/validation-report.md", question_ref: "gates/pre_pr.question.md",
+      });
+      const earlyBoundary = await transitionSteeringBoundaryOpened(fixture.runDir, "gate");
+      await transitionGateDecision(fixture.runDir, "pre_pr", {
+        status: "approved", artifact: "artifacts/validation-report.md", question_ref: "gates/pre_pr.question.md", answer: "approve",
+      }, { boundaryToken: earlyBoundary.boundary.token });
+
       const candidate = installApprovedLifecycleSlice(fixture);
       await assert.rejects(
         publishIndependentPanels(fixture, candidate.integrationHead),
@@ -142,6 +154,11 @@ describe("active-run base advancement lifecycle compatibility", () => {
         { validator: panels.run.validator.verdict, validator_head: panels.run.validator.reviewed_head_sha, security: panels.run.security_review.verdict, security_head: panels.run.security_review.reviewed_head_sha },
         { validator: "GO", validator_head: candidate.integrationHead, security: "PASS", security_head: candidate.integrationHead },
       );
+      await assert.rejects(
+        transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }),
+        /checked pre-PR gate authority is not bound to current tests and panels/u,
+      );
+      await publishPrePrApproval(fixture);
       const driftedMain = fixture.advance("post-review canonical main drift\n");
       const pr = await recordOpenReadyPr(fixture, driftedMain, candidate.integrationHead);
       assert.equal(pr.recorded.disposition, "open");
@@ -211,6 +228,7 @@ describe("active-run base advancement lifecycle compatibility", () => {
       await transitionSliceMerged(fixture.runDir, candidate.sliceId, { merge_commit: candidate.integrationHead }, { repoRoot: fixture.repo });
       await completeFinalCheckedTest(fixture, candidate.integrationHead);
       await publishIndependentPanels(fixture, candidate.integrationHead);
+      await publishPrePrApproval(fixture);
 
       git(fixture.publisher, ["checkout", "--orphan", "divergent-main"]);
       git(fixture.publisher, ["rm", "-rf", "."]);
@@ -238,6 +256,7 @@ describe("active-run base advancement lifecycle compatibility", () => {
       await transitionSliceMerged(fixture.runDir, candidate.sliceId, { merge_commit: candidate.integrationHead }, { repoRoot: fixture.repo });
       await completeFinalCheckedTest(fixture, candidate.integrationHead);
       await publishIndependentPanels(fixture, candidate.integrationHead);
+      await publishPrePrApproval(fixture);
       git(fixture.worktree, ["push", "-u", "origin", `HEAD:refs/heads/${fixture.runId}`]);
       const run = fixture.readRun();
       run.pr_mode = "draft";
@@ -247,7 +266,7 @@ describe("active-run base advancement lifecycle compatibility", () => {
         transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }),
         /pr-fence denied: ordinary-fresh-ready-required/u,
       );
-      assert.equal(fixture.readRun().steering?.pr_fence, undefined);
+      assert.equal(fixture.readRun().steering?.pr_fence, null);
     } finally {
       fixture.cleanup();
     }
@@ -268,7 +287,7 @@ describe("active-run base advancement lifecycle compatibility", () => {
           (error) => error.code === code,
           name,
         );
-        assert.equal(fixture.readRun().steering?.pr_fence, undefined, name);
+        assert.equal(fixture.readRun().steering?.pr_fence, null, name);
       } finally {
         fixture.cleanup();
       }
@@ -284,6 +303,7 @@ async function createFenceReadyOrdinaryFixture(name) {
   await transitionSliceMerged(fixture.runDir, candidate.sliceId, { merge_commit: candidate.integrationHead }, { repoRoot: fixture.repo });
   await completeFinalCheckedTest(fixture, candidate.integrationHead);
   await publishIndependentPanels(fixture, candidate.integrationHead);
+  await publishPrePrApproval(fixture);
   git(fixture.worktree, ["push", "-u", "origin", `HEAD:refs/heads/${fixture.runId}`]);
   return fixture;
 }
