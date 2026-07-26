@@ -2411,9 +2411,9 @@ export function assertPublishedCarryForwardRun(repoInput, expectedContinuation, 
   if (!existsSync(runFile) || !lstatSync(runFile).isFile()) throw new Error("schema-v2 carry-forward payload requires an exact published child run");
   const run = validateRun(parseJsonObjectFile(runFile, "published carry-forward run.json"));
   if (!sameJson(run.continuation, expectedContinuation)) throw new Error("schema-v2 carry-forward payload does not match the published child continuation");
+  const parent = assertContinuationAuthorityCurrent(runDir, run, { repoRoot: repo });
   const validation = validateRunDir(runDir);
   if (!validation.ok) throw new Error("published carry-forward child directory is invalid");
-  const parent = assertContinuationAuthorityCurrent(runDir, run, { repoRoot: repo });
   const observedCarryForward = observeCarryForwardAuthority(repo, dirname(parent.parentFile), parent.parentRun, expectedContinuation.target.base_ref, expectedContinuation.target.base_commit, options);
   if (!sameJson(observedCarryForward, expectedContinuation.carry_forward)) throw new Error("continuation carry_forward authority changed after publication");
   assertPublishedCarryForwardConfiguration(run, options.expectedConfiguration);
