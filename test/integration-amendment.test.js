@@ -15,6 +15,7 @@ import { completeIntegrationAmendmentReviewTaskDispatch, completeSliceBuilderTas
 import { checkRunConsistency, inspectIntegrationAmendmentInventory, integrationAmendmentId, validateIntegrationAmendment, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateRun } from "../src/validate.js";
 import { buildContinuation, cleanupRun, continueFactory, executeIntegrationAmendment, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startHeartbeat, stopHeartbeat } from "../src/factory.js";
 import plugin from "../src/plugin.js";
+import { executeCheckedTestExecution } from "../src/test-execution.js";
 
 const RUN_ID = "amendment-run";
 const FEATURE_BRANCH = "amendment-feature";
@@ -2431,7 +2432,32 @@ async function advanceMergedAmendmentConsumer(fixture, { assertCurrentDispatchTa
   git(fixture.featureWorktree, ["merge", "--no-ff", branch, "-m", "merge consumer integration"]);
   const mergeCommit = git(fixture.featureWorktree, ["rev-parse", "HEAD"]).trim();
   const mergedResult = await transitionSliceMerged(fixture.runDir, "consumer", { merge_commit: mergeCommit }, { repoRoot: fixture.repo, now: NOW });
+  await establishAcceptedCheckedTestAuthority(fixture, mergeCommit);
   return { started: startedResult.slice, reviewed: reviewedResult.slice, merged: mergedResult.slice, reviewedCommit, mergeCommit };
+}
+
+async function establishAcceptedCheckedTestAuthority(fixture, head) {
+  const run = readRun(fixture);
+  run.steps.push({ agent: "test-verifier", status: "blocked", attempts: 0 });
+  writeJson(join(fixture.runDir, "run.json"), validateRun(run));
+  await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }, { mustExist: true });
+  const completed = await executeCheckedTestExecution(fixture.runDir, executionOptions([{ code: 0 }], []));
+  assert.equal(completed.status, "pass");
+  assert.equal(completed.head_sha, head);
+  writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "consumer integration passed\n");
+  const reviewRef = "reviews/test-verifier.attempt-1.json";
+  writeJson(join(fixture.runDir, reviewRef), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] });
+  const accepted = await transitionRunStep(fixture.runDir, "test-verifier", {
+    status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md", evidence_ref: completed.receipt_ref, review_ref: reviewRef,
+  }, { mustExist: true });
+  writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n");
+  writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: FEATURE_BRANCH, attempt: 1, verdict: "GO", reviewed_head_sha: head, required_fixes: [] });
+  writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: FEATURE_BRANCH, attempt: 1, verdict: "PASS", reviewed_head_sha: head, required_fixes: [] });
+  await transitionPanelVerdicts(fixture.runDir, {
+    validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
+    security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
+  });
+  return accepted;
 }
 
 async function publishConsumerReview(fixture, { attempt, reviewedCommit, verdict = "APPROVE", requiredFixes = [] }) {
