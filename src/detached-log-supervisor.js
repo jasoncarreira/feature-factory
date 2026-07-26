@@ -46,6 +46,15 @@ export async function superviseDetachedLaunch(init, options = {}) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     activeChild = child;
+    // Register the close listener before any awaited work. `close` is emitted
+    // once, and a short-lived child can emit it while we are awaiting spawn or
+    // identity settling — a `once` handler attached afterwards never sees that
+    // past event, leaving the supervisor promise pending forever. Nothing
+    // consumes the rejection until the await below, so mark it handled here to
+    // keep an early spawn error from surfacing as an unhandled rejection while
+    // still rejecting for the real awaiter.
+    const close = waitForClose(child);
+    close.catch(() => {});
     await waitForSpawn(child);
     send({ type: "spawned", pid: child.pid });
 
@@ -75,7 +84,6 @@ export async function superviseDetachedLaunch(init, options = {}) {
     }
 
     send({ type: "ready", pid: child.pid });
-    const close = waitForClose(child);
     try {
       await Promise.all([close, writer.finished()]);
     } catch (error) {
@@ -133,6 +141,15 @@ function waitForSpawn(child) {
 }
 
 function waitForClose(child) {
+  // Mirror `waitForSpawn`'s already-settled fast path: a child handed to us
+  // after it exited will never emit another `close`, so read the terminal state
+  // directly instead of waiting for an event that cannot arrive.
+  if (child?.exitCode !== null && child?.exitCode !== undefined) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode ?? null });
+  }
+  if (child?.signalCode !== null && child?.signalCode !== undefined) {
+    return Promise.resolve({ code: child.exitCode ?? null, signal: child.signalCode });
+  }
   return new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => resolve({ code, signal }));
