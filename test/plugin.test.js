@@ -6,10 +6,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import plugin, { createPendingCallbackStore, createSessionCorrelationProbe, mergeFactoryPermission, parseFrontmatter, parseSpecialBuilderDispatchMarker, specialTaskTelemetryAttributes } from "../src/plugin.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadValue } from "../src/feature-command-payload.js";
-import { adoptSliceBuilderTaskDispatchCandidate, completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionIntegrationAmendment, transitionPanelVerdicts } from "../src/run-state.js";
+import { adoptSliceBuilderTaskDispatchCandidate, completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionIntegrationAmendment, transitionPanelVerdicts, transitionRunStep } from "../src/run-state.js";
 import { buildContinuation, cleanupRun, recoverDisruptedRun, resumeFactory } from "../src/factory.js";
 import { integrationAmendmentId, validateRun } from "../src/validate.js";
 import { hashValue } from "../src/refs.js";
+import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
@@ -128,6 +129,7 @@ describe("checked slice builder Task dispatch", () => {
       writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n", "utf8");
       writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "main", attempt: 2, verdict: "GO", reviewed_head_sha: completionHead, required_fixes: [] });
       writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "main", attempt: 2, verdict: "PASS", reviewed_head_sha: completionHead, required_fixes: [] });
+      await establishAcceptedCheckedTestAuthority(fixture, completionHead);
       await transitionPanelVerdicts(fixture.runDir, {
         validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
         security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
@@ -138,6 +140,7 @@ describe("checked slice builder Task dispatch", () => {
       git(fixture.repo, ["add", "src/late.js"]);
       git(fixture.repo, ["commit", "-m", "unclaimed passing panel replacement"]);
       const lateHead = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      installAcceptedCheckedTestAuthority(fixture, lateHead, JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8")));
       writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "main", attempt: 3, verdict: "GO-WITH-NITS", reviewed_head_sha: lateHead, required_fixes: [] });
       writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "main", attempt: 3, verdict: "PASS", reviewed_head_sha: lateHead, required_fixes: [] });
       await assert.rejects(
@@ -160,6 +163,7 @@ describe("checked slice builder Task dispatch", () => {
       git(fixture.repo, ["add", "src/unchecked.js"]);
       git(fixture.repo, ["commit", "-m", "unchecked test verifier edit"]);
       const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      await establishAcceptedCheckedTestAuthority(fixture, head);
       writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n", "utf8");
       writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "main", attempt: 2, verdict: "GO", reviewed_head_sha: head, required_fixes: [] });
       writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "main", attempt: 2, verdict: "PASS", reviewed_head_sha: head, required_fixes: [] });
@@ -2108,6 +2112,57 @@ function specialBuilderPrompt() {
   return `FEATURE_FACTORY_SPECIAL_BUILDER_DISPATCH ${JSON.stringify({ run_id: "run", route: "panel-remediation", agent: "backend-builder" })}\nRepair the checked panel findings.`;
 }
 
+async function establishAcceptedCheckedTestAuthority(fixture, head) {
+  const current = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+  if (current.special_builder_dispatch?.closure_ref) return installAcceptedCheckedTestAuthority(fixture, head, current);
+  await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }, { mustExist: true });
+  const completed = await executeCheckedTestExecution(fixture.runDir);
+  assert.equal(completed.status, "pass");
+  assert.equal(completed.head_sha, head);
+  writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "checked integration passed\n", "utf8");
+  const reviewRef = "reviews/test-verifier.attempt-1.json";
+  writeJson(join(fixture.runDir, reviewRef), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] });
+  return transitionRunStep(fixture.runDir, "test-verifier", {
+    status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md", evidence_ref: completed.receipt_ref, review_ref: reviewRef,
+  }, { mustExist: true });
+}
+
+function installAcceptedCheckedTestAuthority(fixture, head, run) {
+  const planRef = "plan/slices.json";
+  const planPath = join(fixture.runDir, planRef);
+  const plan = JSON.parse(readFileSync(planPath, "utf8"));
+  const receiptRef = "evidence/test-verifier.attempt-1.json";
+  const reviewRef = "reviews/test-verifier.attempt-1.json";
+  const artifactRef = "artifacts/test-report.md";
+  const nonce = "123e4567-e89b-42d3-a456-426614174126";
+  const emptyStream = { captured_bytes: 0, sha256: shaRealAmendment(""), truncated: false };
+  const receipt = {
+    schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: run.run_id, attempt: 1,
+    claim_nonce: nonce, plan_ref: planRef, plan_hash: fileHash(planPath), head_sha: head, timeout_ms: plan.integration_gate.timeout_ms,
+    started_at: REAL_AMENDMENT_NOW, completed_at: REAL_AMENDMENT_NOW, duration_ms: 0, status: "pass", review_ready: true,
+    commands: plan.integration_gate.required_commands.map((command, index) => ({ index, ...command, outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 0, stdout: emptyStream, stderr: emptyStream })),
+  };
+  writeJson(join(fixture.runDir, receiptRef), receipt);
+  const claim = {
+    schema_version: 1, kind: "checked-test-execution-claim", state: "completed", nonce, run_id: run.run_id, attempt: 1,
+    plan_ref: planRef, plan_hash: fileHash(planPath), head_sha: head, timeout_ms: plan.integration_gate.timeout_ms, receipt_ref: receiptRef,
+    claimed_at: REAL_AMENDMENT_NOW, completed_at: REAL_AMENDMENT_NOW, status: "pass", receipt_hash: fileHash(join(fixture.runDir, receiptRef)),
+  };
+  writeFileSync(join(fixture.runDir, artifactRef), "checked integration passed\n", "utf8");
+  writeJson(join(fixture.runDir, reviewRef), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] });
+  const step = run.steps.find(({ agent }) => agent === "test-verifier");
+  Object.assign(step, {
+    status: "accepted", attempts: 1, artifact_ref: artifactRef, evidence_ref: receiptRef, review_ref: reviewRef,
+    execution_claim: claim, execution_claim_hash: hashValue(claim),
+    acceptance: {
+      artifact_ref: artifactRef, artifact_hash: fileHash(join(fixture.runDir, artifactRef)), evidence_ref: receiptRef,
+      evidence_hash: fileHash(join(fixture.runDir, receiptRef)), review_ref: reviewRef, review_hash: fileHash(join(fixture.runDir, reviewRef)), reviewed_head_sha: head,
+    },
+  });
+  writeJson(join(fixture.runDir, "run.json"), validateRun(run));
+  return step;
+}
+
 const REAL_AMENDMENT_RUN_ID = "amendment-run";
 const REAL_AMENDMENT_BRANCH = "amendment-feature";
 const REAL_AMENDMENT_NOW = "2026-07-20T12:00:00.000Z";
@@ -2442,7 +2497,8 @@ function createBuilderDispatchFixture(options = {}) {
   git(repo, ["config", "user.name", "Test"]);
   writeFileSync(join(repo, ".gitignore"), ".opencode/\n", "utf8");
   writeFileSync(join(repo, "README.md"), "fixture\n", "utf8");
-  git(repo, ["add", ".gitignore", "README.md"]);
+  writeJson(join(repo, "package.json"), { scripts: { check: "node --version" } });
+  git(repo, ["add", ".gitignore", "README.md", "package.json"]);
   git(repo, ["commit", "-m", "fixture"]);
   const runDir = join(repo, ".opencode", "factory", "run");
   mkdirSync(join(runDir, "plan"), { recursive: true });
@@ -2518,6 +2574,7 @@ function createSpecialPanelDispatchFixture() {
     reviewed_commit: fixture.head, merge_commit: fixture.head,
     attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: fixture.head, diff_base_commit: fixture.head, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 }],
   }];
+  run.steps.push({ agent: "test-verifier", status: "blocked", attempts: 0 });
   run.validator = {
     verdict: "NO-GO", report: reportRef, review_ref: validatorRef,
     report_hash: fileHash(join(fixture.runDir, reportRef)), review_hash: fileHash(join(fixture.runDir, validatorRef)), reviewed_head_sha: fixture.head,

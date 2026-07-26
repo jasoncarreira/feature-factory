@@ -290,6 +290,15 @@ describe("cli write surface", () => {
       runFactory(repo, ["slice-merged", RUN_ID, "slice", "--merge-commit", integrationHead, "--json"]);
       validateFactory(repo);
 
+      runFactory(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "1", "--json"]);
+      const checked = JSON.parse(runFactory(repo, ["test-execute", RUN_ID, "--json"]).stdout);
+      assert.equal(checked.status, "pass");
+      assert.equal(checked.head_sha, integrationHead);
+      writeFileSync(join(runDir, "artifacts", "test-report.md"), "checked integration passed\n", "utf8");
+      writeJson(join(runDir, "reviews", "test-verifier.attempt-1.json"), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: integrationHead, required_fixes: [] });
+      runFactory(repo, ["step", RUN_ID, "test-verifier", "accepted", "--attempts", "1", "--artifact-ref", "artifacts/test-report.md", "--evidence-ref", checked.receipt_ref, "--review-ref", "reviews/test-verifier.attempt-1.json", "--json"]);
+      validateFactory(repo);
+
       writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
       runFactory(repo, ["step", RUN_ID, "story-reader", "accepted", "--attempts", "1", "--artifact-ref", "artifacts/story.md", "--review-ref", "reviews/slice.json", "--json"]);
       validateFactory(repo);
@@ -443,6 +452,7 @@ function seedRun(runDir) {
       { agent: "spec-writer", status: "running", attempts: 0 },
       { agent: "work-decomposer", status: "running", attempts: 0 },
       { agent: "story-reader", status: "running", attempts: 0 },
+      { agent: "test-verifier", status: "blocked", attempts: 0 },
     ],
   });
   writeJson(join(runDir, "plan", "slices.json"), withDeliveryEnvelope({
@@ -487,7 +497,7 @@ function runFactoryFrom(cwd, args) {
 function spawnFactory(repo, args) {
   const commandArgs = args[0] === "answer"
     ? [CLI, "factory", "answer", "--repo", repo, ...args.slice(1)]
-    : args[0] === "pr-created"
+    : ["pr-created", "test-execute"].includes(args[0])
       ? [CLI, "factory", ...args]
     : [CLI, "factory", ...args, "--repo", repo];
   return spawnSync(process.execPath, commandArgs, {
@@ -546,7 +556,8 @@ function initGitRepo(repo, branches = []) {
   runGit(repo, ["config", "user.email", "test@example.com"]);
   runGit(repo, ["config", "user.name", "Test"]);
   writeFileSync(join(repo, "README.md"), "test\n", "utf8");
-  runGit(repo, ["add", "README.md"]);
+  writeJson(join(repo, "package.json"), { scripts: { check: "node --version" } });
+  runGit(repo, ["add", "README.md", "package.json"]);
   runGit(repo, ["commit", "-m", "init"]);
   for (const branch of branches) runGit(repo, ["branch", branch]);
 }
