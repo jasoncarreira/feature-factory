@@ -1978,6 +1978,97 @@ describe("continuation planning-artifact reuse", () => {
     }
   });
 
+  it("preserves an ordinary merged A2/S2 row only with its same-binding merged owner", async () => {
+    const fixture = createV2SiblingAuthorityFixture("issue128-ordinary-sibling");
+    const childRunId = "issue128-ordinary-sibling-next";
+    try {
+      const parent = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+      const parentConsumer = parent.slices.find(({ id }) => id === "C");
+      const refs = parent.slices.flatMap((slice) => (slice.attempt_reviews || []).flatMap((entry) => [entry.evidence_ref, entry.review_ref, entry.dispatch_claim_ref, entry.dispatch_closure_ref]));
+      const parentBytes = new Map(refs.map((ref) => [ref, readFileSync(join(fixture.runDir, ref))]));
+
+      const result = await continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+      });
+      const accepted = result.payload.continuation.carry_forward.accepted_slices;
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const child = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
+      const childConsumer = child.slices.find(({ id }) => id === "C");
+
+      assert.deepEqual(accepted.map(({ id }) => id), ["A", "C"]);
+      assert.deepEqual(accepted.find(({ id }) => id === "C").attempt_reviews, parentConsumer.attempt_reviews);
+      assert.deepEqual(childConsumer.attempt_reviews, parentConsumer.attempt_reviews);
+      assert.deepEqual(childConsumer.effective_paths, ["C.txt", "src/shared.js"]);
+      assert.equal(childConsumer.attempt_reviews[0].modified_extensions[0].authority, "non-conflicting-sibling");
+      for (const [ref, bytes] of parentBytes) assert.deepEqual(readFileSync(join(childRunDir, ref)), bytes, ref);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("rejects missing, review-only, stale, and cross-bound S2 owners before ordinary child publication", () => {
+    const cases = [
+      ["missing", (run) => { run.slices = run.slices.filter(({ id }) => id !== "A"); }],
+      ["review-only", (run) => { const owner = run.slices.find(({ id }) => id === "A"); owner.status = "review"; delete owner.merge_commit; }],
+      ["stale", (run) => { run.slices.find(({ id }) => id === "C").attempt_reviews[0].modified_extensions[0].owner_review_hash = `sha256:${"0".repeat(64)}`; }],
+      ["cross-bound", (run) => { run.slices.find(({ id }) => id === "C").attempt_reviews[0].modified_extensions[0].owner_slice_id = "C"; }],
+    ];
+    for (const [label, mutate] of cases) {
+      const fixture = createV2SiblingAuthorityFixture(`issue128-ordinary-${label}`);
+      const childRunId = `${fixture.runId}-next`;
+      try {
+        updateRun(fixture, mutate);
+        const parentBytes = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        assert.throws(
+          () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, dryRun: true }),
+          /owner|sibling|binding|stale|accepted|merged|dependency|unknown/u,
+          label,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), parentBytes, label);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false, label);
+        assert.equal(refOid(fixture.repo, `refs/heads/${childRunId}`), null, label);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("preserves a checkpoint-bound merged A2/S2 owner pair and rejects owner drift before publication", async () => {
+    const fixture = createV2SiblingAuthorityFixture("issue128-checkpoint-sibling");
+    const childRunId = "issue128-checkpoint-sibling-next";
+    try {
+      const bound = bindCheckpointContinuationFixture(fixture, "strict");
+      const parent = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+      const parentConsumer = parent.slices.find(({ id }) => id === "C");
+      const result = await continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+      });
+      const child = JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json"), "utf8"));
+      assert.deepEqual(child.checkpoint_source, bound.source);
+      assert.deepEqual(child.slices.find(({ id }) => id === "C").attempt_reviews, parentConsumer.attempt_reviews);
+      assert.equal(result.payload.continuation.carry_forward.accepted_slices.find(({ id }) => id === "C").attempt_reviews[0].modified_extensions[0].owner_slice_id, "A");
+    } finally { cleanup(fixture.repo); }
+
+    const stale = createV2SiblingAuthorityFixture("issue128-checkpoint-stale");
+    const staleChild = "issue128-checkpoint-stale-next";
+    try {
+      bindCheckpointContinuationFixture(stale, null);
+      updateRun(stale, (run) => {
+        run.slices.find(({ id }) => id === "C").attempt_reviews[0].modified_extensions[0].owner_reviewed_commit = "0".repeat(40);
+      });
+      assert.throws(
+        () => continueFactory(stale.runId, { cwd: stale.repo, review: "reviewer.json", runId: staleChild, carryForward: true, dryRun: true }),
+        /owner|sibling|binding|stale/u,
+      );
+      assert.equal(existsSync(join(stale.repo, ".opencode", "factory", staleChild)), false);
+      assert.equal(refOid(stale.repo, `refs/heads/${staleChild}`), null);
+    } finally { cleanup(stale.repo); }
+  });
+
   it("rejects checkpoint B1 configuration conflicts and cross-checkpoint source before allocation", () => {
     const conflict = createV2Fixture("checkpoint-b1-conflict", { accepted: ["A"], mergeOrder: ["A"] });
     try {
@@ -3493,6 +3584,219 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
   writeJson(join(runDir, "run.json"), run);
   const actualMergeOrder = gitStdout(repo, ["rev-list", "--first-parent", "--reverse", `${baseCommit}..${runId}`]).split("\n").filter(Boolean);
   return { repo, runDir, runId, baseCommit, reviewedCommits, mergeCommits, actualMergeOrder };
+}
+
+function createV2SiblingAuthorityFixture(runId) {
+  const fixture = createV2Fixture(runId, { accepted: [], mergeOrder: [] });
+  mkdirSync(join(fixture.repo, "src"), { recursive: true });
+  writeFileSync(join(fixture.repo, "src", "shared.js"), "export const shared = 1;\n");
+  runGit(fixture.repo, ["add", "src/shared.js"]);
+  runGit(fixture.repo, ["commit", "-m", "seed pre-existing sibling path"]);
+  fixture.baseCommit = gitStdout(fixture.repo, ["rev-parse", "HEAD"]);
+  runGit(fixture.repo, ["branch", "-f", "main", fixture.baseCommit]);
+  runGit(fixture.repo, ["push", "--force", "origin", `${fixture.baseCommit}:main`]);
+  const planPath = join(fixture.runDir, "plan", "slices.json");
+  const plan = JSON.parse(readFileSync(planPath, "utf8"));
+  plan.slices.find(({ id }) => id === "A").paths = ["src/shared.js", "src/owner.js"];
+  plan.slices.find(({ id }) => id === "C").paths = ["C.txt"];
+  plan.delivery_envelope = deliveryEnvelopeForSlices(plan.slices);
+  writeJson(planPath, plan);
+
+  mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
+  const branches = {};
+  const worktrees = {};
+  const reviewed = {};
+  for (const id of ["A", "C"]) {
+    branches[id] = `${runId}--${id}`;
+    worktrees[id] = join(fixture.repo, ".opencode", "worktrees", branches[id]);
+    runGit(fixture.repo, ["branch", branches[id], fixture.baseCommit]);
+    runGit(fixture.repo, ["worktree", "add", worktrees[id], branches[id]]);
+    if (id === "A") writeFileSync(join(worktrees[id], "src", "owner.js"), "export const owner = true;\n");
+    else writeFileSync(join(worktrees[id], "src", "shared.js"), "export const shared = 2;\n");
+    runGit(worktrees[id], ["add", id === "A" ? "src/owner.js" : "src/shared.js"]);
+    runGit(worktrees[id], ["commit", "-m", `reviewed ${id}`]);
+    reviewed[id] = gitStdout(worktrees[id], ["rev-parse", "HEAD"]);
+  }
+  const mergeCommits = {};
+  for (const id of ["A", "C"]) {
+    runGit(fixture.repo, ["merge", "--no-ff", "--no-edit", branches[id]]);
+    mergeCommits[id] = gitStdout(fixture.repo, ["rev-parse", "HEAD"]);
+  }
+
+  const authority = {};
+  for (const id of ["A", "C"]) {
+    const attempt = 1;
+    const evidenceRef = `evidence/${id}.v2.json`;
+    const familyEvidenceRef = `evidence/${id}.v2.family.json`;
+    const reviewRef = `reviews/${id}.v2.json`;
+    const rationale = "The consumer requires the pre-existing sibling-owned compatibility surface.";
+    writeJson(join(fixture.runDir, evidenceRef), {
+      subject: id,
+      attempt,
+      status: "pass",
+      review_ready: true,
+      head_sha: reviewed[id],
+      ...(id === "C" ? { ownership_disclosure: [{ path: "src/shared.js", rationale }] } : {}),
+    });
+    const familyEvidence = writeFamilyReceipt(fixture.runDir, runId, plan, id, attempt, reviewed[id], familyEvidenceRef);
+    writeJson(join(fixture.runDir, reviewRef), {
+      subject: id,
+      attempt,
+      verdict: "APPROVE",
+      convergence: "converging",
+      late_discovery_strike: false,
+      remaining_fix_count: 0,
+      required_fixes: [],
+      ownership_ratification: { schema_version: 2, kind: "factory-derived-modified-extension" },
+      remediation_context: { schema_version: 2, fixes: [] },
+      reviewed_commit: reviewed[id],
+      invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: id, reviewedCommit: reviewed[id], evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
+    });
+    const claimStem = createHash("sha256").update(`${runId}\0${id}\0${attempt}`, "utf8").digest("hex");
+    const claimRef = `dispatch/${claimStem}.json`;
+    const closureRef = `dispatch/${claimStem}.closed.json`;
+    const token = `issue128-${id}-completion`;
+    mkdirSync(join(fixture.runDir, "dispatch"), { recursive: true });
+    writeJson(join(fixture.runDir, claimRef), {
+      schema_version: 1,
+      kind: "checked-slice-builder-dispatch-claim",
+      run_id: runId,
+      slice_id: id,
+      attempt,
+      agent: "backend-builder",
+      branch: branches[id],
+      worktree: worktrees[id],
+      head: fixture.baseCommit,
+      context_hash: `sha256:${"a".repeat(64)}`,
+      completion_token_hash: `sha256:${createHash("sha256").update(token).digest("hex")}`,
+      claimed_at: "2026-07-25T12:00:00.000Z",
+      closure_ref: closureRef,
+    });
+    const claimHash = hashFile(join(fixture.runDir, claimRef));
+    writeJson(join(fixture.runDir, closureRef), {
+      schema_version: 1,
+      kind: "checked-slice-builder-dispatch-closure",
+      claim_ref: claimRef,
+      claim_hash: claimHash,
+      run_id: runId,
+      slice_id: id,
+      attempt,
+      agent: "backend-builder",
+      branch: branches[id],
+      worktree: worktrees[id],
+      head: fixture.baseCommit,
+      completion_head: reviewed[id],
+      context_hash: `sha256:${"a".repeat(64)}`,
+      completion_token: token,
+      returned_at: "2026-07-25T12:01:00.000Z",
+    });
+    authority[id] = {
+      evidenceRef,
+      evidenceHash: hashFile(join(fixture.runDir, evidenceRef)),
+      reviewRef,
+      reviewHash: hashFile(join(fixture.runDir, reviewRef)),
+      claimRef,
+      claimHash,
+      closureRef,
+      closureHash: hashFile(join(fixture.runDir, closureRef)),
+      rationale,
+    };
+  }
+  const ownerAttempt = {
+    attempt: 1,
+    evidence_ref: authority.A.evidenceRef,
+    evidence_hash: authority.A.evidenceHash,
+    review_ref: authority.A.reviewRef,
+    review_hash: authority.A.reviewHash,
+    reviewed_commit: reviewed.A,
+    diff_base_commit: fixture.baseCommit,
+    ownership_schema_version: 2,
+    ratified_paths: [],
+    modified_extensions: [],
+    verdict: "APPROVE",
+    convergence: "converging",
+    late_discovery_strike: false,
+    remaining_fix_count: 0,
+    dispatch_claim_ref: authority.A.claimRef,
+    dispatch_claim_hash: authority.A.claimHash,
+    dispatch_closure_ref: authority.A.closureRef,
+    dispatch_closure_hash: authority.A.closureHash,
+  };
+  const extension = {
+    kind: "modified-extension",
+    path: "src/shared.js",
+    rationale: authority.C.rationale,
+    authority: "non-conflicting-sibling",
+    owner_slice_id: "A",
+    owner_attempt: 1,
+    owner_evidence_ref: ownerAttempt.evidence_ref,
+    owner_evidence_hash: ownerAttempt.evidence_hash,
+    owner_review_ref: ownerAttempt.review_ref,
+    owner_review_hash: ownerAttempt.review_hash,
+    owner_dispatch_claim_ref: ownerAttempt.dispatch_claim_ref,
+    owner_dispatch_claim_hash: ownerAttempt.dispatch_claim_hash,
+    owner_dispatch_closure_ref: ownerAttempt.dispatch_closure_ref,
+    owner_dispatch_closure_hash: ownerAttempt.dispatch_closure_hash,
+    owner_reviewed_commit: ownerAttempt.reviewed_commit,
+    owner_diff_base_commit: ownerAttempt.diff_base_commit,
+  };
+  const consumerAttempt = {
+    attempt: 1,
+    evidence_ref: authority.C.evidenceRef,
+    evidence_hash: authority.C.evidenceHash,
+    review_ref: authority.C.reviewRef,
+    review_hash: authority.C.reviewHash,
+    reviewed_commit: reviewed.C,
+    diff_base_commit: fixture.baseCommit,
+    ownership_schema_version: 2,
+    ratified_paths: ["src/shared.js"],
+    modified_extensions: [extension],
+    verdict: "APPROVE",
+    convergence: "converging",
+    late_discovery_strike: false,
+    remaining_fix_count: 0,
+    dispatch_claim_ref: authority.C.claimRef,
+    dispatch_claim_hash: authority.C.claimHash,
+    dispatch_closure_ref: authority.C.closureRef,
+    dispatch_closure_hash: authority.C.closureHash,
+  };
+  const row = (id, attempt, effectivePaths) => ({
+    id,
+    stack: "backend",
+    depends_on: plan.slices.find((slice) => slice.id === id).depends_on,
+    declared_paths: [...plan.slices.find((slice) => slice.id === id).paths],
+    effective_paths: effectivePaths,
+    status: "merged",
+    attempts: 1,
+    branch: branches[id],
+    worktree: worktrees[id],
+    dispatch_required: true,
+    dispatch_claim_ref: attempt.dispatch_claim_ref,
+    dispatch_claim_hash: attempt.dispatch_claim_hash,
+    dispatch_closure_ref: attempt.dispatch_closure_ref,
+    dispatch_closure_hash: attempt.dispatch_closure_hash,
+    evidence_ref: attempt.evidence_ref,
+    evidence_hash: attempt.evidence_hash,
+    review_ref: attempt.review_ref,
+    review_hash: attempt.review_hash,
+    reviewed_commit: attempt.reviewed_commit,
+    attempt_reviews: [attempt],
+    merge_commit: mergeCommits[id],
+  });
+  const runPath = join(fixture.runDir, "run.json");
+  const run = JSON.parse(readFileSync(runPath, "utf8"));
+  run.slices = [
+    row("A", ownerAttempt, ["src/shared.js", "src/owner.js"]),
+    run.slices.find(({ id }) => id === "B"),
+    row("C", consumerAttempt, ["C.txt", "src/shared.js"]),
+  ];
+  run.base_commit = fixture.baseCommit;
+  run.steps.find(({ agent }) => agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
+  writeJson(runPath, run);
+  fixture.reviewedCommits = reviewed;
+  fixture.mergeCommits = mergeCommits;
+  fixture.actualMergeOrder = [mergeCommits.A, mergeCommits.C];
+  return fixture;
 }
 
 function bindCheckpointContinuationFixture(fixture, reviewTier) {
