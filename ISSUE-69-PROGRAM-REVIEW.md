@@ -24,7 +24,7 @@ Evidence basis (three-agent shipping-first audit plus the week's live-run
 record, 2026-07-25): of ~32 critical-path gates, ~6 protect product-code
 correctness; all four real ship-blockages of the week (mid-build ownership
 abort, pre-PR base fence, fresh-run route gap, test-lane amendment pause)
-came from the other ~26 firing fail-closed on correct work; across 15
+came from the other ~26 firing fail-closed on plausibly correct work; across 15
 dogfood runs plus this week there has been zero corrupted or forged durable
 record — while the correctness core has never killed a run. Correctness
 itself rests on two thin points (builder-authored tests under checked
@@ -41,7 +41,8 @@ Accepted under P0:
 2. **Finish-and-disclose (#128)** — out-of-lane modifications are completed,
    disclosed, and reviewer-ratified (`modified-extension`); the mid-build
    hard stop remains only for privileged control-plane paths. Reverses the
-   B0-era abort posture after three strikes in one week on correct work.
+   B0-era abort posture after three strikes in one week on plausibly correct
+   work.
 3. **#111 scope expansion** — six further deletions (~2,000–2,500 LOC):
    derive-don't-echo ownership sets, dispatch-lease collapse, steering
    generation/boundary removal, non-routed echo-field drops (including
