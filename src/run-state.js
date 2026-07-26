@@ -2423,7 +2423,10 @@ export function assertPublishedCarryForwardRun(repoInput, expectedContinuation, 
   assertNoSymlinkPath(runDir, planPath, "published carry-forward plan");
   if (!existsSync(planPath) || !lstatSync(planPath).isFile() || hashFile(planPath) !== expectedContinuation.carry_forward.plan_hash) throw new Error("published carry-forward plan bytes do not match continuation authority");
   const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
-  assertPublishedCarryForwardSlices(runDir, run, plan, expectedContinuation.carry_forward);
+  assertPublishedCarryForwardSlices(runDir, run, plan, expectedContinuation.carry_forward, {
+    runDir: dirname(parent.parentFile),
+    run: parent.parentRun,
+  });
   assertPublishedCarryForwardSpec(runDir, run, expectedContinuation);
   observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
   assertPublishedCarryForwardClaim(repo, expectedContinuation);
@@ -2599,7 +2602,7 @@ function assertRunMatchesContinuationConfiguration(run, configuration, label) {
   }
 }
 
-function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
+function assertPublishedCarryForwardSlices(runDir, run, plan, carry, authority) {
   const rows = Array.isArray(run.slices) ? run.slices : [];
   if (rows.length !== plan.slices.length || rows.some((row, index) => row.id !== plan.slices[index].id || row.stack !== plan.slices[index].stack || !sameJson(row.depends_on, plan.slices[index].depends_on))) {
     throw new Error("published carry-forward slices must remain in exact PLAN order with plan identity and dependencies");
@@ -2621,7 +2624,57 @@ function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
       assertNoSymlinkPath(runDir, path, `adopted slice ${label}`);
       if (!existsSync(path) || !lstatSync(path).isFile() || hashFile(path) !== hash) throw new Error(`adopted carry-forward slice '${row.id}' ${label} sidecar changed`);
     }
+    assertPublishedCarryForwardSiblingCopies(runDir, authority, row);
     if (row.integration_conflict) assertSliceIntegrationConflictCurrent(runDir, run, row, { runDir });
+  }
+}
+
+function assertPublishedCarryForwardSiblingCopies(runDir, authority, row) {
+  const checked = new Set();
+  for (const attempt of row.attempt_reviews || []) {
+    for (const extension of attempt.modified_extensions || []) {
+      if (extension.authority !== "non-conflicting-sibling") continue;
+      const owner = (authority.run.slices || []).find((slice) => slice.id === extension.owner_slice_id);
+      const ownerAttempt = owner?.attempt_reviews?.find((entry) => entry.attempt === extension.owner_attempt);
+      if (!ownerAttempt || ownerAttempt.review_ref !== extension.owner_review_ref
+        || ownerAttempt.review_hash !== extension.owner_review_hash
+        || ownerAttempt.dispatch_claim_ref !== extension.owner_dispatch_claim_ref
+        || ownerAttempt.dispatch_claim_hash !== extension.owner_dispatch_claim_hash
+        || ownerAttempt.dispatch_closure_ref !== extension.owner_dispatch_closure_ref
+        || ownerAttempt.dispatch_closure_hash !== extension.owner_dispatch_closure_hash) {
+        throw new Error(`adopted carry-forward slice '${row.id}' sibling owner authority changed`);
+      }
+      assertPublishedCarryForwardArtifactCopy(runDir, authority.runDir, extension.owner_dispatch_claim_ref,
+        extension.owner_dispatch_claim_hash, `adopted slice '${row.id}' owner dispatch claim`, checked);
+      assertPublishedCarryForwardArtifactCopy(runDir, authority.runDir, extension.owner_dispatch_closure_ref,
+        extension.owner_dispatch_closure_hash, `adopted slice '${row.id}' owner dispatch closure`, checked);
+      const ownerReviewPath = resolveReviewRef(authority.runDir, extension.owner_review_ref).path;
+      const ownerReview = parseJsonObjectFile(ownerReviewPath, `adopted slice '${row.id}' owner review`);
+      for (const disposition of ownerReview.invariant_family_ledger?.dispositions || []) {
+        assertPublishedCarryForwardArtifactCopy(runDir, authority.runDir, disposition.evidence_ref,
+          disposition.evidence_hash, `adopted slice '${row.id}' owner invariant-family receipt`, checked);
+        const claimRef = verificationArtifactExecutionClaimRef(disposition.evidence_ref);
+        const claimPath = resolveEvidenceRef(authority.runDir, claimRef).path;
+        assertPublishedCarryForwardArtifactCopy(runDir, authority.runDir, claimRef, hashFile(claimPath),
+          `adopted slice '${row.id}' owner invariant-family claim`, checked);
+      }
+    }
+  }
+}
+
+function assertPublishedCarryForwardArtifactCopy(runDir, authorityRunDir, ref, expectedHash, label, checked) {
+  const key = `${ref}\0${expectedHash}`;
+  if (checked.has(key)) return;
+  checked.add(key);
+  const authorityPath = resolve(authorityRunDir, ref);
+  const copiedPath = resolve(runDir, ref);
+  assertNoSymlinkPath(authorityRunDir, authorityPath, `${label} authority`);
+  assertNoSymlinkPath(runDir, copiedPath, label);
+  if (!existsSync(authorityPath) || !lstatSync(authorityPath).isFile()
+    || !existsSync(copiedPath) || !lstatSync(copiedPath).isFile()
+    || hashFile(authorityPath) !== expectedHash || hashFile(copiedPath) !== expectedHash
+    || !readFileSync(copiedPath).equals(readFileSync(authorityPath))) {
+    throw new Error(`${label} bytes changed`);
   }
 }
 
@@ -4111,10 +4164,11 @@ export function assertV2LocalPublishedAuthority(runDir, run, options = {}, expec
   assertNoSymlinkPath(runDir, planPath, "published carry-forward plan");
   if (!existsSync(planPath) || !lstatSync(planPath).isFile() || hashFile(planPath) !== run.continuation.carry_forward.plan_hash) throw new Error("published carry-forward plan bytes do not match continuation authority");
   const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
-  assertPublishedCarryForwardSlices(runDir, run, plan, run.continuation.carry_forward);
+  const parent = observeV2ParentAuthority(runDir, run, options);
+  assertPublishedCarryForwardSlices(runDir, run, plan, run.continuation.carry_forward,
+    readV2ParentAuthoritySource(runDir, run, options));
   assertPublishedCarryForwardSpec(runDir, run, run.continuation);
   observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
-  const parent = observeV2ParentAuthority(runDir, run, options);
   const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "schema-v2 local publication");
   const repository = integration.repository;
   const merged = (run.slices || []).filter((slice) => slice?.status === "merged").map((slice) => {
@@ -4264,6 +4318,15 @@ function observeV2ParentAuthority(runDir, run, options = {}) {
     }
   }
   return { run_hash: runHash, branch_commit: parentBranchCommit, bindings_hash: hashValue(bindings) };
+}
+
+function readV2ParentAuthoritySource(runDir, run, options = {}) {
+  const repository = resolve(options.repoRoot || runDir, options.repoRoot ? "." : "../../..");
+  const parentFile = resolve(repository, run.continuation.parent.run_ref);
+  return {
+    runDir: dirname(parentFile),
+    run: validateRun(parseJsonObjectFile(parentFile, "schema-v2 parent run.json")),
+  };
 }
 
 function canonicalCarryForwardSpecStep(continuation) {

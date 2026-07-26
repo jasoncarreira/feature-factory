@@ -2140,7 +2140,9 @@ function observeConsistencySiblingAuthority(runDir, run, modifyingSliceId, path,
     || ownerEntry.evidence_hash !== owner.evidence_hash || ownerEntry.review_hash !== owner.review_hash) {
     throw new Error(`slice '${modifyingSliceId}' persisted sibling owner '${ownerSliceId}' review authority is stale`);
   }
-  assertConsistencyInvariantFamilyAuthority(authorityRunDir, authorityRun, plan, owner, ownerReview);
+  assertConsistencyInvariantFamilyAuthority(authorityRunDir, authorityRun, plan, owner, ownerReview, {
+    copiedRunDir: useInheritedSource ? runDir : null,
+  });
   assertConsistencyOwnerAttemptHistory(authorityRunDir, authorityRun, owner, plan, {
     ...options,
     ownershipObservationStack: new Set([...(options.ownershipObservationStack || []), modifyingSliceId]),
@@ -2148,6 +2150,12 @@ function observeConsistencySiblingAuthority(runDir, run, modifyingSliceId, path,
   const dispatch = observeConsistencySliceDispatch(authorityRunDir, authorityRun, owner, ownerEntry);
   const claimPath = resolve(authorityRunDir, dispatch.dispatch_claim_ref);
   const closurePath = resolve(authorityRunDir, dispatch.dispatch_closure_ref);
+  if (useInheritedSource) {
+    assertConsistencyCopiedArtifact(runDir, authorityRunDir, dispatch.dispatch_claim_ref,
+      ownerEntry.dispatch_claim_hash, `slice '${ownerSliceId}' copied dispatch claim`);
+    assertConsistencyCopiedArtifact(runDir, authorityRunDir, dispatch.dispatch_closure_ref,
+      ownerEntry.dispatch_closure_hash, `slice '${ownerSliceId}' copied dispatch closure`);
+  }
   assertConsistencyReviewedSliceHead(authorityRunDir, owner);
   const first = owner.attempt_reviews[0];
   const firstClaim = readInventoryJson(resolve(authorityRunDir, first.dispatch_claim_ref), `slice '${ownerSliceId}' first dispatch claim`);
@@ -2253,13 +2261,13 @@ function assertConsistencyReviewedSliceHead(runDir, slice) {
   }
 }
 
-function assertConsistencyInvariantFamilyAuthority(runDir, run, plan, owner, review) {
+function assertConsistencyInvariantFamilyAuthority(runDir, run, plan, owner, review, options = {}) {
   const planHash = hashFile(join(runDir, PLAN_SLICES_REF));
   const extension = validateReviewExtensionResult(evaluateInvariantFamilyReview({
     plan,
     sliceId: owner.id,
     review,
-    observeEvidence(ref) {
+    observeEvidence(ref, disposition) {
       const receiptPath = resolveEvidenceRef(runDir, ref).path;
       const receiptHash = hashFile(receiptPath);
       const receipt = validateVerificationArtifactExecutionReceipt(readInventoryJson(receiptPath, `slice '${owner.id}' invariant-family receipt`));
@@ -2275,11 +2283,30 @@ function assertConsistencyInvariantFamilyAuthority(runDir, run, plan, owner, rev
         || pairKeys.some((key) => JSON.stringify(claim[key]) !== JSON.stringify(receipt[key]))) {
         throw new Error(`slice '${owner.id}' invariant-family checked receipt authority is stale or cross-bound`);
       }
+      if (options.copiedRunDir) {
+        assertConsistencyCopiedArtifact(options.copiedRunDir, runDir, ref, disposition.evidence_hash,
+          `slice '${owner.id}' copied invariant-family receipt`);
+        assertConsistencyCopiedArtifact(options.copiedRunDir, runDir, claimRef, hashFile(claimPath),
+          `slice '${owner.id}' copied invariant-family claim`);
+      }
       return { ref, hash: receiptHash, receipt, claim_ref: claimRef, claim };
     },
   }));
   if (plan.delivery_envelope !== undefined && (extension.status !== "active" || extension.decision !== "approve" || extension.grants_b4_authority !== true)) {
     throw new Error(`slice '${owner.id}' persisted sibling owner invariant-family authority is not approving`);
+  }
+}
+
+function assertConsistencyCopiedArtifact(copiedRunDir, authorityRunDir, ref, expectedHash, label) {
+  const authorityPath = resolve(authorityRunDir, ref);
+  const copiedPath = resolve(copiedRunDir, ref);
+  assertConsistencyRegularFile(authorityRunDir, authorityPath, `${label} authority`);
+  assertConsistencyRegularFile(copiedRunDir, copiedPath, label);
+  const authorityBytes = readFileSync(authorityPath);
+  const copiedBytes = readFileSync(copiedPath);
+  if (hashFile(authorityPath) !== expectedHash || hashFile(copiedPath) !== expectedHash
+    || !copiedBytes.equals(authorityBytes)) {
+    throw new Error(`${label} bytes are stale or cross-bound`);
   }
 }
 
