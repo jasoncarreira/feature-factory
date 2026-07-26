@@ -36,6 +36,22 @@ const COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/iu;
 const CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
 const CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "declared_paths", "effective_paths", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
 const CARRY_FORWARD_ACCEPTED_OPTIONAL_KEYS = new Set(["integration_conflict"]);
+const SIBLING_EXTENSION_OWNER_BINDINGS = Object.freeze([
+  ["owner_slice_id", "id"],
+  ["owner_attempt", "attempts"],
+  ["owner_evidence_ref", "evidence_ref"],
+  ["owner_evidence_hash", "evidence_hash"],
+  ["owner_review_ref", "review_ref"],
+  ["owner_review_hash", "review_hash"],
+  ["owner_reviewed_commit", "reviewed_commit"],
+]);
+const SIBLING_EXTENSION_ATTEMPT_BINDINGS = Object.freeze([
+  ["owner_dispatch_claim_ref", "dispatch_claim_ref"],
+  ["owner_dispatch_claim_hash", "dispatch_claim_hash"],
+  ["owner_dispatch_closure_ref", "dispatch_closure_ref"],
+  ["owner_dispatch_closure_hash", "dispatch_closure_hash"],
+  ["owner_diff_base_commit", "diff_base_commit"],
+]);
 
 export function encodeFeatureCommandPayload(payload) {
   return `${PREFIX}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
@@ -417,7 +433,59 @@ function normalizeCarryForward(continuation) {
     if (!nonEmptyString(id) || accepted.has(id) || remaining.has(id)) return { ok: false, reason: "invalid-continuation-carry-forward" };
     remaining.add(id);
   }
+  try {
+    assertCarryForwardSiblingOwnerPairs(value);
+  } catch {
+    return { ok: false, reason: "invalid-continuation-carry-forward" };
+  }
   return { ok: true, value: cloneJson(value) };
+}
+
+export function assertCarryForwardSiblingOwnerPairs(carryForward) {
+  if (!plainObject(carryForward) || !Array.isArray(carryForward.accepted_slices)) {
+    throw new Error("carry-forward sibling authority requires accepted_slices");
+  }
+  const accepted = new Map();
+  for (const row of carryForward.accepted_slices) {
+    if (!plainObject(row) || !nonEmptyString(row.id) || accepted.has(row.id)) {
+      throw new Error("carry-forward accepted slice identities must be unique");
+    }
+    accepted.set(row.id, row);
+  }
+  for (const modifier of carryForward.accepted_slices) {
+    for (const attempt of Array.isArray(modifier.attempt_reviews) ? modifier.attempt_reviews : []) {
+      for (const extension of Array.isArray(attempt.modified_extensions) ? attempt.modified_extensions : []) {
+        if (extension?.authority !== "non-conflicting-sibling") continue;
+        const owner = accepted.get(extension.owner_slice_id);
+        if (!owner || owner === modifier) {
+          throw new Error(`carry-forward slice '${modifier.id}' requires same-binding merged sibling owner '${extension.owner_slice_id || "<missing>"}'`);
+        }
+        const ownerAttempt = Array.isArray(owner.attempt_reviews) ? owner.attempt_reviews.at(-1) : null;
+        if (!ownerAttempt || ownerAttempt.attempt !== owner.attempts || ownerAttempt.verdict !== "APPROVE") {
+          throw new Error(`carry-forward sibling owner '${owner.id}' lacks its current merged APPROVE binding`);
+        }
+        for (const [extensionKey, ownerKey] of SIBLING_EXTENSION_OWNER_BINDINGS) {
+          if (extension[extensionKey] !== owner[ownerKey]) {
+            throw new Error(`carry-forward sibling owner '${owner.id}' ${extensionKey} is stale or cross-bound`);
+          }
+        }
+        for (const [extensionKey, ownerKey] of SIBLING_EXTENSION_ATTEMPT_BINDINGS) {
+          if (extension[extensionKey] !== ownerAttempt[ownerKey]) {
+            throw new Error(`carry-forward sibling owner '${owner.id}' ${extensionKey} is stale or cross-bound`);
+          }
+        }
+        if (!Array.isArray(owner.declared_paths) || !owner.declared_paths.some((lane) => ownershipLaneContains(lane, extension.path))) {
+          throw new Error(`carry-forward sibling owner '${owner.id}' does not own '${extension.path}' in its declared binding`);
+        }
+      }
+    }
+  }
+  return carryForward;
+}
+
+function ownershipLaneContains(lane, path) {
+  if (!nonEmptyString(lane) || !nonEmptyString(path)) return false;
+  return lane.endsWith("/**") ? path.startsWith(`${lane.slice(0, -3)}/`) : path === lane;
 }
 
 function validOwnershipPaths(paths) {
