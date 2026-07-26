@@ -120,6 +120,10 @@ describe("active-run base advancement lifecycle compatibility", () => {
       assert.deepEqual(fixture.readRun().post_pr, postPr);
 
       const candidate = installApprovedLifecycleSlice(fixture);
+      await assert.rejects(
+        publishIndependentPanels(fixture, candidate.integrationHead),
+        /ordinary fresh downstream authority requires all child slices merged before panel publication/u,
+      );
       const merged = await transitionSliceMerged(fixture.runDir, candidate.sliceId, { merge_commit: candidate.integrationHead }, { repoRoot: fixture.repo });
       assert.equal(merged.slice.status, "merged");
       assert.equal(merged.slice.merge_commit, candidate.integrationHead);

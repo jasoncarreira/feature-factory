@@ -121,9 +121,21 @@ describe("checked test execution receipt", () => {
       assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, checkpoint_source: {} }), "legacy-unselected");
       assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, checkpoint_progress: {} }), "legacy-unselected");
       assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, slices: initial.slices.map((slice) => ({ ...slice, status: "review" })) }), "legacy-unselected");
+      assert.throws(
+        () => classifyWholeStoryTestRoute(fixture.runDir, { ...initial, run_id: "different-run" }),
+        /canonical factory run directory/u,
+      );
       const started = await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }, { mustExist: true });
       assert.equal(started.step.status, "running");
       assert.equal(classifyWholeStoryTestRoute(fixture.runDir, started.run), "ordinary-fresh-v1");
+
+      for (const status of ["rejected", "blocked", "running"]) {
+        await assert.rejects(
+          transitionRunStep(fixture.runDir, "work-decomposer", { status, attempts: status === "running" ? 2 : 1 }, { mustExist: true }),
+          /accepted work-decomposer authority cannot regress/u,
+          status,
+        );
+      }
 
       writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "caller-authored legacy evidence\n");
       writeJson(join(fixture.runDir, "evidence", "legacy.json"), { subject: "test-verifier", status: "pass" });

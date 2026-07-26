@@ -2965,7 +2965,7 @@ async function transitionRunStepChecked(runDir, stepSelector, updater, options, 
     if (!update.changed) return;
     if (!hadSteps) draft.steps = steps;
     if (stepIndex >= 0) {
-      assertStepIdentityAndAttempts(stepSelector, priorStep, steps[stepIndex]);
+      assertStepIdentityAndAttempts(stepSelector, priorStep, steps[stepIndex], draft);
       prepareStepAcceptanceAuthority(priorStep, steps[stepIndex], authority);
       if (["running", "accepted"].includes(steps[stepIndex]?.status) && mergedSliceRepairFence(draft)) {
         throw new Error(`step '${steps[stepIndex].agent || formatSelector(stepSelector)}' cannot advance while a merged-slice repair is unresolved`);
@@ -3002,11 +3002,15 @@ async function transitionRunStepChecked(runDir, stepSelector, updater, options, 
   return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
 }
 
-function assertStepIdentityAndAttempts(selector, priorStep, step) {
+function assertStepIdentityAndAttempts(selector, priorStep, step, run) {
   const expectedAgent = priorStep?.agent || stepIdentityForSelector(selector);
   if (stringValue(expectedAgent) && step?.agent !== expectedAgent) throw new Error(`step agent identity is immutable; expected '${expectedAgent}'`);
   if (Number.isInteger(priorStep?.attempts) && Number.isInteger(step?.attempts) && step.attempts < priorStep.attempts) {
     throw new Error(`step '${expectedAgent}' attempts cannot regress from ${priorStep.attempts} to ${step.attempts}`);
+  }
+  if (expectedAgent === "work-decomposer" && priorStep?.status === "accepted" && step?.status !== "accepted"
+    && (run?.slices || []).some(hasSliceProgress)) {
+    throw new Error("accepted work-decomposer authority cannot regress after slice work has started");
   }
 }
 
@@ -5476,15 +5480,19 @@ export function classifyWholeStoryTestRoute(runDir, run, options = {}) {
   let route = deriveWholeStoryRoute(state);
   if (route === WHOLE_STORY_ROUTES.ORDINARY_FRESH) {
     const decompositionSteps = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
-    if (!existsSync(join(resolve(runDir), "plan", "slices.json")) || decompositionSteps.length !== 1
-      || decompositionSteps[0].status !== "accepted" || !isRecord(decompositionSteps[0].acceptance)) {
+    if (!existsSync(join(resolve(runDir), "plan", "slices.json")) || decompositionSteps.length !== 1) {
       state.slice_projection = "incomplete";
       route = deriveWholeStoryRoute(state);
+    } else if (decompositionSteps[0].status !== "accepted" || !isRecord(decompositionSteps[0].acceptance)) {
+      throw new Error("ordinary fresh whole-story route requires exact accepted work-decomposer authority");
     } else {
+      const repository = resolve(runDir, "../../..");
+      if (resolve(runDir) !== resolve(directFactoryRoot(repository), run.run_id)) {
+        throw new Error("ordinary fresh whole-story route requires the canonical factory run directory");
+      }
       const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
       if (!Array.isArray(decomposition.plan.slices) || decomposition.plan.slices.length === 0 || !isRecord(decomposition.plan.integration_gate)) {
-        state.slice_projection = "incomplete";
-        route = deriveWholeStoryRoute(state);
+        throw new Error("ordinary fresh whole-story route requires a nonempty accepted plan and integration gate");
       }
     }
   }
@@ -5677,7 +5685,18 @@ function testExecutionError(code, message) {
 
 function assertCheckedFreshDownstreamAuthority(runDir, run, sink, expected = null) {
   const route = classifyWholeStoryTestRoute(runDir, run, { runDir });
-  if (route === WHOLE_STORY_ROUTES.LEGACY) return null;
+  if (route === WHOLE_STORY_ROUTES.LEGACY) {
+    const slices = Array.isArray(run?.slices) ? run.slices : [];
+    const decompositionSteps = (run?.steps || []).filter((step) => step?.agent === "work-decomposer");
+    const ordinaryDirect = !run?.continuation && !run?.checkpoint_source && !run?.checkpoint_progress
+      && integrationConflictSlices(run).length === 0
+      && existsSync(join(resolve(runDir), "plan", "slices.json")) && decompositionSteps.length === 1;
+    if (ordinaryDirect && slices.length > 0) {
+      const incomplete = slices.filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
+      throw new Error(`ordinary fresh downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
+    }
+    return null;
+  }
   const authorityLabel = isSchemaV2WholeStoryRoute(route) ? "schema-v2" : route;
   const incomplete = (run.slices || []).filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
   if (incomplete.length) throw new Error(`${authorityLabel} downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
