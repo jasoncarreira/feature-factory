@@ -114,9 +114,9 @@ describe("checked post-PR transitions", () => {
       mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
       const ref = "evidence/post-pr-ci.attempt-1.json";
       const fingerprint = `sha256:${"a".repeat(64)}`;
-      writeJson(join(fixture.runDir, ref), { schema_version: 1, kind: "post-pr-ci", run_id: fixture.runId, attempt: 1, source: "check-red", verdict: "red", failed_head_sha: HEAD, failure_fingerprint: fingerprint });
+      writeJson(join(fixture.runDir, ref), { schema_version: 1, kind: "post-pr-ci", run_id: fixture.runId, attempt: 1, source: "check-red", verdict: "red", failed_head_sha: fixture.head, failure_fingerprint: fingerprint });
       const hash = hashFile(join(fixture.runDir, ref));
-      const next = remediation(1, "planned", { failure_evidence_ref: ref, failure_evidence_hash: hash, failure_fingerprint: fingerprint });
+      const next = remediation(1, "planned", { failed_head_sha: fixture.head, baseline_head_sha: fixture.head, failure_evidence_ref: ref, failure_evidence_hash: hash, failure_fingerprint: fingerprint });
       const red = readJson(join(fixture.runDir, "run.json"));
       red.post_pr.observation.last_verdict = "red";
       red.post_pr.observation.last_check_verdict = "red";
@@ -166,11 +166,11 @@ describe("checked post-PR transitions", () => {
         pr_number: 7,
         pr_node_id: "PR_post_pr_state",
         repository: "acme/repo",
-        operation_id: operationRecord("guards").operation_id,
+        operation_id: operationRecord("guards", fixture.head).operation_id,
         head_ref: "feature",
-        head_sha: HEAD,
+        head_sha: fixture.head,
         base_ref: "main",
-        base_sha: HEAD,
+        base_sha: fixture.head,
         draft: false,
         reason: "post-pr-ci-green",
         summary: "post-pr-ci-green",
@@ -330,7 +330,7 @@ describe("checked post-PR transitions", () => {
       writeJson(join(fixture.runDir, reviewRef), {
         kind: "post-pr-continuation", subject: fixture.runId, verdict: "BLOCKED", attempt: 1, reason: "post-pr-retry-exhausted", route: failure.route,
         evidence_ref: failure.failure_evidence_ref, evidence_hash: failure.failure_evidence_hash, post_pr_hash: hashValue(postPrForHash),
-        pr_url: reserved.run.pr_url, repository: "acme/repo", pr_number: 7, head_sha: HEAD, pr_disposition: "leave-unchanged", summary: "Retry budget exhausted.", required_fixes: [],
+        pr_url: reserved.run.pr_url, repository: "acme/repo", pr_number: 7, head_sha: fixture.head, pr_disposition: "leave-unchanged", summary: "Retry budget exhausted.", required_fixes: [],
       });
       const binding = { ref: reviewRef, hash: hashFile(join(fixture.runDir, reviewRef)) };
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, { status: "blocked", reason: "post-pr-retry-exhausted", continuation_review: { ...binding, hash: `sha256:${"f".repeat(64)}` } }), /exact-byte hash mismatch/u);
@@ -516,7 +516,7 @@ describe("checked post-PR transitions", () => {
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       await assert.rejects(transitionPostPrState(fixture.runDir, next, {
         worktree: fixture.repo,
-        atomicWriteHooks: { beforeCommit: () => fixtureGit(fixture.repo, ["update-ref", "refs/heads/main", fixture.baseline]) },
+        atomicWriteHooks: { beforeCommit: () => fixtureGit(fixture.repo, ["update-ref", "refs/heads/feature", fixture.baseline]) },
       }), publicationRaceError("post-PR authority changed before run.json publication"));
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
       assert.deepEqual(tempRunJsonFiles(fixture.runDir), []);
@@ -539,7 +539,6 @@ describe("checked post-PR transitions", () => {
   it("rechecks post-PR candidate Git identity inside the protected commit boundary", async () => {
     const fixture = createActiveFixture("post-pr-git-race");
     try {
-      fixtureGit(fixture.repo, ["init", "-q", "-b", "main"]);
       writeFileSync(join(fixture.repo, "candidate.txt"), "baseline\n");
       fixtureGit(fixture.repo, ["add", "candidate.txt"]);
       fixtureGit(fixture.repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "baseline"]);
@@ -560,7 +559,7 @@ describe("checked post-PR transitions", () => {
       next.phase = "committed";
       next.remediation.stage = "committed";
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionPostPrState(fixture.runDir, next, { worktree: fixture.repo, atomicWriteHooks: { beforeCommit: () => fixtureGit(fixture.repo, ["update-ref", "refs/heads/main", baseline]) } }), publicationRaceError("post-PR authority changed before run.json publication"));
+      await assert.rejects(transitionPostPrState(fixture.runDir, next, { worktree: fixture.repo, atomicWriteHooks: { beforeCommit: () => fixtureGit(fixture.repo, ["update-ref", "refs/heads/feature", baseline]) } }), publicationRaceError("post-PR authority changed before run.json publication"));
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
       assert.deepEqual(tempRunJsonFiles(fixture.runDir), []);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
@@ -575,14 +574,14 @@ function baseRun(runId, postPr) {
   return { schema_version: 1, run_id: runId, status: "running", max_retries: 3, gates: {}, post_pr: postPr, terminal_result: null };
 }
 
-function observation() {
-  return { epoch: 1, expected_head_sha: HEAD, started_at: NOW, deadline_at: "2026-07-12T13:00:00.000Z", next_poll_at: NOW, poll_count: 0, unchanged_count: 0, current_interval_ms: 30_000, consecutive_transient_errors: 0, last_observed_at: null, last_fingerprint: null, last_check_verdict: "not_started", last_review_verdict: "not_required", last_verdict: "pending", last_error: null };
+function observation(head = HEAD) {
+  return { epoch: 1, expected_head_sha: head, started_at: NOW, deadline_at: "2026-07-12T13:00:00.000Z", next_poll_at: NOW, poll_count: 0, unchanged_count: 0, current_interval_ms: 30_000, consecutive_transient_errors: 0, last_observed_at: null, last_fingerprint: null, last_check_verdict: "not_started", last_review_verdict: "not_required", last_verdict: "pending", last_error: null };
 }
 
-function operationRecord(runId) {
+function operationRecord(runId, head = HEAD) {
   return {
-    operation_id: computePrOperationId({ base_commit: HEAD, branch: "feature", created_at: NOW, repository: "acme/repo", run_id: runId }),
-    repository: "acme/repo", created_at: NOW, head_ref: "feature", head_sha: HEAD, base_ref: "main", base_sha: HEAD, draft: false,
+    operation_id: computePrOperationId({ base_commit: head, branch: "feature", created_at: NOW, repository: "acme/repo", run_id: runId }),
+    repository: "acme/repo", created_at: NOW, head_ref: "feature", head_sha: head, base_ref: "main", base_sha: head, draft: false,
     pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, pr_node_id: "PR_post_pr_state",
   };
 }
@@ -602,9 +601,9 @@ function prOperationOptions(fixture, overrides = {}) {
     ...overrides,
     repoRoot: fixture.repo,
     gitFn: overrides.gitFn || ((cwd, args) => {
-      if (args.join(" ") === "config --get remote.origin.url") return { ok: true, status: 0, stdout: "https://github.com/acme/repo.git\n", stderr: "" };
+      if (["config --get remote.origin.url", "config --get-all remote.origin.url"].includes(args.join(" "))) return { ok: true, status: 0, stdout: "https://github.com/acme/repo.git\n", stderr: "" };
       if (args[0] === "ls-remote") {
-        const ref = args[3].slice("refs/heads/".length);
+        const ref = args.at(-1).slice("refs/heads/".length);
         const sha = ref === run.base_ref ? run.base_commit : head;
         return { ok: true, status: 0, stdout: `${sha}\trefs/heads/${ref}\n`, stderr: "" };
       }
@@ -619,17 +618,17 @@ function prOperationOptions(fixture, overrides = {}) {
   };
 }
 
-function activeRun(runId = "active") {
+function activeRun(runId = "active", head = HEAD) {
   const run = baseRun(runId, createPostPrState(policy(true)));
   run.branch = "feature";
   run.base_ref = "main";
-  run.base_commit = HEAD;
+  run.base_commit = head;
   run.pr_mode = "ready";
   run.github_account = "acme";
   run.pr_url = "https://github.com/acme/repo/pull/7";
   run.post_pr.phase = "observing";
-  run.post_pr.observation = observation();
-  run.post_pr.pr_operation = operationRecord(runId);
+  run.post_pr.observation = observation(head);
+  run.post_pr.pr_operation = operationRecord(runId, head);
   return run;
 }
 
@@ -653,6 +652,7 @@ function createPrFixture(runId, enabled) {
   fixtureGit(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "fixture"]);
   const head = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
   fixtureGit(repo, ["checkout", "-q", "-b", "feature"]);
+  configureCanonicalOrigin(repo);
   const runDir = join(repo, ".opencode", "factory", runId);
   for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n");
@@ -675,10 +675,17 @@ function createPrFixture(runId, enabled) {
 
 function createActiveFixture(runId) {
   const repo = mkdtempSync(join(tmpdir(), "post-pr-active-"));
+  fixtureGit(repo, ["init", "-q", "-b", "main"]);
+  writeFileSync(join(repo, "tracked.txt"), "tracked\n");
+  fixtureGit(repo, ["add", "tracked.txt"]);
+  fixtureGit(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "fixture"]);
+  const head = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+  fixtureGit(repo, ["checkout", "-q", "-b", "feature"]);
+  configureCanonicalOrigin(repo);
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(runDir, { recursive: true });
-  writeJson(join(runDir, "run.json"), activeRun(runId));
-  return { repo, runDir, runId };
+  writeJson(join(runDir, "run.json"), activeRun(runId, head));
+  return { repo, runDir, runId, head };
 }
 
 function prepareCheckRedFailure(fixture, attempt) {
@@ -687,7 +694,7 @@ function prepareCheckRedFailure(fixture, attempt) {
   run.post_pr.observation.last_check_verdict = "red";
   writeJson(join(fixture.runDir, "run.json"), run);
   mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
-  const value = remediation(attempt, "planned", { failure_evidence_ref: `evidence/post-pr-ci.attempt-${attempt}.json` });
+  const value = remediation(attempt, "planned", { failed_head_sha: run.post_pr.observation.expected_head_sha, baseline_head_sha: run.post_pr.observation.expected_head_sha, failure_evidence_ref: `evidence/post-pr-ci.attempt-${attempt}.json` });
   writeJson(join(fixture.runDir, value.failure_evidence_ref), failureEvidence(fixture.runId, value));
   value.failure_evidence_hash = hashFile(join(fixture.runDir, value.failure_evidence_ref));
   return value;
@@ -713,16 +720,20 @@ function fixtureGit(repo, args) {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" });
 }
 
+function configureCanonicalOrigin(repo) {
+  fixtureGit(repo, ["remote", "add", "origin", "https://github.com/acme/repo.git"]);
+  fixtureGit(repo, ["config", `url.file://${repo}/.insteadOf`, "https://github.com/acme/repo.git"]);
+}
+
 async function prepareInitialCandidateTransition(runId) {
   const fixture = createActiveFixture(runId);
-  fixtureGit(fixture.repo, ["init", "-q", "-b", "main"]);
   writeFileSync(join(fixture.repo, "candidate.txt"), "baseline\n");
   fixtureGit(fixture.repo, ["add", "candidate.txt"]);
   fixtureGit(fixture.repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "baseline"]);
   fixture.baseline = fixtureGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
   const run = readJson(join(fixture.runDir, "run.json"));
   run.worktree = fixture.repo;
-  run.branch = "main";
+  run.branch = "feature";
   run.base_commit = fixture.baseline;
   run.post_pr.observation.expected_head_sha = fixture.baseline;
   writeJson(join(fixture.runDir, "run.json"), run);

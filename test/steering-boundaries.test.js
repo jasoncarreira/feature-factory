@@ -638,13 +638,12 @@ describe("lock-protected steering boundaries", () => {
   it("fences real disrupted-recovery terminalization before heartbeat cleanup", async () => {
     const fixture = createRecoveryFixture("recovery-terminal-race");
     runGit(fixture.repo, ["worktree", "add", fixture.worktree, fixture.runId]);
-    const run = readJson(fixture.runPath);
-    run.base_commit = "f".repeat(40);
-    writeJson(fixture.runPath, run);
     seedInactiveHeartbeat(fixture, NOW, 987654321, 60000);
     const holder = await acquireHolder(fixture.runDir);
     const fenceLane = lane("recovery-terminal-fence");
     const recoveryLane = lane("recovery-terminal-writer");
+    const recoveryPreflight = deferred();
+    const releaseRecoveryPreflight = deferred();
     const liveness = { processAliveFn: (pid) => pid !== 987654321 };
     const authority = prOptions(fixture);
     const authorityGit = authority.gitFn;
@@ -656,16 +655,26 @@ describe("lock-protected steering boundaries", () => {
         return authorityGit(cwd, args);
       },
     }));
-    const recovery = tracked(recoverDisruptedRun(fixture.runId, { ...laneOptions(recoveryLane), cwd: fixture.repo, now: LATER, ...liveness }));
+    const recovery = tracked(recoverDisruptedRun(fixture.runId, {
+      ...laneOptions(recoveryLane), cwd: fixture.repo, now: LATER, ...liveness,
+      recoveryHooks: { beforeLegacyFenceMutation: async () => { recoveryPreflight.resolve(); await releaseRecoveryPreflight.promise; } },
+    }));
+    let terminalHolder;
     try {
-      await allEntered(fenceLane, recoveryLane);
+      await bounded(recoveryPreflight.promise, "recovery terminal preflight");
+      await allEntered(fenceLane);
       fenceLane.release.resolve();
       holder.release.resolve();
       const established = await fence.promise;
       assert.equal(recovery.settled, false);
+      runGit(fixture.worktree, ["checkout", "--detach"]);
+      terminalHolder = await acquireHolder(fixture.runDir);
+      releaseRecoveryPreflight.resolve();
+      await allEntered(recoveryLane);
       const runBeforeRecovery = bytes(fixture.runPath);
       const heartbeatBeforeRecovery = bytes(fixture.heartbeatPath);
       recoveryLane.release.resolve();
+      terminalHolder.release.resolve();
       await assert.rejects(recovery.promise, /recovery terminalization rejected: active pre-PR fence/u);
       assertBytes(fixture.runPath, runBeforeRecovery);
       assertBytes(fixture.heartbeatPath, heartbeatBeforeRecovery);
@@ -675,7 +684,8 @@ describe("lock-protected steering boundaries", () => {
       assert.equal(persisted.steering.pr_fence.token, established.fence.token);
       assert.equal(readJson(fixture.heartbeatPath).pid, 987654321);
     } finally {
-      await finishRace(fixture, holder, fenceLane, recoveryLane, fence, recovery);
+      releaseRecoveryPreflight.resolve();
+      await finishRace(fixture, holder, terminalHolder, fenceLane, recoveryLane, fence, recovery);
       cleanupRecoveryFixture(fixture);
     }
   });
@@ -987,6 +997,8 @@ function createRecoveryFixture(runId, { omitWorktree = false, deleteBranch = fal
   initGitRepo(repo);
   const baseCommit = gitStdout(repo, ["rev-parse", "HEAD"]);
   runGit(repo, ["branch", runId]);
+  configureLocalGithubOrigin(repo, "https://github.com/acme/project.git");
+  writeAbsentOperationGh(repo);
   const runDir = join(repo, ".opencode", "factory", runId);
   const worktree = join(repo, ".opencode", "worktrees", runId);
   mkdirSync(runDir, { recursive: true });
@@ -1001,7 +1013,6 @@ function createRecoveryFixture(runId, { omitWorktree = false, deleteBranch = fal
     ...readyRun(runId, readyFixture, baseCommit),
     base_ref: "main",
     base_commit: baseCommit,
-    branch: runId,
     branch: runId,
   };
   if (omitWorktree) delete run.worktree;
@@ -1062,9 +1073,9 @@ function prOptions(fixture, overrides = {}) {
     ...options,
     repoRoot: fixture.repo,
     gitFn: options.gitFn || ((cwd, args) => {
-      if (args.join(" ") === "config --get remote.origin.url") return { ok: true, status: 0, stdout: "https://github.com/acme/project.git\n", stderr: "" };
+      if (["config --get remote.origin.url", "config --get-all remote.origin.url"].includes(args.join(" "))) return { ok: true, status: 0, stdout: "https://github.com/acme/project.git\n", stderr: "" };
       if (args[0] === "ls-remote") {
-        const ref = args[3].slice("refs/heads/".length);
+        const ref = args.at(-1).slice("refs/heads/".length);
         const local = ref === run.base_ref ? run.base_commit : gitStdout(fixture.repo, ["rev-parse", `refs/heads/${ref}`]);
         return { ok: true, status: 0, stdout: `${local}\trefs/heads/${ref}\n`, stderr: "" };
       }
