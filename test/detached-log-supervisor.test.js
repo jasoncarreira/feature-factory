@@ -1,9 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { superviseDetachedLaunch } from "../src/detached-log-supervisor.js";
 
 describe("detached log supervisor", () => {
@@ -79,7 +81,83 @@ describe("detached log supervisor", () => {
       rmSync(fixture.root, { recursive: true, force: true });
     }
   });
+
+  it("resolves when the child closes during identity settling", async () => {
+    // `close` is emitted once. Registering the listener only after the awaited
+    // identity work meant a short-lived child's close was missed and the
+    // supervisor promise stayed pending forever — a real main-CI hang.
+    const fixture = createFixture("close-during-settle");
+    const runDir = join(fixture.root, ".opencode", "factory", "scoped-run");
+    mkdirSync(join(runDir, "processes"), { recursive: true });
+    const child = stubChild();
+    try {
+      const result = await withTimeout(superviseDetachedLaunch({
+        ...init(fixture),
+        runDir,
+        runId: "scoped-run",
+        executionId: "execution-1",
+        logRef: "processes/child.log",
+        recordEvidence: true,
+      }, {
+        spawnFn: () => child,
+        send() {},
+        // Close arrives while the supervisor is awaiting identity settling.
+        sleepFn: async () => {
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("close", 0, null);
+        },
+        inspectorFn: (pid) => ({ ok: true, inspector: "test", pid, start_marker: "start-1", command_name: "opencode", cwd: fixture.root }),
+        stopHeartbeatFn: async () => {},
+      }));
+
+      assert.deepEqual(result, { pid: child.pid, status: "exited" });
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves for a child that already exited before supervision", async () => {
+    const fixture = createFixture("already-exited");
+    const child = stubChild();
+    child.exitCode = 3;
+    child.stdout.end();
+    child.stderr.end();
+    try {
+      const result = await withTimeout(superviseDetachedLaunch(init(fixture), {
+        spawnFn: () => child,
+        send() {},
+      }));
+
+      assert.deepEqual(result, { pid: child.pid, status: "exited" });
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
 });
+
+function stubChild() {
+  const child = new EventEmitter();
+  child.pid = 4242;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => true;
+  return child;
+}
+
+// A hang is the defect under test, so bound it here rather than letting the
+// runner time out with no attribution.
+function withTimeout(promise, ms = 5000) {
+  return Promise.race([
+    promise,
+    new Promise((_resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`supervisor did not settle within ${ms}ms`)), ms);
+      timer.unref?.();
+    }),
+  ]);
+}
 
 function createFixture(name) {
   const root = mkdtempSync(join(tmpdir(), `detached-supervisor-${name}-`));
