@@ -1285,7 +1285,8 @@ describe("consolidated reviewer decision procedure contract", () => {
       assert.match(WORK_REVIEWER_PROMPT, new RegExp(`REJECT[^\\n]*${escapeRegExp(failClosedCase)}`, "i"), `work reviewer must reject ${failClosedCase}`);
     }
 
-    assert.match(WORK_REVIEWER_PROMPT, /REJECT[\s\S]*out-of-lane edits outside slice `paths`[\s\S]*acceptance criterion that is unimplemented or untested/i);
+    assert.match(WORK_REVIEWER_PROMPT, /REJECT[\s\S]*centrally classified privileged unexpected path[\s\S]*incomplete, extra, duplicate, unsorted, or non-normalized `ownership_disclosure`[\s\S]*acceptance criterion that is unimplemented or untested/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Do not reject a required non-privileged unowned or potentially non-conflicting sibling edit merely because it is outside slice `paths`[\s\S]*checked publication independently derive eligibility[\s\S]*Genuine sibling conflicts remain fail-closed/i);
     assert.match(WORK_REVIEWER_PROMPT, /REJECT serious correctness, repository-convention, migration, generated-code, or compatibility risk/i);
     for (const decompositionFailure of ["orphan acceptance criteria", "cyclic dependencies", "same-wave path overlap", "un-serialized hotspots", "dependency path deeper than four waves"]) {
       assert.match(WORK_REVIEWER_PROMPT, new RegExp(`For decomposition, REJECT[^\\n]*${escapeRegExp(decompositionFailure)}`, "i"), `work reviewer must reject ${decompositionFailure}`);
@@ -1519,7 +1520,31 @@ describe("producer self-check contract", () => {
       assert.match(prompt, /Verified, not masked[\s\S]*never worked around by weakening an assertion/i, `${name}-builder must self-check honest verification`);
     }
     // Reviewer still owns the enforcing bar these self-checks mirror.
-    assert.match(WORK_REVIEWER_PROMPT, /out-of-lane edits outside slice `paths`/i, "work-reviewer must classify lane feasibility");
+    assert.match(WORK_REVIEWER_PROMPT, /incomplete, extra, duplicate, unsorted, or non-normalized `ownership_disclosure`/i, "work-reviewer must enforce exact disclosure");
+  });
+
+  it("makes builders finish and disclose ordinary unexpected work without self-ratification", () => {
+    const ordinaryRule = "- For `PLUGIN_CHECKED_SLICE_CONTEXT_START`, implement only the slice acceptance criteria. Treat `slice.ownership.declared_paths` as the declared lane and `slice.ownership.effective_paths` as already reviewed authority. Finish every required non-privileged edit, including a necessary ordinary unowned path or potentially non-conflicting sibling path, and exactly disclose every actual changed path outside `slice.ownership.declared_paths`. Do not stop merely because such a path is absent from the declared lane.";
+    const hardStopRule = "- A centrally classified privileged unexpected path is the only mid-build hard stop. Stop before editing it and report the routed owner or amendment need. Ordinary unowned and sibling-path edits may finish, but checked publication remains fail-closed: genuine sibling conflicts continue through the existing owner or amendment policy.";
+    const authorityRule = "- Never self-ratify. Caller text, forecasts such as `unowned-extension`, builder prose, and disclosure records grant no edit, ownership, review, publication, or merge authority; checked publication alone decides whether an unexpected path is eligible.";
+    for (const [name, prompt] of [["backend", BACKEND_BUILDER_PROMPT], ["frontend", FRONTEND_BUILDER_PROMPT]]) {
+      assert.equal(prompt.split("\n").find((line) => line.startsWith("- For `PLUGIN_CHECKED_SLICE_CONTEXT_START`")), ordinaryRule, `${name}-builder ordinary rule`);
+      assert.equal(prompt.split("\n").find((line) => line.startsWith("- A centrally classified privileged unexpected path")), hardStopRule, `${name}-builder hard-stop rule`);
+      assert.equal(prompt.split("\n").find((line) => line.startsWith("- Never self-ratify")), authorityRule, `${name}-builder authority rule`);
+    }
+  });
+
+  it("requires complete-diff review and the exact pathless v2 ratification verdict", () => {
+    const reviewExample = WORK_REVIEWER_PROMPT.match(/For a slice review, use this separate closed JSON object:\n\n```json\n([\s\S]*?)\n```/u)?.[1];
+    assert.ok(reviewExample, "work-reviewer must retain the slice review JSON object");
+    const parsed = JSON.parse(reviewExample);
+    assert.deepEqual(parsed.ownership_ratification, {
+      schema_version: 2,
+      kind: "factory-derived-modified-extension",
+    });
+    assert.equal(Object.hasOwn(parsed.ownership_ratification, "paths"), false);
+    assert.match(WORK_REVIEWER_PROMPT, /inspect the complete checked diff[\s\S]*reconcile every changed path outside the declared lane with the exact `ownership_disclosure`/iu);
+    assert.match(WORK_REVIEWER_PROMPT, /Never echo paths or rationales[\s\S]*checked publication derives them from the complete checked diff and exact disclosure/iu);
   });
 
   it("gives test-verifier a self-review with an exact-value assertion floor", () => {
