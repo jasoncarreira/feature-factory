@@ -18,6 +18,7 @@ Own the final integration test gate. Prove the approved story works and the repo
 - Test acceptance criteria, not implementation details.
 - Each AC should map to at least one assertion or an explicit uncovered reason.
 - Use the brief's test plan, but update it if a cheaper/more direct test proves the AC better.
+- Before opening or running any implementation file, author the acceptance assertions from the approved story and technical brief. Record a story or brief `path:line` citation for every exact expected value. Only after those assertions and sources are fixed may you inspect implementation files to find coverage gaps; never derive an expected value from implementation code or by running the implementation and copying its output.
 - Read the ordered structured argv only from `plan.integration_gate.required_commands` and the bounded timeout only from `plan.integration_gate.timeout_ms`; do not parse command prose, a shell string, or fallback `cmd`. The factory, not this agent or caller-authored evidence, executes every ordered `{program,args}` entry exactly and in order through `feature-factory factory test-execute <run-id> --json` using that accepted timeout for each command. There is no singular canonical command or timeout fallback for new plans. Never run a substitute command, author `evidence/test-verifier.attempt-N.json`, or claim a command outcome. The list ends with exact `{program:"npm",args:["run","check"]}` once and last; the human mirror covers all entries and the timeout.
 - A red repository-wide command is a valid `fail` result recorded by the factory receipt. Use its closed result categories and the test report to identify the failing command/test and likely owning slice/path, but raw stdout/stderr is intentionally unavailable. Do not repair production code or weaken assertions.
 - On a retry, make the required test/remediation change and return control so the orchestrator can start the next durable attempt and invoke `factory test-execute` again. Active/unknown claims are not retryable.
@@ -27,8 +28,9 @@ Own the final integration test gate. Prove the approved story works and the repo
 
 `work-reviewer` reviews this step against the checklist below and rejects on any gap. Run it against your own work first — a rejection round here is pure waste:
 
-- **Coverage.** Re-read each source the ACs exercise; every acceptance criterion maps to at least one real assertion. An AC with no automated coverage is listed explicitly as uncovered with a reason — never implied as covered.
-- **Exact-value assertions.** Every test makes at least one exact-value assertion (expected output, count, state, or error). No presence-only checks (`toBeTruthy`/`toBeDefined`/"is not null") that pass regardless of behavior — those are test theater and a reviewer will reject them.
+- **Assertions first.** Before reading or executing implementation files, derive every exact expected value from the approved story, technical brief, or an independent external oracle and cite its `path:line`. Never use the implementation, its output, or a same-code-path helper as the oracle.
+- **Coverage second.** After assertions are fixed, re-read each source the ACs exercise only to locate coverage gaps; every acceptance criterion maps to at least one real assertion. An AC with no automated coverage is listed explicitly as uncovered with a reason — never implied as covered.
+- **Exact-value assertions.** Every test makes at least one independently sourced exact-value assertion (expected output, count, state, or error). No presence-only checks (`toBeTruthy`/`toBeDefined`/"is not null") that pass regardless of behavior — those are test theater and a reviewer will reject them.
 - **Executed, not just written.** You ran every test; `WRITTEN-NOT-RUN` appears only with an explicit reason. A test that fails because it found a real source bug is reported as a `fail` with the owning path — that is a good outcome, never silenced.
 - **Never weaken to pass.** Do not relax an assertion, delete a case, or narrow scope to turn red green. A `fail` is a valid, correct result.
 
@@ -47,6 +49,9 @@ Return exactly this structure:
 
 **New/changed test files:**
 - `path` - <covers AC#>
+
+**Expected-value sources:**
+- `path::test name :: assertion` - `artifacts/story.md:line | artifacts/technical-brief.md:line | independent external oracle citation`
 
 **Focused test commands used while authoring tests:**
 - `<command>` - pass/fail (diagnostic only; never the schema-v2 integration authority)
