@@ -12,14 +12,38 @@
 // tail. It requires npm_execpath (always set when invoked via npm scripts).
 //
 // --shard k/n splits the file list across n independent invocations (CI
-// runners), assigning files to shards by greedy size balancing: files are
-// sorted by byte size descending and each goes to the currently-lightest
-// shard. Size is a stable proxy for runtime that also lands the giant suites
-// on different shards. The assignment is deterministic for a given tree, and
-// the union of all shards is exactly the full file list.
+// runners) by greedy longest-processing-time balancing: files are sorted by
+// weight descending and each goes to the currently-lightest shard. The
+// assignment is deterministic for a given tree, and the union of all shards is
+// exactly the full file list.
+//
+// Weights come from scripts/shard-weights.json (measured milliseconds per test
+// file). Byte size is a poor runtime proxy here — docs-contract.test.js is the
+// largest file and one of the fastest (pure regex assertions), while
+// factory-continue.test.js is a third its size and the slowest (git
+// subprocesses) — and balancing by bytes measured a 3.9x runtime spread across
+// four shards. Files absent from the manifest fall back to a byte estimate, so
+// a new or renamed test file balances approximately instead of failing, and
+// stale entries for deleted files are ignored.
+//
+// Regenerate after significant test changes: run `npm run check`, then map each
+// top-level describe result line (`✔ <name> (<ms>ms)`) back to the file that
+// declares that describe and sum per file. Exact values do not matter; relative
+// ones do, so a concurrent run on a busy host is fine.
 import { spawn } from "node:child_process";
-import { readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { availableParallelism } from "node:os";
+
+// Median observed cost across the manifest, used only for unlisted files.
+const FALLBACK_MS_PER_KB = 76;
+
+function loadShardWeights() {
+  try {
+    return JSON.parse(readFileSync("scripts/shard-weights.json", "utf8"));
+  } catch {
+    return {};
+  }
+}
 
 const parallelism = availableParallelism();
 const concurrency = parallelism <= 4 ? Math.max(1, parallelism - 1) : Math.min(8, Math.floor(parallelism / 2));
@@ -38,19 +62,23 @@ if (shardArgIndex !== -1) {
     console.error("--shard requires k/n with 1 <= k <= n");
     process.exit(1);
   }
+  const manifest = loadShardWeights();
   const weighted = files
-    .map((file) => ({ file, size: statSync(file).size }))
-    .sort((a, b) => b.size - a.size || (a.file < b.file ? -1 : 1));
+    .map((file) => ({
+      file,
+      cost: manifest[file.replace(/^test\//u, "")] ?? Math.round((statSync(file).size / 1024) * FALLBACK_MS_PER_KB),
+    }))
+    .sort((a, b) => b.cost - a.cost || (a.file < b.file ? -1 : 1));
   const loads = Array.from({ length: total }, () => 0);
   const bins = Array.from({ length: total }, () => []);
-  for (const { file, size } of weighted) {
+  for (const { file, cost } of weighted) {
     let lightest = 0;
     for (let i = 1; i < total; i += 1) if (loads[i] < loads[lightest]) lightest = i;
     bins[lightest].push(file);
-    loads[lightest] += size;
+    loads[lightest] += cost;
   }
   files = bins[shard - 1].sort();
-  console.log(`shard ${shard}/${total}: ${files.length} files, ${loads[shard - 1]} bytes`);
+  console.log(`shard ${shard}/${total}: ${files.length} files, estimated ${Math.round(loads[shard - 1] / 1000)}s`);
 }
 
 if (process.argv.includes("--with-smoke")) files.push("test/package-smoke.mjs");
