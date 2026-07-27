@@ -599,6 +599,7 @@ export function recordDetachedProcessEvidence(runDir, input = {}) {
   const inspected = inspectProcessForEvidence(input.pid, input);
   const cwd = resolve(input.cwd || process.cwd());
   const verified = requireVerifiedProcessIdentity(inspected, cwd);
+  requireExpectedProcessIdentity(inspected, input.expectedIdentity);
   const identity = {
     inspector: stringOrDefault(inspected.inspector, DEFAULT_INSPECTOR),
     start_marker: verified.startMarker,
@@ -859,6 +860,24 @@ function requireVerifiedProcessIdentity(inspected, expectedCwd) {
   if (!nonEmptyString(inspected.cwd)) throw new Error("process evidence requires verifiable live process identity: missing process cwd");
   if (resolve(String(inspected.cwd)) !== expectedCwd) throw new Error("process evidence requires verifiable live process identity: process cwd mismatch");
   return { startMarker, commandName };
+}
+
+function requireExpectedProcessIdentity(inspected, expected) {
+  if (expected === undefined) return;
+  const actualFingerprint = processIdentityFingerprint(inspected);
+  const expectedFingerprint = processIdentityFingerprint(expected);
+  if (!actualFingerprint || !expectedFingerprint || actualFingerprint !== expectedFingerprint) {
+    throw new Error("process evidence requires the final process identity to match the settled identity");
+  }
+}
+
+function processIdentityFingerprint(identity) {
+  if (!plainObject(identity) || !positivePid(identity.pid) || !nonEmptyString(identity.inspector)) return null;
+  const startMarker = String(identity.start_marker ?? "").trim();
+  const commandName = normalizeCommandName(identity.command_name || "");
+  const cwd = nonEmptyString(identity.cwd) ? resolve(identity.cwd) : null;
+  if (!startMarker || !commandName || !cwd) return null;
+  return JSON.stringify([identity.inspector, identity.pid, startMarker, commandName, cwd]);
 }
 
 function failClosed(runId, reason, processRef, pid = null) {

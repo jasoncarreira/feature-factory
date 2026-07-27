@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -152,6 +152,42 @@ describe("detached log supervisor", () => {
       assert.deepEqual(result, { pid: child.pid, status: "exited" });
       assert.equal(commandReads, 4);
       assert.equal(JSON.parse(readFileSync(join(runDir, "process.json"), "utf8")).identity.command_name, "opencode");
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the final identity differs from the stable pair", async () => {
+    const fixture = createFixture("changed-after-stable-pair");
+    const runDir = join(fixture.root, ".opencode", "factory", "scoped-run");
+    const child = stubChild();
+    const messages = [];
+    let commandReads = 0;
+    mkdirSync(join(runDir, "processes"), { recursive: true });
+    try {
+      await assert.rejects(superviseDetachedLaunch({
+        ...init(fixture),
+        runDir,
+        runId: "scoped-run",
+        executionId: "execution-1",
+        logRef: "processes/child.log",
+        recordEvidence: true,
+      }, {
+        spawnFn: () => child,
+        send: (message) => messages.push(message),
+        ...inspectionOptions(fixture),
+        procReadFile(path) {
+          if (path.endsWith("/stat")) return `${child.pid} (opencode) S ${Array(18).fill("0").join(" ")} 111\n`;
+          commandReads += 1;
+          return `${commandReads <= 2 ? "opencode" : "replacement"}\n`;
+        },
+        sleep: async () => {},
+        stopHeartbeatFn: async () => {},
+      }), /final process identity to match the settled identity/u);
+
+      assert.deepEqual(messages, [{ type: "spawned", pid: child.pid }]);
+      assert.equal(commandReads, 3);
+      assert.equal(existsSync(join(runDir, "process.json")), false);
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }

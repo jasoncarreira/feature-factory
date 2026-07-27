@@ -188,8 +188,10 @@ describe("platform process identity inspection", () => {
     assert.equal(JSON.stringify(inspected).includes("do not leak"), false);
   });
 
-  it("uses targeted Darwin tools with bounded options and a final start recheck", () => {
+  it("passes retained Darwin command bounds to targeted tools and performs a final start recheck", () => {
     const calls = [];
+    const commandTimeoutMs = 321;
+    const commandMaxBuffer = 4096;
     const output = (command, args) => {
       if (command === "ps" && args.at(-1) === "lstart=") return "Thu Jul  9 15:00:00 2026\n";
       if (command === "ps" && args.at(-1) === "comm=") return "/opt/homebrew/bin/opencode\n";
@@ -200,6 +202,8 @@ describe("platform process identity inspection", () => {
       platform: "darwin",
       hostname: "darwin-host",
       livenessProbe: () => ({ status: "live" }),
+      commandTimeoutMs,
+      commandMaxBuffer,
       commandRunner(command, args, options) {
         calls.push({ command, args, options });
         return output(command, args);
@@ -222,8 +226,8 @@ describe("platform process identity inspection", () => {
       ["ps", "-p", String(PID), "-o", "lstart="],
     ]);
     for (const call of calls) {
-      assert.equal(call.options.timeout, 5_000);
-      assert.equal(call.options.maxBuffer, 1024 * 1024);
+      assert.equal(call.options.timeout, commandTimeoutMs);
+      assert.equal(call.options.maxBuffer, commandMaxBuffer);
       assert.equal(Object.hasOwn(call.options, "shell"), false);
     }
   });

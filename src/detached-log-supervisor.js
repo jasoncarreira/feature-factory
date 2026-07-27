@@ -70,7 +70,7 @@ export async function superviseDetachedLaunch(init, options = {}) {
     child.stderr.pipe(writer.stderr);
 
     if (init.recordEvidence) {
-      await waitForStableProcessIdentity(child.pid, options);
+      const stableIdentity = await waitForStableProcessIdentity(child.pid, options);
       recordDetachedProcessEvidence(init.runDir, {
         runId: init.runId,
         executionId: init.executionId,
@@ -80,6 +80,7 @@ export async function superviseDetachedLaunch(init, options = {}) {
         commandName: "opencode",
         logRef: init.logRef,
         now: init.now,
+        expectedIdentity: stableIdentity.identity,
         ...processInspectionOptions(options),
       });
     }

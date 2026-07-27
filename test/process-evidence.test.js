@@ -748,6 +748,8 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
       "procReadFile",
       "procReadlink",
       "commandRunner",
+      "commandTimeoutMs",
+      "commandMaxBuffer",
       "clock",
       "sleep",
       "signalFn",
@@ -770,7 +772,7 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
       "clockFn",
       "sleepFn",
     ];
-    assert.equal(retainedOptionSeams.length, 10);
+    assert.equal(retainedOptionSeams.length, 12);
     assert.equal(retiredOptionSeams.length, 15);
     for (const retained of retainedOptionSeams) assert.equal(combinedSource.includes(retained), true, retained);
     for (const retired of retiredOptionSeams) assert.equal(combinedSource.includes(retired), false, retired);
