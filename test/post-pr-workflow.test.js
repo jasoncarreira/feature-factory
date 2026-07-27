@@ -10,9 +10,17 @@ import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src
 import { hashValue } from "../src/refs.js";
 import { computePrOperationId } from "../src/github.js";
 import { completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionPostPrState } from "../src/run-state.js";
+import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
 
 const SHA = "a".repeat(40);
 const EMPTY_PATHS_HASH = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
+
+function currentPlan(slices) {
+  return withDeliveryEnvelope({
+    slices,
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+  });
+}
 
 describe("post-PR workflow orchestration", () => {
   it("does no GitHub work before next_poll_at and exposes a read-only summary", async () => {
@@ -145,10 +153,10 @@ describe("post-PR workflow orchestration", () => {
     const ratifiedPath = "docs/ratified-api.md";
     try {
       installRatifiedApiOwnership(fixture, ratifiedPath, SHA);
-      writeJson(join(fixture.runDir, "plan", "slices.json"), { slices: [
+      writeJson(join(fixture.runDir, "plan", "slices.json"), currentPlan([
         { id: "api", stack: "backend", paths: ["src/stale-api/**"], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
         { id: "ui", stack: "frontend", paths: [ratifiedPath], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
-      ] });
+      ]));
       const result = await postPrObserve(fixture.runId, { cwd: fixture.repo, now: "2026-07-12T12:00:30.000Z", executeGithub: async ({ args }) => {
         if (args[0] === "auth") return { exitCode: 0, stdout: "", stderr: "" };
         if (args[0] === "pr") return { exitCode: 0, stderr: "", stdout: JSON.stringify({ headRefOid: SHA, isDraft: false, reviewDecision: null, reviews: [], state: "OPEN", statusCheckRollup: [{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" }] }) };
@@ -190,10 +198,10 @@ describe("post-PR workflow orchestration", () => {
     try {
       configurePanelPlan(fixture);
       installRatifiedApiOwnership(fixture, ratifiedPath, fixture.candidate);
-      writeJson(join(fixture.runDir, "plan", "slices.json"), { slices: [
+      writeJson(join(fixture.runDir, "plan", "slices.json"), currentPlan([
         { id: "api", stack: "backend", paths: ["src/stale-api.js"], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
         { id: "ui", stack: "frontend", paths: [ratifiedPath], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
-      ] });
+      ]));
       await dispatchWorkflowPanel(fixture, "validator", { verdict: "NO-GO", affected_paths: [ratifiedPath] }, dispatches);
       await dispatchWorkflowPanel(fixture, "security", { verdict: "PASS", affected_paths: [ratifiedPath] }, dispatches);
       await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:07:00.000Z" });
@@ -315,10 +323,10 @@ describe("post-PR workflow orchestration", () => {
     const ratifiedPath = "docs/ratified-remediation.md";
     try {
       installRatifiedApiOwnership(fixture, ratifiedPath, fixture.baseline);
-      writeJson(join(fixture.runDir, "plan", "slices.json"), { slices: [
+      writeJson(join(fixture.runDir, "plan", "slices.json"), currentPlan([
         { id: "api", stack: "backend", paths: ["src/stale-api.js"], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
         { id: "ui", stack: "frontend", paths: [ratifiedPath], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
-      ] });
+      ]));
       updateRunFile(fixture, (run) => {
         run.post_pr.phase = "remediation-running";
         Object.assign(run.post_pr.remediation, {
@@ -1022,7 +1030,7 @@ function createFixture(runId, { nextPollAt = "2026-07-12T12:00:00.000Z", reviewe
   const repo = mkdtempSync(join(tmpdir(), "post-pr-workflow-"));
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(join(runDir, "plan"), { recursive: true });
-  writeFileSync(join(runDir, "plan", "slices.json"), `${JSON.stringify({ slices: [{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] }] })}\n`);
+  writeFileSync(join(runDir, "plan", "slices.json"), `${JSON.stringify(currentPlan([{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] }]))}\n`);
   const review = reviewer ? { required: true, reviewer_login: reviewer, source: "driver" } : { required: false, reviewer_login: null, source: "none" };
   writeFileSync(join(runDir, "run.json"), `${JSON.stringify({
     schema_version: 1, run_id: runId, status: "running", max_retries: 3, github_account: "octocat", branch: "feature", worktree: repo, base_ref: "main", base_commit: SHA, pr_url: "https://github.com/acme/widgets/pull/7", pr_mode: "ready", gates: {},
@@ -1102,7 +1110,7 @@ function createRevalidationFixture(runId) {
   cpSync(template.repo, repo, { recursive: true });
   const { baseline, candidate } = template;
   const runDir = join(repo, ".opencode", "factory", runId); mkdirSync(join(runDir, "plan"), { recursive: true }); mkdirSync(join(runDir, "evidence")); mkdirSync(join(runDir, "reviews")); mkdirSync(join(runDir, "artifacts"));
-  writeFileSync(join(runDir, "plan", "slices.json"), `${JSON.stringify({ slices: [{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] }] })}\n`);
+  writeFileSync(join(runDir, "plan", "slices.json"), `${JSON.stringify(currentPlan([{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] }]))}\n`);
   writeFileSync(join(runDir, "evidence", "post-pr-ci.attempt-1.json"), "{}\n");
   const owner = { kind: "slice", slice_id: "api", stack: "backend", path_b64url: null, method: "check-slice-id" };
   const failureEvidenceRef = "evidence/post-pr-ci.attempt-1.json"; const failureHash = fileHash(join(runDir, failureEvidenceRef));
@@ -1220,10 +1228,10 @@ async function dispatchWorkflowPanel(fixture, activity, result, dispatches) {
 }
 
 function configurePanelPlan(fixture) {
-  writeJson(join(fixture.runDir, "plan", "slices.json"), { slices: [
+  writeJson(join(fixture.runDir, "plan", "slices.json"), currentPlan([
     { id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] },
     { id: "ui", stack: "frontend", paths: ["src/ui.js"], depends_on: [], acceptance: ["UI works"], test_plan: ["node --test"] },
-  ] });
+  ]));
   updateRunFile(fixture, (run) => {
     run.slices = [
       { id: "api", stack: "backend", depends_on: [], declared_paths: ["src/api.js"], effective_paths: ["src/api.js"], status: "pending", attempts: 0 },
@@ -1255,10 +1263,10 @@ function installRatifiedApiOwnership(fixture, ratifiedPath, reviewedCommit) {
 
 async function closeRecoverablePostPrDispatch(fixture, { ratifiedPath, candidatePath }) {
   installRatifiedApiOwnership(fixture, ratifiedPath, fixture.baseline);
-  writeJson(join(fixture.runDir, "plan", "slices.json"), { slices: [
+  writeJson(join(fixture.runDir, "plan", "slices.json"), currentPlan([
     { id: "api", stack: "backend", paths: ["src/stale-api.js"], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
     { id: "ui", stack: "frontend", paths: [ratifiedPath], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
-  ] });
+  ]));
   updateRunFile(fixture, (run) => {
     run.post_pr.phase = "remediation-running";
     Object.assign(run.post_pr.remediation, { stage: "running", candidate_head_sha: null, remediation_evidence_ref: null, remediation_evidence_hash: null, changes: { paths: [], entries: [], tree_hash: null } });
@@ -1305,7 +1313,7 @@ function createRunStatePanelFixture(runId, { overlap = false, renameSource = fal
     { id: "api", stack: "backend", paths: ["src/api/**"], depends_on: [], acceptance: ["api"], test_plan: ["node --test"] },
     { id: "ui", stack: "frontend", paths: overlap ? [ratifiedPath] : ["src/ui/**"], depends_on: [], acceptance: ["ui"], test_plan: ["node --test"] },
   ];
-  writeJson(join(runDir, "plan", "slices.json"), { slices: plannedSlices });
+  writeJson(join(runDir, "plan", "slices.json"), currentPlan(plannedSlices));
   const slices = plannedSlices.map((planned) => {
     const ratifiedPaths = planned.id === "api" ? [ratifiedPath] : [];
     const evidenceRef = `evidence/${planned.id}.json`;

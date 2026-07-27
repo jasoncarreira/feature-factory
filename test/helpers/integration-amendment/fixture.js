@@ -11,6 +11,7 @@ import { PassThrough } from "node:stream";
 import { execFileSync } from "../git-fixture.js";
 import { withDeliveryEnvelope, passingInvariantFamilyLedger, writeVerificationArtifactReceipt } from "../delivery-envelope-fixture.js";
 import { createSliceAttemptReview, createSliceReviewRecord } from "../review-record-fixture.js";
+import { computePrOperationId } from "../../../src/github.js";
 import { hashFile, hashValue } from "../../../src/refs.js";
 import { completeIntegrationAmendmentReviewTaskDispatch, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, createPostPrState, hasInFlightHeartbeatWork, heartbeatOnce, prepareIntegrationAmendmentReviewTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionPanelVerdicts, transitionPostPrState, transitionPrCreated, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../../../src/run-state.js";
 import { checkRunConsistency, inspectIntegrationAmendmentInventory, integrationAmendmentId, validateIntegrationAmendment, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateRun } from "../../../src/validate.js";
@@ -20,6 +21,7 @@ import { executeCheckedTestExecution } from "../../../src/test-execution.js";
 export const RUN_ID = "amendment-run";
 export const FEATURE_BRANCH = "amendment-feature";
 export const NOW = "2026-07-20T12:00:00.000Z";
+export const CARRY_FORWARD_REQUIRED_SUMMARY = "Integration amendment is unsupported for this run state; continue remaining work in a fresh schema-v2 carry-forward child.";
 export const fixtures = [];
 export const PR79_GENERIC_PARITY = [
   [1, "report eligibility", "checked failure execution and report admission"],
@@ -104,20 +106,45 @@ export async function exerciseGenericParity(id) {
       for (const [name, mutate, error] of [
         ["test-verifier", (run) => { run.steps.push({ agent: "test-verifier", status: "running", attempts: 1 }); }, /pristine attempt-zero test-verifier/u],
         ["gate", (run) => { run.gates.pre_pr = { status: "pending", artifact: "artifacts/test-report.md", question_ref: "gates/pre-pr.md" }; }, /excluded after panel|gate/u],
-        ["PR fence", (run) => { run.steering = { schema_version: 1, generation: 0, pending: null, uncheckpointed: null, boundary: null, action_claim: null, last_action: null, pr_fence: { token: "fence-token", generation: 0, state_hash: hashValue(run), created_at: NOW }, history: [] }; }, /excluded after panel|PR/u],
+        ["PR fence", (run, { base }) => {
+          const repository = "acme/repo";
+          run.steering = {
+            schema_version: 1,
+            generation: 0,
+            pending: null,
+            uncheckpointed: null,
+            boundary: null,
+            action_claim: null,
+            last_action: null,
+            pr_fence: {
+              token: "fence-token",
+              generation: 0,
+              state_hash: hashValue(run),
+              created_at: NOW,
+              operation_id: computePrOperationId({ base_commit: base, branch: run.branch, created_at: NOW, repository, run_id: run.run_id }),
+              repository,
+              head_ref: run.branch,
+              head_sha: git(run.worktree, ["rev-parse", "HEAD"]).trim(),
+              base_ref: "main",
+              base_sha: base,
+              draft: false,
+            },
+            history: [],
+          };
+        }, /excluded after panel|PR/u],
         ["PR presence", (run) => { run.pr_url = "https://github.com/acme/repo/pull/79"; }, /excluded after panel|PR/u],
       ]) {
         const excluded = createFixture({ publishReport: false });
         try {
           const run = readRun(excluded);
-          mutate(run);
+          mutate(run, excluded);
           writeJson(join(excluded.runDir, "run.json"), run);
           await assert.rejects(executeIntegrationAmendment(excluded.runDir, reportRequest(), executionOptions([{ code: 1 }], [])), error, name);
         } finally { cleanup(excluded); }
       }
       const run = readRun(fixture);
-      run.validator = { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" };
-      run.security_review = { verdict: "PASS", review_ref: "reviews/security-reviewer.json" };
+      run.validator = { verdict: "GO", report: "artifacts/validation-report.md", report_hash: sha("validator-report"), review_ref: "reviews/implementation-validator.json", review_hash: sha("validator-review"), reviewed_head_sha: fixture.baseline };
+      run.security_review = { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: sha("security-review"), reviewed_head_sha: fixture.baseline };
       writeJson(join(fixture.runDir, "run.json"), run);
       await assert.rejects(executeIntegrationAmendment(fixture.runDir, reportRequest(), executionOptions([{ code: 1 }], [])), /excluded after panel/u, "panel presence");
       return;
@@ -213,7 +240,7 @@ export async function exerciseGenericParity(id) {
     }
     if (id === 21) {
       addPristineTestVerifier(fixture);
-      await assert.rejects(transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }), /integration amendment is reported|merged-slice repair is unresolved/u);
+      await assert.rejects(transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }), /integration amendment is reported/u);
       return;
     }
     if (id === 22) {
@@ -916,6 +943,10 @@ export function createFixture({ managedFeatureWorktree = false, publishReport = 
   return { repo, featureWorktree, runDir, base, baseline, baselineTree, reviewedCommit, amendmentId };
 }
 
+export function carryForwardTerminalResult() {
+  return { status: "blocked", reason: "carry-forward-required", summary: CARRY_FORWARD_REQUIRED_SUMMARY, artifacts: {} };
+}
+
 export function admissionFixture({ repo, baseline, baselineTree, owner, consumer, plan }) {
   const unit = plan.delivery_envelope.delivery_units.find((entry) => entry.slice_id === "consumer");
   const artifact = unit.verification_artifacts[0];
@@ -1197,12 +1228,6 @@ export function snapshotAmendmentSidecars(root) {
   };
   visit(root);
   return result;
-}
-
-export function installLegacyPrFence(fixture) {
-  const run = readRun(fixture);
-  run.steering = { schema_version: 1, generation: 0, pending: null, uncheckpointed: null, boundary: null, action_claim: null, last_action: null, pr_fence: { token: "stale-pr-fence", generation: 0, state_hash: hashValue(run), created_at: NOW }, history: [] };
-  writeJson(join(fixture.runDir, "run.json"), run);
 }
 
 export function rewriteReportOutcome(fixture, outcome) {

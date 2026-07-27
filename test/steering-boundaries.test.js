@@ -572,35 +572,37 @@ describe("lock-protected steering boundaries", () => {
     }
   });
 
-  it("terminalizes a legacy identity-less fence on mutating resume-check while retaining it", async () => {
+  it("rejects an identity-less fence during disrupted recovery without mutation", async () => {
     const fixture = createReadyPrFixture("legacy-fence-resume-check");
     try {
-      const established = await transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, { token: "legacy-resume-fence" }));
+      await transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, { token: "legacy-resume-fence" }));
       const run = readJson(fixture.runPath);
       for (const key of ["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]) delete run.steering.pr_fence[key];
       writeJson(fixture.runPath, run);
+      const before = bytes(fixture.runPath);
       const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo, now: LATER });
-      const terminal = readJson(fixture.runPath);
       assert.equal(result.ok, false);
-      assert.equal(terminal.status, "needs-human");
-      assert.equal(terminal.terminal_result.reason, "legacy-pr-fence-operation-identity-missing");
-      assert.equal(terminal.steering.pr_fence.token, established.fence.token);
+      assert.equal(result.updated, false);
+      assert.match(result.terminal_result.reason, /pr_fence|operation_id.*repository.*head_ref.*head_sha.*base_ref.*base_sha.*draft/u);
+      assertBytes(fixture.runPath, before);
     } finally {
       cleanupFixture(fixture);
     }
   });
 
-  it("terminalizes a legacy identity-less fence on recover while retaining it", async () => {
+  it("rejects an identity-less fence at the direct recovery boundary without mutation", async () => {
     const fixture = createReadyPrFixture("legacy-fence-recover");
     try {
-      const established = await transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, { token: "legacy-recover-fence" }));
+      await transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, { token: "legacy-recover-fence" }));
       const run = readJson(fixture.runPath);
       for (const key of ["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]) delete run.steering.pr_fence[key];
       writeJson(fixture.runPath, run);
-      const result = await transitionRecoverOrphan(fixture.runDir, "ignored", { now: LATER });
-      assert.equal(result.run.status, "needs-human");
-      assert.equal(result.run.terminal_result.reason, "legacy-pr-fence-operation-identity-missing");
-      assert.equal(result.run.steering.pr_fence.token, established.fence.token);
+      const before = bytes(fixture.runPath);
+      await assert.rejects(
+        transitionRecoverOrphan(fixture.runDir, "ignored", { now: LATER }),
+        /pr_fence|operation_id.*repository.*head_ref.*head_sha.*base_ref.*base_sha.*draft/u,
+      );
+      assertBytes(fixture.runPath, before);
     } finally {
       cleanupFixture(fixture);
     }
@@ -657,7 +659,7 @@ describe("lock-protected steering boundaries", () => {
     }));
     const recovery = tracked(recoverDisruptedRun(fixture.runId, {
       ...laneOptions(recoveryLane), cwd: fixture.repo, now: LATER, ...liveness,
-      recoveryHooks: { beforeLegacyFenceMutation: async () => { recoveryPreflight.resolve(); await releaseRecoveryPreflight.promise; } },
+      recoveryHooks: { beforeTerminalWrite: async () => { recoveryPreflight.resolve(); await releaseRecoveryPreflight.promise; } },
     }));
     let terminalHolder;
     try {

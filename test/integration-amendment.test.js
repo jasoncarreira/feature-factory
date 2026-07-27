@@ -4,11 +4,11 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hashFile } from "../src/refs.js";
-import { completeIntegrationAmendmentReviewTaskDispatch, completeSpecialBuilderTaskDispatch, heartbeatOnce, inspectContinuationRouteSchema, prepareIntegrationAmendmentReviewTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionContinuationAdoption, transitionGateDecision, transitionIntegrationAmendment, transitionMergedSliceRepair, transitionRunJson, transitionRunSlice, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
-import { checkRunConsistency, inspectIntegrationAmendmentInventory, validateRun } from "../src/validate.js";
+import { completeIntegrationAmendmentReviewTaskDispatch, completeSpecialBuilderTaskDispatch, heartbeatOnce, inspectContinuationRouteSchema, prepareIntegrationAmendmentReviewTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionContinuationAdoption, transitionGateDecision, transitionIntegrationAmendment, transitionRunJson, transitionRunSlice, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
+import { checkRunConsistency, inspectIntegrationAmendmentInventory } from "../src/validate.js";
 import { buildContinuation, cleanupRun, collectCleanupTargets, continueFactory, executeIntegrationAmendment, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startHeartbeat, stopHeartbeat } from "../src/factory.js";
 import plugin from "../src/plugin.js";
-import { FEATURE_BRANCH, NOW, RUN_ID, addPristineTestVerifier, amendmentReviewPrompt, bindAmendmentDispatch, blocked, checkedReviewPromptContext, cleanup, cleanupFixtures, commitCandidate, commitCandidatePath, createFixture, downstreamProductionConsumers, executionOptions, git, installLegacyPrFence, makeReportClaimActive, publishAmendmentReview, reachIntegrated, reachMerged, reachVerified, readJson, readRun, reportRequest, reviewFromContext, reviewMarker, rewriteExecutionBinding, rewriteReportAsForeignRun, rewriteReportOutcome, sha, snapshotAmendmentGateAuthority, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
+import { FEATURE_BRANCH, NOW, RUN_ID, addPristineTestVerifier, amendmentReviewPrompt, bindAmendmentDispatch, blocked, checkedReviewPromptContext, cleanup, cleanupFixtures, commitCandidate, commitCandidatePath, createFixture, downstreamProductionConsumers, executionOptions, git, makeReportClaimActive, publishAmendmentReview, reachIntegrated, reachMerged, reachVerified, readJson, readRun, reportRequest, reviewFromContext, reviewMarker, rewriteExecutionBinding, rewriteReportAsForeignRun, sha, snapshotAmendmentGateAuthority, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
 
 after(cleanupFixtures);
 
@@ -547,20 +547,6 @@ describe("generic integration amendment", () => {
     } finally { cleanup(fixture); }
   });
 
-  it("keeps settled generic tombstones disjoint from new legacy repair admission", async () => {
-    for (const outcome of ["pass", "launch-error"]) {
-      const fixture = createFixture();
-      try {
-        rewriteReportOutcome(fixture, outcome);
-        const inventory = inspectIntegrationAmendmentInventory(fixture.runDir, readRun(fixture));
-        assert.equal(inventory.classification, outcome === "pass" ? "completed-pass-receipt-no-manifest" : "completed-diagnostic-receipt-no-manifest");
-        await assert.rejects(transitionMergedSliceRepair(fixture.runDir, {
-          status: "reported", owner_slice_id: "owner", consumer_slice_id: "consumer", defect_path: "src/owner/api.js", evidence_ref: "evidence/unused.json",
-        }), /generic amendment tombstone/u);
-      } finally { cleanup(fixture); }
-    }
-  });
-
   it("rejects stale plan, owner, baseline, sidecar, and attempt Git authority", async () => {
     const fixture = createFixture();
     try {
@@ -740,7 +726,7 @@ describe("generic integration amendment", () => {
       const blocked = await transitionIntegrationAmendment(fixture.runDir, { action: "block", reason: "attempt budget exhausted" }, { repoRoot: fixture.repo, now: NOW });
       assert.equal(blocked.integration_amendment.status, "blocked");
       assert.equal(blocked.integration_amendment.blocked.origin, "reviewed-reject");
-      await assert.rejects(transitionRunSlice(fixture.runDir, "consumer", { status: "running", attempts: 1 }), /integration amendment is blocked|merged-slice repair is unresolved/u);
+      await assert.rejects(transitionRunSlice(fixture.runDir, "consumer", { status: "running", attempts: 1 }), /integration amendment is blocked/u);
     } finally { cleanup(fixture); }
   });
 
@@ -790,14 +776,11 @@ describe("generic integration amendment", () => {
     }
   });
 
-  it("rejects caller authority fields and legacy coexistence", async () => {
+  it("rejects caller authority fields without entering fallback routing", async () => {
     const fixture = createFixture();
     try {
       await assert.rejects(transitionIntegrationAmendment(fixture.runDir, { ...reportRequest(), commit: fixture.baseline }), /does not accept caller authority field/u);
-      const run = readRun(fixture);
-      run.merged_slice_repair = { status: "reported" };
-      writeJson(join(fixture.runDir, "run.json"), run);
-      await assert.rejects(transitionIntegrationAmendment(fixture.runDir, reportRequest()), /merged_slice_repair|legacy repair/u);
+      assert.equal(readRun(fixture).integration_amendment, undefined);
     } finally { cleanup(fixture); }
   });
 
@@ -814,7 +797,7 @@ describe("generic integration amendment", () => {
           await transitionIntegrationAmendment(fixture.runDir, reportRequest(), { repoRoot: fixture.repo, now: NOW });
           if (status === "blocked") await transitionIntegrationAmendment(fixture.runDir, { action: "block", reason: "checked blocked fixture" }, { repoRoot: fixture.repo, now: NOW });
           const before = snapshotAmendmentGateAuthority(fixture);
-          await assert.rejects(invoke(fixture), /integration amendment is (?:reported|blocked)|writer rejected|merged-slice repair is unresolved/u, `${status}:${name}`);
+          await assert.rejects(invoke(fixture), /integration amendment is (?:reported|blocked)|writer rejected/u, `${status}:${name}`);
           assert.deepEqual(snapshotAmendmentGateAuthority(fixture), before, `${status}:${name}: protected gate authority`);
         } finally { cleanup(fixture); }
       }
@@ -827,7 +810,7 @@ describe("generic integration amendment", () => {
         const fixture = createFixture();
         try {
           await reachMerged(fixture);
-          if (name === "PR") installLegacyPrFence(fixture);
+          if (name === "PR") installCurrentPrFence(fixture);
           if (drift === "sidecar") {
             const receiptPath = join(fixture.runDir, readRun(fixture).integration_amendment.failure_execution.receipt_ref);
             const receipt = readJson(receiptPath);
@@ -844,21 +827,33 @@ describe("generic integration amendment", () => {
     }
   });
 
-  it("retires new generic-eligible legacy reports before publication and preserves malformed overlap rejection", async () => {
-    const fixture = createFixture({ publishReport: false });
-    try {
-      writeJson(join(fixture.runDir, "evidence", "legacy-generic-failure.json"), { subject: "consumer", status: "fail", substrate: "feature-baseline" });
-      const before = readFileSync(join(fixture.runDir, "run.json"));
-      await assert.rejects(transitionMergedSliceRepair(fixture.runDir, {
-        status: "reported", owner_slice_id: "owner", consumer_slice_id: "consumer", defect_path: "src/owner/api.js", evidence_ref: "evidence/legacy-generic-failure.json",
-      }, { repoRoot: fixture.repo }), /legacy merged-slice repair report is retired.*factory amendment amendment-run report.*--artifact-id fixture-artifact-2 --json/u);
-      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), before);
-      assert.equal(readRun(fixture).merged_slice_repair, undefined);
-
-      const malformed = readRun(fixture);
-      malformed.merged_slice_repair = { status: "reported" };
-      malformed.integration_amendment = { status: "reported" };
-      assert.throws(() => validateRun(malformed), /mutually exclusive|merged_slice_repair|integration_amendment/u);
-    } finally { cleanup(fixture); }
-  });
 });
+
+function installCurrentPrFence(fixture) {
+  const run = readRun(fixture);
+  const head = git(fixture.featureWorktree, ["rev-parse", "HEAD"]).trim();
+  run.steering = {
+    schema_version: 1,
+    generation: 0,
+    pending: null,
+    uncheckpointed: null,
+    boundary: null,
+    action_claim: null,
+    last_action: null,
+    pr_fence: {
+      token: "current-pr-fence",
+      generation: 0,
+      state_hash: sha("current-pr-fence-state"),
+      created_at: NOW,
+      operation_id: `ffpr-v1-${"a".repeat(64)}`,
+      repository: "acme/repo",
+      head_ref: run.branch,
+      head_sha: head,
+      base_ref: "main",
+      base_sha: fixture.base,
+      draft: false,
+    },
+    history: [],
+  };
+  writeJson(join(fixture.runDir, "run.json"), run);
+}

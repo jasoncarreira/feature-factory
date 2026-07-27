@@ -1393,21 +1393,22 @@ describe("simplified run-state transitions", () => {
     } finally { cleanup(fixture.repo); }
   });
 
-  it("allows default ready PR creation for blocked-run continuations", async () => {
-    const fixture = createFixture("pr-continuation-default-ready");
+  it("rejects legacy continuation state before PR fence or PR effects", async () => {
+    const fixture = createFixture("pr-legacy-continuation-rejected");
     try {
       writeReadyPrRun(fixture, {
         continuation: continuationMetadata(fixture.runId),
       });
-
-      const result = await createPrTransition(fixture.runDir, {
-        pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/103",
-        pr_number: 103,
-        repository: "jasoncarreira/opencode-feature-factory",
-      });
-
-      assert.equal(result.run.status, "completed");
-      assert.equal(result.run.terminal_result.draft, false);
+      const before = readFileSync(join(fixture.runDir, "run.json"));
+      await assert.rejects(
+        createPrTransition(fixture.runDir, {
+          pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/103",
+          pr_number: 103,
+          repository: "jasoncarreira/opencode-feature-factory",
+        }),
+        /run\.continuation\.schema_version: must equal 2/u,
+      );
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), before);
     } finally {
       cleanup(fixture.repo);
     }
@@ -1719,27 +1720,6 @@ describe("simplified run-state transitions", () => {
     } finally { cleanup(fixture.repo); }
   });
 
-  it("allows explicit draft PR creation for blocked-run continuations", async () => {
-    const fixture = createFixture("pr-continuation-draft");
-    try {
-      writeReadyPrRun(fixture, {
-        continuation: continuationMetadata(fixture.runId),
-      });
-
-      const result = await createPrTransition(fixture.runDir, {
-        pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
-        pr_number: 104,
-        repository: "jasoncarreira/opencode-feature-factory",
-        draft: true,
-      });
-
-      assert.equal(result.run.status, "completed");
-      assert.equal(result.run.terminal_result.draft, true);
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
-
   it("allows explicit draft PR recording for ordinary runs with the draft summary", async () => {
     const fixture = createFixture("pr-ordinary-draft");
     try {
@@ -1857,9 +1837,6 @@ describe("simplified run-state transitions", () => {
       const fixture = createFixture(item.runId);
       try {
         writeReadyPrRun(fixture, {
-          branch: "continuation-branch",
-          worktree: "/tmp/continuation-worktree",
-          continuation: continuationMetadata(fixture.runId),
           ...item.overrides,
         });
         if (item.runId === "pr-validator-no-go") writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), item.review);
@@ -3869,7 +3846,7 @@ describe("simplified run-state transitions", () => {
       const planPath = join(fixture.runDir, "plan", "slices.json");
       const originalPlan = readFileSync(planPath, "utf8");
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-      writeJson(planPath, { ...readJson(planPath), integration_gate: { required_commands: [{ program: "node", args: ["--test"] }, { program: "npm", args: ["run", "check"] }] } });
+      writeJson(planPath, withDeliveryEnvelope({ ...readJson(planPath), integration_gate: { required_commands: [{ program: "node", args: ["--test"] }, { program: "npm", args: ["run", "check"] }] } }));
       await assert.rejects(
         transitionSliceMerged(fixture.runDir, "slice", { merge_commit: integrationHead }),
         /plan ref\/hash does not match exact plan bytes/u,
@@ -3932,172 +3909,32 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("upgrades legacy panels together and rejects stale, different, dirty, or moved panel heads", async () => {
-    const legacy = createFixture("legacy-panel-upgrade");
-    const input = {
-      validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
-      security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
-    };
-    try {
-      initGitRepo(legacy.repo, ["feature"]);
-      runGit(legacy.repo, ["checkout", "feature"]);
-      const head = gitOutput(legacy.repo, ["rev-parse", "HEAD"]);
-      mkdirSync(join(legacy.runDir, "reviews"), { recursive: true });
-      writeFileSync(join(legacy.runDir, "artifacts", "validation-report.md"), "GO\n");
-      writeJson(join(legacy.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "GO" }));
-      writeJson(join(legacy.runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "PASS" }));
-      writeJson(join(legacy.runDir, "run.json"), { ...baseRun(legacy.runId), branch: "feature", worktree: legacy.repo, validator: input.validator, security_review: input.security_review });
-      const upgraded = await transitionPanelVerdicts(legacy.runDir, input);
-      assert.equal(upgraded.run.validator.reviewed_head_sha, head);
-      assert.equal(upgraded.run.security_review.reviewed_head_sha, head);
-      assert.match(upgraded.run.validator.report_hash, /^sha256:[0-9a-f]{64}$/u);
-
-      const exactBytes = readFileSync(join(legacy.runDir, "run.json"), "utf8");
-      const replay = await transitionPanelVerdicts(legacy.runDir, input);
-      assert.equal(replay.updated, false);
-      assert.equal(readFileSync(join(legacy.runDir, "run.json"), "utf8"), exactBytes);
-
-      writeFileSync(join(legacy.repo, "dirty.txt"), "dirty\n");
-      await assert.rejects(transitionPanelVerdicts(legacy.runDir, input), /clean integration worktree/u);
-      rmSync(join(legacy.repo, "dirty.txt"));
-
-      writeFileSync(join(legacy.repo, "moved.txt"), "moved\n");
-      runGit(legacy.repo, ["add", "moved.txt"]);
-      runGit(legacy.repo, ["commit", "-m", "move integration head"]);
-      await assert.rejects(transitionPanelVerdicts(legacy.runDir, input), /reviewed_head_sha values must equal the current integration head/u);
-      assert.equal(readFileSync(join(legacy.runDir, "run.json"), "utf8"), exactBytes);
-    } finally {
-      cleanup(legacy.repo);
-    }
-
-    const different = createFixture("different-panel-heads");
-    try {
-      initGitRepo(different.repo, ["feature"]);
-      runGit(different.repo, ["checkout", "feature"]);
-      const head = gitOutput(different.repo, ["rev-parse", "HEAD"]);
-      mkdirSync(join(different.runDir, "reviews"), { recursive: true });
-      writeFileSync(join(different.runDir, "artifacts", "validation-report.md"), "GO\n");
-      writeJson(join(different.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "GO" }));
-      writeJson(join(different.runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: "0".repeat(40), verdict: "PASS" }));
-      writeJson(join(different.runDir, "run.json"), { ...baseRun(different.runId), branch: "feature", worktree: different.repo });
-      await assert.rejects(transitionPanelVerdicts(different.runDir, input), /reviewed_head_sha values must equal the current integration head/u);
-      assert.equal(readJson(join(different.runDir, "run.json")).validator, undefined);
-      assert.equal(readJson(join(different.runDir, "run.json")).security_review, undefined);
-    } finally {
-      cleanup(different.repo);
-    }
-  });
-
-  it("rejects migration when only one legacy panel row exists", async () => {
-    for (const [existingPanel, counterpart] of [["validator", undefined], ["validator", null], ["security_review", undefined], ["security_review", null]]) {
-      const fixture = createFixture(`single-legacy-panel-${existingPanel}-${counterpart === null ? "null" : "absent"}`);
+  it("rejects incomplete panel rows without mutation, upgrade, or read-only authority", async () => {
+    for (const shape of ["both", "validator-only", "security-only", "terminal-both"]) {
+      const fixture = createFixture(`incomplete-panel-${shape}`);
       try {
         const { input, legacyValidator, legacySecurity } = prepareLegacyPanelState(fixture);
         const run = readJson(join(fixture.runDir, "run.json"));
-        run.validator = existingPanel === "validator" ? legacyValidator : counterpart;
-        run.security_review = existingPanel === "security_review" ? legacySecurity : counterpart;
+        if (shape === "validator-only") delete run.security_review;
+        if (shape === "security-only") delete run.validator;
+        if (shape === "terminal-both") {
+          run.status = "completed";
+          run.pr_url = "https://github.com/acme/repo/pull/1";
+          run.terminal_result = { status: "completed", run_id: run.run_id, pr_url: run.pr_url, pr_number: 1, repository: "acme/repo", draft: false };
+        }
+        if (shape === "validator-only") run.validator = legacyValidator;
+        if (shape === "security-only") run.security_review = legacySecurity;
         writeJson(join(fixture.runDir, "run.json"), run);
         const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-        const label = `${existingPanel}/${counterpart === null ? "null" : "absent"}`;
-        await assert.rejects(transitionPanelVerdicts(fixture.runDir, input), /legacy panel upgrade requires both existing rows and an exact replay/u, label);
-        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, label);
-      } finally {
-        cleanup(fixture.repo);
-      }
-    }
-  });
-
-  it("requires an exact base-field replay before upgrading legacy panel rows", async () => {
-    const variations = [
-      ["validator verdict", (input) => { input.validator.verdict = "GO-WITH-NITS"; }],
-      ["validator report", (input) => { input.validator.report = "artifacts/alternate-validation-report.md"; }],
-      ["validator review_ref", (input) => { input.validator.review_ref = "reviews/alternate-implementation-validator.json"; }],
-      ["security verdict", (input) => { input.security_review.verdict = "BLOCK"; }],
-      ["security review_ref", (input) => { input.security_review.review_ref = "reviews/alternate-security-reviewer.json"; }],
-    ];
-    for (const [name, change] of variations) {
-      const fixture = createFixture(`legacy-panel-field-${name.replaceAll(" ", "-")}`);
-      try {
-        const { input, head } = prepareLegacyPanelState(fixture);
-        writeFileSync(join(fixture.runDir, "artifacts", "alternate-validation-report.md"), "GO alternate\n");
-        writeJson(join(fixture.runDir, "reviews", "alternate-implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "GO" }));
-        writeJson(join(fixture.runDir, "reviews", "alternate-security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "PASS" }));
-        const changed = structuredClone(input);
-        change(changed);
-        if (name === "validator verdict") writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "GO-WITH-NITS" }));
-        if (name === "security verdict") writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "BLOCK" }));
-        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-        await assert.rejects(transitionPanelVerdicts(fixture.runDir, changed), /legacy panel upgrade requires both existing rows and an exact replay|validator review_ref must be reviews\/implementation-validator\.json/u, name);
-        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
-      } finally {
-        cleanup(fixture.repo);
-      }
-    }
-  });
-
-  it("keeps completed legacy panel rows read-only before observing sidecars", async () => {
-    for (const [name, mutateSidecars] of [
-      ["intact", () => {}],
-      ["missing", (fixture) => rmSync(join(fixture.runDir, "reviews", "security-reviewer.json"))],
-      ["changed", (fixture) => writeFileSync(join(fixture.runDir, "reviews", "implementation-validator.json"), "changed legacy review bytes\n")],
-    ]) {
-      const fixture = createFixture(`terminal-legacy-panel-${name}`);
-      try {
-        const { input } = prepareLegacyPanelState(fixture);
-        const run = readJson(join(fixture.runDir, "run.json"));
-        run.status = "completed";
-        run.pr_url = "https://github.com/acme/repo/pull/1";
-        run.terminal_result = {
-          status: "completed",
-          run_id: run.run_id,
-          pr_url: run.pr_url,
-          pr_number: 1,
-          repository: "acme/repo",
-          draft: false,
-        };
-        writeJson(join(fixture.runDir, "run.json"), run);
-        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-        mutateSidecars(fixture);
         await assert.rejects(
           transitionPanelVerdicts(fixture.runDir, input),
-          (error) => error.message === "legacy completed run is read-only",
-          name,
+          /report_hash, review_hash, reviewed_head_sha must all be present|review_hash, reviewed_head_sha must all be present/u,
+          shape,
         );
-        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, shape);
       } finally {
         cleanup(fixture.repo);
       }
-    }
-  });
-
-  it("re-observes successor panel bytes before a completed exact no-op", async () => {
-    const fixture = createFixture("terminal-successor-panel-replay");
-    try {
-      const { input } = prepareLegacyPanelState(fixture);
-      await transitionPanelVerdicts(fixture.runDir, input);
-      const run = readJson(join(fixture.runDir, "run.json"));
-      run.status = "completed";
-      run.pr_url = "https://github.com/acme/repo/pull/1";
-      run.terminal_result = {
-        status: "completed",
-        run_id: run.run_id,
-        pr_url: run.pr_url,
-        pr_number: 1,
-        repository: "acme/repo",
-        draft: false,
-      };
-      writeJson(join(fixture.runDir, "run.json"), run);
-
-      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-      const replay = await transitionPanelVerdicts(fixture.runDir, input);
-      assert.equal(replay.updated, false);
-      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
-
-      writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "changed successor report bytes\n");
-      await assert.rejects(transitionPanelVerdicts(fixture.runDir, input), /persisted panel successor binding is stale/u);
-      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
-    } finally {
-      cleanup(fixture.repo);
     }
   });
 
@@ -5963,7 +5800,7 @@ function writeReadyPrRun(fixture, overrides = {}) {
     })
     : [slice];
   mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
-  writeJson(join(fixture.runDir, "plan", "slices.json"), {
+  writeJson(join(fixture.runDir, "plan", "slices.json"), withDeliveryEnvelope({
     slices: slices.map((candidate) => ({
       id: candidate.id,
       stack: candidate.stack || "backend",
@@ -5972,7 +5809,8 @@ function writeReadyPrRun(fixture, overrides = {}) {
       acceptance: [`${candidate.id} works`],
       test_plan: [`test ${candidate.id}`],
     })),
-  });
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+  }));
   writeJson(join(fixture.runDir, "run.json"), {
     ...baseRun(fixture.runId),
     branch,

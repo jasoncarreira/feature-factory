@@ -789,7 +789,7 @@ describe("uniform slice attempt evidence", () => {
     }
   });
 
-  it("adopts the exact persisted legacy reconciliation record without granting review", async () => {
+  it("rejects the retired reconciliation closure without granting review", async () => {
     const fixture = createFixture("builder-dispatch-legacy-reconciliation");
     try {
       const { context } = await startAttempt(fixture, 1, { completeDispatch: false });
@@ -812,9 +812,10 @@ describe("uniform slice attempt evidence", () => {
         disposition: "operator-authorized-callback-returned-without-closure",
         authorized_at: "2026-07-08T12:00:00.000Z",
       });
-      const adopted = await adoptSliceBuilderTaskDispatchCandidate(fixture.repo, { run_id: "run", slice_id: "slice", attempt: 1 });
-      assert.equal(adopted.updated, true);
-      assert.equal(adopted.adoption.completion_kind, "candidate-adoption");
+      await assert.rejects(
+        adoptSliceBuilderTaskDispatchCandidate(fixture.repo, { run_id: "run", slice_id: "slice", attempt: 1 }),
+        /slice builder dispatch completion binding is invalid/u,
+      );
       assert.equal(readRun(fixture).slices[0].status, "running");
     } finally {
       cleanup(fixture);

@@ -3,14 +3,124 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionRunJson, transitionRunSlice, transitionSliceMerged, transitionSteeringBoundaryOpened } from "../src/run-state.js";
-import { checkRunConsistency } from "../src/validate.js";
+import { completeSliceBuilderTaskDispatch, observeIntegrationAmendmentExecutionAuthority, prepareSliceBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionRunJson, transitionRunSlice, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
+import { checkRunConsistency, validateRun } from "../src/validate.js";
 import { executeIntegrationAmendment } from "../src/factory.js";
-import { FEATURE_BRANCH, NOW, RUN_ID, addAcceptedTechnicalBrief, advanceMergedAmendmentConsumer, bindAmendmentDispatch, blocked, cleanup, cleanupFixtures, commitCandidate, createFixture, executionOptions, git, publishAmendmentReview, publishConsumerReview, reachIntegrated, reachMerged, readJson, readRun, reportRequest, snapshotRuntimeFiles, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
+import { CARRY_FORWARD_REQUIRED_SUMMARY, FEATURE_BRANCH, NOW, RUN_ID, addAcceptedTechnicalBrief, advanceMergedAmendmentConsumer, bindAmendmentDispatch, blocked, carryForwardTerminalResult, cleanup, cleanupFixtures, commitCandidate, createFixture, executionOptions, git, publishAmendmentReview, publishConsumerReview, reachIntegrated, reachMerged, readJson, readRun, reportRequest, snapshotRuntimeFiles, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
 
 after(cleanupFixtures);
 
 describe("generic integration amendment lifecycle and execution", () => {
+  it("rejects every non-pristine consumer class with one exact effect-free reason", async () => {
+    const cases = [
+      ["blocked", (consumer) => Object.assign(consumer, { status: "blocked", attempts: 0, blocked_reason: "prior terminal stop" })],
+      ["previously-attempted", (consumer) => Object.assign(consumer, { status: "blocked", attempts: 1, blocked_reason: "attempted before repair" })],
+      ["branch-only", (consumer) => Object.assign(consumer, { branch: "consumer-build", worktree: "/tmp/consumer-build" })],
+      ["active", (consumer) => Object.assign(consumer, { status: "running", attempts: 1 })],
+    ];
+    for (const [name, mutate] of cases) {
+      const fixture = createFixture({ publishReport: false });
+      try {
+        const run = readRun(fixture);
+        mutate(run.slices.find((slice) => slice.id === "consumer"));
+        validateRun(run);
+        writeJson(join(fixture.runDir, "run.json"), run);
+        const beforeFiles = snapshotRuntimeFiles(fixture.runDir);
+        const beforeRefs = git(fixture.repo, ["for-each-ref", "--format=%(refname) %(objectname)"]);
+        const beforeWorktrees = git(fixture.repo, ["worktree", "list", "--porcelain"]);
+
+        assert.throws(
+          () => observeIntegrationAmendmentExecutionAuthority(fixture.runDir, run, "report", reportRequest(), { repoRoot: fixture.repo }),
+          (error) => error?.message === "integration-amendment-consumer-not-pristine-pending",
+          name,
+        );
+        await assert.rejects(
+          executeIntegrationAmendment(fixture.runDir, reportRequest(), { spawnFn() { throw new Error("unexpected spawn"); } }),
+          (error) => error?.message === "integration-amendment-consumer-not-pristine-pending",
+          name,
+        );
+        assert.deepEqual(snapshotRuntimeFiles(fixture.runDir), beforeFiles, `${name}: durable files`);
+        assert.equal(git(fixture.repo, ["for-each-ref", "--format=%(refname) %(objectname)"]), beforeRefs, `${name}: refs`);
+        assert.equal(git(fixture.repo, ["worktree", "list", "--porcelain"]), beforeWorktrees, `${name}: worktrees`);
+        assert.equal(readRun(fixture).terminal_result, undefined, `${name}: terminal result`);
+        assert.equal(readRun(fixture).integration_amendment, undefined, `${name}: manifest`);
+
+        const transitionFixture = createFixture();
+        try {
+          const transitionRun = readRun(transitionFixture);
+          mutate(transitionRun.slices.find((slice) => slice.id === "consumer"));
+          validateRun(transitionRun);
+          writeJson(join(transitionFixture.runDir, "run.json"), transitionRun);
+          const beforeTransition = snapshotRuntimeFiles(transitionFixture.runDir);
+          await assert.rejects(
+            transitionIntegrationAmendment(transitionFixture.runDir, reportRequest(), { repoRoot: transitionFixture.repo }),
+            (error) => error?.message === "integration-amendment-consumer-not-pristine-pending",
+            name,
+          );
+          assert.deepEqual(snapshotRuntimeFiles(transitionFixture.runDir), beforeTransition, `${name}: transition files`);
+        } finally { cleanup(transitionFixture); }
+      } finally { cleanup(fixture); }
+    }
+  });
+
+  it("gives continuation and checkpoint state precedence over non-pristine consumer state", () => {
+    const parentCases = [
+      ["continuation", (run) => { run.continuation = { schema_version: 2 }; }],
+      ["checkpoint child", (run) => { run.checkpoint_source = { kind: "delivery-checkpoint-source" }; }],
+      ["checkpoint router", (run) => { run.status = "blocked"; run.checkpoint_progress = { kind: "delivery-checkpoint-progress" }; }],
+    ];
+    assert.equal(parentCases.length, 3);
+    for (const [name, markParent] of parentCases) {
+      const fixture = createFixture({ publishReport: false });
+      try {
+        const run = readRun(fixture);
+        Object.assign(run.slices.find((slice) => slice.id === "consumer"), { status: "blocked", blocked_reason: "prior terminal stop" });
+        markParent(run);
+        const beforeFiles = snapshotRuntimeFiles(fixture.runDir);
+        assert.throws(
+          () => observeIntegrationAmendmentExecutionAuthority(fixture.runDir, run, "report", reportRequest(), { repoRoot: fixture.repo }),
+          (error) => error?.message === "integration-amendment-continuation-unsupported",
+          name,
+        );
+        assert.deepEqual(snapshotRuntimeFiles(fixture.runDir), beforeFiles, name);
+      } finally { cleanup(fixture); }
+    }
+  });
+
+  it("terminalizes an ordinary rejected repair only through checked carry-forward authority", async () => {
+    const fixture = createFixture({ publishReport: false });
+    try {
+      const run = readRun(fixture);
+      Object.assign(run.slices.find((slice) => slice.id === "consumer"), { status: "blocked", blocked_reason: "prior terminal stop" });
+      writeJson(join(fixture.runDir, "run.json"), run);
+      await assert.rejects(
+        executeIntegrationAmendment(fixture.runDir, reportRequest(), { spawnFn() { throw new Error("unexpected spawn"); } }),
+        (error) => error?.message === "integration-amendment-consumer-not-pristine-pending",
+      );
+
+      await assert.rejects(
+        transitionTerminalResult(fixture.runDir, carryForwardTerminalResult()),
+        /terminal requires a lock-protected boundary observation/u,
+      );
+      const opened = await transitionSteeringBoundaryOpened(fixture.runDir, "terminal", { now: NOW });
+      const reviewPath = join(fixture.runDir, "reviews", "work-decomposer.json");
+      const reviewBytes = readFileSync(reviewPath);
+      writeFileSync(reviewPath, `${reviewBytes.toString("utf8")} `);
+      await assert.rejects(
+        transitionTerminalResult(fixture.runDir, carryForwardTerminalResult(), { boundaryToken: opened.boundary.token, now: NOW }),
+        /accepted work-decomposer|review_hash|authority/u,
+      );
+      writeFileSync(reviewPath, reviewBytes);
+
+      const terminal = await transitionTerminalResult(fixture.runDir, carryForwardTerminalResult(), { boundaryToken: opened.boundary.token, now: NOW });
+      assert.equal(terminal.run.status, "blocked");
+      assert.equal(terminal.terminal_result.reason, "carry-forward-required");
+      assert.equal(terminal.terminal_result.summary, CARRY_FORWARD_REQUIRED_SUMMARY);
+      assert.deepEqual(terminal.terminal_result.artifacts, {});
+      assert.equal(terminal.run.integration_amendment, undefined);
+    } finally { cleanup(fixture); }
+  });
+
   it("drives report, build, review, integrate, verify, and merge with exact replay", async () => {
     const fixture = createFixture();
     try {
