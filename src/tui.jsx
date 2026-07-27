@@ -59,6 +59,7 @@ function runSnapshot(runs) {
     branch: run.branch,
     diagnostic_status: run.diagnostic_status,
     diagnostic_classification: run.diagnostic_classification,
+    diagnostic_condition: run.diagnostic_condition,
     diagnostic_summary: run.diagnostic_summary,
     updated_at: run.updated_at,
   })));

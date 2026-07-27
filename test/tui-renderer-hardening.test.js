@@ -138,3 +138,40 @@ describe("process line rendering", () => {
     }
   });
 });
+
+describe("newer-schema diagnostic rendering", () => {
+  it("shows the refining condition next to the classification", () => {
+    assert.equal(
+      renderDiagnosticLine({
+        diagnostic_classification: "invalid",
+        diagnostic_condition: "newer-schema",
+        diagnostic_summary: "Factory run state uses a newer schema than this reader (feature-factory 0.2.1).",
+      }),
+      "invalid - newer-schema: Factory run sta...",
+    );
+  });
+
+  it("leaves the line unchanged for conditions that do not refine the classification", () => {
+    // These conditions are already implied by the classification, so showing
+    // them would only steal width from the summary.
+    assert.equal(
+      renderDiagnosticLine({ diagnostic_classification: "recoverable", diagnostic_condition: "stale-heartbeat", diagnostic_summary: "Heartbeat is stale." }),
+      "recoverable: Heartbeat is stale.",
+    );
+    assert.equal(
+      renderDiagnosticLine({ diagnostic_classification: "invalid", diagnostic_condition: "invalid-run-state", diagnostic_summary: "Bad JSON." }),
+      "invalid: Bad JSON.",
+    );
+  });
+
+  it("drops a condition that is not a known diagnostic identity", () => {
+    const hostile = ["newer-schema[31m", "../../etc/passwd", "", null, undefined, 7, { toString: () => "newer-schema" }];
+    for (const value of hostile) {
+      assert.equal(
+        renderDiagnosticLine({ diagnostic_classification: "invalid", diagnostic_condition: value, diagnostic_summary: "Bad JSON." }),
+        "invalid: Bad JSON.",
+        String(value),
+      );
+    }
+  });
+});

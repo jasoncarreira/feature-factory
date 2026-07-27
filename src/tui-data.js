@@ -7,6 +7,8 @@ import { repoRoot } from "./git.js";
 import {
   DIAGNOSTIC_CLASSIFICATIONS,
   DIAGNOSTIC_CONDITIONS,
+  aggregateDiagnostics,
+  FAIL_CLOSED_DIAGNOSTIC_CONDITIONS,
   DIAGNOSTIC_SEVERITIES,
   DIAGNOSTIC_STATUSES,
   DEFAULT_HEARTBEAT_INTERVAL_MS,
@@ -33,7 +35,6 @@ const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache",
 const MAX_SCAN_DIRS = 2000;
 const MAX_DIAGNOSTIC_SUMMARY = 180;
 const ROOT_CACHE_TTL_MS = 30000;
-const FAIL_CLOSED_CONDITIONS = new Set(["invalid-run-state"]);
 const DIAGNOSTIC_IDENTITIES = Object.freeze({
   condition: new Set(DIAGNOSTIC_CONDITIONS),
   classification: new Set(DIAGNOSTIC_CLASSIFICATIONS),
@@ -417,7 +418,7 @@ function fallbackRun(fallbackID, file, diagnostics) {
 }
 
 function shouldUseFallbackRow(diagnostics) {
-  return Array.isArray(diagnostics?.items) && diagnostics.items.some((item) => FAIL_CLOSED_CONDITIONS.has(item?.condition));
+  return Array.isArray(diagnostics?.items) && diagnostics.items.some((item) => FAIL_CLOSED_DIAGNOSTIC_CONDITIONS.has(item?.condition));
 }
 
 function safeDiagnoseRunFile(file, options) {
@@ -459,6 +460,10 @@ function diagnosticSummary(diagnostics) {
     diagnostic_status: stringOrDefault(envelope.status, "ok"),
     diagnostic_severity: stringOrDefault(envelope.severity, "info"),
     diagnostic_classification: stringOrDefault(envelope.classification, "healthy"),
+    // The primary item's condition, taken from the same aggregator the envelope
+    // used, so the row can tell apart two failures that share one classification
+    // (a corrupt run.json vs. one written by a newer schema). Display only.
+    diagnostic_condition: stringOrDefault(aggregateDiagnostics(envelope.items).primary?.condition, ""),
     diagnostic_summary: truncateDiagnosticSummary(stringOrDefault(envelope.summary, "No diagnostics")),
   };
 }
