@@ -1411,3 +1411,184 @@ function combineProjectionInputs(...inputs) {
   }
   return combined;
 }
+
+describe("process activity projection", () => {
+  const NOW = Date.parse("2026-07-27T18:20:00.000Z");
+  const FRESH = "2026-07-27T18:19:30.000Z"; // 30s old
+  const STALE = "2026-07-27T18:10:00.000Z"; // 10m old
+
+  function fixture({ processState, lastTick, intervalMs, evidence = {} }) {
+    const root = mkdtempSync(join(tmpdir(), "tui-process-activity-"));
+    const runDir = join(root, ".opencode", "factory", "run-1");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "run.json"), JSON.stringify({ schema_version: 1, run_id: "run-1", status: "running" }));
+    if (lastTick) {
+      writeFileSync(join(runDir, "heartbeat.json"), JSON.stringify({
+        schema_version: 1, run_id: "run-1", last_tick_at: lastTick,
+        ...(intervalMs === undefined ? {} : { interval_ms: intervalMs }),
+      }));
+    }
+    const record = processState === null
+      ? { ok: false, missing: true, reason: "missing process evidence", evidence: null }
+      : { ok: true, missing: false, reason: null, evidence: { state: processState, updated_at: "2026-07-27T18:03:37.722Z", log_ref: "processes/run-1.log", ...evidence } };
+    return { root, factoryRoot: join(root, ".opencode", "factory"), record };
+  }
+
+  function activity({ processState, lastTick, verify, evidence, intervalMs }) {
+    const f = fixture({ processState, lastTick, intervalMs, evidence });
+    try {
+      const [row] = readRuns([f.factoryRoot], {
+        diagnostics: false,
+        now: () => NOW,
+        readProcessRecord: () => f.record,
+        verifyProcess: () => verify ?? null,
+      });
+      return row.process;
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }
+
+  it("reports a stopped run when the process exited and the heartbeat is stale", () => {
+    // The issue-110 shape: process.json recorded `exited` at the moment ticking
+    // stopped, but the only operator signal was a lingering stale-heartbeat warning.
+    const projected = activity({ processState: "exited", lastTick: STALE });
+    assert.equal(projected.classification, "stopped");
+    assert.match(projected.detail, /process exited/u);
+    assert.match(projected.log_ref, /processes\/run-1\.log/u);
+  });
+
+  it("reports work in progress when the heartbeat is stale but the process verifies live", () => {
+    // Single model calls run 10-20+ minutes, so a stale heartbeat over a live
+    // process is normal operation and must not read as a failure.
+    for (const status of ["live", "live-and-matching"]) {
+      const projected = activity({ processState: "running", lastTick: STALE, verify: status });
+      assert.equal(projected.classification, "working", status);
+      assert.match(projected.detail, /verified live/u);
+    }
+  });
+
+  it("reports an orphan when the heartbeat is stale and the process is absent or reused", () => {
+    assert.equal(activity({ processState: "running", lastTick: STALE, verify: "absent" }).classification, "orphaned");
+    assert.equal(activity({ processState: "running", lastTick: STALE, verify: "mismatched" }).classification, "orphaned");
+  });
+
+  it("reports unknown rather than guessing when liveness is indeterminate", () => {
+    for (const status of ["indeterminate", null]) {
+      const projected = activity({ processState: "running", lastTick: STALE, verify: status });
+      assert.equal(projected.classification, "unknown", String(status));
+      assert.match(projected.detail, /indeterminate/u);
+    }
+  });
+
+  it("flags a heartbeat that outlives its process", () => {
+    const projected = activity({ processState: "exited", lastTick: FRESH });
+    assert.equal(projected.classification, "heartbeat-orphaned");
+    assert.match(projected.detail, /still ticks/u);
+  });
+
+  it("treats every non-running recorded state as stopped", () => {
+    for (const state of ["cancelled", "failed-closed", "exited"]) {
+      assert.equal(activity({ processState: state, lastTick: STALE }).classification, "stopped", state);
+    }
+  });
+
+  it("reports a healthy run while the heartbeat is current", () => {
+    const projected = activity({ processState: "running", lastTick: FRESH });
+    assert.equal(projected.classification, "running");
+    assert.equal(projected.state, "running");
+  });
+
+  it("treats a missing heartbeat as stale so a dead run cannot look healthy", () => {
+    assert.equal(activity({ processState: "exited", lastTick: null }).classification, "stopped");
+  });
+
+  it("omits the projection when the run has no process record", () => {
+    assert.equal(activity({ processState: null, lastTick: FRESH }), null);
+  });
+
+  it("derives staleness from interval_ms exactly as run-state does", () => {
+    // run-state's inspectHeartbeatLiveness uses max(2 * interval_ms,
+    // MIN_STALE_HEARTBEAT_MS). Hardcoding only the 120s floor made a current
+    // heartbeat look stale for any interval above 60s, which then probed the
+    // process and reported working/orphaned while run-state still called it fresh.
+    const tick = (msAgo) => new Date(NOW - msAgo).toISOString();
+
+    // interval 300s -> threshold 600s: a 5-minute-old tick is still fresh.
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(300000), intervalMs: 300000 }).classification,
+      "running",
+    );
+    // ...and the same tick with the default interval is stale, since the 120s floor governs.
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(300000), verify: "absent" }).classification,
+      "orphaned",
+    );
+
+    // Boundary: threshold is exactly 2 * interval when that exceeds the floor.
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(179000), intervalMs: 90000 }).classification,
+      "running",
+      "just inside 2 * 90s",
+    );
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(181000), intervalMs: 90000, verify: "absent" }).classification,
+      "orphaned",
+      "just outside 2 * 90s",
+    );
+
+    // Floor still applies when 2 * interval is below it (2 * 30s < 120s).
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(119000), intervalMs: 30000 }).classification,
+      "running",
+    );
+    // An invalid interval falls back to the default rather than trusting the record.
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(119000), intervalMs: -5 }).classification,
+      "running",
+    );
+  });
+
+  it("reads a real process record without injection", () => {
+    // Guards the production path: the cases above inject the record, so this
+    // one writes a process.json shaped like a real run's and exercises
+    // readProcessEvidence itself.
+    const root = mkdtempSync(join(tmpdir(), "tui-process-real-"));
+    const runDir = join(root, ".opencode", "factory", "run-1");
+    mkdirSync(join(runDir, "processes"), { recursive: true });
+    writeFileSync(join(runDir, "run.json"), JSON.stringify({ schema_version: 1, run_id: "run-1", status: "running" }));
+    writeFileSync(join(runDir, "heartbeat.json"), JSON.stringify({ schema_version: 1, run_id: "run-1", last_tick_at: STALE }));
+    writeFileSync(join(runDir, "processes", "p.log"), "log\n");
+    writeFileSync(join(runDir, "process.json"), JSON.stringify({
+      schema_version: 1, kind: "opencode-process", run_id: "run-1",
+      execution_id: "7e414401-90d0-4d1c-b084-6969fc009347", pid: 8117,
+      started_at: "2026-07-27T15:40:26.150Z", updated_at: "2026-07-27T18:03:37.722Z",
+      state: "exited", cwd: root,
+      identity: { inspector: "node-process", start_marker: "darwin-ps:x", command_name: "opencode" },
+      log_ref: "processes/p.log", cancel: null,
+    }));
+    try {
+      const [row] = readRuns([join(root, ".opencode", "factory")], { diagnostics: false, now: () => NOW });
+      assert.equal(row.process.classification, "stopped");
+      assert.equal(row.process.state, "exited");
+      assert.equal(row.process.log_ref, "processes/p.log");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports unknown when the process record is unreadable", () => {
+    const f = fixture({ processState: "running", lastTick: FRESH });
+    try {
+      const [row] = readRuns([f.factoryRoot], {
+        diagnostics: false,
+        now: () => NOW,
+        readProcessRecord: () => ({ ok: false, missing: false, reason: "invalid process evidence", evidence: null }),
+      });
+      assert.equal(row.process.classification, "unknown");
+      assert.match(row.process.detail, /unreadable/u);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+});
