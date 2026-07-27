@@ -1224,6 +1224,9 @@ describe("consolidated reviewer decision procedure contract", () => {
     assert.match(TEST_VERIFIER_PROMPT, /Before opening or running any implementation file[\s\S]*author the acceptance assertions[\s\S]*path:line.*every exact expected value/i);
     assert.match(TEST_VERIFIER_PROMPT, /Only after those assertions and sources are fixed[\s\S]*inspect implementation files[\s\S]*never derive an expected value from implementation/i);
     assert.match(TEST_VERIFIER_PROMPT, /\*\*Expected-value sources:\*\*[\s\S]*artifacts\/story\.md:line[\s\S]*artifacts\/technical-brief\.md:line/i);
+    assert.match(TEST_VERIFIER_PROMPT, /external standard or oracle may supplement that required citation, never replace it/i);
+    assert.doesNotMatch(TEST_VERIFIER_PROMPT, /story, technical brief, or an independent external oracle/i);
+    assert.doesNotMatch(TEST_VERIFIER_PROMPT, /technical-brief\.md:line \| independent external oracle citation/i);
   });
 
   it("preserves exact role-specific structured verdict schemas, actionable fields, and durable routes", () => {

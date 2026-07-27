@@ -28,7 +28,7 @@ Own the final integration test gate. Prove the approved story works and the repo
 
 `work-reviewer` reviews this step against the checklist below and rejects on any gap. Run it against your own work first — a rejection round here is pure waste:
 
-- **Assertions first.** Before reading or executing implementation files, derive every exact expected value from the approved story, technical brief, or an independent external oracle and cite its `path:line`. Never use the implementation, its output, or a same-code-path helper as the oracle.
+- **Assertions first.** Before reading or executing implementation files, derive every exact expected value from the approved story or technical brief and cite its `path:line`. An external standard or oracle may supplement that required citation, never replace it. Never use the implementation, its output, or a same-code-path helper as the oracle.
 - **Coverage second.** After assertions are fixed, re-read each source the ACs exercise only to locate coverage gaps; every acceptance criterion maps to at least one real assertion. An AC with no automated coverage is listed explicitly as uncovered with a reason — never implied as covered.
 - **Exact-value assertions.** Every test makes at least one independently sourced exact-value assertion (expected output, count, state, or error). No presence-only checks (`toBeTruthy`/`toBeDefined`/"is not null") that pass regardless of behavior — those are test theater and a reviewer will reject them.
 - **Executed, not just written.** You ran every test; `WRITTEN-NOT-RUN` appears only with an explicit reason. A test that fails because it found a real source bug is reported as a `fail` with the owning path — that is a good outcome, never silenced.
@@ -51,7 +51,7 @@ Return exactly this structure:
 - `path` - <covers AC#>
 
 **Expected-value sources:**
-- `path::test name :: assertion` - `artifacts/story.md:line | artifacts/technical-brief.md:line | independent external oracle citation`
+- `path::test name :: assertion` - `artifacts/story.md:line | artifacts/technical-brief.md:line` [; supplementary external oracle citation]
 
 **Focused test commands used while authoring tests:**
 - `<command>` - pass/fail (diagnostic only; never the schema-v2 integration authority)
