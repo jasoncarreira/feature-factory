@@ -2,6 +2,10 @@ import { DeliveryContractValidationError, validateDeliveryEnvelope } from "./ext
 
 export const MIXED_FAMILY_CHECKPOINT_OBLIGATIONS = 6;
 export const ADMISSION_MAX_DEPENDENCY_WAVES = 4;
+// Dogfood evidence: the blocked slice carried 8 acceptance rows / 16 paths,
+// while its healthy sibling carried 3 / 6.
+export const ADMISSION_MAX_ACCEPTANCE_ROWS_PER_SLICE = 3;
+export const ADMISSION_MAX_DECLARED_PATHS_PER_SLICE = 6;
 
 export function evaluateDeliveryEnvelopeAdmissionPolicy({ plan } = {}) {
   const slices = plan?.slices;
@@ -11,6 +15,7 @@ export function evaluateDeliveryEnvelopeAdmissionPolicy({ plan } = {}) {
 
   const reasons = [
     ...mixedFamilyReasons(deliveryEnvelope),
+    ...sliceWidthReasons(slices),
     ...dependencyDepthReasons(slices),
   ];
 
@@ -71,6 +76,43 @@ function mixedFamilyReasons(deliveryEnvelope) {
       reasons.push(`checkpoint:mixed-invariant-families:unit=${unit.id}:families=${familyCount}:obligations=${obligationCount}`);
     }
   }
+  return reasons;
+}
+
+function sliceWidthReasons(slices) {
+  const errors = [];
+  const reasons = [];
+  for (const [sliceIndex, slice] of slices.entries()) {
+    const slicePath = `plan.slices[${sliceIndex}]`;
+    if (slice === null || typeof slice !== "object" || Array.isArray(slice)) {
+      errors.push({ path: slicePath, message: "must be an object" });
+      continue;
+    }
+
+    let sliceId = null;
+    if (typeof slice.id !== "string") {
+      errors.push({ path: `${slicePath}.id`, message: "must be a string" });
+    } else {
+      try {
+        sliceId = encodeURIComponent(slice.id);
+      } catch {
+        errors.push({ path: `${slicePath}.id`, message: "must be valid Unicode text" });
+      }
+    }
+
+    const metrics = [
+      ["acceptance-rows", "acceptance", ADMISSION_MAX_ACCEPTANCE_ROWS_PER_SLICE],
+      ["declared-paths", "paths", ADMISSION_MAX_DECLARED_PATHS_PER_SLICE],
+    ];
+    for (const [metric, field, budget] of metrics) {
+      if (!Array.isArray(slice[field])) {
+        errors.push({ path: `${slicePath}.${field}`, message: "must be an array" });
+      } else if (sliceId !== null && slice[field].length > budget) {
+        reasons.push(`checkpoint:slice-width:slice=${sliceId}:metric=${metric}:observed=${slice[field].length}:budget=${budget}`);
+      }
+    }
+  }
+  if (errors.length > 0) throw new DeliveryContractValidationError(errors);
   return reasons;
 }
 
