@@ -1172,8 +1172,8 @@ describe("consolidated reviewer decision procedure contract", () => {
     for (const [name, text] of documentEntries(reviewerPrompts)) {
       assert.equal(text.match(/^## Ordered decision procedure$/gmu)?.length, 1, `${name} must have exactly one decision procedure`);
     }
-    assert.match(WORK_REVIEWER_PROMPT, orderedPattern(["evidence truth", "evidence boundary", "attempt mode", "subject checks", "touched-path security", "declared trust model", "required-omission precedence", "structured review"]));
-    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, orderedPattern(["bounded integrated surface", "attempt mode", "priority order", "mandatory security review", "declared trust model", "validator threshold", "structured validation report"]));
+    assert.match(WORK_REVIEWER_PROMPT, orderedPattern(["evidence truth", "evidence boundary", "attempt mode", "subject checks", "security-reviewer ownership", "declared trust model", "required-omission precedence", "structured review"]));
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, orderedPattern(["bounded integrated surface", "attempt mode", "priority order", "security-reviewer ownership", "declared trust model", "validator threshold", "structured validation report"]));
     assert.match(SECURITY_REVIEWER_PROMPT, orderedPattern(["trust model and bounded diff surface", "attempt mode", "every touched ingress", "Qualify each candidate", "trust and authority qualification", "security-specific threshold", "structured security review"]));
   });
 
@@ -1183,7 +1183,7 @@ describe("consolidated reviewer decision procedure contract", () => {
         /Producer reports are claims; orchestrator-observed evidence is truth/i,
         /First-attempt completeness rule/i,
         /Feasibility rule/i,
-        /mandatory touched-path security review/i,
+        /Preserve security-reviewer ownership/i,
         /Apply the declared trust model/i,
         /Precedence for late discoveries/i,
         /Emit the structured review/i,
@@ -1192,7 +1192,7 @@ describe("consolidated reviewer decision procedure contract", () => {
         /Establish the bounded integrated surface/i,
         /Delta Review Rule/i,
         /Review holistically in priority order/i,
-        /Perform the mandatory security review/i,
+        /Preserve security-reviewer ownership/i,
         /Qualify security candidates against the declared trust model before elevation/i,
         /Apply the validator threshold and determine severity\/verdict/i,
         /Emit and route the structured validation report/i,
@@ -1216,6 +1216,18 @@ describe("consolidated reviewer decision procedure contract", () => {
         assert.doesNotMatch(outsideProcedure, marker, `${name} must not duplicate ${marker} in a legacy rule block`);
       }
     }
+  });
+
+  it("keeps acceptance expected values independent of implementation output", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /every exact expected value[\s\S]*approved story or technical-brief `path:line`/i);
+    assert.match(WORK_REVIEWER_PROMPT, /external standard or oracle may supplement that required citation, never replace it/i);
+    assert.match(WORK_REVIEWER_PROMPT, /REJECT expected values[\s\S]*derivable only from the implementation[\s\S]*same table, helper, serializer, or code path under test/i);
+    assert.match(TEST_VERIFIER_PROMPT, /Before opening or running any implementation file[\s\S]*author the acceptance assertions[\s\S]*path:line.*every exact expected value/i);
+    assert.match(TEST_VERIFIER_PROMPT, /Only after those assertions and sources are fixed[\s\S]*inspect implementation files[\s\S]*never derive an expected value from implementation/i);
+    assert.match(TEST_VERIFIER_PROMPT, /\*\*Expected-value sources:\*\*[\s\S]*artifacts\/story\.md:line[\s\S]*artifacts\/technical-brief\.md:line/i);
+    assert.match(TEST_VERIFIER_PROMPT, /external standard or oracle may supplement that required citation, never replace it/i);
+    assert.doesNotMatch(TEST_VERIFIER_PROMPT, /story, technical brief, or an independent external oracle/i);
+    assert.doesNotMatch(TEST_VERIFIER_PROMPT, /technical-brief\.md:line \| independent external oracle citation/i);
   });
 
   it("preserves exact role-specific structured verdict schemas, actionable fields, and durable routes", () => {
@@ -1292,7 +1304,7 @@ describe("consolidated reviewer decision procedure contract", () => {
       assert.match(WORK_REVIEWER_PROMPT, new RegExp(`For decomposition, REJECT[^\\n]*${escapeRegExp(decompositionFailure)}`, "i"), `work reviewer must reject ${decompositionFailure}`);
     }
 
-    assert.match(WORK_REVIEWER_PROMPT, /mandatory touched-path security review[\s\S]*Enumerate \*\*every\*\* path the observed diff touches[\s\S]*including sibling entry points/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Preserve security-reviewer ownership[\s\S]*Do not repeat the holistic adversarial security class review owned by `security-reviewer`[\s\S]*explicit security acceptance criteria and concrete security regressions/i);
     assert.match(
       WORK_REVIEWER_PROMPT,
       /outside the factory trust model[\s\S]*NONBLOCKING notes, never REJECT reasons[\s\S]*malicious local operator[\s\S]*manipulating `PATH`[\s\S]*rewriting Git history[\s\S]*hand-editing run state[\s\S]*tampering across runs[\s\S]*arbitrary code already executing in the same process[\s\S]*story does not classify it as untrusted[\s\S]*Same-process object mutation alone adds no signaling authority[\s\S]*Cite the README trust statement/i,
@@ -1315,7 +1327,7 @@ describe("consolidated reviewer decision procedure contract", () => {
     ]) {
       assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, check, `validator missing holistic check ${check}`);
     }
-    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /mandatory security review[\s\S]*Enumerate \*\*every\*\* relevant ingress and path[\s\S]*including sibling handlers/i);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Preserve security-reviewer ownership[\s\S]*Do not repeat the holistic adversarial class review owned by the parallel `security-reviewer` panel[\s\S]*explicit security acceptance-criterion failures and concrete security regressions/i);
     assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Carry every unresolved prior fix forward[\s\S]*unresolved prior blockers[\s\S]*produce `NO-GO`/i);
     assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /same process is outside the threat model unless the approved story explicitly classifies it as untrusted[\s\S]*same-process object mutation alone adds no signaling authority/i);
     assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /`reviews\/implementation-validator\.json` with `subject` equal to the integrated feature branch name/i);
@@ -1336,15 +1348,15 @@ describe("consolidated reviewer decision procedure contract", () => {
     assert.doesNotMatch(SECURITY_REVIEWER_PROMPT, /artifacts\/validation-report\.md|run\.json\.validator\./i, "security routing must remain distinct from validator routing");
   });
 
-  it("preserves security classes and each role's repository-rubric boundary", () => {
-    for (const [name, text] of documentEntries(reviewerPrompts)) {
-      for (const findingClass of ["Trust boundaries", "Injection", "Forgeable identity / authz", "Secrets", "Security regression"]) {
-        assert.match(text, literalPattern(findingClass), `${name} missing security class ${findingClass}`);
-      }
+  it("keeps the adversarial security class checklist solely with security-reviewer", () => {
+    const classPatterns = [/\*\*Trust boundaries:\*\*/u, /\*\*Injection:\*\*/u, /\*\*Forgeable identity \/ authz:\*\*/u, /\*\*Secrets:\*\*/u, /\*\*Supply chain[^*]*:\*\*/u, /\*\*Security regression:\*\*/u];
+    for (const findingClass of classPatterns) assert.match(SECURITY_REVIEWER_PROMPT, findingClass, `security reviewer missing ${findingClass}`);
+    assert.equal(numberedProcedureStep(WORK_REVIEWER_PROMPT, 5), "5. **Preserve security-reviewer ownership.** Do not repeat the holistic adversarial security class review owned by `security-reviewer`. For build subjects, assess explicit security acceptance criteria and concrete security regressions visible in the supplied changed-path evidence, cite `path:line`, and route broader trust-boundary, injection, authorization, secret-exposure, and supply-chain analysis to the independent security panel.");
+    assert.equal(numberedProcedureStep(IMPLEMENTATION_VALIDATOR_PROMPT, 4), "4. **Preserve security-reviewer ownership.** Do not repeat the holistic adversarial class review owned by the parallel `security-reviewer` panel. During holistic correctness validation, report explicit security acceptance-criterion failures and concrete security regressions visible in the bounded diff, but route broader trust-boundary, injection, authorization, secret-exposure, and supply-chain analysis to `security-reviewer`.");
+    for (const [name, text] of documentEntries({ WORK_REVIEWER_PROMPT, IMPLEMENTATION_VALIDATOR_PROMPT })) for (const findingClass of classPatterns) {
+      assert.doesNotMatch(text, findingClass, `${name} must not duplicate ${findingClass}`);
     }
-    for (const text of [IMPLEMENTATION_VALIDATOR_PROMPT, SECURITY_REVIEWER_PROMPT]) assert.match(text, /Supply chain[\s\S]*(?:when|if).*touch/i);
-    for (const text of [WORK_REVIEWER_PROMPT, IMPLEMENTATION_VALIDATOR_PROMPT]) assert.match(text, /`REVIEW\.md`[\s\S]*binding rubric when present/i);
-    assert.doesNotMatch(SECURITY_REVIEWER_PROMPT, /REVIEW\.md/i, "security reviewer must not gain a repository-rubric policy");
+    assert.match(SECURITY_REVIEWER_PROMPT, /Apply the repository's `REVIEW\.md` and security conventions as a binding rubric when present/i, "security reviewer must own repository-specific security policy");
   });
 
   it("keeps severity mappings and role-specific fail-closed thresholds distinct", () => {
@@ -3288,6 +3300,13 @@ function markdownSection(text, heading) {
   const bodyStart = match.index + match[0].length;
   const nextHeading = new RegExp(`^#{1,${level}} \\S.*$`, "mu").exec(text.slice(bodyStart));
   return text.slice(match.index, nextHeading ? bodyStart + nextHeading.index : text.length);
+}
+
+function numberedProcedureStep(text, number) {
+  const procedure = markdownSection(text, "Ordered decision procedure");
+  const step = new RegExp(`^${number}\\. [\\s\\S]*?(?=^${number + 1}\\. |^## |(?![\\s\\S]))`, "mu").exec(procedure);
+  assert.ok(step, `missing ordered decision procedure step ${number}`);
+  return step[0].trim();
 }
 
 function markdownTableRow(text, authorityClass) {
