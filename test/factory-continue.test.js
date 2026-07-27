@@ -671,7 +671,7 @@ describe("continuation planning-artifact reuse", { concurrency: 2 }, () => {
       assert.equal(result.completion.route, result.route, diagnostics);
       assert.equal(result.completion.chunk, result.chunk, diagnostics);
       assert.equal(result.completion.chunk_count, issue128WorkerChunkCount, diagnostics);
-      assert.deepEqual(result.completion.baseline_ids, issue128BaselineIdsForRoute(result.route), diagnostics);
+      assert.deepEqual(result.completion.baseline_ids, result.chunk === 0 ? issue128BaselineIdsForRoute(result.route) : [], diagnostics);
       assert.equal(result.completion.executed, result.completion.mutation_names.length, diagnostics);
       assert.equal(result.completion.mutation_digest, issue128MutationNameDigest(result.completion.mutation_names), diagnostics);
     }
@@ -687,6 +687,10 @@ describe("continuation planning-artifact reuse", { concurrency: 2 }, () => {
       const observedByName = new Set(observedNames);
       assert.equal(issue128MutationNameDigest(expectedNames.filter((name) => observedByName.has(name))), issue128MutationNameDigest(expectedNames), `${route}: exact emitter-order mutation digest`);
     }
+    const expectedBaselineIds = Object.keys(issue128WorkerTests).flatMap(issue128BaselineIdsForRoute);
+    const observedBaselineIds = results.flatMap(({ completion }) => completion.baseline_ids);
+    assert.equal(new Set(observedBaselineIds).size, observedBaselineIds.length, "no duplicate continuation baseline IDs across chunks or routes");
+    assert.deepEqual([...observedBaselineIds].sort(), [...expectedBaselineIds].sort(), "no missing or unexpected continuation baseline IDs");
   });
 
   // The brief + spec review are written by createFixture({ spec }) so the parent's
@@ -3296,38 +3300,40 @@ describe("continuation planning-artifact reuse", { concurrency: 2 }, () => {
 
 describe("issue 128 continuation executable oracle", { concurrency: true }, () => {
   it("preserves an ordinary merged A2/S2 row only with its same-binding merged owner", { skip: issue128WorkerRoute !== "ordinary-continuation" }, async () => {
-    const fixtureName = `issue128-ordinary-sibling-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`;
-    const fixture = createV2SiblingAuthorityFixture(fixtureName);
-    const childRunId = `${fixtureName}-next`;
     const observedBaselineIds = [];
-    try {
-      const parent = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
-      const parentConsumer = parent.slices.find(({ id }) => id === "consumer");
-      const refs = parent.slices.flatMap((slice) => (slice.attempt_reviews || []).flatMap((entry) => [entry.evidence_ref, entry.review_ref, entry.dispatch_claim_ref, entry.dispatch_closure_ref]));
-      const parentBytes = new Map(refs.map((ref) => [ref, readFileSync(join(fixture.runDir, ref))]));
+    if (issue128WorkerChunk === 0) {
+      const fixtureName = `issue128-ordinary-sibling-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`;
+      const fixture = createV2SiblingAuthorityFixture(fixtureName);
+      const childRunId = `${fixtureName}-next`;
+      try {
+        const parent = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+        const parentConsumer = parent.slices.find(({ id }) => id === "consumer");
+        const refs = parent.slices.flatMap((slice) => (slice.attempt_reviews || []).flatMap((entry) => [entry.evidence_ref, entry.review_ref, entry.dispatch_claim_ref, entry.dispatch_closure_ref]));
+        const parentBytes = new Map(refs.map((ref) => [ref, readFileSync(join(fixture.runDir, ref))]));
 
-      const result = await continueFactory(fixture.runId, {
-        cwd: fixture.repo,
-        review: "reviewer.json",
-        runId: childRunId,
-        carryForward: true,
-        foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
-      });
-      const accepted = result.payload.continuation.carry_forward.accepted_slices;
-      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
-      const child = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
-      const childConsumer = child.slices.find(({ id }) => id === "consumer");
+        const result = await continueFactory(fixture.runId, {
+          cwd: fixture.repo,
+          review: "reviewer.json",
+          runId: childRunId,
+          carryForward: true,
+          foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+        });
+        const accepted = result.payload.continuation.carry_forward.accepted_slices;
+        const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+        const child = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
+        const childConsumer = child.slices.find(({ id }) => id === "consumer");
 
-      assert.deepEqual(accepted.map(({ id }) => id), ["owner", "consumer"]);
-      assert.deepEqual(accepted.find(({ id }) => id === "consumer"), fixture.issue128Catalog.source);
-      observedBaselineIds.push(fixture.issue128Catalog.id);
-      assert.deepEqual(observedBaselineIds, issue128BaselineIdsForRoute("ordinary-continuation"));
-      assert.deepEqual(childConsumer.attempt_reviews, parentConsumer.attempt_reviews);
-      assert.deepEqual(issue128CarryForwardProjection(childConsumer), fixture.issue128Catalog.source);
-      assert.deepEqual(childConsumer.effective_paths, ["src/consumer/**", "src/owner/shared.js"]);
-      assert.equal(childConsumer.attempt_reviews[0].modified_extensions[0].authority, "non-conflicting-sibling");
-      for (const [ref, bytes] of parentBytes) assert.deepEqual(readFileSync(join(childRunDir, ref)), bytes, ref);
-    } finally { cleanup(fixture.repo); }
+        assert.deepEqual(accepted.map(({ id }) => id), ["owner", "consumer"]);
+        assert.deepEqual(accepted.find(({ id }) => id === "consumer"), fixture.issue128Catalog.source);
+        observedBaselineIds.push(fixture.issue128Catalog.id);
+        assert.deepEqual(observedBaselineIds, issue128BaselineIdsForRoute("ordinary-continuation"));
+        assert.deepEqual(childConsumer.attempt_reviews, parentConsumer.attempt_reviews);
+        assert.deepEqual(issue128CarryForwardProjection(childConsumer), fixture.issue128Catalog.source);
+        assert.deepEqual(childConsumer.effective_paths, ["src/consumer/**", "src/owner/shared.js"]);
+        assert.equal(childConsumer.attempt_reviews[0].modified_extensions[0].authority, "non-conflicting-sibling");
+        for (const [ref, bytes] of parentBytes) assert.deepEqual(readFileSync(join(childRunDir, ref)), bytes, ref);
+      } finally { cleanup(fixture.repo); }
+    }
 
     const mutationFixture = createV2SiblingAuthorityFixture(`issue128-ordinary-oracle-mutations-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`);
     let mutations;
@@ -3339,50 +3345,52 @@ describe("issue 128 continuation executable oracle", { concurrency: true }, () =
   });
 
   it("preserves a checkpoint-bound merged A2/S2 owner pair and rejects owner drift before publication", { skip: issue128WorkerRoute !== "checkpoint-continuation" }, async () => {
-    const fixtureName = `issue128-checkpoint-sibling-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`;
-    const fixture = createV2SiblingAuthorityFixture(fixtureName);
-    const childRunId = `${fixtureName}-next`;
-    const checkpointRow = ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.find(({ id }) => id === "checkpoint-carry-forward-accepted-slice-v2");
     const observedBaselineIds = [];
-    try {
-      const bound = bindCheckpointContinuationFixture(fixture, "strict");
-      const parent = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
-      const parentConsumer = parent.slices.find(({ id }) => id === "consumer");
-      const result = await continueFactory(fixture.runId, {
-        cwd: fixture.repo,
-        review: "reviewer.json",
-        runId: childRunId,
-        carryForward: true,
-        foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
-      });
-      const child = JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json"), "utf8"));
-      assert.deepEqual(child.checkpoint_source, bound.source);
-      assert.deepEqual(result.payload.continuation.carry_forward.accepted_slices.find(({ id }) => id === "consumer"), checkpointRow.source);
-      assert.deepEqual(issue128CarryForwardProjection(child.slices.find(({ id }) => id === "consumer")), checkpointRow.source);
-      observedBaselineIds.push(checkpointRow.id);
-      assert.deepEqual(observedBaselineIds, issue128BaselineIdsForRoute("checkpoint-continuation"));
-      assert.deepEqual(child.slices.find(({ id }) => id === "consumer").attempt_reviews, parentConsumer.attempt_reviews);
-      assert.equal(result.payload.continuation.carry_forward.accepted_slices.find(({ id }) => id === "consumer").attempt_reviews[0].modified_extensions[0].owner_slice_id, "owner");
-    } finally { cleanup(fixture.repo); }
-
-    for (const field of ["owner_reviewed_commit", "owner_diff_base_commit"]) {
-      const identity = createV2SiblingAuthorityFixture(`issue128-checkpoint-${field}-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`);
-      const staleChild = `issue128-checkpoint-stale-${field}-chunk-${issue128WorkerChunk}-next`;
+    if (issue128WorkerChunk === 0) {
+      const fixtureName = `issue128-checkpoint-sibling-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`;
+      const fixture = createV2SiblingAuthorityFixture(fixtureName);
+      const childRunId = `${fixtureName}-next`;
+      const checkpointRow = ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.find(({ id }) => id === "checkpoint-carry-forward-accepted-slice-v2");
       try {
-        bindCheckpointContinuationFixture(identity, null);
-        updateRun(identity, (run) => {
-          run.slices.find(({ id }) => id === "consumer").attempt_reviews[0].modified_extensions[0][field] = "0".repeat(40);
+        const bound = bindCheckpointContinuationFixture(fixture, "strict");
+        const parent = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+        const parentConsumer = parent.slices.find(({ id }) => id === "consumer");
+        const result = await continueFactory(fixture.runId, {
+          cwd: fixture.repo,
+          review: "reviewer.json",
+          runId: childRunId,
+          carryForward: true,
+          foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
         });
-        const parentBytes = readFileSync(join(identity.runDir, "run.json"), "utf8");
-        assert.throws(
-          () => continueFactory(identity.runId, { cwd: identity.repo, review: "reviewer.json", runId: staleChild, carryForward: true, dryRun: true }),
-          /owner|sibling|binding|stale|cross-bound/u,
-          field,
-        );
-        assert.equal(readFileSync(join(identity.runDir, "run.json"), "utf8"), parentBytes, field);
-        assert.equal(existsSync(join(identity.repo, ".opencode", "factory", staleChild)), false, field);
-        assert.equal(refOid(identity.repo, `refs/heads/${staleChild}`), null, field);
-      } finally { cleanup(identity.repo); }
+        const child = JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json"), "utf8"));
+        assert.deepEqual(child.checkpoint_source, bound.source);
+        assert.deepEqual(result.payload.continuation.carry_forward.accepted_slices.find(({ id }) => id === "consumer"), checkpointRow.source);
+        assert.deepEqual(issue128CarryForwardProjection(child.slices.find(({ id }) => id === "consumer")), checkpointRow.source);
+        observedBaselineIds.push(checkpointRow.id);
+        assert.deepEqual(observedBaselineIds, issue128BaselineIdsForRoute("checkpoint-continuation"));
+        assert.deepEqual(child.slices.find(({ id }) => id === "consumer").attempt_reviews, parentConsumer.attempt_reviews);
+        assert.equal(result.payload.continuation.carry_forward.accepted_slices.find(({ id }) => id === "consumer").attempt_reviews[0].modified_extensions[0].owner_slice_id, "owner");
+      } finally { cleanup(fixture.repo); }
+
+      for (const field of ["owner_reviewed_commit", "owner_diff_base_commit"]) {
+        const identity = createV2SiblingAuthorityFixture(`issue128-checkpoint-${field}-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`);
+        const staleChild = `issue128-checkpoint-stale-${field}-chunk-${issue128WorkerChunk}-next`;
+        try {
+          bindCheckpointContinuationFixture(identity, null);
+          updateRun(identity, (run) => {
+            run.slices.find(({ id }) => id === "consumer").attempt_reviews[0].modified_extensions[0][field] = "0".repeat(40);
+          });
+          const parentBytes = readFileSync(join(identity.runDir, "run.json"), "utf8");
+          assert.throws(
+            () => continueFactory(identity.runId, { cwd: identity.repo, review: "reviewer.json", runId: staleChild, carryForward: true, dryRun: true }),
+            /owner|sibling|binding|stale|cross-bound/u,
+            field,
+          );
+          assert.equal(readFileSync(join(identity.runDir, "run.json"), "utf8"), parentBytes, field);
+          assert.equal(existsSync(join(identity.repo, ".opencode", "factory", staleChild)), false, field);
+          assert.equal(refOid(identity.repo, `refs/heads/${staleChild}`), null, field);
+        } finally { cleanup(identity.repo); }
+      }
     }
 
     const mutationFixture = createV2SiblingAuthorityFixture(`issue128-checkpoint-stale-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`);
