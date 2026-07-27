@@ -970,6 +970,63 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("marks a run written by a newer schema without granting it any projection", () => {
+    const repo = tempDir();
+    // Exactly the issue-128 shape: a healthy, actively progressing run whose
+    // records carry forward-schema keys this reader does not know.
+    writeRawRun(repo, "issue-128", JSON.stringify({
+      schema_version: 1,
+      run_id: "issue-128",
+      status: "running",
+      branch: "issue-128-finish-and-disclose-continuation",
+      gates: { story: { status: "approved" } },
+      ownership_schema_version: 2,
+      modified_extensions: ["delivery"],
+    }));
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.diagnostic_condition, "newer-schema");
+    assert.equal(run.diagnostics.items[0].condition, "newer-schema");
+    assert.match(run.diagnostic_summary, /newer schema than this reader/u);
+    // Fail-closed exactly like any other invalid run: the fallback row exposes
+    // no branch, gate, or slice state, even though those fields validated.
+    assert.equal(run.status, "invalid");
+    assert.equal(run.diagnostic_classification, "invalid");
+    assert.equal(run.diagnostic_severity, "critical");
+    assert.equal(run.diagnostics.authoritative, false);
+    assert.equal(run.branch, null);
+    assert.equal(run.gate, null);
+    assert.equal(run.slices, null);
+    cleanup(repo);
+  });
+
+  it("reports plain invalid-run-state when a newer-schema run also breaks a known constraint", () => {
+    const repo = tempDir();
+    writeRawRun(repo, "mixed", JSON.stringify({ schema_version: 1, run_id: "mixed", status: "bogus", ownership_schema_version: 2 }));
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.diagnostic_condition, "invalid-run-state");
+    assert.equal(run.status, "invalid");
+    cleanup(repo);
+  });
+
+  it("returns the normal row on the next poll once the unknown keys are gone", () => {
+    const repo = tempDir();
+    writeRawRun(repo, "issue-128", JSON.stringify({ schema_version: 1, run_id: "issue-128", status: "running", branch: "feature", gates: {}, ownership_schema_version: 2 }));
+    assert.equal(readRuns(findFactoryRoots(repo))[0].diagnostic_condition, "newer-schema");
+
+    // No restart and no cached state: the same reader re-reads the same path.
+    writeRawRun(repo, "issue-128", JSON.stringify({ schema_version: 1, run_id: "issue-128", status: "running", branch: "feature", gates: {} }));
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.status, "running");
+    assert.equal(run.branch, "feature");
+    assert.equal(run.diagnostic_classification, "healthy");
+    cleanup(repo);
+  });
+
   it("sorts invalid fallback rows before valid stale rows", () => {
     const repo = tempDir();
     writeRun(repo, "valid-newer", { status: "running", updated_at: "2026-07-05T00:00:00Z", gates: {} });

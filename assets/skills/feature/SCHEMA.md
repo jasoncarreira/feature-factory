@@ -385,7 +385,7 @@ Envelope shape:
 
 Enums:
 
-- `condition`: `stale-heartbeat`, `missing-heartbeat-process`, `missing-worktree`, `invalid-run-state`, `protected-gate`, `terminal-run`.
+- `condition`: `stale-heartbeat`, `missing-heartbeat-process`, `missing-worktree`, `invalid-run-state`, `newer-schema`, `protected-gate`, `terminal-run`.
 - `classification`: `healthy`, `recoverable`, `blocked`, `needs-human`, `terminal`, `invalid`. `invalid` is first-class.
 - `status`: `ok`, `warning`, `error`.
 - `severity`: `info`, `warning`, `error`, `critical`.
@@ -393,7 +393,7 @@ Enums:
 Aggregation:
 
 - No items yields `classification: "healthy"`, `status: "ok"`, `severity: "info"`, and `summary: "No diagnostics"`.
-- Primary item priority is classification `invalid` > `blocked` > `needs-human` > `recoverable` > `terminal` > `healthy`, severity `critical` > `error` > `warning` > `info`, status `error` > `warning` > `ok`, condition `invalid-run-state` > `missing-worktree` > `missing-heartbeat-process` > `stale-heartbeat` > `protected-gate` > `terminal-run`, then original detection order.
+- Primary item priority is classification `invalid` > `blocked` > `needs-human` > `recoverable` > `terminal` > `healthy`, severity `critical` > `error` > `warning` > `info`, status `error` > `warning` > `ok`, condition `invalid-run-state` > `newer-schema` > `missing-worktree` > `missing-heartbeat-process` > `stale-heartbeat` > `protected-gate` > `terminal-run`, then original detection order.
 - Top-level `classification`, `status`, `severity`, and `summary` come from the primary item.
 
 Condition mappings and operator actions:
@@ -402,6 +402,7 @@ Condition mappings and operator actions:
 - `missing-heartbeat-process` -> `recoverable` / `warning` / `warning`; heartbeat-helper PID only; liveness-only; the PID is not a detached opencode process.
 - `missing-worktree` -> `blocked` / `error` / `error`; restore the worktree or recover from durable state.
 - `invalid-run-state` -> `invalid` / `error` / `critical`; invalid JSON/schema/required sidecars; treat as untrusted until validation passes.
+- `newer-schema` -> `invalid` / `error` / `critical`; `run.json` failed validation with unknown keys only; the writer is ahead of this reader. Fail-closed and workflow-blocking exactly like `invalid-run-state`; the distinct condition is display and triage information, not authority.
 - `protected-gate` -> exactly `needs-human` / `warning` / `warning`; answer the pending protected gate (`story`, `brief`, or `pre_pr`) or stop the run.
 - `terminal-run`: `completed`/`partial` -> `terminal` / `ok` / `info`; `blocked` -> `blocked` / `error` / `error`; `needs-human` -> `needs-human` / `warning` / `warning`; read `terminal_result`.
 

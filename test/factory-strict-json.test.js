@@ -13,6 +13,38 @@ describe("factory run.json strict JSON parsing", () => {
   it("reports trailing commas in run.json as invalid factory state", () => {
     assertRunJsonRejected("trailing-comma-run", withTrailingComma(validRun("trailing-comma-run")));
   });
+
+  it("fails list and status closed for a run written by a newer schema", () => {
+    // Unknown keys alone get their own condition so operators can tell a
+    // forward-schema record from a corrupt one, but `list` and `status` must
+    // still withhold every projected field. These two surfaces stay closed even
+    // if the condition were left out of the fail-closed set, because the
+    // validation error alone routes them to the invalid envelope; the assertion
+    // that earns its place here is that the emitted condition is `newer-schema`
+    // rather than the bare `invalid-run-state` operators were misreading.
+    const runId = "newer-schema-run";
+    const repo = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", runId);
+
+    try {
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "run.json"), `${JSON.stringify({ ...validRun(runId), ownership_schema_version: 2 }, null, 2)}\n`, "utf8");
+
+      const listed = listRuns({ cwd: repo });
+      assert.equal(listed[0].status, "invalid");
+      assert.equal(listed[0].diagnostics.classification, "invalid");
+      assert.equal(listed[0].diagnostics.items[0].condition, "newer-schema");
+
+      const current = status(runId, { cwd: repo });
+      assert.equal(current.status, "invalid");
+      assert.equal(current.diagnostics.authoritative, false);
+      assert.equal(current.diagnostics.items[0].condition, "newer-schema");
+      assert.equal("branch" in current, false);
+      assert.equal("gates" in current, false);
+    } finally {
+      cleanup(repo);
+    }
+  });
 });
 
 function assertRunJsonRejected(runId, runJson) {

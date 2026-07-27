@@ -6,11 +6,14 @@ import { join } from "node:path";
 import {
   DIAGNOSTIC_CLASSIFICATIONS,
   DIAGNOSTIC_CONDITIONS,
+  FAIL_CLOSED_DIAGNOSTIC_CONDITIONS,
   aggregateDiagnostics,
   diagnoseRunDir,
+  diagnoseRunFile,
   diagnosticEnvelope,
   diagnosticItem,
 } from "../src/factory-diagnostics.js";
+import { REDACTED_VALUE } from "../src/hardening/sensitive-data.js";
 
 const CHECKED_AT = "2026-07-08T12:00:00.000Z";
 const RUN_ID = "diag-core";
@@ -19,6 +22,7 @@ describe("factory diagnostics", () => {
   it("exports liveness-only condition enums", () => {
     assert.deepEqual(DIAGNOSTIC_CONDITIONS, [
       "invalid-run-state",
+      "newer-schema",
       "missing-worktree",
       "missing-heartbeat-process",
       "stale-heartbeat",
@@ -316,3 +320,85 @@ function writeJson(filePath, value) {
 function cleanup(repo) {
   rmSync(repo, { recursive: true, force: true });
 }
+
+describe("newer-schema classification", () => {
+  const VALID = Object.freeze({ schema_version: 1, run_id: RUN_ID, status: "running" });
+
+  function diagnose(run) {
+    const dir = mkdtempSync(join(tmpdir(), "diag-schema-"));
+    writeFileSync(join(dir, "run.json"), JSON.stringify(run));
+    try {
+      return diagnoseRunFile(join(dir, "run.json"), { now: CHECKED_AT });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("classifies an unknown-keys-only failure as newer-schema and names the reader", () => {
+    const envelope = diagnose({ ...VALID, ownership_schema_version: 2, modified_extensions: ["delivery"] });
+    const [item] = envelope.items;
+
+    assert.equal(item.condition, "newer-schema");
+    assert.deepEqual(item.evidence.unknown_keys, ["run.ownership_schema_version", "run.modified_extensions"]);
+    assert.equal(item.evidence.unknown_key_count, 2);
+    assert.equal(item.evidence.reader_version, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
+    assert.match(item.message, /newer schema than this reader/u);
+    assert.match(item.message, new RegExp(`feature-factory ${item.evidence.reader_version.replace(/\./gu, "\\.")}`, "u"));
+  });
+
+  it("keeps newer-schema fail-closed with no workflow authority", () => {
+    const envelope = diagnose({ ...VALID, ownership_schema_version: 2 });
+
+    assert.equal(envelope.classification, "invalid");
+    assert.equal(envelope.severity, "critical");
+    assert.equal(envelope.status, "error");
+    assert.equal(envelope.authoritative, false);
+    assert.equal(envelope.items[0].authoritative, false);
+    assert.ok(FAIL_CLOSED_DIAGNOSTIC_CONDITIONS.has("newer-schema"));
+  });
+
+  it("still reports plain invalid-run-state when any other constraint fails", () => {
+    // Alone, and alongside unknown keys: one real violation means the record is
+    // wrong for this reader, not merely ahead of it.
+    assert.equal(diagnose({ ...VALID, status: "bogus" }).items[0].condition, "invalid-run-state");
+    assert.equal(diagnose({ ...VALID, status: "bogus", ownership_schema_version: 2 }).items[0].condition, "invalid-run-state");
+    assert.equal(diagnose({ ...VALID, schema_version: 2 }).items[0].condition, "invalid-run-state");
+  });
+
+  it("does not treat constraint messages that merely contain the unknown-key phrase as newer-schema", () => {
+    // An unredacted secret in the debug snapshot is the sole failure here, and
+    // its message ends in "is not allowed in debug snapshot". The classifier
+    // compares against the allowedKeys message exactly for this reason: a
+    // substring test would report a leaked credential as a harmless
+    // forward-schema key. Several other constraints share the phrase
+    // ("is not allowed for schema_version 1", "untrusted raw or sensitive data
+    // is not allowed"), and all of them are real invalid state.
+    const envelope = diagnose({
+      ...VALID,
+      debug_snapshot: {
+        created_with: { collected_at: "2026-07-01T00:00:00.000Z", event: "created", diagnostic_only: true, env: { AWS_SECRET_ACCESS_KEY: "leaked" } },
+        last_resumed_with: null,
+        resume_count: 0,
+      },
+    });
+    const [item] = envelope.items;
+
+    assert.equal(item.condition, "invalid-run-state");
+    assert.equal(item.evidence.unknown_keys, undefined);
+    // The projection redacts the whole detail because the path names a
+    // sensitive env key, so the leaked value never reaches a diagnostic reader.
+    assert.equal(item.evidence.error, REDACTED_VALUE);
+  });
+
+  it("returns to a healthy envelope once the unknown keys are gone", () => {
+    assert.equal(diagnose({ ...VALID, ownership_schema_version: 2 }).classification, "invalid");
+    assert.equal(diagnose(VALID).classification, "healthy");
+  });
+
+  it("derives the fail-closed condition set from the condition table", () => {
+    assert.deepEqual([...FAIL_CLOSED_DIAGNOSTIC_CONDITIONS], ["invalid-run-state", "newer-schema"]);
+    for (const condition of FAIL_CLOSED_DIAGNOSTIC_CONDITIONS) {
+      assert.equal(diagnosticItem(condition, { checkedAt: CHECKED_AT }).classification, "invalid");
+    }
+  });
+});
