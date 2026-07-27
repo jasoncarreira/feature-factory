@@ -3363,13 +3363,54 @@ export const ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS = Object.freeze([
   "amendment-owner-snapshot-v2-history",
 ]);
 
-const ISSUE128_HASH = `sha256:${"8".repeat(64)}`;
-const ISSUE128_REVIEWED_COMMIT = "8".repeat(40);
-const ISSUE128_MERGE_COMMIT = "9".repeat(40);
+export const ISSUE128_BASELINE_ROUTE_INVENTORY = deepFreeze({
+  "slice-attempt-review-v2-reject": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-attempt-review-v2-approve-empty": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-attempt-review-v2-approve-unowned": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-attempt-review-v2-approve-sibling": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-modified-extension-unowned-v2": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-modified-extension-sibling-v2": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-running-with-v2-history": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-review-v2-reject": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-review-v2-approve-empty": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-review-v2-approve-unowned": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-review-v2-approve-sibling": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-merged-v2-approve-empty": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-merged-v2-unowned": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-merged-v2-sibling": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-blocked-ordinary-v2-history": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "slice-blocked-nonconvergent-v2-history": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "terminal-nonconvergence-v2-source-review": { route: "durable-run-consistency", consumer: "issue128RunAuthorityFailures", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+  "continuation-carry-forward-accepted-slice-v2": { route: "ordinary-continuation", consumer: "continueFactory ordinary carry-forward authority", test: "test/factory-continue.test.js :: preserves an ordinary merged A2/S2 row only with its same-binding merged owner" },
+  "checkpoint-carry-forward-accepted-slice-v2": { route: "checkpoint-continuation", consumer: "continueFactory checkpoint carry-forward authority", test: "test/factory-continue.test.js :: preserves a checkpoint-bound merged A2/S2 owner pair and rejects owner drift before publication" },
+  "amendment-owner-snapshot-v2-history": { route: "durable-amendment-consistency", consumer: "assertIntegrationAmendmentConsistency", test: "test/durable-record-mutations.test.js :: executes every non-continuation baseline and physical mutation through production consistency" },
+});
+
+const ISSUE128_RUN_ID = "issue128-oracle";
+const ISSUE128_BASE_COMMIT = "8b20ea435c507974bec4acb19f81e17969a8cf23";
+const ISSUE128_OWNER_REVIEWED_COMMIT = "ff72597376c2c7c3771198a766a1ba1c049da558";
+const ISSUE128_OWNER_MERGE_COMMIT = "84ae9626ea3f547d151a9bc024393e5737805355";
+const ISSUE128_EMPTY_REVIEWED_COMMIT = "08f147e9f78c7a13c5b1e8159c6d85c8beb6a5fe";
+const ISSUE128_EMPTY_MERGE_COMMIT = "cc372a426a85607b070337de5ddc601dc1604354";
+const ISSUE128_UNOWNED_REVIEWED_COMMIT = "2ab370fb56a397c11c1dd1defe59203a1587797a";
+const ISSUE128_UNOWNED_MERGE_COMMIT = "3b45f19f7ee2421894135a8dbd4462a49ead2209";
+const ISSUE128_SIBLING_REVIEWED_COMMIT = "ddc920e780e08f2a3561d407b880f22a726b7c9d";
+const ISSUE128_SIBLING_MERGE_COMMIT = "d209b10df237a6893c2aae54e4a36676588feda9";
+const ISSUE128_AMENDMENT_REVIEWED_COMMIT = "d29a5e849c5c73bc0d8dfe723fb51578ee6dfc06";
+const ISSUE128_AMENDMENT_MERGE_COMMIT = "32c7160a87fd07fb9125ca31af1e46123f1dbbef";
 const ISSUE128_DECLARED_PATH = "src/consumer/**";
 const ISSUE128_UNOWNED_PATH = "docs/consumer.md";
 const ISSUE128_SIBLING_PATH = "src/owner/shared.js";
 const ISSUE128_RATIONALE = "The checked consumer requires this exact pre-existing file modification.";
+const ISSUE128_SIDECAR_HASHES = Object.freeze({
+  owner: Object.freeze({ evidence: "sha256:be2cd6801d813141c52b486305dda0af5570fe71834b90b035bdb7ed934a6f0e", review: "sha256:41fe478c3b2b854c2efc3ca052944cdb2450d1b727158a7206383613ac1440e1", dispatch_claim: "sha256:7ba13019185455aa29441f78a45a201ed925e9d524b4bf54166d666a2ec6bc7f", dispatch_closure: "sha256:38be09b529ef2442de5d09ae042cd946780c912f1f4ea080406c77781af1caaf" }),
+  amendment_owner: Object.freeze({ evidence: "sha256:1828ef4466b3255c8e5644bdf9b400928baaf6c33a4d4d31b26f1a6025b96059", review: "sha256:2534ed987cb961cd8805fc0e085bc63e99ab26fad3805b101102e6b2ce21338f", dispatch_claim: "sha256:7ba13019185455aa29441f78a45a201ed925e9d524b4bf54166d666a2ec6bc7f", dispatch_closure: "sha256:86a79d00f15a8ae493abf0499434b4ee8c8b6016f437423a6206d57369a6159e" }),
+  empty: Object.freeze({ evidence: "sha256:cf4f5894bf53d3569d46a14a3a00f8d042975f20e49db36c1b57b4d05e1edd4b", review: "sha256:7b2d4317eb143421ebda160b63bcc6aa3a7d5747abd2e7a8e4749ab7e45b7807", dispatch_claim: "sha256:5aebc7a7e5941a7eae1f1d6f621e7c20a860f305760d8ab8ef6ea9fbe2c1c920", dispatch_closure: "sha256:947041102a28ae1bdb8b6f591559e66185d1a066625d6eba97a3b5f8221aa36e" }),
+  reject: Object.freeze({ evidence: "sha256:cf4f5894bf53d3569d46a14a3a00f8d042975f20e49db36c1b57b4d05e1edd4b", review: "sha256:5ea9e7199f87afdfd90e4670d391e20d7d45999aa26121653e14525dc1af70d8", dispatch_claim: "sha256:5aebc7a7e5941a7eae1f1d6f621e7c20a860f305760d8ab8ef6ea9fbe2c1c920", dispatch_closure: "sha256:947041102a28ae1bdb8b6f591559e66185d1a066625d6eba97a3b5f8221aa36e" }),
+  nonconvergent: Object.freeze({ evidence: "sha256:cf4f5894bf53d3569d46a14a3a00f8d042975f20e49db36c1b57b4d05e1edd4b", review: "sha256:d12407ae31d4ce32e36cb2fb113a80920f9818487c47ba313c857f5ae66ee48f", dispatch_claim: "sha256:5aebc7a7e5941a7eae1f1d6f621e7c20a860f305760d8ab8ef6ea9fbe2c1c920", dispatch_closure: "sha256:947041102a28ae1bdb8b6f591559e66185d1a066625d6eba97a3b5f8221aa36e" }),
+  unowned: Object.freeze({ evidence: "sha256:b63d2a315c5ecaf2d4f9a6eafdaefc53f9fe29751c1bfc3a7c0f08f122911da9", review: "sha256:2014bdf7f14e57adb357f05dbd80ba693bb2dc9a15b2c7d5dfb08b08166edfe9", dispatch_claim: "sha256:5aebc7a7e5941a7eae1f1d6f621e7c20a860f305760d8ab8ef6ea9fbe2c1c920", dispatch_closure: "sha256:9ff26e0eeef27073ecc3dc35495c4b49b2acba684f87abcb5f7bfced163859fa" }),
+  sibling: Object.freeze({ evidence: "sha256:949cd707025a38b5102cb598f3517acbccd1eda0e27258171592f6088303d4bb", review: "sha256:1c64ce25515121ab02e43f3711c7f50ef65b1196f509ed29ddd93842a6ec7d7e", dispatch_claim: "sha256:5aebc7a7e5941a7eae1f1d6f621e7c20a860f305760d8ab8ef6ea9fbe2c1c920", dispatch_closure: "sha256:c0a63e52c21eb07ed96c3d0618e275e5c6972685de27dadf4e7148f653ff8e0c" }),
+});
 
 const ISSUE128_READERS = Object.freeze({
   P: ["validateRun slice/history validator", "checked review publication", "checked retry dispatch", "review/history re-observation", "checked merge observation", "transitionSliceMerged"],
@@ -3412,25 +3453,80 @@ function issue128Readers(...groups) {
   return [...new Set(groups.flatMap((group) => ISSUE128_READERS[group]))];
 }
 
-function issue128ExternalSources(prefix = "consumer") {
-  return {
-    evidence: { ref: `evidence/${prefix}.json`, hash: ISSUE128_HASH, bytes: `${JSON.stringify({ subject: prefix, attempt: 1, status: "pass", review_ready: true, head_sha: ISSUE128_REVIEWED_COMMIT })}\n` },
-    review: { ref: `reviews/${prefix}.json`, hash: ISSUE128_HASH, bytes: `${JSON.stringify({ subject: prefix, attempt: 1, verdict: "APPROVE", reviewed_commit: ISSUE128_REVIEWED_COMMIT })}\n` },
-    dispatch_claim: { ref: `dispatch/${prefix}.json`, hash: ISSUE128_HASH, bytes: `${JSON.stringify({ kind: "checked-slice-builder-dispatch-claim", slice_id: prefix, attempt: 1 })}\n` },
-    dispatch_closure: { ref: `dispatch/${prefix}.closed.json`, hash: ISSUE128_HASH, bytes: `${JSON.stringify({ kind: "checked-slice-builder-dispatch-closure", slice_id: prefix, attempt: 1 })}\n` },
+function issue128ExternalSources(variant = "empty") {
+  const owner = variant === "owner" || variant === "amendment_owner";
+  const subject = owner ? "owner" : "consumer";
+  const reviewedCommit = {
+    owner: ISSUE128_OWNER_REVIEWED_COMMIT,
+    amendment_owner: ISSUE128_AMENDMENT_REVIEWED_COMMIT,
+    empty: ISSUE128_EMPTY_REVIEWED_COMMIT,
+    reject: ISSUE128_EMPTY_REVIEWED_COMMIT,
+    nonconvergent: ISSUE128_EMPTY_REVIEWED_COMMIT,
+    unowned: ISSUE128_UNOWNED_REVIEWED_COMMIT,
+    sibling: ISSUE128_SIBLING_REVIEWED_COMMIT,
+  }[variant];
+  const verdict = ["reject", "nonconvergent"].includes(variant) ? "REJECT" : "APPROVE";
+  const convergence = variant === "nonconvergent" ? "nonconvergent" : "converging";
+  const disclosure = variant === "unowned" || variant === "amendment_owner"
+    ? [{ path: ISSUE128_UNOWNED_PATH, rationale: ISSUE128_RATIONALE }]
+    : variant === "sibling" ? [{ path: ISSUE128_SIBLING_PATH, rationale: ISSUE128_RATIONALE }] : [];
+  const rejected = verdict === "REJECT";
+  const evidence = { subject, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit, ownership_disclosure: disclosure };
+  const review = {
+    subject, attempt: 1, verdict, convergence, late_discovery_strike: false, remaining_fix_count: rejected ? 1 : 0,
+    required_fixes: rejected ? ["Repair the rejected implementation"] : [],
+    ownership_ratification: { schema_version: 2, kind: "factory-derived-modified-extension" },
+    remediation_context: { schema_version: 2, fixes: rejected ? [{ required_fix_index: 0, classification: convergence === "nonconvergent" ? "nonconvergent" : "narrow-correction", scope_effect: "in-lane", likely_paths: [`src/${subject}/fix.js`], fix_owner: subject }] : [] },
+    reviewed_commit: reviewedCommit,
   };
+  if (owner) {
+    review.invariant_family_ledger = {
+      schema_version: 1,
+      delivery_unit_id: "fixture-unit-1",
+      dispositions: [{
+        invariant_family_id: "fixture-family-1", verification_artifact_id: "fixture-artifact-1",
+        evidence_ref: "evidence/owner.family.json",
+        evidence_hash: variant === "owner" ? "sha256:e6ce2b2551458ce741e09ce3823075af6187850034e58ff488d14bea048a7382" : "sha256:7f8f603b9f01807db4f01590e13a9980db2462385fdfe16e25fdd6e66960b555",
+        probe: { type: "verification-artifact", verification_artifact_id: "fixture-artifact-1" },
+        result: { type: "verification-result", outcome: "pass", summary: "Verify owner behavior passed" },
+        reviewed_commit: reviewedCommit, unresolved_findings: [],
+      }],
+    };
+  }
+  const stem = createHash("sha256").update(`${ISSUE128_RUN_ID}\0${subject}\0${1}`, "utf8").digest("hex");
+  const claimRef = `dispatch/${stem}.json`;
+  const closureRef = `dispatch/${stem}.closed.json`;
+  const token = `issue128-${subject}-completion`;
+  const claim = {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-claim", run_id: ISSUE128_RUN_ID, slice_id: subject, attempt: 1,
+    agent: "backend-builder", branch: `issue128-${subject}`, worktree: `/tmp/issue128-${subject}`, head: ISSUE128_BASE_COMMIT,
+    context_hash: `sha256:${"a".repeat(64)}`, completion_token_hash: hashBytes(token), claimed_at: "2026-01-01T00:00:00.000Z", closure_ref: closureRef,
+  };
+  const claimBytes = `${JSON.stringify(claim)}\n`;
+  const closure = {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-closure", claim_ref: claimRef, claim_hash: ISSUE128_SIDECAR_HASHES[variant].dispatch_claim,
+    run_id: ISSUE128_RUN_ID, slice_id: subject, attempt: 1, agent: "backend-builder", branch: claim.branch, worktree: claim.worktree,
+    head: ISSUE128_BASE_COMMIT, completion_head: reviewedCommit, context_hash: claim.context_hash, completion_token: token, returned_at: "2026-01-01T00:01:00.000Z",
+  };
+  const values = { evidence, review, dispatch_claim: claim, dispatch_closure: closure };
+  const refs = { evidence: `evidence/${subject}.json`, review: `reviews/${subject}.json`, dispatch_claim: claimRef, dispatch_closure: closureRef };
+  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, {
+    ref: refs[key], hash: ISSUE128_SIDECAR_HASHES[variant][key], bytes: key === "dispatch_claim" ? claimBytes : `${JSON.stringify(value)}\n`,
+  }]));
 }
 
-function issue128Attempt({ verdict = "APPROVE", extension = null, convergence = "converging" } = {}) {
-  const external = issue128ExternalSources();
+function issue128Attempt({ verdict = "APPROVE", extension = null, convergence = "converging", owner = false, amendmentOwner = false } = {}) {
+  const variant = amendmentOwner ? "amendment_owner" : owner ? "owner" : verdict === "REJECT" ? convergence === "nonconvergent" ? "nonconvergent" : "reject" : extension?.authority === "unowned" ? "unowned" : extension?.authority === "non-conflicting-sibling" ? "sibling" : "empty";
+  const external = issue128ExternalSources(variant);
+  const reviewedCommit = JSON.parse(external.evidence.bytes).head_sha;
   return {
     attempt: 1,
     evidence_ref: external.evidence.ref,
     evidence_hash: external.evidence.hash,
     review_ref: external.review.ref,
     review_hash: external.review.hash,
-    reviewed_commit: ISSUE128_REVIEWED_COMMIT,
-    diff_base_commit: ISSUE128_REVIEWED_COMMIT,
+    reviewed_commit: reviewedCommit,
+    diff_base_commit: ISSUE128_BASE_COMMIT,
     ownership_schema_version: 2,
     ratified_paths: extension ? [extension.path] : [],
     modified_extensions: extension ? [structuredClone(extension)] : [],
@@ -3466,12 +3562,12 @@ function issue128SiblingExtension() {
     owner_dispatch_claim_hash: owner.dispatch_claim.hash,
     owner_dispatch_closure_ref: owner.dispatch_closure.ref,
     owner_dispatch_closure_hash: owner.dispatch_closure.hash,
-    owner_reviewed_commit: ISSUE128_REVIEWED_COMMIT,
-    owner_diff_base_commit: ISSUE128_REVIEWED_COMMIT,
+    owner_reviewed_commit: ISSUE128_OWNER_REVIEWED_COMMIT,
+    owner_diff_base_commit: ISSUE128_BASE_COMMIT,
   };
 }
 
-function issue128Slice(status, attempt, { id = "consumer", merged = false, blockedReason = null } = {}) {
+function issue128Slice(status, attempt, { id = "consumer", merged = false, blockedReason = null, mergeCommit = null } = {}) {
   const currentApproved = attempt.verdict === "APPROVE";
   const row = {
     id,
@@ -3481,6 +3577,8 @@ function issue128Slice(status, attempt, { id = "consumer", merged = false, block
     effective_paths: [id === "consumer" ? ISSUE128_DECLARED_PATH : "src/owner/**", ...(currentApproved ? attempt.ratified_paths : [])],
     status,
     attempts: status === "running" ? 2 : 1,
+    branch: `issue128-${id}`,
+    worktree: `/tmp/issue128-${id}`,
     attempt_reviews: [structuredClone(attempt)],
   };
   if (["review", "merged"].includes(status)) {
@@ -3497,33 +3595,310 @@ function issue128Slice(status, attempt, { id = "consumer", merged = false, block
       dispatch_closure_hash: attempt.dispatch_closure_hash,
     });
   }
-  if (merged) row.merge_commit = ISSUE128_MERGE_COMMIT;
+  if (merged) row.merge_commit = mergeCommit || issue128MergeCommit(attempt, id);
   if (blockedReason) row.blocked_reason = blockedReason;
   return row;
 }
 
 function issue128OwnerSlice(status = "merged") {
-  const attempt = issue128Attempt();
-  return issue128Slice(status, attempt, { id: "owner", merged: status === "merged" });
+  const attempt = issue128Attempt({ owner: true });
+  return issue128Slice(status, attempt, { id: "owner", merged: status === "merged", mergeCommit: ISSUE128_OWNER_MERGE_COMMIT });
 }
 
-function issue128Dispositions({ ownRefs = true, ownTime = false } = {}) {
-  const target = (path, expected) => ({ disposition: "target", path, expected });
+function issue128OrdinaryBlockedSlice(attempt) {
+  const slice = issue128Slice("blocked", attempt, { blockedReason: "slice review rejected" });
+  slice.attempts = 2;
+  return slice;
+}
+
+function issue128MergeCommit(attempt, id) {
+  if (id === "owner") return attempt.reviewed_commit === ISSUE128_AMENDMENT_REVIEWED_COMMIT ? ISSUE128_AMENDMENT_MERGE_COMMIT : ISSUE128_OWNER_MERGE_COMMIT;
+  if (attempt.reviewed_commit === ISSUE128_UNOWNED_REVIEWED_COMMIT) return ISSUE128_UNOWNED_MERGE_COMMIT;
+  if (attempt.reviewed_commit === ISSUE128_SIBLING_REVIEWED_COMMIT) return ISSUE128_SIBLING_MERGE_COMMIT;
+  return ISSUE128_EMPTY_MERGE_COMMIT;
+}
+
+function issue128Dispositions(id, source, ownerSource = null) {
+  const target = (targets) => ({ disposition: "target", targets });
   const exclusion = (reason) => ({ disposition: "exclusion", reason });
+  const context = {
+    source,
+    ...(id.startsWith("slice-modified-extension-") ? { enclosing_source: issue128Attempt({ extension: source }) } : {}),
+    ...(ownerSource ? { owner_source: ownerSource } : {}),
+    external_sources: issue128CatalogExternalSources(id, source),
+  };
+  const paths = Object.fromEntries(["K", "V", "R", "H", "B", "D", "I", "X"].map((code) => [code, []]));
+  const add = (code, path) => paths[code].push({ path, expected: structuredClone(issue128ValueAt(context, path)) });
+  const addUnknown = (path, boundary) => paths.K.push({
+    path,
+    expected: structuredClone(issue128ValueAt(context, path)),
+    operation: "unknown-key",
+    key: `unsupported_issue128_${boundary.replaceAll("-", "_")}`,
+    value: `unsupported-${boundary}`,
+  });
+  const addFields = (code, root, fields) => fields.forEach((field) => add(code, [...root, field]));
+  const addAttempt = (root) => {
+    addFields("K", root, ["attempt", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "diff_base_commit", "ownership_schema_version", "ratified_paths", "modified_extensions", "verdict", "convergence", "late_discovery_strike", "remaining_fix_count", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
+    addFields("V", root, ["attempt", "ownership_schema_version", "verdict", "convergence", "late_discovery_strike", "remaining_fix_count"]);
+    addFields("R", root, ["evidence_ref", "review_ref", "dispatch_claim_ref", "dispatch_closure_ref"]);
+    addFields("H", root, ["evidence_hash", "review_hash", "dispatch_claim_hash", "dispatch_closure_hash"]);
+    addFields("D", root, ["ratified_paths", "modified_extensions"]);
+    add("I", [...root, "reviewed_commit"]);
+    add("X", [...root, "diff_base_commit"]);
+  };
+  const addExtension = (root, sibling) => {
+    addFields("K", root, sibling ? ["kind", "path", "rationale", "authority", "owner_slice_id", "owner_attempt", "owner_evidence_ref", "owner_evidence_hash", "owner_review_ref", "owner_review_hash", "owner_dispatch_claim_ref", "owner_dispatch_claim_hash", "owner_dispatch_closure_ref", "owner_dispatch_closure_hash", "owner_reviewed_commit", "owner_diff_base_commit"] : ["kind", "path", "rationale", "authority"]);
+    addFields("V", root, ["kind", "path", "rationale", "authority"]);
+    addFields("D", root, ["kind", "path", "rationale", "authority"]);
+    if (sibling) {
+      addFields("R", root, ["owner_evidence_ref", "owner_review_ref", "owner_dispatch_claim_ref", "owner_dispatch_closure_ref"]);
+      addFields("H", root, ["owner_evidence_hash", "owner_review_hash", "owner_dispatch_claim_hash", "owner_dispatch_closure_hash"]);
+      addFields("I", root, ["owner_slice_id", "owner_attempt", "owner_reviewed_commit"]);
+      add("X", [...root, "owner_diff_base_commit"]);
+    }
+  };
+  const addSlice = (root) => {
+    const sliceValue = issue128ValueAt(context, root);
+    const rootFields = [
+      "id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "attempt_reviews", "branch", "worktree",
+      "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash",
+      "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "blocked_reason",
+    ].filter((field) => Object.hasOwn(sliceValue || {}, field));
+    addFields("K", root, rootFields);
+    add("V", [...root, "attempts"]);
+    if (sliceValue?.status !== undefined) add("V", [...root, "status"]);
+    addFields("D", root, ["declared_paths", "effective_paths", "attempt_reviews"]);
+    if (sliceValue?.evidence_ref !== undefined) {
+      const currentFields = ["evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"].filter((field) => sliceValue[field] !== undefined);
+      addFields("R", root, ["evidence_ref", "review_ref", "dispatch_claim_ref", "dispatch_closure_ref"].filter((field) => sliceValue[field] !== undefined));
+      addFields("H", root, ["evidence_hash", "review_hash", "dispatch_claim_hash", "dispatch_closure_hash"].filter((field) => sliceValue[field] !== undefined));
+      add("I", [...root, "reviewed_commit"]);
+    }
+    if (sliceValue?.merge_commit !== undefined) {
+      add("I", [...root, "merge_commit"]);
+    }
+  };
+  const addExternalBytes = (ownerIncluded) => {
+    for (const key of ["evidence", "review", "dispatch_claim", "dispatch_closure"]) add("B", ["external_sources", key, "bytes"]);
+    if (ownerIncluded) for (const key of ["owner_evidence", "owner_review", "owner_dispatch_claim", "owner_dispatch_closure"]) add("B", ["external_sources", key, "bytes"]);
+  };
+
+  if (id.startsWith("slice-attempt-review-")) {
+    addAttempt(["source"]);
+    if (source.modified_extensions[0]) addExtension(["source", "modified_extensions", 0], source.modified_extensions[0].authority === "non-conflicting-sibling");
+  } else if (id.startsWith("slice-modified-extension-")) {
+    addAttempt(["enclosing_source"]);
+    addExtension(["source"], source.authority === "non-conflicting-sibling");
+  } else if (id === "terminal-nonconvergence-v2-source-review") {
+    addFields("K", ["source"], ["schema_version", "kind", "slice_id", "source_review", "continuation"]);
+    addFields("V", ["source"], ["schema_version", "kind"]);
+    addFields("K", ["source", "continuation"], ["program", "args"]);
+    addFields("V", ["source", "continuation"], ["program", "args"]);
+    add("D", ["source", "continuation", "args"]);
+    add("I", ["source", "slice_id"]);
+    addAttempt(["source", "source_review"]);
+  } else {
+    addSlice(["source"]);
+    addAttempt(["source", "attempt_reviews", 0]);
+    const extension = source.attempt_reviews[0]?.modified_extensions?.[0];
+    if (extension) addExtension(["source", "attempt_reviews", 0, "modified_extensions", 0], extension.authority === "non-conflicting-sibling");
+  }
+  const attemptRoot = id.startsWith("slice-attempt-review-") ? ["source"]
+    : id.startsWith("slice-modified-extension-") ? ["enclosing_source"]
+      : id === "terminal-nonconvergence-v2-source-review" ? ["source", "source_review"]
+        : ["source", "attempt_reviews", 0];
+  addUnknown(attemptRoot, "a2-boundary");
+  const extensionRoot = id.startsWith("slice-modified-extension-") ? ["source"]
+    : id.startsWith("slice-attempt-review-") ? ["source", "modified_extensions", 0]
+      : ["source", "attempt_reviews", 0, "modified_extensions", 0];
+  const extensionValue = issue128ValueAt(context, extensionRoot);
+  if (extensionValue?.authority === "unowned") addUnknown(extensionRoot, "u2-boundary");
+  if (extensionValue?.authority === "non-conflicting-sibling") addUnknown(extensionRoot, "s2-boundary");
+  if (ownerSource) {
+    addSlice(["owner_source"]);
+    addAttempt(["owner_source", "attempt_reviews", 0]);
+    addUnknown(["owner_source"], "owner-root-boundary");
+    addUnknown(["owner_source", "attempt_reviews", 0], "owner-a2-boundary");
+  }
+  if (id === "terminal-nonconvergence-v2-source-review") {
+    addUnknown(["source"], "nonconvergence-root-boundary");
+    addUnknown(["source", "continuation"], "nonconvergence-continuation-boundary");
+  } else if (!id.startsWith("slice-attempt-review-") && !id.startsWith("slice-modified-extension-")) {
+    addUnknown(["source"], id.includes("carry-forward") ? "cf2-root-boundary" : id === "amendment-owner-snapshot-v2-history" ? "amendment-owner-root-boundary" : "slice-root-boundary");
+  }
+  addExternalBytes(id.includes("sibling") || id.includes("carry-forward"));
+  for (const [code, targets] of Object.entries(paths)) {
+    const identities = targets.map((target) => `${target.operation || "field"}\0${target.path.join(".")}\0${target.key || ""}`);
+    if (new Set(identities).size !== identities.length) throw new TypeError(`${id} has duplicate ${code} mutation targets`);
+    for (const target of targets) Object.assign(target, issue128ExpectedRejection(id, code, target));
+  }
+  return { ...Object.fromEntries(Object.entries(paths).map(([code, targets]) => [code, target(targets)])), time: exclusion("This variant has no independent timestamp field.") };
+}
+
+function issue128ExpectedRejection(id, code, target) {
+  const field = target.operation === "unknown-key" ? target.key : String(target.path.at(-1));
+  const sourceName = target.path[0];
+  const rootSliceTarget = sourceName === "owner_source" || sourceName === "source" && !id.startsWith("slice-attempt-review-") && !id.startsWith("slice-modified-extension-") && id !== "terminal-nonconvergence-v2-source-review";
+  if (id.includes("carry-forward")) {
+    const schemaValidExtensionValue = code === "V" && target.path.includes("modified_extensions") && field === "rationale";
+    return {
+      expected_check: id.startsWith("checkpoint-") ? "continueFactory checkpoint carry-forward authority" : "continueFactory ordinary carry-forward authority",
+      expected_rejection: target.operation === "unknown-key" ? `${field}.*(?:not allowed|invalid-continuation-carry-forward)`
+        : code === "K" && field === "merge_commit" ? sourceName === "owner_source"
+          ? "slice 'owner' persisted sibling owner merge authority is incomplete"
+          : "v2 carry-forward first-parent range must contain all and only accepted merge commits exactly once"
+        : code === "K" && sourceName === "owner_source" && ["stack", "branch", "worktree"].includes(field) ? "slice builder dispatch claim identity is invalid"
+          : code === "K" && sourceName === "owner_source" && field === "depends_on" ? id.startsWith("checkpoint-")
+            ? "v2 carry-forward requires durably accepted unchanged planning and no draft_spec_reuse"
+            : "accepted work-decomposer plan authority for the bound plan is invalid: parent run slices must exactly classify the bound plan"
+          : code === "V" && target.path.includes("modified_extensions") && field === "path" ? "ratified_paths: must exactly equal modified_extensions paths"
+        : code === "K" || code === "V" && !schemaValidExtensionValue ? issue128SchemaDiscriminator(field)
+          : schemaValidExtensionValue ? "(?:ownership|review history|persisted).*stale"
+            : issue128RejectionDiscriminator(code, field, target),
+    };
+  }
+  if (id === "amendment-owner-snapshot-v2-history") {
+    const schemaValidExtensionValue = code === "V" && target.path.includes("modified_extensions") && ["path", "rationale"].includes(field);
+    const amendmentBytes = code === "B" ? target.path[1] : null;
+    return {
+      expected_check: target.operation === "unknown-key" || code === "K" || code === "V" && !schemaValidExtensionValue ? "validateRun" : "assertIntegrationAmendmentConsistency",
+      expected_rejection: target.operation === "unknown-key" ? `${field}.*is not allowed`
+        : code === "K" || code === "V" && !schemaValidExtensionValue ? issue128SchemaDiscriminator(field)
+          : schemaValidExtensionValue ? "integration amendment report identity is cross-bound"
+            : code !== "B" ? "integration amendment report identity is cross-bound"
+              : amendmentBytes.includes("dispatch") ? "dispatch.*(?:bound|binding|invalid|stale|closed)"
+                : "slice 'owner'.*(?:history|authority).*stale",
+    };
+  }
+  if (id === "terminal-nonconvergence-v2-source-review" && code !== "B") {
+    const continuation = target.path.includes("continuation");
+    return {
+      expected_check: "validateRun",
+      expected_rejection: target.operation === "unknown-key" ? `${field}.*is not allowed`
+        : continuation ? `${field}.*(?:exact checked carry-forward command template|required|must|allowed)`
+          : `(?:${field}.*(?:required|must|allowed|equal|invalid)|nonconvergence.source_review: must equal the current latest append-only slice review entry)`,
+    };
+  }
+  if (target.operation === "unknown-key") return { expected_check: "validateRun", expected_rejection: `${field}.*is not allowed` };
+  if (sourceName === "source" && ["stack", "depends_on"].includes(field) && id.startsWith("slice-")) {
+    return { expected_check: "observeAcceptedDecompositionAuthority", expected_rejection: "parent run slices must exactly classify the bound plan" };
+  }
+  if (sourceName === "source" && ["branch", "worktree"].includes(field)) {
+    return { expected_check: `assertSliceAttemptHistoryCurrent(${id === "amendment-owner-snapshot-v2-history" ? "owner" : "consumer"})`, expected_rejection: "(?:slice '.*' attempt 1 (?:dispatch|review history)|dispatch claim identity is invalid)" };
+  }
+  if (sourceName === "owner_source" && ["stack", "depends_on"].includes(field)) {
+    return { expected_check: "observeAcceptedDecompositionAuthority", expected_rejection: "parent run slices must exactly classify the bound plan" };
+  }
+  if (sourceName === "owner_source" && ["branch", "worktree"].includes(field)) {
+    return { expected_check: "assertSliceAttemptHistoryCurrent(owner)", expected_rejection: "(?:slice 'owner' attempt 1 (?:dispatch|review history)|dispatch claim identity is invalid)" };
+  }
+  if (code === "V" && (target.path.includes("modified_extensions") || id.startsWith("slice-modified-extension-")) && ["path", "rationale"].includes(field)) {
+    return { expected_check: `assertSliceAttemptHistoryCurrent(${sourceName === "owner_source" ? "owner" : "consumer"})`, expected_rejection: "review history is stale" };
+  }
+  if (code === "K" && id === "slice-running-with-v2-history" && field === "attempts") {
+    return { expected_check: "assertNoUnresolvedSliceDispatches", expected_rejection: "slice 'consumer' has a future attempt 1 claim" };
+  }
+  if (code === "K" && id === "slice-running-with-v2-history" && field === "attempt_reviews") {
+    return { expected_check: "assertNoUnresolvedSliceDispatches", expected_rejection: "slice 'consumer' attempt 1 sidecars are not bound by run state" };
+  }
+  if (code === "K" && id === "slice-blocked-ordinary-v2-history" && field === "attempts") {
+    return { expected_check: "assertNoUnresolvedSliceDispatches", expected_rejection: "slice 'consumer' has a future attempt 1 claim" };
+  }
+  if (code === "K" && id === "slice-blocked-ordinary-v2-history" && field === "attempt_reviews") {
+    return { expected_check: "assertNoUnresolvedSliceDispatches", expected_rejection: "slice 'consumer' attempt 1 sidecars are not bound by run state" };
+  }
+  if (code === "K" && id === "slice-blocked-nonconvergent-v2-history" && ["attempts", "attempt_reviews"].includes(field)) {
+    return { expected_check: "validateRun", expected_rejection: "nonconvergence.source_review: must equal the current latest append-only slice review entry" };
+  }
+  if (code === "K" && field === "merge_commit") {
+    const owner = sourceName === "owner_source";
+    return { expected_check: `checkRunConsistency: run.slices[${owner ? 0 : 1}].merged`, expected_rejection: "merge_commit: merged slice requires merge_commit" };
+  }
+  if (code === "K" || code === "V") return { expected_check: "validateRun", expected_rejection: issue128SchemaDiscriminator(field) };
+  if (["R", "H"].includes(code) && rootSliceTarget && target.path.length === 2 && ["evidence_ref", "evidence_hash", "review_ref", "review_hash"].includes(field)) {
+    return { expected_check: "validateRun", expected_rejection: `${field}: must equal the current attempt_reviews ${field}` };
+  }
+  if (["R", "H"].includes(code) && rootSliceTarget && target.path.length === 2 && field.includes("dispatch_")) {
+    return { expected_check: "assertNoUnresolvedSliceDispatches", expected_rejection: field.includes("closure") ? "slice '.*' attempt 1 is not exactly closed" : "dispatch claim is not bound by current run state" };
+  }
+  if (code === "D" && rootSliceTarget && target.path.length === 2) {
+    return { expected_check: "validateRun", expected_rejection: `${field}.*(?:must|current|object|array)` };
+  }
+  if (["I", "X"].includes(code) && rootSliceTarget && target.path.length === 2 && field === "reviewed_commit") {
+    return { expected_check: "validateRun", expected_rejection: "reviewed_commit: must equal the current attempt_reviews reviewed_commit" };
+  }
+  if (code === "B") {
+    const owner = target.path[1]?.startsWith("owner_");
+    if (target.path[1]?.includes("dispatch_")) {
+      return { expected_check: `assertSliceAttemptHistoryCurrent(${owner ? "owner" : "consumer"})`, expected_rejection: "dispatch.*(?:claim|closure|bound|binding|invalid)" };
+    }
+    return { expected_check: `checkRunConsistency: run.slices[${owner ? 0 : 1}].attempt_reviews[0]`, expected_rejection: "(?:evidence_hash|review_hash|persisted ownership authority).*stale|must match.*bytes" };
+  }
+  if (field === "merge_commit") return { expected_check: `observeReviewedMergeProof(${sourceName === "owner_source" ? "owner" : "consumer"})`, expected_rejection: "merge (?:parents|commit|second parent|base)" };
   return {
-    K: target(["source", "attempt"], 1),
-    V: target(["source", "ownership_schema_version"], 2),
-    R: ownRefs ? target(["source", "review_ref"], "reviews/consumer.json") : exclusion("The nested record has no independent ref; enclosing A2 refs remain mandatory targets."),
-    H: ownRefs ? target(["source", "review_hash"], ISSUE128_HASH) : exclusion("The nested record has no independent hash; enclosing A2 hashes remain mandatory targets."),
-    B: target(["external_sources", "review", "bytes"], issue128ExternalSources().review.bytes),
-    D: target(["source", "ratified_paths"], []),
-    I: target(["source", "reviewed_commit"], ISSUE128_REVIEWED_COMMIT),
-    X: target(["source", "diff_base_commit"], ISSUE128_REVIEWED_COMMIT),
-    ...(ownTime ? {} : { time: exclusion("This variant has no independent timestamp field.") }),
+    expected_check: `assertSliceAttemptHistoryCurrent(${sourceName === "owner_source" ? "owner" : "consumer"})`,
+    expected_rejection: issue128RejectionDiscriminator(code, field, target),
   };
 }
 
-function issue128Row({ id, authorityClass, variant, canonicalPath, shape, writer, readers, tests, source, externalSources, dispositions, facts }) {
+function issue128SchemaDiscriminator(field) {
+  if (field.includes("dispatch_")) return "dispatch.*(?:claim|closure|authority|binding)";
+  if (field === "attempts") return "attempt(?:s|_reviews).*(?:required|must|positive|equal|invalid|current)";
+  if (["evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit"].includes(field)) {
+    return `(?:${field}|review and merged slices require complete|current attempt_reviews)`;
+  }
+  return `${field}.*(?:required|must|allowed|forbidden|positive|equal|invalid)`;
+}
+
+function issue128RejectionDiscriminator(code, field, target, prefix = "") {
+  const scoped = prefix ? `${prefix}.*` : "";
+  const byteSource = code === "B" ? String(target.path[1]) : "";
+  if (target.operation === "unknown-key") return `${field}.*(?:not allowed|invalid-continuation-carry-forward)`;
+  if (code === "R") return `(?:${scoped}${field.includes("dispatch") ? "dispatch" : field.includes("evidence") ? "evidence" : "review"}.*(?:missing|stale|invalid|authority|binding|bound|must (?:equal|be a safe))|review history is stale)`;
+  if (code === "H") return `(?:${scoped}${field.includes("dispatch") ? "dispatch" : field.includes("evidence") ? "evidence" : "review"}.*(?:hash|stale|authority|binding|bound)|review history is stale|slice '.*' attempt 1 is not exactly closed)`;
+  if (code === "B") return byteSource.includes("dispatch")
+    ? "(?:dispatch.*(?:bytes|hash|stale|invalid|authority|binding|bound)|slice '.*' attempt 1 is not exactly closed)"
+    : byteSource.includes("evidence") ? "(?:evidence.*(?:bytes|hash|stale|invalid|authority|binding)|review history is stale)"
+      : `${scoped}review.*(?:bytes|hash|stale|invalid|authority|binding)`;
+  if (code === "D") return `${scoped}(?:${field}|ownership|projection|history|path|authority).*(?:stale|equal|match|invalid|authority|must|not allowed)`;
+  if (code === "I" || code === "X") return `${scoped}(?:${field}|owner|reviewed|commit|baseline|identity|review history|first-parent).*(?:stale|cross-bound|match|equal|invalid|authority|contain)`;
+  return `${scoped}${field}.*(?:required|must|allowed|forbidden|stale|invalid)`;
+}
+
+function issue128ValueAt(value, path) {
+  let current = value;
+  for (const segment of path) current = current?.[segment];
+  return current;
+}
+
+function issue128CatalogExternalSources(id, source) {
+  const attempt = id.startsWith("slice-modified-extension-") ? issue128Attempt({ extension: source })
+    : id === "terminal-nonconvergence-v2-source-review" ? source.source_review
+      : source?.attempt_reviews?.[0] || source;
+  const variant = source?.id === "owner" ? "amendment_owner"
+    : attempt?.verdict === "REJECT" ? attempt.convergence === "nonconvergent" ? "nonconvergent" : "reject"
+      : attempt?.modified_extensions?.[0]?.authority === "unowned" ? "unowned"
+        : attempt?.modified_extensions?.[0]?.authority === "non-conflicting-sibling" ? "sibling" : "empty";
+  const modifying = issue128ExternalSources(variant);
+  const owner = issue128ExternalSources("owner");
+  const sources = {
+    evidence: modifying.evidence,
+    review: modifying.review,
+    dispatch_claim: modifying.dispatch_claim,
+    dispatch_closure: modifying.dispatch_closure,
+  };
+  if (id.includes("sibling") || id.includes("carry-forward")) {
+    Object.assign(sources, {
+      owner_evidence: owner.evidence,
+      owner_review: owner.review,
+      owner_dispatch_claim: owner.dispatch_claim,
+      owner_dispatch_closure: owner.dispatch_closure,
+    });
+  }
+  return sources;
+}
+
+function issue128Row({ id, authorityClass, variant, canonicalPath, shape, writer, readers, tests, source, enclosingSource, ownerSource, externalSources, dispositions, facts }) {
   return {
     id,
     authority_class: authorityClass,
@@ -3535,13 +3910,14 @@ function issue128Row({ id, authorityClass, variant, canonicalPath, shape, writer
     tests,
     facts,
     source,
+    ...(enclosingSource ? { enclosing_source: enclosingSource } : {}),
+    ...(ownerSource ? { owner_source: ownerSource } : {}),
     external_sources: externalSources,
     dispositions,
   };
 }
 
 function buildIssue128FinishAndDiscloseCatalog() {
-  const external = issue128ExternalSources();
   const reject = issue128Attempt({ verdict: "REJECT" });
   const approveEmpty = issue128Attempt();
   const approveUnowned = issue128Attempt({ extension: issue128UnownedExtension() });
@@ -3562,42 +3938,51 @@ function buildIssue128FinishAndDiscloseCatalog() {
     ["slice-merged-v2-approve-empty", "slices-review-evidence-bindings", "merged root with approve-empty A2", "run.slices[i]", "slice-merged+A2", "transitionSliceMerged", issue128Readers("P", "C", "D"), issue128Slice("merged", approveEmpty, { merged: true })],
     ["slice-merged-v2-unowned", "slices-review-evidence-bindings", "merged root with U2 authority", "run.slices[i]", "slice-merged+A2+U2", "transitionSliceMerged", issue128Readers("P", "C", "D"), issue128Slice("merged", approveUnowned, { merged: true })],
     ["slice-merged-v2-sibling", "slices-review-evidence-bindings", "merged modifying root with S2 and same-bound owner", "run.slices[i]", "slice-merged+A2+S2", "transitionSliceMerged", issue128Readers("P", "C", "D"), issue128Slice("merged", approveSibling, { merged: true })],
-    ["slice-blocked-ordinary-v2-history", "slices-review-evidence-bindings", "ordinary blocked root retaining A2 history", "run.slices[i]", "slice-blocked+A2", "ordinary blocked transition", issue128Readers("P", "C", "D"), issue128Slice("blocked", reject, { blockedReason: "slice review rejected" })],
+    ["slice-blocked-ordinary-v2-history", "slices-review-evidence-bindings", "ordinary blocked root retaining A2 history", "run.slices[i]", "slice-blocked+A2", "ordinary blocked transition", issue128Readers("P", "C", "D"), issue128OrdinaryBlockedSlice(reject)],
     ["slice-blocked-nonconvergent-v2-history", "slices-review-evidence-bindings", "nonconvergent blocked root retaining latest A2 REJECT", "run.slices[i]", "slice-blocked+A2-nonconvergent", "nonconvergence checked transition", issue128Readers("P", "N", "C", "D"), issue128Slice("blocked", nonconvergent, { blockedReason: "slice-review-nonconvergent" })],
   ];
-  const rows = definitions.map(([id, authorityClass, variant, canonicalPath, shape, writer, readers, source]) => issue128Row({
-    id, authorityClass, variant, canonicalPath, shape, writer, readers,
-    tests: issue128ProductionTests(id),
-    source: structuredClone(source), externalSources: structuredClone(external), dispositions: issue128Dispositions({ ownRefs: !id.startsWith("slice-modified-extension-") }),
-    facts: [
-      { path: ["canonical_path"], expected: canonicalPath },
-      { path: ["canonical_shape"], expected: shape },
-      { path: ["variant"], expected: variant },
-    ],
-  }));
+  const rows = definitions.map(([id, authorityClass, variant, canonicalPath, shape, writer, readers, source]) => {
+    const ownerSource = id.includes("sibling") ? issue128OwnerSlice() : null;
+    return issue128Row({
+      id, authorityClass, variant, canonicalPath, shape, writer, readers,
+      tests: issue128ProductionTests(id),
+      ...(id.startsWith("slice-modified-extension-") ? { enclosingSource: issue128Attempt({ extension: source }) } : {}),
+      ...(ownerSource ? { ownerSource } : {}),
+      source: structuredClone(source), externalSources: issue128CatalogExternalSources(id, source), dispositions: issue128Dispositions(id, source, ownerSource),
+      facts: [
+        { path: ["canonical_path"], expected: canonicalPath },
+        { path: ["canonical_shape"], expected: shape },
+        { path: ["variant"], expected: variant },
+      ],
+    });
+  });
   const terminalSource = {
     schema_version: 1,
     kind: "slice-review-nonconvergence",
     slice_id: "consumer",
     source_review: structuredClone(nonconvergent),
-    continuation: { program: "feature-factory", args: ["factory", "continue", "issue128-parent", "--review", nonconvergent.review_ref, "--run-id", "<new-run-id>", "--carry-forward", "--json"] },
+    continuation: { program: "feature-factory", args: ["factory", "continue", ISSUE128_RUN_ID, "--review", nonconvergent.review_ref, "--run-id", "<new-run-id>", "--carry-forward", "--json"] },
   };
   rows.push(issue128Row({
     id: "terminal-nonconvergence-v2-source-review", authorityClass: "run-envelope-terminal-result", variant: "terminal nonconvergence bound to latest A2", canonicalPath: "run.terminal_result.nonconvergence", shape: "N+A2", writer: "nonconvergence terminalization", readers: issue128Readers("N", "C", "D"),
-    tests: issue128ProductionTests("terminal-nonconvergence-v2-source-review"), source: terminalSource, externalSources: structuredClone(external), dispositions: issue128Dispositions(), facts: [{ path: ["source", "slice_id"], expected: "consumer" }],
+    tests: issue128ProductionTests("terminal-nonconvergence-v2-source-review"), source: terminalSource, externalSources: issue128CatalogExternalSources("terminal-nonconvergence-v2-source-review", terminalSource), dispositions: issue128Dispositions("terminal-nonconvergence-v2-source-review", terminalSource), facts: [{ path: ["source", "slice_id"], expected: "consumer" }],
   }));
   for (const checkpoint of [false, true]) {
     const id = checkpoint ? "checkpoint-carry-forward-accepted-slice-v2" : "continuation-carry-forward-accepted-slice-v2";
     const accepted = issue128Slice("merged", approveSibling, { merged: true });
-    delete accepted.status;
+    const ownerSource = issue128OwnerSlice();
+    for (const key of ["stack", "depends_on", "status", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]) delete accepted[key];
     rows.push(issue128Row({
       id, authorityClass: "continuation-planning-draft-reuse", variant: checkpoint ? "checkpoint CF2 with A2/S2 owner pair" : "ordinary CF2 with A2/S2 owner pair", canonicalPath: "continuation.carry_forward.accepted_slices[i]", shape: "CF2+A2+S2", writer: checkpoint ? "checked checkpoint-bound factory continue" : "checked ordinary factory continue", readers: issue128Readers("C", "P", "D"),
-      tests: issue128ProductionTests(id), source: accepted, externalSources: { ...structuredClone(external), owner: issue128ExternalSources("owner") }, dispositions: issue128Dispositions(), facts: [{ path: ["source", "effective_paths"], expected: [ISSUE128_DECLARED_PATH, ISSUE128_SIBLING_PATH] }, { path: ["source", "attempt_reviews", 0, "modified_extensions", 0, "authority"], expected: "non-conflicting-sibling" }],
+      tests: issue128ProductionTests(id), source: accepted, ownerSource, externalSources: issue128CatalogExternalSources(id, accepted), dispositions: issue128Dispositions(id, accepted, ownerSource), facts: [{ path: ["source", "effective_paths"], expected: [ISSUE128_DECLARED_PATH, ISSUE128_SIBLING_PATH] }, { path: ["source", "attempt_reviews", 0, "modified_extensions", 0, "authority"], expected: "non-conflicting-sibling" }],
     }));
   }
+  const amendmentAttempt = issue128Attempt({ extension: issue128UnownedExtension(), amendmentOwner: true });
+  const amendmentOwner = issue128Slice("merged", amendmentAttempt, { id: "owner", merged: true, mergeCommit: ISSUE128_AMENDMENT_MERGE_COMMIT });
+  for (const key of ["branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]) delete amendmentOwner[key];
   rows.push(issue128Row({
     id: "amendment-owner-snapshot-v2-history", authorityClass: "pr79-merged-slice-repair", variant: "integration-amendment owner snapshot with A2/U2", canonicalPath: "run.integration_amendment.admission.owner", shape: "amendment-owner+A2+U2", writer: "checked integration-amendment admission", readers: issue128Readers("A", "P", "D"),
-    tests: issue128ProductionTests("amendment-owner-snapshot-v2-history"), source: issue128Slice("merged", approveUnowned, { id: "owner", merged: true }), externalSources: { ...structuredClone(external), owner: issue128ExternalSources("owner") }, dispositions: issue128Dispositions(), facts: [{ path: ["source", "id"], expected: "owner" }, { path: ["source", "attempt_reviews", 0, "ownership_schema_version"], expected: 2 }],
+    tests: issue128ProductionTests("amendment-owner-snapshot-v2-history"), source: amendmentOwner, externalSources: issue128CatalogExternalSources("amendment-owner-snapshot-v2-history", amendmentOwner), dispositions: issue128Dispositions("amendment-owner-snapshot-v2-history", amendmentOwner), facts: [{ path: ["source", "id"], expected: "owner" }, { path: ["source", "attempt_reviews", 0, "ownership_schema_version"], expected: 2 }],
   }));
   return rows;
 }
@@ -3607,26 +3992,26 @@ export const ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG = deepFreeze(buildIs
 // These independent digests deliberately do not derive from the catalog during
 // validation. Update them only after reviewing the complete oracle snapshot.
 const ISSUE128_FINISH_AND_DISCLOSE_ORACLE_DIGESTS = Object.freeze([
-  ["slice-attempt-review-v2-reject", "37d833621d5d3063036324443b2739a792727ed3f604c376816bd959fa40a077", "2db41ef3bc51d037f6784b725d1b5abc9a908dd9c1a1dac80e980f1e5b927a8a", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-attempt-review-v2-approve-empty", "1112bf934e4b4bb34047f0ab4dd22478ef8b8557d06fb742cd97af6fd13f8019", "cd2cbc4de09c181ce9d48238b0d56b1eacc7d9d22f1cb14b7fc5ec59449f4906", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-attempt-review-v2-approve-unowned", "69616301f1cfb17cdfa788314ffe849a77e8b5842c7123acb299fb2be0670eb5", "1de0899cbb2741c9ea7d6d2a5c0a611e81c55e492303bc8a9cf02a856782226a", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-attempt-review-v2-approve-sibling", "23729b362ae4fb9478a7bd7653154b9d8fd75c4b4293b1a3fdaa026eca73bb0a", "3491709d12932ce903647f1dc5a14c1e71012dfac823ca84fdee7b28fb252b57", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-modified-extension-unowned-v2", "1f74f6c9d862b3385b3bf9cae7c0a132272a0bd9ffdb25f58ba8675cc0cb90aa", "aeadfdbb1379b3791699122dad2325aaff1ea712339cd2b4dd8b2168555a3238", "b5ec5a73b12a5945e3e0ef81e757d3631f8119a1a6a30be0b925eac6ffb8d8d0"],
-  ["slice-modified-extension-sibling-v2", "fa3a6f2664f8c5b8a4bd9ab9f85d5309331002c1c30b5773651f5363bcfa5ddf", "262e51d70b65786ab718a2ef1df956198cdc2e052970d488a1176d7dd0799c8a", "b5ec5a73b12a5945e3e0ef81e757d3631f8119a1a6a30be0b925eac6ffb8d8d0"],
-  ["slice-running-with-v2-history", "89068e2d1e883882f9b542a61a3727c625d7ab7ecc3dddc80e692572dc32413d", "f79c9d6a5b42fc3c953ee96b75c00232a26610217128518c26ad7b9f7455b497", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-review-v2-reject", "102310055c7fa2abc6b2e46890e793f05bdccce62ac2235c0a6995636e308730", "8f1369cd8e75c72d53258472b7e09907b10424d2974ae18e417d9b064d9c6832", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-review-v2-approve-empty", "b42a7984c3b8ec55b747bcd75bcab997d1bec34294397eb7d14283758617be5f", "d854ebb4b6903f15bd243ec17caca963cdfb8c49b319052a7e1ea9c982a36d54", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-review-v2-approve-unowned", "90f74854bdc2996b98abcd5cdc75850110acc33093e8220e37c3b8f5fe4de02a", "9ae5b8b73c6869af900b1488e22c723a04c535d7783b482503869db680db66c7", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-review-v2-approve-sibling", "79ea82fb8dd87777449788fa5fd3d64a07f8c3fe6922ca13ad0155a814065dab", "e73ed4e752784713d8ac961b1cf7f425dd9581a562517c8c46fb7d30ee4c9c88", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-merged-v2-approve-empty", "2176dd79c4151df78057f82f630d3d22fef75dba61f9d018b195040c8de6dadc", "0d80d408629cef4889c78c70cac65c41e7a691c24c4aed4189ecbc9da4246fbe", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-merged-v2-unowned", "e82025b07582aedf85cfcb37851c695c83ce4ab6bab4f5de7d2b992b3c5b9133", "ec2292836ce42b17725a250596a211ba76f6b4281205063480bd568e133bfcee", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-merged-v2-sibling", "0e39f7947cef51f314dc0821d2753123deabe48cb8f59f7a07b473fa56b707ba", "83adcf7de6882a26d1c03f80c2555c3c636da851fc922c329b274b33c56c056a", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-blocked-ordinary-v2-history", "5ba31480ba4732fd6056c4f7eef5c1de0b0b31f2172f498a5bc9cdcfeb7b6497", "638b66b02e83685c608e4c1aad11d9560f2c50e7b570dc4e9a3a93de93effd82", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["slice-blocked-nonconvergent-v2-history", "880c51c472c9d996172f4ebbd304e9c21127ff6beb0aeafbd9d15d2499a1535e", "6e588cc8e215509415f5195ffecbb04492522db235c3789f84c4318999285f8e", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["terminal-nonconvergence-v2-source-review", "b02c8ee1d2a58e1a86b6bdb7831f0973d95eb5b3213335122a09cb3dc8281053", "1bb6f389b5f15e7c004ac1223967741cc3e5b9724f7e2a945c54241e7315ff94", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["continuation-carry-forward-accepted-slice-v2", "6dc73d0ad5b6473b4ed0c4a94967383729a5aacdd2f3006f97d72d38f2bf6a1a", "69597345abd36c54f8480efbb64820aae4f7c1a5842ac6841ab3e1f846b247e6", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["checkpoint-carry-forward-accepted-slice-v2", "7bb9fdaeaa09c62c31366bcb64108db1b24fad3a3283b9d8ca015cf733bd8b51", "69597345abd36c54f8480efbb64820aae4f7c1a5842ac6841ab3e1f846b247e6", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
-  ["amendment-owner-snapshot-v2-history", "bc3058f7fd9bee9165de32300fddcd12e12e54fa864efb95ca4b5c536eaa3e21", "ffdf7bba06ff789c2cd8e73897e7a3e2395c2af3fca6690c33343165e14a0746", "660d8068fd21806934834d388821e8af14fd7d512bed38880e73a0a61ec107d7"],
+  ["slice-attempt-review-v2-reject", "37d833621d5d3063036324443b2739a792727ed3f604c376816bd959fa40a077", "f3fd5426fe0c571b234d1169c943d4d6c655e03ea2f123cb74803e403dc8f50c", "ab44344c122d2bd743f9778f938b831fdb992e36a1f81d70912e4655960aa7c2"],
+  ["slice-attempt-review-v2-approve-empty", "1112bf934e4b4bb34047f0ab4dd22478ef8b8557d06fb742cd97af6fd13f8019", "ee9461c488f4f31203e5cd09eff48c1781237f4e374ec2ff5981eba407da38af", "f2baf4b0b23ae3933421be1173266cd924eca72ea2378466ae38a577b78fc1a7"],
+  ["slice-attempt-review-v2-approve-unowned", "69616301f1cfb17cdfa788314ffe849a77e8b5842c7123acb299fb2be0670eb5", "929feb587841636b53ca9ddb2013b8573a6b7267dd7cf681a53f5341e891aacb", "e6bdef1e84bd5e4c5db0bbd77dc1d34015e0d00343bb4ed4d174b68e821f95f5"],
+  ["slice-attempt-review-v2-approve-sibling", "23729b362ae4fb9478a7bd7653154b9d8fd75c4b4293b1a3fdaa026eca73bb0a", "07486203405ca7623d1f1b4a495044da2338b5c877e8d84f4d955c95c16ecedb", "7d882fed2a0f3c7b42d2257a24973916f1d76416c4ac13f01ddbe8fe49b68915"],
+  ["slice-modified-extension-unowned-v2", "1f74f6c9d862b3385b3bf9cae7c0a132272a0bd9ffdb25f58ba8675cc0cb90aa", "beb702d07e637fcf4351749dca2e93685a2f1216ceb2c57211b0dc0636d8e6cd", "666ad541800e39f781d5c92f417bc108540770c19b10ac931b2673d7d6dae331"],
+  ["slice-modified-extension-sibling-v2", "fa3a6f2664f8c5b8a4bd9ab9f85d5309331002c1c30b5773651f5363bcfa5ddf", "e5c80ff7464aeb6ad4da9d69eda757c36ef1a3d16c8361ec0cfa31e6da7ff443", "941a8df00c7c2be534a5d6e23d3408503c2e7062db5d792bf3a4cb0ce6c91ec3"],
+  ["slice-running-with-v2-history", "89068e2d1e883882f9b542a61a3727c625d7ab7ecc3dddc80e692572dc32413d", "fcf2f9a52ad57bd71d7fce2a7ef71305049ed096709bb09cbccd5871e158d723", "4159a22d4335701291af4e4b7b602f042640d3f8dba1bf6611accf999d9f19dc"],
+  ["slice-review-v2-reject", "102310055c7fa2abc6b2e46890e793f05bdccce62ac2235c0a6995636e308730", "49d59f093d67d2e45ad595d476f631069836ad4f81465d353b7aa9c73c0fa531", "000d4e55d8436c72e624ae64aafc743f85411d7d3026821415d4d05ec1d5b669"],
+  ["slice-review-v2-approve-empty", "b42a7984c3b8ec55b747bcd75bcab997d1bec34294397eb7d14283758617be5f", "cd6b09dedf8f1679706d343fcfa48c9f4a884f8963aa21ae909ae5ddcdb7c839", "d4b6db87b0d7cc65ee6633656507ba9dcc2af8f28474372366fa20dffcc41e4d"],
+  ["slice-review-v2-approve-unowned", "90f74854bdc2996b98abcd5cdc75850110acc33093e8220e37c3b8f5fe4de02a", "514a0ec00e48d4fb6c38783549ec2bb0f0f35d987dd5fddf2c8c72224e3063d6", "8a3cac108fb33ed7452e26c47097f4fa3289b4300725a6a7d2b5b941b555c01d"],
+  ["slice-review-v2-approve-sibling", "79ea82fb8dd87777449788fa5fd3d64a07f8c3fe6922ca13ad0155a814065dab", "3c5dd7a418beb5c5a29097436db7f0410bc626bc6a402340ba486e597629d86b", "bd3db71e6afe9b4e5b50c5e046079823bc8892ced491b0321d4c0d84cfea8443"],
+  ["slice-merged-v2-approve-empty", "2176dd79c4151df78057f82f630d3d22fef75dba61f9d018b195040c8de6dadc", "9725215bfd8651a0e2ba57f65d0f525a74ed0905f9c608124d6f7b32c77dfcdc", "920696f8e71d724af00c84af39baa3622490a08d470c24077d9d8223cfb82665"],
+  ["slice-merged-v2-unowned", "e82025b07582aedf85cfcb37851c695c83ce4ab6bab4f5de7d2b992b3c5b9133", "9a3f2a253dd645c2976779cda982ed38c98f6adf1cc531253cbbbad09b96c15e", "9c7e3ae6d174809699ae1143f138d6f87fd0615accc9d633e071aad1951eaef6"],
+  ["slice-merged-v2-sibling", "0e39f7947cef51f314dc0821d2753123deabe48cb8f59f7a07b473fa56b707ba", "17186d04a801a12718d3ddf641799fa124fea23d6df2dc37fa5b4a8889085822", "c5830ce93cdc978e69af92044e381f9758f8fd719d8bb6d10f5e2487c8687857"],
+  ["slice-blocked-ordinary-v2-history", "5ba31480ba4732fd6056c4f7eef5c1de0b0b31f2172f498a5bc9cdcfeb7b6497", "da46ffdc524250765f1091358e0ab5dfa7fc46f040cf01ae83a6de972b92ef9a", "b0c844056b7ca090b3bd2300e8a2837dc54d920e3c123b66a199101f4f61bf2b"],
+  ["slice-blocked-nonconvergent-v2-history", "880c51c472c9d996172f4ebbd304e9c21127ff6beb0aeafbd9d15d2499a1535e", "13482462ee238cd5ef40645c04155c3c86bb4e212509f8c5393eb402c0739165", "16ac9022bcb20caf262715e3881292102324f5ca142ed7ce75740f8119b20076"],
+  ["terminal-nonconvergence-v2-source-review", "b02c8ee1d2a58e1a86b6bdb7831f0973d95eb5b3213335122a09cb3dc8281053", "580ea713f4df3dff696d7aed6f99fa82eb443c02f45857a4fd6389ace854371c", "ef82a147840477858dd1d479b567c104254a8b19274fb89413656636a97fd221"],
+  ["continuation-carry-forward-accepted-slice-v2", "6dc73d0ad5b6473b4ed0c4a94967383729a5aacdd2f3006f97d72d38f2bf6a1a", "08ac2f6b7d1df33055d34a052d37635f28fc828dc40227163379e3b5e001ec68", "7710e61652b301ceb71fdcae2c9101166cbcec71adfde38ee0866f274af87a4f"],
+  ["checkpoint-carry-forward-accepted-slice-v2", "7bb9fdaeaa09c62c31366bcb64108db1b24fad3a3283b9d8ca015cf733bd8b51", "08ac2f6b7d1df33055d34a052d37635f28fc828dc40227163379e3b5e001ec68", "1d9923bb6b5a686c8f69ebdf1790731cbbd59dd75a4d3c4e31301eab4f43b102"],
+  ["amendment-owner-snapshot-v2-history", "bc3058f7fd9bee9165de32300fddcd12e12e54fa864efb95ca4b5c536eaa3e21", "ef9dbacdb8e20470e0a75cd22420ba3b512eac876207b0a1a3f6fc847bdaede0", "2bf2354da6b3663af1d1ea3fe4f79f01573135ff14125082822c240d36fb64e7"],
 ]);
 
 function issue128OracleSnapshot(row) {
@@ -3642,7 +4027,7 @@ function issue128OracleSnapshot(row) {
       tests: row.tests,
       facts: row.facts,
     },
-    source_boundary: { source: row.source, external_sources: row.external_sources },
+    source_boundary: { source: row.source, ...(row.enclosing_source ? { enclosing_source: row.enclosing_source } : {}), ...(row.owner_source ? { owner_source: row.owner_source } : {}), external_sources: row.external_sources },
     dispositions: row.dispositions,
   };
 }
@@ -3676,6 +4061,25 @@ export function issue128FinishAndDiscloseAuthorityOracle(catalog = ISSUE128_FINI
   return true;
 }
 
+export function emitIssue128FinishAndDiscloseMutations(row) {
+  if (!ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS.includes(row?.id)) throw new TypeError("issue #128 mutations require a registered row");
+  return ["K", "V", "R", "H", "B", "D", "I", "X"].flatMap((code) => {
+    const disposition = row.dispositions[code];
+    if (disposition.disposition === "exclusion") return [];
+    return disposition.targets.map((target) => ({
+      name: target.operation === "unknown-key"
+        ? `${row.id}: ${code} (unknown ${target.key} at ${target.path.join(".")})`
+        : `${row.id}: ${code} (${target.path.join(".")})`,
+      code,
+      path: [...target.path],
+      expected: structuredClone(target.expected),
+      ...(target.operation ? { operation: target.operation, key: target.key, value: target.value } : {}),
+      expected_check: target.expected_check,
+      expected_rejection: target.expected_rejection,
+    }));
+  });
+}
+
 export function createIssue128DurableRunBaseline(row) {
   if (!ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS.includes(row?.id)) throw new TypeError("issue #128 baseline requires a registered row");
   const owner = issue128OwnerSlice();
@@ -3688,13 +4092,25 @@ export function createIssue128DurableRunBaseline(row) {
   }
   if (row.id.startsWith("slice-")) {
     const slices = row.source.id === "owner" ? [structuredClone(row.source)] : [owner, structuredClone(row.source)];
-    return { schema_version: 1, run_id: "issue128-oracle", status: "running", gates: {}, slices };
+    const run = { schema_version: 1, run_id: "issue128-oracle", status: "running", gates: {}, slices };
+    if (row.id === "slice-blocked-nonconvergent-v2-history") {
+      const sourceReview = structuredClone(row.source.attempt_reviews.at(-1));
+      run.status = "blocked";
+      run.terminal_result = {
+        status: "blocked", run_id: ISSUE128_RUN_ID, pr_url: null, reason: "slice-review-nonconvergent", summary: "nonconvergent", artifacts: {},
+        nonconvergence: {
+          schema_version: 1, kind: "slice-review-nonconvergence", slice_id: row.source.id, source_review: sourceReview,
+          continuation: { program: "feature-factory", args: ["factory", "continue", ISSUE128_RUN_ID, "--review", sourceReview.review_ref, "--run-id", "<new-run-id>", "--carry-forward", "--json"] },
+        },
+      };
+    }
+    return run;
   }
   if (row.id === "terminal-nonconvergence-v2-source-review") {
     const blocked = issue128Slice("blocked", nonconvergentIssue128Attempt(), { blockedReason: "slice-review-nonconvergent" });
     return {
-      schema_version: 1, run_id: "issue128-parent", status: "blocked", gates: {}, slices: [owner, blocked],
-      terminal_result: { status: "blocked", run_id: "issue128-parent", pr_url: null, reason: "slice-review-nonconvergent", summary: "nonconvergent", artifacts: {}, nonconvergence: structuredClone(row.source) },
+      schema_version: 1, run_id: ISSUE128_RUN_ID, status: "blocked", gates: {}, slices: [owner, blocked],
+      terminal_result: { status: "blocked", run_id: ISSUE128_RUN_ID, pr_url: null, reason: "slice-review-nonconvergent", summary: "nonconvergent", artifacts: {}, nonconvergence: structuredClone(row.source) },
     };
   }
   if (row.id === "amendment-owner-snapshot-v2-history") return { schema_version: 1, run_id: "issue128-oracle", status: "running", gates: {}, slices: [structuredClone(row.source)] };

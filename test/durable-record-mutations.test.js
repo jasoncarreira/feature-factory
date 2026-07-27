@@ -19,6 +19,7 @@ import {
   DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS,
   DURABLE_AUTHORITY_REQUIRED_RECORD_IDS,
   DURABLE_MUTATION_FAMILIES,
+  ISSUE128_BASELINE_ROUTE_INVENTORY,
   ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG,
   ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS,
   assertDurableAuthorityCatalogComplete,
@@ -27,10 +28,11 @@ import {
   createPostPrCatalogBaseline,
   createRepairCatalogBaseline,
   emitDurableRecordMutations,
+  emitIssue128FinishAndDiscloseMutations,
   issue128FinishAndDiscloseAuthorityOracle,
   renderDurableAuthorityOracleReviewSnapshot,
 } from "./helpers/durable-record-mutations.js";
-import { checkRunConsistency, validateCheckpointChildPublication, validateCheckpointProgress, validateCheckpointSource, validateDeliveryCheckpointFinalClosure, validateIntegrationAmendment, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateIntegrationAmendmentReviewDispatchClaim, validateIntegrationAmendmentReviewDispatchClosure, validateRun, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "../src/validate.js";
+import { assertIntegrationAmendmentConsistency, checkRunConsistency, integrationAmendmentId, validateCheckpointChildPublication, validateCheckpointProgress, validateCheckpointSource, validateDeliveryCheckpointFinalClosure, validateIntegrationAmendment, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateIntegrationAmendmentReviewDispatchClaim, validateIntegrationAmendmentReviewDispatchClosure, validateRun, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "../src/validate.js";
 import { cleanupRun, continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
@@ -45,12 +47,14 @@ import {
   completeCheckedTestExecution,
   markCheckedTestExecutionUnknown,
   observeAcceptedDecompositionAuthority,
+  observeReviewedMergeProof,
   prepareSpecialBuilderTaskDispatch,
   transitionMergedSliceRepair,
   mergedSliceRepairFence,
   transitionPanelVerdicts,
   transitionContinuationAdoption,
   transitionGateDecision,
+  transitionIntegrationAmendment,
   transitionPostPrState,
   transitionPrCreated,
   transitionPrePrFenceCleared,
@@ -92,6 +96,30 @@ const ISSUE128_EMPTY_AUTHORITY_RECORD_IDS = Object.freeze([
   "slice-blocked-nonconvergent-v2-history",
   "terminal-nonconvergence-v2-source-review",
 ]);
+const ISSUE128_EXPECTED_SOURCE_COUNT = 20;
+const ISSUE128_EXPECTED_MUTATION_COUNTS = Object.freeze([
+  ["slice-attempt-review-v2-reject", 41],
+  ["slice-attempt-review-v2-approve-empty", 41],
+  ["slice-attempt-review-v2-approve-unowned", 54],
+  ["slice-attempt-review-v2-approve-sibling", 156],
+  ["slice-modified-extension-unowned-v2", 54],
+  ["slice-modified-extension-sibling-v2", 156],
+  ["slice-running-with-v2-history", 57],
+  ["slice-review-v2-reject", 76],
+  ["slice-review-v2-approve-empty", 76],
+  ["slice-review-v2-approve-unowned", 89],
+  ["slice-review-v2-approve-sibling", 191],
+  ["slice-merged-v2-approve-empty", 78],
+  ["slice-merged-v2-unowned", 91],
+  ["slice-merged-v2-sibling", 193],
+  ["slice-blocked-ordinary-v2-history", 58],
+  ["slice-blocked-nonconvergent-v2-history", 58],
+  ["terminal-nonconvergence-v2-source-review", 56],
+  ["continuation-carry-forward-accepted-slice-v2", 178],
+  ["checkpoint-carry-forward-accepted-slice-v2", 178],
+  ["amendment-owner-snapshot-v2-history", 80],
+]);
+const ISSUE128_EXPECTED_MUTATION_COUNT = 1961;
 
 const TARGET_FIELDS_BY_FAMILY = Object.freeze({
   "missing-key": ["path", "label"],
@@ -2830,7 +2858,21 @@ describe("issue128FinishAndDiscloseAuthorityOracle", () => {
   it("independently binds the exact 20-row successor authority inventory", () => {
     assert.equal(issue128FinishAndDiscloseAuthorityOracle(), true);
     assert.deepEqual(ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.map(({ id }) => id), ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS);
-    assert.equal(ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.length, 20);
+    assert.equal(ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.length, ISSUE128_EXPECTED_SOURCE_COUNT);
+    const routeIds = ["durable-run-consistency", "durable-amendment-consistency", "ordinary-continuation", "checkpoint-continuation"]
+      .flatMap(issue128BaselineIdsForRoute);
+    assert.equal(new Set(routeIds).size, routeIds.length, "baseline route assignments must be disjoint");
+    assert.deepEqual([...routeIds].sort(), [...ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS].sort(), "independent baseline route union must equal the exact successor inventory");
+    assert.deepEqual(Object.keys(ISSUE128_BASELINE_ROUTE_INVENTORY), ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS, "every exact row ID must key one closed baseline route");
+    for (const [id, assignment] of Object.entries(ISSUE128_BASELINE_ROUTE_INVENTORY)) {
+      assert.equal(typeof assignment.consumer, "string", `${id}: exact baseline consumer route`);
+      assert.equal(assignment.consumer.length > 0, true, `${id}: nonempty baseline consumer route`);
+      const match = /^(test\/[^:]+) :: (.+)$/u.exec(assignment.test);
+      assert.ok(match, `${id}: exact baseline test route`);
+      const [, relativePath, title] = match;
+      const source = readFileSync(join(TEST_DIR, relativePath.slice("test/".length)), "utf8");
+      assert.equal(source.includes(`it("${title}"`), true, `${id}: assigned baseline test must exist exactly`);
+    }
     assert.equal(Object.isFrozen(ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG), true);
     for (const row of ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG) {
       assert.deepEqual(Object.keys(row.dispositions).filter((key) => key.length === 1).sort(), ["B", "D", "H", "I", "K", "R", "V", "X"], row.id);
@@ -2846,17 +2888,67 @@ describe("issue128FinishAndDiscloseAuthorityOracle", () => {
         assert.equal(source.includes(`it("${title}"`), true, `${row.id} must name an existing exact production test title`);
       }
     }
+    const physicalMutations = ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.flatMap(emitIssue128FinishAndDiscloseMutations);
+    assert.deepEqual(ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.map((row) => [row.id, emitIssue128FinishAndDiscloseMutations(row).length]), ISSUE128_EXPECTED_MUTATION_COUNTS);
+    assert.equal(physicalMutations.length, ISSUE128_EXPECTED_MUTATION_COUNT);
+    assert.equal(new Set(physicalMutations.map(({ name }) => name)).size, ISSUE128_EXPECTED_MUTATION_COUNT);
+    for (const mutation of physicalMutations) {
+      assert.equal(typeof mutation.expected_check, "string", `${mutation.name}: concrete production check`);
+      assert.equal(mutation.expected_check.length > 0, true, `${mutation.name}: nonempty production check`);
+      assert.equal(typeof mutation.expected_rejection, "string", `${mutation.name}: target-specific rejection discriminator`);
+      assert.doesNotThrow(() => new RegExp(mutation.expected_rejection, "iu"), `${mutation.name}: valid rejection discriminator`);
+      if (mutation.operation === "unknown-key") {
+        assert.equal(typeof mutation.key, "string", `${mutation.name}: concrete unsupported key`);
+        assert.equal(mutation.key.startsWith("unsupported_issue128_"), true, `${mutation.name}: issue-specific unsupported key`);
+        assert.notEqual(mutation.value, undefined, `${mutation.name}: concrete unsupported value`);
+      }
+    }
   });
 
-  it("passes every non-continuation baseline through the production run validator", () => {
-    const validated = [];
-    for (const row of ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG) {
-      if (row.id.includes("carry-forward-accepted-slice")) continue;
-      const run = createIssue128DurableRunBaseline(row);
-      assert.equal(validateRun(run), run, row.id);
-      validated.push(row.id);
+  it("executes every non-continuation baseline and physical mutation through production consistency", async () => {
+    const root = mkdtempSync(join(tmpdir(), "issue128-executable-oracle-"));
+    const observedRunBaselineIds = [];
+    const observedAmendmentBaselineIds = [];
+    let mutationCount = 0;
+    try {
+      for (const [index, row] of ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.entries()) {
+        if (row.id.includes("carry-forward-accepted-slice") || row.id === "amendment-owner-snapshot-v2-history") continue;
+        const fixture = createIssue128ExecutableFixture(root, row, index);
+        const immutableRun = freezeIssue128Baseline(structuredClone(fixture.run));
+        const immutableRunBytes = readFileSync(join(fixture.runDir, "run.json"));
+        assert.deepEqual(issue128RunAuthorityFailures(fixture.runDir, fixture.run), [], row.id);
+        observedRunBaselineIds.push(row.id);
+        for (const mutation of emitIssue128FinishAndDiscloseMutations(row)) {
+          restoreIssue128ExecutableBaseline(fixture, immutableRun, immutableRunBytes, mutation);
+          const candidate = structuredClone(immutableRun);
+          applyIssue128ExecutableMutation(candidate, fixture, row, mutation);
+          assertIssue128TargetRejection(issue128ExpectedConsumerFailures(fixture.runDir, candidate, mutation), mutation);
+          mutationCount += 1;
+        }
+      }
+      const amendmentRow = ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.find(({ id }) => id === "amendment-owner-snapshot-v2-history");
+      const amendment = await createIssue128AmendmentFixture(root, amendmentRow, ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.indexOf(amendmentRow));
+      const immutableAmendmentRun = freezeIssue128Baseline(structuredClone(amendment.run));
+      const immutableAmendmentRunBytes = readFileSync(join(amendment.runDir, "run.json"));
+      assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(amendment.runDir, amendment.run));
+      observedAmendmentBaselineIds.push(amendmentRow.id);
+      for (const mutation of emitIssue128FinishAndDiscloseMutations(amendmentRow)) {
+        restoreIssue128ExecutableBaseline(amendment, immutableAmendmentRun, immutableAmendmentRunBytes, mutation);
+        const candidate = structuredClone(immutableAmendmentRun);
+        applyIssue128ExecutableMutation(candidate, amendment, amendmentRow, mutation);
+        assertIssue128TargetRejection(issue128ExpectedConsumerFailures(amendment.runDir, candidate, mutation), mutation);
+        mutationCount += 1;
+      }
+      assert.deepEqual(observedRunBaselineIds, issue128BaselineIdsForRoute("durable-run-consistency"));
+      assert.deepEqual(observedAmendmentBaselineIds, issue128BaselineIdsForRoute("durable-amendment-consistency"));
+      assert.deepEqual([...observedRunBaselineIds, ...observedAmendmentBaselineIds], [
+        ...issue128BaselineIdsForRoute("durable-run-consistency"),
+        ...issue128BaselineIdsForRoute("durable-amendment-consistency"),
+      ]);
+      assert.equal(mutationCount, 1605);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
-    assert.deepEqual(validated, ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS.filter((id) => !id.includes("carry-forward-accepted-slice")));
   });
 
   it("rejects planless empty-v2 authority through production consistency", () => {
@@ -2886,8 +2978,14 @@ describe("issue128FinishAndDiscloseAuthorityOracle", () => {
       ["contradiction", (rows) => { rows[2].facts[0].expected = "run.other"; }],
       ["synthetic key", (rows) => { rows[3].source.sidecar_bytes = "untrusted"; }],
       ["source boundary loss", (rows) => { delete rows[4].external_sources.review; }],
+      ["source boundary substitution", (rows) => { rows[4].external_sources.review = structuredClone(rows[5].external_sources.owner_review); }],
+      ["authority fact deletion", (rows) => { rows[6].facts.splice(0, 1); }],
+      ["authority fact relocation", (rows) => { rows[6].facts[0].path = ["source", "unexpected"]; }],
       ["disposition substitution", (rows) => { rows[5].dispositions.R = { disposition: "target", path: ["source", "invented_ref"], expected: "reviews/invented.json" }; }],
       ["target mutation", (rows) => { rows[6].dispositions.I.path = ["source", "merge_commit"]; }],
+      ["target deletion", (rows) => { delete rows[7].dispositions.K; }],
+      ["target to exclusion", (rows) => { rows[8].dispositions.V = { disposition: "exclusion", reason: "substituted" }; }],
+      ["exclusion to target", (rows) => { rows[9].dispositions.time = { disposition: "target", path: ["source", "invented_at"], expected: "2026-07-26T00:00:00.000Z" }; }],
     ];
     for (const [label, mutate] of mutations) {
       const candidate = structuredClone(ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG);
@@ -2961,6 +3059,329 @@ function materializeIssue128EmptyAuthority(runDir, run) {
   }
   validateRun(run);
   return run;
+}
+
+function issue128RunAuthorityFailures(runDir, run) {
+  const failures = [];
+  const consume = (check, fn) => {
+    try { fn(); } catch (error) { failures.push({ check, rejection: error.message }); }
+  };
+  consume("validateRun", () => validateRun(run));
+  for (const check of checkRunConsistency(runDir, run).checks.filter(({ ok }) => !ok)) {
+    failures.push(...check.errors.map(({ path, message }) => ({ check: `checkRunConsistency: ${check.name}`, rejection: `${path}: ${message}` })));
+  }
+  consume("observeAcceptedDecompositionAuthority", () => observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true, requireApprovingReview: true }));
+  for (const slice of run.slices || []) {
+    consume(`assertSliceAttemptHistoryCurrent(${slice.id})`, () => assertSliceAttemptHistoryCurrent(runDir, slice.id, slice));
+    if (slice.status === "merged") {
+      consume(`observeReviewedMergeProof(${slice.id})`, () => observeReviewedMergeProof(runDir, slice.id, slice.merge_commit, slice.reviewed_commit));
+    }
+  }
+  if (!run.slices?.some(({ status }) => status === "blocked")) {
+    consume("assertNoUnresolvedSliceDispatches", () => assertNoUnresolvedSliceDispatches(runDir, run));
+  }
+  return failures;
+}
+
+function issue128ExpectedConsumerFailures(runDir, run, mutation) {
+  const failures = [];
+  const check = mutation.expected_check;
+  let consume;
+  if (check === "validateRun") consume = () => validateRun(run);
+  else if (check === "observeAcceptedDecompositionAuthority") consume = () => observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true, requireApprovingReview: true });
+  else if (check === "assertNoUnresolvedSliceDispatches") consume = () => assertNoUnresolvedSliceDispatches(runDir, run);
+  else if (check === "assertIntegrationAmendmentConsistency") consume = () => assertIntegrationAmendmentConsistency(runDir, run);
+  else if (check.startsWith("assertSliceAttemptHistoryCurrent(")) {
+    const sliceId = check.slice("assertSliceAttemptHistoryCurrent(".length, -1);
+    consume = () => assertSliceAttemptHistoryCurrent(runDir, sliceId, run.slices.find(({ id }) => id === sliceId));
+  } else if (check.startsWith("observeReviewedMergeProof(")) {
+    const sliceId = check.slice("observeReviewedMergeProof(".length, -1);
+    const slice = run.slices.find(({ id }) => id === sliceId);
+    consume = () => observeReviewedMergeProof(runDir, sliceId, slice.merge_commit, slice.reviewed_commit);
+  } else if (check.startsWith("checkRunConsistency: ")) {
+    const checkName = check.slice("checkRunConsistency: ".length);
+    const result = checkRunConsistency(runDir, run).checks.find(({ name }) => name === checkName);
+    assert.ok(result, `${mutation.name}: production consistency check ${checkName} must exist`);
+    if (!result.ok) failures.push(...result.errors.map(({ path, message }) => ({ check, rejection: `${path}: ${message}` })));
+    return failures;
+  } else throw new Error(`${mutation.name}: unsupported expected production check ${check}`);
+  try { consume(); } catch (error) { failures.push({ check, rejection: error.message }); }
+  return failures;
+}
+
+function assertIssue128TargetRejection(failures, mutation) {
+  assert.equal(typeof mutation.expected_check, "string", `${mutation.name}: expected production check`);
+  assert.equal(typeof mutation.expected_rejection, "string", `${mutation.name}: expected rejection discriminator`);
+  const intended = failures.filter(({ check }) => check === mutation.expected_check);
+  assert.notEqual(intended.length, 0, `${mutation.name}: expected ${mutation.expected_check}, got ${JSON.stringify(failures)}`);
+  const discriminator = new RegExp(mutation.expected_rejection, "iu");
+  assert.equal(intended.some(({ rejection }) => discriminator.test(rejection)), true, `${mutation.name}: ${mutation.expected_check} did not reject with /${mutation.expected_rejection}/; got ${JSON.stringify(intended)}`);
+}
+
+function createIssue128ExecutableFixture(root, row, index) {
+  const repo = join(root, String(index));
+  createIssue128StaticGit(repo);
+  const runId = "issue128-oracle";
+  const runDir = join(repo, ".opencode", "factory", runId);
+  for (const directory of ["dispatch", "evidence", "plan", "reviews"]) mkdirSync(join(runDir, directory), { recursive: true });
+  const plan = issue128Plan();
+  writeJson(join(runDir, "plan", "slices.json"), plan);
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+  const amendmentOwner = row.id === "amendment-owner-snapshot-v2-history";
+  const ownerReviewed = amendmentOwner ? "d29a5e849c5c73bc0d8dfe723fb51578ee6dfc06" : "ff72597376c2c7c3771198a766a1ba1c049da558";
+  const ownerFamily = writeVerificationArtifactReceipt({
+    runDir, runId, plan, sliceId: "owner", attempt: 1, reviewedCommit: ownerReviewed,
+    artifactId: "fixture-artifact-1", evidenceRef: "evidence/owner.family.json",
+    result: { type: "verification-result", outcome: "pass", summary: "Verify owner behavior passed" },
+  });
+  const expectedFamilyHash = JSON.parse(row.external_sources[row.external_sources.owner_review ? "owner_review" : "review"].bytes).invariant_family_ledger?.dispositions[0]?.evidence_hash;
+  if (expectedFamilyHash) assert.equal(ownerFamily.hash, expectedFamilyHash, `${row.id}: owner family source hash`);
+  const siblingRow = ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.find(({ id }) => id === "slice-attempt-review-v2-approve-sibling");
+  const sources = structuredClone(row.external_sources);
+  if (!amendmentOwner && !sources.owner_evidence) {
+    for (const key of ["owner_evidence", "owner_review", "owner_dispatch_claim", "owner_dispatch_closure"]) sources[key] = structuredClone(siblingRow.external_sources[key]);
+  }
+  const sidecars = materializeIssue128Sources(runDir, sources, row.id);
+  const run = createIssue128DurableRunBaseline(row);
+  run.slices.push({ id: "remaining", stack: "backend", depends_on: ["consumer"], declared_paths: ["src/remaining/**"], effective_paths: ["src/remaining/**"], status: "pending", attempts: 0 });
+  run.steps = [{
+    agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+    acceptance: {
+      artifact_ref: "plan/slices.json", artifact_hash: hashFileBytes(join(runDir, "plan", "slices.json")),
+      review_ref: "reviews/work-decomposer.json", review_hash: hashFileBytes(join(runDir, "reviews", "work-decomposer.json")),
+    },
+  }];
+  if (row.owner_source) assert.deepEqual(run.slices.find(({ id }) => id === "owner"), row.owner_source, `${row.id}: exact related owner source before production consumer`);
+  assert.deepEqual(issue128CanonicalSource(run, row), row.source, `${row.id}: exact source before production consumer`);
+  if (row.enclosing_source) assert.deepEqual(run.slices.find(({ id }) => id === "consumer").attempt_reviews[0], row.enclosing_source, `${row.id}: exact enclosing A2 before production consumer`);
+  writeJson(join(runDir, "run.json"), run);
+  return { repo, runDir, run, sidecars };
+}
+
+async function createIssue128AmendmentFixture(root, row, index) {
+  const repo = join(root, String(index));
+  createIssue128StaticGit(repo);
+  const runId = "issue128-oracle";
+  const runDir = join(repo, ".opencode", "factory", runId);
+  for (const directory of ["dispatch", "evidence", "plan", "reviews"]) mkdirSync(join(runDir, directory), { recursive: true });
+  const plan = issue128Plan();
+  writeJson(join(runDir, "plan", "slices.json"), plan);
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+  const family = writeVerificationArtifactReceipt({
+    runDir, runId, plan, sliceId: "owner", attempt: 1, reviewedCommit: row.source.reviewed_commit,
+    artifactId: "fixture-artifact-1", evidenceRef: "evidence/owner.family.json",
+    result: { type: "verification-result", outcome: "pass", summary: "Verify owner behavior passed" },
+  });
+  assert.equal(family.hash, JSON.parse(row.external_sources.review.bytes).invariant_family_ledger.dispositions[0].evidence_hash);
+  const sidecars = materializeIssue128Sources(runDir, row.external_sources, row.id);
+  const ownerEntry = row.source.attempt_reviews[0];
+  const owner = {
+    ...structuredClone(row.source),
+    branch: "issue128-owner",
+    worktree: "/tmp/issue128-owner",
+    dispatch_required: true,
+    dispatch_claim_ref: ownerEntry.dispatch_claim_ref,
+    dispatch_claim_hash: ownerEntry.dispatch_claim_hash,
+    dispatch_closure_ref: ownerEntry.dispatch_closure_ref,
+    dispatch_closure_hash: ownerEntry.dispatch_closure_hash,
+  };
+  const consumer = { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**"], status: "pending", attempts: 0 };
+  const planPath = join(runDir, "plan", "slices.json");
+  const decompositionReviewPath = join(runDir, "reviews", "work-decomposer.json");
+  const baseline = row.source.merge_commit;
+  const baselineTree = fixtureGit(repo, ["rev-parse", `${baseline}^{tree}`]).trim();
+  const run = {
+    schema_version: 1, run_id: runId, status: "running", branch: "issue128-amendment-main", worktree: repo, gates: {}, slices: [owner, consumer, { id: "remaining", stack: "backend", depends_on: ["consumer"], declared_paths: ["src/remaining/**"], effective_paths: ["src/remaining/**"], status: "pending", attempts: 0 }],
+    steps: [{
+      agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+      acceptance: { artifact_ref: "plan/slices.json", artifact_hash: hashFileBytes(planPath), review_ref: "reviews/work-decomposer.json", review_hash: hashFileBytes(decompositionReviewPath) },
+    }],
+  };
+  writeJson(join(runDir, "run.json"), run);
+  const unit = plan.delivery_envelope.delivery_units.find(({ slice_id }) => slice_id === "consumer");
+  const artifact = unit.verification_artifacts[0];
+  const admission = {
+    baseline_ref: "refs/heads/issue128-amendment-main", baseline_commit: baseline, baseline_tree: baselineTree, worktree: repo,
+    probe: { schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: unit.id, consumer_slice_id: "consumer", verification_artifact_id: artifact.id, test_plan_index: artifact.test_plan_index, test_plan_entry: artifact.test_plan_entry, program: "node", args: ["--test", "consumer"], timeout_ms: artifact.timeout_ms, substrate: "feature-baseline" },
+    owner: structuredClone(row.source), consumer: structuredClone(consumer),
+  };
+  const identity = { schema_version: 1, kind: "integration-amendment-identity", run_id: runId, defect_path: "src/owner/amendment.js", admission };
+  const amendmentId = integrationAmendmentId(identity);
+  const nonce = "issue128-amendment-report-nonce";
+  const receiptRef = `evidence/integration-amendment-${amendmentId}.report.receipt.json`;
+  const stream = { captured_bytes: 0, sha256: `sha256:${createHash("sha256").update("").digest("hex")}`, truncated: false };
+  const receipt = {
+    schema_version: 1, kind: "integration-amendment-execution-receipt", phase: "report", subject: `integration-amendment:${amendmentId}:report`, run_id: runId,
+    amendment_id: amendmentId, claim_nonce: nonce, probe: admission.probe, head_sha: baseline, tree_sha: baselineTree, cwd: repo, timeout_ms: artifact.timeout_ms,
+    started_at: CLAIM_NOW, completed_at: CLAIM_NOW, duration_ms: 1, status: "fail", review_ready: true,
+    commands: [{ index: 0, program: "node", args: ["--test", "consumer"], outcome: "exited", status: "fail", exit_code: 1, signal: null, error_code: null, duration_ms: 1, stdout: stream, stderr: stream }],
+  };
+  writeJson(join(runDir, receiptRef), receipt);
+  writeJson(join(runDir, "evidence", "integration-amendment.report.claim.json"), {
+    schema_version: 1, kind: "integration-amendment-execution-claim", phase: "report", subject: receipt.subject, state: "completed", nonce, amendment_id: amendmentId,
+    identity, run_id: runId, probe: admission.probe, head_sha: baseline, tree_sha: baselineTree, cwd: repo, timeout_ms: artifact.timeout_ms,
+    receipt_ref: receiptRef, claimed_at: CLAIM_NOW, completed_at: CLAIM_NOW, status: "fail", receipt_hash: hashFileBytes(join(runDir, receiptRef)),
+  });
+  await transitionIntegrationAmendment(runDir, { action: "report", owner_slice_id: "owner", consumer_slice_id: "consumer", defect_path: "src/owner/amendment.js", verification_artifact_id: artifact.id }, { repoRoot: repo, now: CLAIM_NOW });
+  const published = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+  assert.deepEqual(published.integration_amendment.admission.owner, row.source, `${row.id}: exact source before amendment consistency consumer`);
+  return { repo, runDir, run: published, sidecars };
+}
+
+function issue128Plan() {
+  return withDeliveryEnvelope({
+    slices: [
+      { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["owner"], test_plan: ["node --test owner"] },
+      { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["consumer"], test_plan: ["node --test consumer"] },
+      { id: "remaining", stack: "backend", paths: ["src/remaining/**"], depends_on: ["consumer"], acceptance: ["remaining"], test_plan: ["node --test remaining"] },
+    ],
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+  });
+}
+
+function materializeIssue128Sources(runDir, sources, id) {
+  const sidecars = new Map();
+  for (const [name, source] of Object.entries(sources)) {
+    const path = join(runDir, source.ref);
+    if (sidecars.has(source.ref)) {
+      assert.equal(sidecars.get(source.ref).bytes, source.bytes, `${id}: ${name} duplicate ref bytes`);
+      continue;
+    }
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, source.bytes, "utf8");
+    assert.equal(hashFileBytes(path), source.hash, `${id}: ${name} exact sidecar hash`);
+    sidecars.set(source.ref, { path, bytes: source.bytes, hash: source.hash });
+  }
+  return sidecars;
+}
+
+function restoreIssue128ExecutableBaseline(fixture, immutableRun, immutableRunBytes, mutation) {
+  const runPath = join(fixture.runDir, "run.json");
+  assert.deepEqual(fixture.run, immutableRun, `${mutation.name}: immutable structured run baseline`);
+  writeFileSync(runPath, immutableRunBytes);
+  assert.deepEqual(readFileSync(runPath), immutableRunBytes, `${mutation.name}: exact restored run.json bytes`);
+  assert.equal(hashFileBytes(runPath), hashBuffer(immutableRunBytes), `${mutation.name}: exact restored run.json hash`);
+  for (const sidecar of fixture.sidecars.values()) {
+    writeFileSync(sidecar.path, sidecar.bytes);
+    assert.deepEqual(readFileSync(sidecar.path), Buffer.from(sidecar.bytes), `${mutation.name}: exact restored sidecar bytes`);
+    assert.equal(hashFileBytes(sidecar.path), sidecar.hash, `${mutation.name}: exact restored sidecar hash`);
+  }
+}
+
+function freezeIssue128Baseline(value) {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value)) freezeIssue128Baseline(nested);
+  return Object.freeze(value);
+}
+
+function issue128CanonicalSource(run, row) {
+  const consumer = run.slices.find(({ id }) => id === "consumer");
+  if (row.id.startsWith("slice-attempt-review-")) return consumer.attempt_reviews[0];
+  if (row.id.startsWith("slice-modified-extension-")) return consumer.attempt_reviews[0].modified_extensions[0];
+  if (row.id.startsWith("slice-")) return run.slices.find(({ id }) => id === row.source.id);
+  if (row.id.startsWith("terminal-")) return run.terminal_result.nonconvergence;
+  if (row.id === "amendment-owner-snapshot-v2-history") return run.integration_amendment?.admission.owner;
+  return run.continuation?.carry_forward.accepted_slices.find(({ id }) => id === row.source.id);
+}
+
+function applyIssue128ExecutableMutation(run, fixture, row, mutation) {
+  if (mutation.code === "B") {
+    const sourceName = mutation.path[1];
+    const source = row.external_sources[sourceName];
+    const sidecar = fixture.sidecars.get(source.ref);
+    writeFileSync(sidecar.path, `${sidecar.bytes} `);
+    return;
+  }
+  const source = issue128CanonicalSource(run, row);
+  const enclosing = row.id.startsWith("slice-modified-extension-") ? run.slices.find(({ id }) => id === "consumer").attempt_reviews[0] : null;
+  const rootName = mutation.path[0];
+  const path = mutation.path.slice(1);
+  let owner = rootName === "enclosing_source" ? enclosing : rootName === "owner_source" ? run.slices.find(({ id }) => id === "owner") : source;
+  if (mutation.operation === "unknown-key") {
+    for (const segment of path) owner = owner[segment];
+    assert.deepEqual(owner, mutation.expected, `${mutation.name}: exact object boundary before unsupported-key insertion`);
+    assert.equal(Object.hasOwn(owner, mutation.key), false, `${mutation.name}: unsupported key must be new`);
+    owner[mutation.key] = mutation.value;
+    assert.equal(owner[mutation.key], mutation.value, `${mutation.name}: unsupported key must be physically inserted`);
+    return;
+  }
+  for (const segment of path.slice(0, -1)) owner = owner[segment];
+  const key = path.at(-1);
+  assert.deepEqual(owner[key], mutation.expected, `${mutation.name}: exact field before physical mutation`);
+  if (mutation.code === "K") delete owner[key];
+  else if (mutation.code === "V") owner[key] = typeof owner[key] === "string" ? "invalid" : "invalid-type";
+  else if (mutation.code === "R") owner[key] = owner[key].startsWith("evidence/") ? "evidence/missing.json" : owner[key].startsWith("dispatch/") ? "dispatch/missing.json" : "reviews/missing.json";
+  else if (mutation.code === "H") owner[key] = `sha256:${"0".repeat(64)}`;
+  else if (mutation.code === "D") owner[key] = Array.isArray(owner[key]) ? [...owner[key], "synthetic/path"] : `drift-${owner[key]}`;
+  else if (mutation.code === "I") owner[key] = Number.isInteger(owner[key]) ? owner[key] + 1 : owner[key]?.length === 40 ? "0".repeat(40) : "cross-bound-owner";
+  else if (mutation.code === "X") owner[key] = "1".repeat(40);
+}
+
+function createIssue128StaticGit(repo) {
+  mkdirSync(join(repo, "docs"), { recursive: true });
+  mkdirSync(join(repo, "src", "owner"), { recursive: true });
+  fixtureGit(repo, ["init", "-q", "-b", "main"]);
+  writeFileSync(join(repo, ".git", "info", "exclude"), ".opencode/\n");
+  writeFileSync(join(repo, "README.md"), "fixture\n");
+  writeFileSync(join(repo, "docs", "consumer.md"), "baseline consumer\n");
+  writeFileSync(join(repo, "src", "owner", "shared.js"), "export const shared = 1;\n");
+  fixtureGit(repo, ["add", "README.md", "docs/consumer.md", "src/owner/shared.js"]);
+  issue128Commit(repo, "2026-01-01T00:00:00Z", ["commit", "-q", "-m", "issue 128 baseline"]);
+  const base = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+  assert.equal(base, "8b20ea435c507974bec4acb19f81e17969a8cf23");
+  for (const branch of ["issue128-owner", "issue128-consumer", "issue128-empty", "issue128-unowned", "issue128-sibling", "issue128-amendment-owner"]) fixtureGit(repo, ["branch", branch, base]);
+
+  fixtureGit(repo, ["checkout", "-q", "issue128-owner"]);
+  writeFileSync(join(repo, "src", "owner", "owned.js"), "export const owned = true;\n");
+  fixtureGit(repo, ["add", "src/owner/owned.js"]);
+  issue128Commit(repo, "2026-01-01T00:01:00Z", ["commit", "-q", "-m", "issue 128 owner"]);
+  assert.equal(fixtureGit(repo, ["rev-parse", "HEAD"]).trim(), "ff72597376c2c7c3771198a766a1ba1c049da558");
+  fixtureGit(repo, ["checkout", "-q", "main"]);
+  issue128Commit(repo, "2026-01-01T00:02:00Z", ["merge", "-q", "--no-ff", "-m", "merge issue 128 owner", "issue128-owner"]);
+  const ownerMerge = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+  assert.equal(ownerMerge, "84ae9626ea3f547d151a9bc024393e5737805355");
+
+  fixtureGit(repo, ["checkout", "-q", "issue128-empty"]);
+  issue128Commit(repo, "2026-01-01T00:03:00Z", ["commit", "-q", "--allow-empty", "-m", "issue 128 empty consumer"]);
+  assert.equal(fixtureGit(repo, ["rev-parse", "HEAD"]).trim(), "08f147e9f78c7a13c5b1e8159c6d85c8beb6a5fe");
+  issue128MergeVariant(repo, "empty", ownerMerge, "issue128-empty", "2026-01-01T00:04:00Z", "cc372a426a85607b070337de5ddc601dc1604354");
+
+  fixtureGit(repo, ["checkout", "-q", "issue128-unowned"]);
+  writeFileSync(join(repo, "docs", "consumer.md"), "changed consumer\n");
+  fixtureGit(repo, ["add", "docs/consumer.md"]);
+  issue128Commit(repo, "2026-01-01T00:05:00Z", ["commit", "-q", "-m", "issue 128 unowned consumer"]);
+  assert.equal(fixtureGit(repo, ["rev-parse", "HEAD"]).trim(), "2ab370fb56a397c11c1dd1defe59203a1587797a");
+  issue128MergeVariant(repo, "unowned", ownerMerge, "issue128-unowned", "2026-01-01T00:06:00Z", "3b45f19f7ee2421894135a8dbd4462a49ead2209");
+
+  fixtureGit(repo, ["checkout", "-q", "issue128-sibling"]);
+  writeFileSync(join(repo, "src", "owner", "shared.js"), "export const shared = 2;\n");
+  fixtureGit(repo, ["add", "src/owner/shared.js"]);
+  issue128Commit(repo, "2026-01-01T00:07:00Z", ["commit", "-q", "-m", "issue 128 sibling consumer"]);
+  assert.equal(fixtureGit(repo, ["rev-parse", "HEAD"]).trim(), "ddc920e780e08f2a3561d407b880f22a726b7c9d");
+  issue128MergeVariant(repo, "sibling", ownerMerge, "issue128-sibling", "2026-01-01T00:08:00Z", "d209b10df237a6893c2aae54e4a36676588feda9");
+
+  fixtureGit(repo, ["checkout", "-q", "issue128-amendment-owner"]);
+  writeFileSync(join(repo, "docs", "consumer.md"), "changed amendment owner\n");
+  writeFileSync(join(repo, "src", "owner", "amendment.js"), "export const amendmentOwner = true;\n");
+  fixtureGit(repo, ["add", "docs/consumer.md", "src/owner/amendment.js"]);
+  issue128Commit(repo, "2026-01-01T00:09:00Z", ["commit", "-q", "-m", "issue 128 amendment owner"]);
+  assert.equal(fixtureGit(repo, ["rev-parse", "HEAD"]).trim(), "d29a5e849c5c73bc0d8dfe723fb51578ee6dfc06");
+  issue128MergeVariant(repo, "amendment", base, "issue128-amendment-owner", "2026-01-01T00:10:00Z", "32c7160a87fd07fb9125ca31af1e46123f1dbbef");
+  fixtureGit(repo, ["branch", "-f", "issue128-oracle", ownerMerge]);
+}
+
+function issue128MergeVariant(repo, name, base, reviewedBranch, date, expected) {
+  fixtureGit(repo, ["checkout", "-q", "-B", `issue128-${name}-main`, base]);
+  issue128Commit(repo, date, ["merge", "-q", "--no-ff", "-m", `merge issue 128 ${name}${name === "amendment" ? " owner" : " consumer"}`, reviewedBranch]);
+  assert.equal(fixtureGit(repo, ["rev-parse", "HEAD"]).trim(), expected);
+}
+
+function issue128Commit(repo, date, args) {
+  return execFileSync("git", args, {
+    cwd: repo,
+    encoding: "utf8",
+    env: { ...process.env, GIT_AUTHOR_NAME: "Issue 128 Oracle", GIT_AUTHOR_EMAIL: "oracle@example.com", GIT_AUTHOR_DATE: date, GIT_COMMITTER_NAME: "Issue 128 Oracle", GIT_COMMITTER_EMAIL: "oracle@example.com", GIT_COMMITTER_DATE: date },
+  });
 }
 
 async function consumeB0M3Mutation(root, record, mutationCase) {
@@ -3803,6 +4224,16 @@ function continuationSourceSnapshot(parentRunDir, continuation, recordId) {
 
 function hashFileBytes(file) {
   return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
+}
+
+function hashBuffer(bytes) {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function issue128BaselineIdsForRoute(route) {
+  return Object.entries(ISSUE128_BASELINE_ROUTE_INVENTORY)
+    .filter(([, assignment]) => assignment.route === route)
+    .map(([id]) => id);
 }
 
 function isExactNamedRejection(error, rejector) {
