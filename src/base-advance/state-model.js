@@ -146,16 +146,6 @@ export const BASE_ADVANCE_STATE_MODEL = Object.freeze({
     malformed: RUN_INVALID,
     "cross-bound": RUN_INVALID,
   }),
-  repair: dimension({
-    absent: ALLOW,
-    "fully-merged-resolved": ALLOW,
-    reported: INELIGIBLE,
-    repairing: INELIGIBLE,
-    review: INELIGIBLE,
-    blocked: INELIGIBLE,
-    malformed: RUN_INVALID,
-    "cross-bound": RUN_INVALID,
-  }),
   panels: dimension({
     absent: ALLOW,
     validator: INELIGIBLE,

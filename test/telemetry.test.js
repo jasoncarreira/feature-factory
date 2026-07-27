@@ -355,6 +355,20 @@ describe("B6 metadata-only spans", () => {
     assert.deepEqual(b6Attributes(revoked.proxy), {});
   });
 
+  it("projects only current route and continuation enums", () => {
+    for (const route of ["ordinary-slice", "integration-amendment", "integration-amendment-review", "panel-remediation", "post-pr-remediation", "integration-conflict"]) {
+      assert.equal(b6Attributes({ "feature_factory.route": route })["feature_factory.route"], route);
+    }
+    assert.deepEqual(b6Attributes({
+      "feature_factory.route": "merged-slice-repair",
+      "feature_factory.continuation_kind": "narrow-remediation",
+    }), {});
+    assert.deepEqual(b6Attributes({ "feature_factory.continuation_kind": "new-pr" }), {});
+    assert.deepEqual(b6Attributes({ "feature_factory.continuation_kind": "full-plan-carry-forward" }), {
+      "feature_factory.continuation_kind": "full-plan-carry-forward",
+    });
+  });
+
   it("pseudonymizes entropy-classified identifiers without exposing credential shapes", () => {
     const runId = "b6-final-square-completed-correlated-v4-20260722";
     const attributes = b6Attributes({

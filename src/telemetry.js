@@ -50,7 +50,7 @@ const B6_OPAQUE_IDENTIFIER_ATTRIBUTES = new Set([
 ]);
 const B6_ENUM_ATTRIBUTES = new Map([
   ["feature_factory.target_agent", new Set(["feature-factory", "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer", "work-decomposer", "backend-builder", "frontend-builder", "test-verifier", "work-reviewer", "implementation-validator", "security-reviewer"])],
-  ["feature_factory.route", new Set(["ordinary-slice", "merged-slice-repair", "integration-amendment", "integration-amendment-review", "panel-remediation", "post-pr-remediation", "integration-conflict"])],
+  ["feature_factory.route", new Set(["ordinary-slice", "integration-amendment", "integration-amendment-review", "panel-remediation", "post-pr-remediation", "integration-conflict"])],
   ["feature_factory.lane", new Set(["backend", "frontend", "reviewer"])],
   ["feature_factory.task_context", new Set(["fresh", "reuse"])],
   ["feature_factory.call_relationship", new Set(["task-hook", "parent-session"])],
@@ -60,7 +60,7 @@ const B6_ENUM_ATTRIBUTES = new Map([
   ["feature_factory.status", new Set(["started", "dry-run", "completed", "blocked", "partial", "needs-human", "recovery-required", "already-running", "failed"])],
   ["feature_factory.verdict", new Set(["APPROVE", "REJECT", "GO", "GO-WITH-NITS", "NO-GO", "PASS", "BLOCK", "APPROVE-CHECKPOINT", "REDESIGN-REQUIRED"])],
   ["feature_factory.convergence", new Set(["converging", "nonconvergent"])],
-  ["feature_factory.continuation_kind", new Set(["narrow-remediation", "full-plan-carry-forward", "new-pr"])],
+  ["feature_factory.continuation_kind", new Set(["full-plan-carry-forward"])],
   ["gen_ai.agent.name", new Set(["feature-factory", "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer", "work-decomposer", "backend-builder", "frontend-builder", "test-verifier", "work-reviewer", "implementation-validator", "security-reviewer"])],
   ["gen_ai.operation.name", new Set(["invoke_agent", "execute_tool"])],
 ]);

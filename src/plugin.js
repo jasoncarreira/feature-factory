@@ -808,10 +808,7 @@ export function specialTaskTelemetryAttributes(context, completion = null) {
   const setSlice = (value) => { if (typeof value === "string") attributes["feature_factory.slice_id"] = value; };
   const setAttempt = (value) => { if (Number.isSafeInteger(value)) attributes["feature_factory.attempt"] = value; };
   const authority = context?.authority;
-  if (context?.route === "merged-slice-repair") {
-    setSlice(authority?.owner?.id ?? authority?.repair?.owner_slice_id);
-    setAttempt(authority?.repair?.attempts);
-  } else if (context?.route === "integration-amendment") {
+  if (context?.route === "integration-amendment") {
     setSlice(authority?.owner?.id);
     setAttempt(authority?.attempt?.attempt);
   } else if (context?.route === "panel-remediation") {

@@ -1,11 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { continueFactory, resumeFactory, startFactory } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
+import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
+import { createReviewRecord } from "./helpers/review-record-fixture.js";
 
 const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
@@ -142,8 +145,9 @@ describe("factory trace-context propagation", () => {
       await withLaunchEnv(fixture, { OPENCODE_KEEPALIVE: "1" }, async () => {
         const result = await continueFactory(fixture.runId, {
           cwd: fixture.repo,
-          review: "reviewer.json",
+          review: "work-decomposer.json",
           runId: "continue-traceparent-next",
+          carryForward: true,
           detached: true,
           traceparent,
         });
@@ -281,12 +285,12 @@ describe("B6.2 factory lifecycle spans", () => {
     const fake = fakeB6Otel();
     try {
       const dryResult = continueFactory(dry.runId, {
-        cwd: dry.repo, review: "reviewer.json", runId: "dry-child", dryRun: true,
+        cwd: dry.repo, review: "work-decomposer.json", runId: "dry-child", carryForward: true, dryRun: true,
         telemetry: { enabled: true, importer: fake.importer },
       });
       assert.equal(dryResult.status, "dry-run");
-      assert.throws(() => continueFactory(failed.runId, {
-        cwd: failed.repo, review: "reviewer.json", runId: "failed-child",
+      await assert.rejects(continueFactory(failed.runId, {
+        cwd: failed.repo, review: "work-decomposer.json", runId: "failed-child", carryForward: true,
         traceparent: "invalid",
         telemetry: { enabled: true, importer: fake.importer },
       }), /invalid trace context/u);
@@ -294,32 +298,26 @@ describe("B6.2 factory lifecycle spans", () => {
         cwd: failed.repo, carryForward: true,
         telemetry: { enabled: true, importer: fake.importer },
       }));
-      assert.throws(() => continueFactory("missing-new-pr-parent", {
-        cwd: failed.repo, newPr: true,
-        telemetry: { enabled: true, importer: fake.importer },
-      }));
       const continued = await withLaunchEnv(success, {
         OPENCODE_CREATE_RUN_ID: "durable-child",
       }, () => continueFactory(success.runId, {
-        cwd: success.repo, review: "reviewer.json", runId: "durable-child", telemetry: { enabled: true, importer: fake.importer },
+        cwd: success.repo, review: "work-decomposer.json", runId: "durable-child", carryForward: true, telemetry: { enabled: true, importer: fake.importer },
       }));
       assert.equal(continued, undefined);
       await flushB6Telemetry();
       const spans = fake.spans.filter((span) => span.name === "feature_factory.factory.continue");
-      assert.equal(spans.length, 5);
+      assert.equal(spans.length, 4);
       assert.deepEqual(spans.map((span) => span.attributes["feature_factory.continuation_kind"]), [
-        "narrow-remediation",
-        "narrow-remediation",
         "full-plan-carry-forward",
-        "new-pr",
-        "narrow-remediation",
+        "full-plan-carry-forward",
+        "full-plan-carry-forward",
+        "full-plan-carry-forward",
       ]);
       assert.equal(spans[0].attributes["feature_factory.run_id"], undefined);
       assert.equal(spans[1].attributes["feature_factory.run_id"], undefined);
       assert.equal(spans[2].attributes["feature_factory.run_id"], undefined);
-      assert.equal(spans[3].attributes["feature_factory.run_id"], undefined);
-      assert.equal(spans[4].attributes["feature_factory.run_id"], "durable-child");
-      assert.equal(spans[4].attributes["gen_ai.conversation.id"], "durable-child");
+      assert.equal(spans[3].attributes["feature_factory.run_id"], "durable-child");
+      assert.equal(spans[3].attributes["gen_ai.conversation.id"], "durable-child");
     } finally {
       cleanup(dry.root);
       cleanup(failed.root);
@@ -410,21 +408,58 @@ function createResumeLaunchFixture(runId) {
 function createContinueLaunchFixture(runId) {
   const fixture = createLaunchFixture(runId);
   initGitRepo(fixture.repo);
-  runGit(fixture.repo, ["branch", runId]);
+  const origin = join(fixture.root, "origin.git");
+  runGit(fixture.repo, ["init", "--bare", origin]);
+  runGit(fixture.repo, ["remote", "add", "origin", origin]);
+  runGit(fixture.repo, ["push", "-u", "origin", "main"]);
+  const baseCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+  runGit(fixture.repo, ["checkout", "-b", runId]);
   const runDir = join(fixture.repo, ".opencode", "factory", runId);
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
+  mkdirSync(join(runDir, "plan"), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
-  writeJson(join(runDir, "reviews", "reviewer.json"), { subject: runId, summary: "needs continuation" });
+  writeFileSync(join(runDir, "artifacts", "research-map.md"), "research\n", "utf8");
+  writeFileSync(join(runDir, "artifacts", "design-brief.md"), "design\n", "utf8");
+  writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "accepted brief\n", "utf8");
+  writeJson(join(runDir, "reviews", "spec-writer.json"), createReviewRecord({
+    subject: "spec-writer", verdict: "APPROVE", required_fixes: [], summary: "accepted planning",
+  }));
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), createReviewRecord({
+    subject: "work-decomposer", verdict: "APPROVE", required_fixes: [], summary: "accepted decomposition",
+  }));
+  const plan = withDeliveryEnvelope({
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    slices: [{ id: "slice", stack: "backend", paths: ["slice.txt"], depends_on: [], acceptance: ["accepted"], test_plan: ["test slice"] }],
+  });
+  writeJson(join(runDir, "plan", "slices.json"), plan);
   writeJson(join(runDir, "run.json"), {
     schema_version: 1,
     run_id: runId,
     status: "blocked",
+    base_ref: "main",
+    base_commit: baseCommit,
     branch: runId,
-    worktree: join(fixture.repo, ".opencode", "worktrees", runId),
-    validator: { verdict: "NO-GO", review_ref: "reviews/reviewer.json" },
+    worktree: fixture.repo,
     gates: {},
-    terminal_result: { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} },
+    slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "pending", attempts: 0 }],
+    steps: [
+      {
+        agent: "spec-writer", status: "accepted", attempts: 1, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json",
+        acceptance: {
+          artifact_ref: "artifacts/technical-brief.md", artifact_hash: fileHash(join(runDir, "artifacts", "technical-brief.md")),
+          review_ref: "reviews/spec-writer.json", review_hash: fileHash(join(runDir, "reviews", "spec-writer.json")),
+        },
+      },
+      {
+        agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+        acceptance: {
+          artifact_ref: "plan/slices.json", artifact_hash: fileHash(join(runDir, "plan", "slices.json")),
+          review_ref: "reviews/work-decomposer.json", review_hash: fileHash(join(runDir, "reviews", "work-decomposer.json")),
+        },
+      },
+    ],
+    terminal_result: { status: "blocked", run_id: runId, reason: "carry-forward-required", summary: "blocked", artifacts: {} },
   });
   return { ...fixture, runId, runDir };
 }
@@ -434,7 +469,7 @@ function createFakeOpencode(root) {
   mkdirSync(bin);
   const script = join(bin, "opencode");
   writeFileSync(script, `#!/usr/bin/env node
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const keys = [
   "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -459,7 +494,9 @@ if (process.env.OPENCODE_CREATE_RUN_ID) {
   const continuation = payload?.continuation;
   const status = process.env.OPENCODE_CREATE_RUN_STATUS || "running";
   const terminal = status === "blocked" ? { terminal_result: { status, run_id: runId, pr_url: null, reason: "test-blocked", summary: null, artifacts: {} } } : {};
-  writeFileSync(join(runDir, "run.json"), JSON.stringify({ schema_version: 1, run_id: runId, status, branch: runId, worktree, gates: {}, slices: [], ...(continuation ? { continuation } : {}), ...terminal }, null, 2) + "\\n", "utf8");
+  if (!existsSync(join(runDir, "run.json"))) {
+    writeFileSync(join(runDir, "run.json"), JSON.stringify({ schema_version: 1, run_id: runId, status, branch: runId, worktree, gates: {}, slices: [], ...(continuation ? { continuation } : {}), ...terminal }, null, 2) + "\\n", "utf8");
+  }
 }
 if (process.env.OPENCODE_KEEPALIVE === "1") setInterval(() => {}, 1000);
 `, "utf8");
@@ -533,6 +570,16 @@ function initGitRepo(repo) {
 function runGit(repo, args) {
   const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
   assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+}
+
+function gitOutput(repo, args) {
+  const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+  return proc.stdout.trim();
+}
+
+function fileHash(file) {
+  return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 }
 
 function readJson(file) {

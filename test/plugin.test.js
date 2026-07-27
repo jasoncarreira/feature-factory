@@ -17,6 +17,7 @@ import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/rev
 
 const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
 const skillDoc = readFileSync(new URL("../assets/skills/feature/SKILL.md", import.meta.url), "utf8");
+const pluginSource = readFileSync(new URL("../src/plugin.js", import.meta.url), "utf8");
 
 describe("plugin profiles", () => {
   it("lets security-reviewer use a dedicated security profile", async () => {
@@ -111,7 +112,7 @@ describe("checked slice builder Task dispatch", () => {
       await assert.rejects(resumeFactory("run", { cwd: fixture.repo, dryRun: true }), /special builder Task dispatch/u);
       await assert.rejects(recoverDisruptedRun("run", { cwd: fixture.repo }), /special builder Task dispatch/u);
       await assert.rejects(cleanupRun("run", { cwd: fixture.repo, force: true }), /special builder Task dispatch/u);
-      assert.throws(() => buildContinuation("run", { cwd: fixture.repo }), /special builder Task dispatch/u);
+      assert.throws(() => buildContinuation("run", { cwd: fixture.repo, carryForward: true }), /special builder Task dispatch/u);
       mkdirSync(join(fixture.repo, "src"), { recursive: true });
       writeFileSync(join(fixture.repo, "src", "panel.js"), "export const fixed = true;\n", "utf8");
       git(fixture.repo, ["add", "src/panel.js"]);
@@ -125,7 +126,7 @@ describe("checked slice builder Task dispatch", () => {
       await assert.rejects(resumeFactory("run", { cwd: fixture.repo, dryRun: true }), /closed but awaits exact route consumption/u);
       await assert.rejects(recoverDisruptedRun("run", { cwd: fixture.repo }), /closed but awaits exact route consumption/u);
       await assert.rejects(cleanupRun("run", { cwd: fixture.repo, force: true }), /closed but awaits exact route consumption/u);
-      assert.throws(() => buildContinuation("run", { cwd: fixture.repo }), /closed but awaits exact route consumption/u);
+      assert.throws(() => buildContinuation("run", { cwd: fixture.repo, carryForward: true }), /closed but awaits exact route consumption/u);
       writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n", "utf8");
       writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "main", attempt: 2, verdict: "GO", reviewed_head_sha: completionHead, required_fixes: [] });
       writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "main", attempt: 2, verdict: "PASS", reviewed_head_sha: completionHead, required_fixes: [] });
@@ -650,7 +651,7 @@ describe("feature command payload parsing", () => {
       [encodeFeatureCommandPayload({ operator_request: `resume ${runId}`, driver: { mode: "autonomous" }, resume, steering, continuation: {} }), "ambiguous-route"],
       [encodeFeatureCommandPayload({ operator_request: `resume wrong`, driver: { mode: "autonomous" }, resume, steering }), "resume-request-mismatch"],
       [encodeFeatureCommandPayload({ operator_request: `resume ${runId}`, driver: { mode: "autonomous" }, resume, steering: { ...steering, pending: { garbage: true }, consume: { command: "other", args: [] } } }), "invalid-steering-pointer"],
-      [encodeFeatureCommandPayload({ operator_request: "continue", driver: { mode: "headless" }, continuation: {} }), "invalid-continuation"],
+      [encodeFeatureCommandPayload({ operator_request: "continue", driver: { mode: "headless" }, continuation: {} }), "invalid-continuation-schema"],
       [encodeFeatureCommandPayload({ operator_request: "continue", driver: { mode: "headless", run_id: "new-run" }, continuation: {} }), "invalid-driver-run-id-route"],
       [encodeFeatureCommandPayload({ operator_request: "start", driver: {}, checkpoint: {} }), "unsupported-checkpoint-route"],
       [encodeFeatureCommandPayload({ operator_request: "start", driver: {}, checkpoint_reservation: {} }), "unsupported-checkpoint-route"],
@@ -719,36 +720,6 @@ describe("feature command payload parsing", () => {
 
   it("rejects candidate-only and malformed schema-v2 carry-forward payloads", () => {
     const continuation = validContinuation();
-    continuation.schema_version = 2;
-    continuation.parent.commit = "e".repeat(40);
-    continuation.target.base_ref = "refs/remotes/origin/main";
-    continuation.carry_forward = {
-      scope: "full-remaining-plan",
-      plan_ref: "plan/slices.json",
-      plan_hash: `sha256:${"1".repeat(64)}`,
-      start_commit: continuation.parent.commit,
-      accepted_slices: [{
-        id: "A", declared_paths: ["A.txt"], effective_paths: ["A.txt"], attempts: 2,
-        evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`,
-        review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`,
-        reviewed_commit: "4".repeat(40), merge_commit: "5".repeat(40),
-        attempt_reviews: [
-          { attempt: 1, evidence_ref: "evidence/A.attempt-1.json", evidence_hash: `sha256:${"8".repeat(64)}`, review_ref: "reviews/A.attempt-1.json", review_hash: `sha256:${"9".repeat(64)}`, reviewed_commit: "a".repeat(40), diff_base_commit: "e".repeat(40), ratified_paths: [], verdict: "REJECT", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 1 },
-          { attempt: 2, evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`, review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`, reviewed_commit: "4".repeat(40), diff_base_commit: "e".repeat(40), ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 },
-        ],
-      }],
-      remaining_slice_ids: ["B"],
-    };
-    continuation.planning_reuse = {
-      eligible: true, spec_review_ref: "reviews/spec-writer.json", spec_review_hash: `sha256:${"6".repeat(64)}`,
-      spec_artifact_ref: "artifacts/technical-brief.md", spec_artifact_hash: `sha256:${"7".repeat(64)}`, child_spec_review_ref: "reviews/spec-writer.json",
-    };
-    continuation.configuration = {
-      mode: "headless", github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3,
-      post_pr_policy: { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } },
-    };
-    continuation.parent_artifacts.push({ kind: "technical_brief", ref: "artifacts/technical-brief.md", hash: continuation.planning_reuse.spec_artifact_hash });
-    continuation.parent_reviews.push({ kind: "review", ref: "reviews/spec-writer.json", hash: continuation.planning_reuse.spec_review_hash });
     const decoded = decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() });
     assert.deepEqual(decoded, { ok: false, reason: "continuation-schema-route-mismatch" });
 
@@ -770,33 +741,19 @@ describe("feature command payload parsing", () => {
     continuation.review.kind = "slice";
     continuation.review.source = "run.terminal_result.nonconvergence.source_review.review_ref";
     continuation.review.subject = "slice";
-    assert.deepEqual(decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() }), { ok: false, reason: "invalid-continuation-carry-forward-route" });
+    assert.deepEqual(decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() }), { ok: false, reason: "continuation-schema-route-mismatch" });
 
     continuation.review.source = "run.terminal_result.nonconvergence.other.review_ref";
     assert.deepEqual(decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() }), { ok: false, reason: "invalid-continuation-review" });
   });
 
-  it("validates post-PR continuation bindings before reservation admission", () => {
+  it("rejects obsolete post-PR continuation authority", () => {
     const continuation = validContinuation();
-    const hash = `sha256:${"a".repeat(64)}`;
-    const reviewRef = "reviews/post-pr-ci.attempt-3.json";
-    const evidenceRef = "evidence/post-pr-ci.attempt-3.json";
-    continuation.review = { ...continuation.review, kind: "post_pr", ref: reviewRef, source: "run.post_pr.continuation_review.ref", verdict: "BLOCKED" };
-    continuation.operator_summary = `Continue blocked run '${continuation.parent.run_id}' from ${reviewRef}.`;
-    continuation.parent_reviews = [{ kind: "review", ref: reviewRef, hash }];
-    continuation.parent_evidence = [{ kind: "evidence", ref: evidenceRef, hash }];
-    continuation.post_pr = {
-      pr_url: "https://github.com/acme/repo/pull/7", repository: "acme/repo", pr_number: 7, head_sha: "d".repeat(40), disposition: "leave-unchanged",
-      policy: { enabled: true, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } },
-      post_pr_hash: hash, evidence_ref: evidenceRef, evidence_hash: hash, continuation_review_ref: reviewRef, continuation_review_hash: hash,
-    };
-
-    const decoded = decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() });
-    assert.deepEqual(decoded, { ok: false, reason: "continuation-schema-route-mismatch" });
-
-    const forged = structuredClone(continuation);
-    forged.post_pr.evidence_hash = `sha256:${"b".repeat(64)}`;
-    assert.deepEqual(decodeFeatureCommandPayload(continuationToken(forged), { repo: process.cwd() }), { ok: false, reason: "invalid-continuation-post-pr-binding" });
+    continuation.post_pr = {};
+    assert.deepEqual(decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() }), {
+      ok: false,
+      reason: "invalid-continuation",
+    });
   });
 
   it("treats explicit null routes as absent and preserves hook idempotency", async () => {
@@ -1026,6 +983,10 @@ describe("OpenCode 1.18.3 session correlation probe", () => {
 });
 
 describe("B6.2 factory-owned plugin spans", () => {
+  it("contains no merged-slice repair route", () => {
+    assert.doesNotMatch(pluginSource, /merged-slice-repair/u);
+  });
+
   it("rejects every cross-class composite-key collision without replacing the original operation or span", async () => {
     for (const [name, originalKind, collidingKind] of [
       ["special-after-amendment", "amendment", "special"],
@@ -1047,10 +1008,9 @@ describe("B6.2 factory-owned plugin spans", () => {
     }
   });
 
-  it("derives the complete five-route special attribution matrix only from checked context and completion", () => {
+  it("derives the complete four-route special attribution matrix only from checked context and completion", () => {
     const run = { id: "run" };
     const cases = [
-      ["merged-slice-repair", { run, route: "merged-slice-repair", authority: { owner: { id: "owner" }, repair: { owner_slice_id: "owner", attempts: 2 } } }, null, "owner", 2],
       ["integration-amendment", { run, route: "integration-amendment", authority: { owner: { id: "owner" }, attempt: { attempt: 1 } } }, null, "owner", 1],
       ["panel-remediation", { run, route: "panel-remediation", authority: { validator: {}, security_review: {} } }, { owner_slice_id: "panel-owner" }, "panel-owner", null],
       ["post-pr-remediation", { run, route: "post-pr-remediation", authority: { remediation: { attempt: 3, owner: { kind: "slice", slice_id: "post-pr-owner" } } } }, null, "post-pr-owner", 3],
@@ -2055,7 +2015,7 @@ function validContinuation() {
   const reviewRef = "reviews/reviewer.json";
   return {
     kind: "blocked-run-continuation",
-    schema_version: 1,
+    schema_version: 2,
     created_at: "2026-07-09T12:00:00.000Z",
     operator_summary: `Continue blocked run '${parentRunId}' from ${reviewRef}.`,
     parent: {
@@ -2064,7 +2024,7 @@ function validContinuation() {
       run_ref: `.opencode/factory/${parentRunId}/run.json`,
       run_hash: hash,
       branch: parentRunId,
-      commit: "b".repeat(40),
+      commit: "e".repeat(40),
       worktree: resolve(process.cwd(), ".opencode", "worktrees", parentRunId),
     },
     review: {
@@ -2080,12 +2040,43 @@ function validContinuation() {
       run_id: targetRunId,
       branch: targetRunId,
       worktree: resolve(process.cwd(), ".opencode", "worktrees", targetRunId),
-      base_ref: "main",
+      base_ref: "refs/remotes/origin/main",
       base_commit: "c".repeat(40),
     },
-    parent_artifacts: [{ kind: "story", ref: "artifacts/story.md", hash }],
+    parent_artifacts: [
+      { kind: "story", ref: "artifacts/story.md", hash },
+      { kind: "technical_brief", ref: "artifacts/technical-brief.md", hash: `sha256:${"7".repeat(64)}` },
+    ],
     parent_evidence: [{ kind: "evidence", ref: "evidence/build.json", hash }],
-    parent_reviews: [{ kind: "review", ref: reviewRef, hash }],
+    parent_reviews: [
+      { kind: "review", ref: reviewRef, hash },
+      { kind: "review", ref: "reviews/spec-writer.json", hash: `sha256:${"6".repeat(64)}` },
+    ],
+    planning_reuse: {
+      eligible: true, spec_review_ref: "reviews/spec-writer.json", spec_review_hash: `sha256:${"6".repeat(64)}`,
+      spec_artifact_ref: "artifacts/technical-brief.md", spec_artifact_hash: `sha256:${"7".repeat(64)}`, child_spec_review_ref: "reviews/spec-writer.json",
+    },
+    configuration: {
+      mode: "headless", github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3,
+      post_pr_policy: { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } },
+    },
+    carry_forward: {
+      scope: "full-remaining-plan",
+      plan_ref: "plan/slices.json",
+      plan_hash: `sha256:${"1".repeat(64)}`,
+      start_commit: "e".repeat(40),
+      accepted_slices: [{
+        id: "A", declared_paths: ["A.txt"], effective_paths: ["A.txt"], attempts: 2,
+        evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`,
+        review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`,
+        reviewed_commit: "4".repeat(40), merge_commit: "5".repeat(40),
+        attempt_reviews: [
+          { attempt: 1, evidence_ref: "evidence/A.attempt-1.json", evidence_hash: `sha256:${"8".repeat(64)}`, review_ref: "reviews/A.attempt-1.json", review_hash: `sha256:${"9".repeat(64)}`, reviewed_commit: "a".repeat(40), diff_base_commit: "e".repeat(40), ratified_paths: [], verdict: "REJECT", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 1 },
+          { attempt: 2, evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`, review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`, reviewed_commit: "4".repeat(40), diff_base_commit: "e".repeat(40), ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 },
+        ],
+      }],
+      remaining_slice_ids: ["B"],
+    },
   };
 }
 

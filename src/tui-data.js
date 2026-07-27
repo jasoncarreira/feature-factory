@@ -68,7 +68,6 @@ const VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS", "NO-GO"]);
 const SECURITY_VERDICTS = new Set(["PASS", "BLOCK"]);
 const PANEL_AGENTS = new Set(["implementation-validator", "security-reviewer"]);
 const BUILD_SPECIAL_LABELS = Object.freeze({
-  "merged-slice-repair": ["merged-slice repair running", "merged-slice repair awaiting integration"],
   "integration-amendment": ["integration amendment running", "integration amendment awaiting integration"],
   "integration-conflict": ["integration conflict repair running", "integration conflict repair awaiting integration"],
 });

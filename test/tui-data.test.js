@@ -428,7 +428,7 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
-  it("projects authoritative panel state without inferring activity from accepted tests", () => {
+  it("projects complete current panel state and fails closed for incomplete panels", () => {
     const repo = tempDir();
     writeRun(repo, "panel-run", {
       status: "running",
@@ -445,15 +445,23 @@ describe("TUI factory scanner", () => {
       updated_at: "2026-07-04T00:00:00Z",
       gates: {},
       steps: [{ agent: "test-verifier", status: "accepted", attempts: 1 }],
-      validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
+      validator: {
+        verdict: "GO", report: "artifacts/validation-report.md", report_hash: `sha256:${"5".repeat(64)}`,
+        review_ref: "reviews/implementation-validator.json", review_hash: `sha256:${"6".repeat(64)}`, reviewed_head_sha: "7".repeat(40),
+      },
     });
     writeRun(repo, "remediation-run", {
       status: "running",
       updated_at: "2026-07-03T00:00:00Z",
       gates: {},
       steps: [{ agent: "test-verifier", status: "accepted", attempts: 1 }],
-      validator: { verdict: "NO-GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
-      security_review: { verdict: "BLOCK", review_ref: "reviews/security-reviewer.json" },
+      validator: {
+        verdict: "NO-GO", report: "artifacts/validation-report.md", report_hash: `sha256:${"5".repeat(64)}`,
+        review_ref: "reviews/implementation-validator.json", review_hash: `sha256:${"6".repeat(64)}`, reviewed_head_sha: "7".repeat(40),
+      },
+      security_review: {
+        verdict: "BLOCK", review_ref: "reviews/security-reviewer.json", review_hash: `sha256:${"8".repeat(64)}`, reviewed_head_sha: "7".repeat(40),
+      },
     });
 
     const runs = readRuns(findFactoryRoots(repo));
@@ -462,7 +470,8 @@ describe("TUI factory scanner", () => {
     const remediationRun = runs.find((run) => run.run_id === "remediation-run");
 
     assert.equal(panelRun.current, null);
-    assert.equal(securityRun.current, "security-reviewer pending");
+    assert.equal(securityRun.current, null);
+    assert.equal(securityRun.diagnostic_classification, "invalid");
     assert.equal(remediationRun.current, "panel remediation pending");
     cleanup(repo);
   });
@@ -497,7 +506,6 @@ describe("TUI factory scanner", () => {
 
   it("TUI-P3 maps every open and closed build-oriented special dispatch", () => {
     const labels = {
-      "merged-slice-repair": ["merged-slice repair running", "merged-slice repair awaiting integration"],
       "integration-amendment": ["integration amendment running", "integration amendment awaiting integration"],
       "integration-conflict": ["integration conflict repair running", "integration conflict repair awaiting integration"],
     };
@@ -686,7 +694,7 @@ describe("TUI factory scanner", () => {
       { name: "pre-pr", input: { gates: { pre_pr: { status: "approved" } } }, expected: "pre-PR approved" },
       { name: "panel", input: { validator: { verdict: "GO" }, security_review: { verdict: "PASS" } }, expected: "panels passed" },
       { name: "checked-tests", input: { steps: [checkedExecutionStep(runId, { state: "completed", status: "pass", attempt: 1 })] }, expected: "whole-story tests passed a1" },
-      { name: "build-special", input: { special_builder_dispatch: specialDispatch("merged-slice-repair") }, expected: "merged-slice repair running" },
+      { name: "build-special", input: { special_builder_dispatch: specialDispatch("integration-amendment") }, expected: "integration amendment running" },
       { name: "active-slice", input: { slices: [{ id: "active-slice", status: "running", attempts: 1 }] }, expected: "active-slice running a1" },
       { name: "running-step", input: { steps: [{ agent: "story-reader", status: "running", attempts: 1 }] }, expected: "story-reader running a1" },
       { name: "blocked-slice", input: { slices: [{ id: "blocked-slice", status: "blocked", attempts: 1 }] }, expected: "blocked-slice blocked a1" },
@@ -706,7 +714,7 @@ describe("TUI factory scanner", () => {
     assert.equal(projectedCurrent({ status: "blocked", post_pr: postPrFixture("blocked", 0), pr_url: "https://github.com/example/repo/pull/1" }, "tui-p14-terminal-exclusive"), "post-PR blocked");
     assert.equal(projectedCurrent(tiers[0].input, "tui-p14-active-exclusive"), "post-PR checks running a1");
 
-    const malformedLowerDispatch = specialDispatch("merged-slice-repair", { closed: true });
+    const malformedLowerDispatch = specialDispatch("integration-amendment", { closed: true });
     delete malformedLowerDispatch.closure_hash;
     assert.equal(projectedCurrent({
       validator: { verdict: "GO" },
@@ -735,7 +743,7 @@ describe("TUI factory scanner", () => {
     nonRunningClaim.status = "accepted";
     const mismatchedCompleted = checkedExecutionStep(runId, { state: "completed", status: "pass", attempt: 1 });
     mismatchedCompleted.status = "rejected";
-    const partialDispatch = specialDispatch("merged-slice-repair", { closed: true });
+    const partialDispatch = specialDispatch("integration-amendment", { closed: true });
     delete partialDispatch.closure_hash;
     const partialFence = prFence();
     delete partialFence.repository;
@@ -749,6 +757,8 @@ describe("TUI factory scanner", () => {
       ["completed claim status mismatch", { steps: [mismatchedCompleted] }],
       ["unknown validator verdict", { validator: { verdict: "MAYBE" } }],
       ["unknown security verdict", { security_review: { verdict: "WARN" } }],
+      ["retired special dispatch route", { special_builder_dispatch: specialDispatch("merged-slice-repair") }],
+      ["unknown special dispatch route", { special_builder_dispatch: specialDispatch("future-special-route") }],
       ["partial special dispatch", { special_builder_dispatch: partialDispatch }],
       ["partial slice dispatch", { slices: [{ id: "slice", status: "running", attempts: 1, dispatch_required: true, dispatch_claim_ref: "dispatch/claim.json" }] }],
       ["partial PR operation", { post_pr: postPrFixture("disabled", 0, { pr_operation: { operation_id: "partial" } }) }],
