@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { spawnSync } from "./helpers/git-fixture.js";
+import { spawn, spawnSync } from "./helpers/git-fixture.js";
 import { createReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { tmpdir } from "node:os";
@@ -13,12 +13,39 @@ import { PassThrough } from "node:stream";
 import { adoptContinuation, assertContinuationBindingsCurrent, buildContinuation, continueFactory, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory, seedContinuationPlanningArtifacts, startFactory } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
 import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionContinuationAdoption, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
-import { DURABLE_AUTHORITY_CATALOG, DURABLE_MUTATION_FAMILIES, createDurableCatalogBaseline, emitDurableRecordMutations } from "./helpers/durable-record-mutations.js";
+import { DURABLE_AUTHORITY_CATALOG, DURABLE_MUTATION_FAMILIES, ISSUE128_BASELINE_ROUTE_INVENTORY, ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG, createDurableCatalogBaseline, emitDurableRecordMutations, emitIssue128FinishAndDiscloseMutations } from "./helpers/durable-record-mutations.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { deliveryEnvelopeForSlices, passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
+const currentTestPath = fileURLToPath(import.meta.url);
+const issue128WorkerEnv = "OPENCODE_ISSUE128_CONTINUATION_WORKER";
+const issue128WorkerChunkEnv = "OPENCODE_ISSUE128_CONTINUATION_CHUNK";
+const issue128WorkerChunkCount = 2;
+const issue128WorkerTests = Object.freeze({
+  "ordinary-continuation": "preserves an ordinary merged A2/S2 row only with its same-binding merged owner",
+  "checkpoint-continuation": "preserves a checkpoint-bound merged A2/S2 owner pair and rejects owner drift before publication",
+});
+const issue128WorkerRecords = Object.freeze({
+  "ordinary-continuation": "continuation-carry-forward-accepted-slice-v2",
+  "checkpoint-continuation": "checkpoint-carry-forward-accepted-slice-v2",
+});
+const issue128WorkerRoute = process.env[issue128WorkerEnv] || null;
+if (issue128WorkerRoute !== null && !Object.hasOwn(issue128WorkerTests, issue128WorkerRoute)) {
+  throw new Error(`unsupported ${issue128WorkerEnv} route '${issue128WorkerRoute}'`);
+}
+const issue128WorkerChunkText = process.env[issue128WorkerChunkEnv];
+if (issue128WorkerRoute === null && issue128WorkerChunkText !== undefined) {
+  throw new Error(`${issue128WorkerChunkEnv} requires ${issue128WorkerEnv}`);
+}
+if (issue128WorkerRoute !== null && !/^(0|[1-9]\d*)$/u.test(issue128WorkerChunkText || "")) {
+  throw new Error(`${issue128WorkerChunkEnv} must be an integer chunk index`);
+}
+const issue128WorkerChunk = issue128WorkerRoute === null ? null : Number(issue128WorkerChunkText);
+if (issue128WorkerChunk !== null && issue128WorkerChunk >= issue128WorkerChunkCount) {
+  throw new Error(`${issue128WorkerChunkEnv} must be less than ${issue128WorkerChunkCount}`);
+}
 
 describe("factory continue", () => {
   it("rejects a blocked parent that carries an unresolved builder dispatch", () => {
@@ -629,7 +656,43 @@ describe("factory continue", () => {
   });
 });
 
-describe("continuation planning-artifact reuse", () => {
+describe("continuation planning-artifact reuse", { concurrency: 2 }, () => {
+  // Overlap the isolated matrices with independent fixture tests instead of extending the file's serial tail.
+  it("runs ordinary and checkpoint continuation mutation workers concurrently", { skip: issue128WorkerRoute !== null }, async () => {
+    const workers = Object.entries(issue128WorkerTests).flatMap(([route, testName]) =>
+      Array.from({ length: issue128WorkerChunkCount }, (_, chunk) => runIssue128ContinuationWorker(route, testName, chunk)));
+    const results = await Promise.all(workers);
+    for (const result of results) {
+      const diagnostics = issue128WorkerDiagnostics(result);
+      assert.equal(result.error, null, diagnostics);
+      assert.equal(result.signal, null, diagnostics);
+      assert.equal(result.code, 0, diagnostics);
+      result.completion = parseIssue128WorkerCompletion(result.stdout, diagnostics);
+      assert.equal(result.completion.route, result.route, diagnostics);
+      assert.equal(result.completion.chunk, result.chunk, diagnostics);
+      assert.equal(result.completion.chunk_count, issue128WorkerChunkCount, diagnostics);
+      assert.deepEqual(result.completion.baseline_ids, result.chunk === 0 ? issue128BaselineIdsForRoute(result.route) : [], diagnostics);
+      assert.equal(result.completion.executed, result.completion.mutation_names.length, diagnostics);
+      assert.equal(result.completion.mutation_digest, issue128MutationNameDigest(result.completion.mutation_names), diagnostics);
+    }
+    for (const route of Object.keys(issue128WorkerTests)) {
+      const routeCompletions = results.filter((result) => result.route === route).map(({ completion }) => completion);
+      assert.deepEqual(routeCompletions.map(({ chunk }) => chunk).sort((a, b) => a - b), [0, 1], `${route}: exact worker chunks`);
+      assert.equal(routeCompletions.reduce((sum, { executed }) => sum + executed, 0), 178, `${route}: exact executed mutation count`);
+      const expectedNames = issue128MutationNamesForRoute(route);
+      assert.equal(expectedNames.length, 178, `${route}: exact emitted mutation count`);
+      const observedNames = routeCompletions.flatMap(({ mutation_names: names }) => names);
+      assert.equal(new Set(observedNames).size, observedNames.length, `${route}: no duplicate mutation names across chunks`);
+      assert.deepEqual([...observedNames].sort(), [...expectedNames].sort(), `${route}: no missing or unexpected mutation names`);
+      const observedByName = new Set(observedNames);
+      assert.equal(issue128MutationNameDigest(expectedNames.filter((name) => observedByName.has(name))), issue128MutationNameDigest(expectedNames), `${route}: exact emitter-order mutation digest`);
+    }
+    const expectedBaselineIds = Object.keys(issue128WorkerTests).flatMap(issue128BaselineIdsForRoute);
+    const observedBaselineIds = results.flatMap(({ completion }) => completion.baseline_ids);
+    assert.equal(new Set(observedBaselineIds).size, observedBaselineIds.length, "no duplicate continuation baseline IDs across chunks or routes");
+    assert.deepEqual([...observedBaselineIds].sort(), [...expectedBaselineIds].sort(), "no missing or unexpected continuation baseline IDs");
+  });
+
   // The brief + spec review are written by createFixture({ spec }) so the parent's
   // acceptance binding can be computed against them; here we add the other inputs.
   function seedPlanningArtifacts(runDir) {
@@ -1978,6 +2041,31 @@ describe("continuation planning-artifact reuse", () => {
     }
   });
 
+  it("rejects missing, review-only, stale, and cross-bound S2 owners before ordinary child publication", () => {
+    const cases = [
+      ["missing", (run) => { run.slices = run.slices.filter(({ id }) => id !== "owner"); }],
+      ["review-only", (run) => { const owner = run.slices.find(({ id }) => id === "owner"); owner.status = "review"; delete owner.merge_commit; }],
+      ["stale", (run) => { run.slices.find(({ id }) => id === "consumer").attempt_reviews[0].modified_extensions[0].owner_review_hash = `sha256:${"0".repeat(64)}`; }],
+      ["cross-bound", (run) => { run.slices.find(({ id }) => id === "consumer").attempt_reviews[0].modified_extensions[0].owner_slice_id = "consumer"; }],
+    ];
+    for (const [label, mutate] of cases) {
+      const fixture = createV2SiblingAuthorityFixture(`issue128-ordinary-${label}`);
+      const childRunId = `${fixture.runId}-next`;
+      try {
+        updateRun(fixture, mutate);
+        const parentBytes = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        assert.throws(
+          () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, dryRun: true }),
+          /owner|sibling|binding|stale|accepted|merged|dependency|unknown/u,
+          label,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), parentBytes, label);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false, label);
+        assert.equal(refOid(fixture.repo, `refs/heads/${childRunId}`), null, label);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
   it("rejects checkpoint B1 configuration conflicts and cross-checkpoint source before allocation", () => {
     const conflict = createV2Fixture("checkpoint-b1-conflict", { accepted: ["A"], mergeOrder: ["A"] });
     try {
@@ -3210,6 +3298,178 @@ describe("continuation planning-artifact reuse", () => {
   }
 });
 
+describe("issue 128 continuation executable oracle", { concurrency: true }, () => {
+  it("preserves an ordinary merged A2/S2 row only with its same-binding merged owner", { skip: issue128WorkerRoute !== "ordinary-continuation" }, async () => {
+    const observedBaselineIds = [];
+    if (issue128WorkerChunk === 0) {
+      const fixtureName = `issue128-ordinary-sibling-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`;
+      const fixture = createV2SiblingAuthorityFixture(fixtureName);
+      const childRunId = `${fixtureName}-next`;
+      try {
+        const parent = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+        const parentConsumer = parent.slices.find(({ id }) => id === "consumer");
+        const refs = parent.slices.flatMap((slice) => (slice.attempt_reviews || []).flatMap((entry) => [entry.evidence_ref, entry.review_ref, entry.dispatch_claim_ref, entry.dispatch_closure_ref]));
+        const parentBytes = new Map(refs.map((ref) => [ref, readFileSync(join(fixture.runDir, ref))]));
+
+        const result = await continueFactory(fixture.runId, {
+          cwd: fixture.repo,
+          review: "reviewer.json",
+          runId: childRunId,
+          carryForward: true,
+          foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+        });
+        const accepted = result.payload.continuation.carry_forward.accepted_slices;
+        const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+        const child = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
+        const childConsumer = child.slices.find(({ id }) => id === "consumer");
+
+        assert.deepEqual(accepted.map(({ id }) => id), ["owner", "consumer"]);
+        assert.deepEqual(accepted.find(({ id }) => id === "consumer"), fixture.issue128Catalog.source);
+        observedBaselineIds.push(fixture.issue128Catalog.id);
+        assert.deepEqual(observedBaselineIds, issue128BaselineIdsForRoute("ordinary-continuation"));
+        assert.deepEqual(childConsumer.attempt_reviews, parentConsumer.attempt_reviews);
+        assert.deepEqual(issue128CarryForwardProjection(childConsumer), fixture.issue128Catalog.source);
+        assert.deepEqual(childConsumer.effective_paths, ["src/consumer/**", "src/owner/shared.js"]);
+        assert.equal(childConsumer.attempt_reviews[0].modified_extensions[0].authority, "non-conflicting-sibling");
+        for (const [ref, bytes] of parentBytes) assert.deepEqual(readFileSync(join(childRunDir, ref)), bytes, ref);
+      } finally { cleanup(fixture.repo); }
+    }
+
+    const mutationFixture = createV2SiblingAuthorityFixture(`issue128-ordinary-oracle-mutations-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`);
+    let mutations;
+    try {
+      mutations = exerciseIssue128ContinuationMutations(mutationFixture, "continuation-carry-forward-accepted-slice-v2", issue128WorkerChunk, issue128WorkerChunkCount);
+      assert.equal(mutations.executed, 89);
+    } finally { cleanup(mutationFixture.repo); }
+    process.stdout.write(`${issue128WorkerCompletion("ordinary-continuation", issue128WorkerChunk, observedBaselineIds, mutations)}\n`);
+  });
+
+  it("preserves a checkpoint-bound merged A2/S2 owner pair and rejects owner drift before publication", { skip: issue128WorkerRoute !== "checkpoint-continuation" }, async () => {
+    const observedBaselineIds = [];
+    if (issue128WorkerChunk === 0) {
+      const fixtureName = `issue128-checkpoint-sibling-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`;
+      const fixture = createV2SiblingAuthorityFixture(fixtureName);
+      const childRunId = `${fixtureName}-next`;
+      const checkpointRow = ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.find(({ id }) => id === "checkpoint-carry-forward-accepted-slice-v2");
+      try {
+        const bound = bindCheckpointContinuationFixture(fixture, "strict");
+        const parent = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+        const parentConsumer = parent.slices.find(({ id }) => id === "consumer");
+        const result = await continueFactory(fixture.runId, {
+          cwd: fixture.repo,
+          review: "reviewer.json",
+          runId: childRunId,
+          carryForward: true,
+          foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+        });
+        const child = JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json"), "utf8"));
+        assert.deepEqual(child.checkpoint_source, bound.source);
+        assert.deepEqual(result.payload.continuation.carry_forward.accepted_slices.find(({ id }) => id === "consumer"), checkpointRow.source);
+        assert.deepEqual(issue128CarryForwardProjection(child.slices.find(({ id }) => id === "consumer")), checkpointRow.source);
+        observedBaselineIds.push(checkpointRow.id);
+        assert.deepEqual(observedBaselineIds, issue128BaselineIdsForRoute("checkpoint-continuation"));
+        assert.deepEqual(child.slices.find(({ id }) => id === "consumer").attempt_reviews, parentConsumer.attempt_reviews);
+        assert.equal(result.payload.continuation.carry_forward.accepted_slices.find(({ id }) => id === "consumer").attempt_reviews[0].modified_extensions[0].owner_slice_id, "owner");
+      } finally { cleanup(fixture.repo); }
+
+      for (const field of ["owner_reviewed_commit", "owner_diff_base_commit"]) {
+        const identity = createV2SiblingAuthorityFixture(`issue128-checkpoint-${field}-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`);
+        const staleChild = `issue128-checkpoint-stale-${field}-chunk-${issue128WorkerChunk}-next`;
+        try {
+          bindCheckpointContinuationFixture(identity, null);
+          updateRun(identity, (run) => {
+            run.slices.find(({ id }) => id === "consumer").attempt_reviews[0].modified_extensions[0][field] = "0".repeat(40);
+          });
+          const parentBytes = readFileSync(join(identity.runDir, "run.json"), "utf8");
+          assert.throws(
+            () => continueFactory(identity.runId, { cwd: identity.repo, review: "reviewer.json", runId: staleChild, carryForward: true, dryRun: true }),
+            /owner|sibling|binding|stale|cross-bound/u,
+            field,
+          );
+          assert.equal(readFileSync(join(identity.runDir, "run.json"), "utf8"), parentBytes, field);
+          assert.equal(existsSync(join(identity.repo, ".opencode", "factory", staleChild)), false, field);
+          assert.equal(refOid(identity.repo, `refs/heads/${staleChild}`), null, field);
+        } finally { cleanup(identity.repo); }
+      }
+    }
+
+    const mutationFixture = createV2SiblingAuthorityFixture(`issue128-checkpoint-stale-chunk-${issue128WorkerChunk}-of-${issue128WorkerChunkCount}`);
+    let mutations;
+    try {
+      bindCheckpointContinuationFixture(mutationFixture, null);
+      mutations = exerciseIssue128ContinuationMutations(mutationFixture, "checkpoint-carry-forward-accepted-slice-v2", issue128WorkerChunk, issue128WorkerChunkCount);
+      assert.equal(mutations.executed, 89);
+    } finally { cleanup(mutationFixture.repo); }
+    process.stdout.write(`${issue128WorkerCompletion("checkpoint-continuation", issue128WorkerChunk, observedBaselineIds, mutations)}\n`);
+  });
+
+});
+
+function runIssue128ContinuationWorker(route, testName, chunk) {
+  return new Promise((resolve) => {
+    const env = { ...process.env, [issue128WorkerEnv]: route, [issue128WorkerChunkEnv]: String(chunk) };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawn(process.execPath, ["--test", "--test-name-pattern", `^${escapeRegExp(testName)}$`, currentTestPath], {
+      env,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let error = null;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (childError) => { error = childError; });
+    child.on("close", (code, signal) => resolve({ route, chunk, code, signal, error, stdout, stderr }));
+  });
+}
+
+function issue128WorkerDiagnostics({ route, chunk, code, signal, error, stdout, stderr }) {
+  return [
+    `${route} chunk ${chunk} worker failed (code=${String(code)}, signal=${String(signal)})`,
+    error ? error.stack || error.message : "",
+    stdout.trim() ? `stdout:\n${stdout.trim()}` : "",
+    stderr.trim() ? `stderr:\n${stderr.trim()}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+const issue128WorkerCompletionPrefix = "issue128 continuation worker complete: ";
+
+function issue128WorkerCompletion(route, chunk, baselineIds, mutations) {
+  return `${issue128WorkerCompletionPrefix}${JSON.stringify({
+    route,
+    chunk,
+    chunk_count: issue128WorkerChunkCount,
+    baseline_ids: baselineIds,
+    executed: mutations.executed,
+    mutation_names: mutations.mutationNames,
+    mutation_digest: mutations.mutationDigest,
+  })}`;
+}
+
+function parseIssue128WorkerCompletion(stdout, diagnostics) {
+  const line = stdout.split("\n").find((entry) => entry.includes(issue128WorkerCompletionPrefix));
+  assert.ok(line, diagnostics);
+  return JSON.parse(line.slice(line.indexOf(issue128WorkerCompletionPrefix) + issue128WorkerCompletionPrefix.length));
+}
+
+function issue128MutationNamesForRoute(route) {
+  const recordId = issue128WorkerRecords[route];
+  const row = ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.find(({ id }) => id === recordId);
+  assert.ok(row, `${route}: registered mutation row`);
+  return emitIssue128FinishAndDiscloseMutations(row).map(({ name }) => name);
+}
+
+function issue128MutationNameDigest(names) {
+  return createHash("sha256").update(names.join("\0"), "utf8").digest("hex");
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
 function createFixture(runId, { status = "blocked", createBranch = true, review, spec, maxRetries } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "factory-continue-"));
   initGitRepo(repo);
@@ -3390,8 +3650,8 @@ function v2GitTemplate(accepted, mergeOrder) {
   return template;
 }
 
-function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panels = false } = {}) {
-  const repo = mkdtempSync(join(tmpdir(), "factory-carry-forward-"));
+function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panels = false, fixturePrefix = "factory-carry-forward-" } = {}) {
+  const repo = mkdtempSync(join(tmpdir(), fixturePrefix));
   const template = v2GitTemplate(accepted, mergeOrder);
   cpSync(template.dir, repo, { recursive: true });
   // Repoint the copied bare origin at this repo's copy, not the template's.
@@ -3493,6 +3753,247 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
   writeJson(join(runDir, "run.json"), run);
   const actualMergeOrder = gitStdout(repo, ["rev-list", "--first-parent", "--reverse", `${baseCommit}..${runId}`]).split("\n").filter(Boolean);
   return { repo, runDir, runId, baseCommit, reviewedCommits, mergeCommits, actualMergeOrder };
+}
+
+function createV2SiblingAuthorityFixture(runId) {
+  const fixture = createV2Fixture("issue128-oracle", { accepted: [], mergeOrder: [], fixturePrefix: `${runId}-` });
+  const catalog = ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.find(({ id }) => id === "continuation-carry-forward-accepted-slice-v2");
+  const staticRepo = createIssue128ContinuationGit();
+  runGit(fixture.repo, ["fetch", staticRepo, "+refs/heads/*:refs/issue128-static/*"]);
+  const baseCommit = "8b20ea435c507974bec4acb19f81e17969a8cf23";
+  const ownerReviewed = catalog.source.attempt_reviews[0].modified_extensions[0].owner_reviewed_commit;
+  const ownerMerge = "84ae9626ea3f547d151a9bc024393e5737805355";
+  runGit(fixture.repo, ["update-ref", "refs/heads/issue128-owner", ownerReviewed]);
+  runGit(fixture.repo, ["update-ref", "refs/heads/issue128-consumer", catalog.source.reviewed_commit]);
+  runGit(fixture.repo, ["update-ref", "refs/heads/issue128-oracle", catalog.source.merge_commit]);
+  runGit(fixture.repo, ["update-ref", "refs/heads/main", baseCommit]);
+  runGit(fixture.repo, ["checkout", "-q", "issue128-oracle"]);
+  runGit(fixture.repo, ["push", "--force", "origin", `${baseCommit}:main`]);
+  cleanup(staticRepo);
+
+  const plan = withDeliveryEnvelope({
+    slices: [
+      { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["owner"], test_plan: ["node --test owner"] },
+      { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["consumer"], test_plan: ["node --test consumer"] },
+      { id: "remaining", stack: "backend", paths: ["src/remaining/**"], depends_on: ["consumer"], acceptance: ["remaining"], test_plan: ["node --test remaining"] },
+    ],
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+  });
+  const planPath = join(fixture.runDir, "plan", "slices.json");
+  writeJson(planPath, plan);
+  const family = writeFamilyReceipt(fixture.runDir, fixture.runId, plan, "owner", 1, ownerReviewed, "evidence/owner.family.json");
+  assert.equal(family.hash, JSON.parse(catalog.external_sources.owner_review.bytes).invariant_family_ledger.dispositions[0].evidence_hash);
+  const sidecars = new Map();
+  for (const source of Object.values(catalog.external_sources)) {
+    if (sidecars.has(source.ref)) continue;
+    const path = join(fixture.runDir, source.ref);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, source.bytes, "utf8");
+    assert.equal(hashFile(path), source.hash);
+    sidecars.set(source.ref, { path, bytes: source.bytes, hash: source.hash });
+  }
+  const extension = catalog.source.attempt_reviews[0].modified_extensions[0];
+  const ownerAttempt = {
+    attempt: extension.owner_attempt,
+    evidence_ref: extension.owner_evidence_ref,
+    evidence_hash: extension.owner_evidence_hash,
+    review_ref: extension.owner_review_ref,
+    review_hash: extension.owner_review_hash,
+    reviewed_commit: extension.owner_reviewed_commit,
+    diff_base_commit: extension.owner_diff_base_commit,
+    ownership_schema_version: 2,
+    ratified_paths: [],
+    modified_extensions: [],
+    verdict: "APPROVE",
+    convergence: "converging",
+    late_discovery_strike: false,
+    remaining_fix_count: 0,
+    dispatch_claim_ref: extension.owner_dispatch_claim_ref,
+    dispatch_claim_hash: extension.owner_dispatch_claim_hash,
+    dispatch_closure_ref: extension.owner_dispatch_closure_ref,
+    dispatch_closure_hash: extension.owner_dispatch_closure_hash,
+  };
+  const fullSlice = (accepted, attempt, branch, mergeCommit) => ({
+    id: accepted.id, stack: "backend", depends_on: accepted.id === "consumer" ? ["owner"] : [],
+    declared_paths: accepted.declared_paths, effective_paths: accepted.effective_paths, status: "merged", attempts: accepted.attempts,
+    branch, worktree: `/tmp/${branch}`, dispatch_required: true,
+    dispatch_claim_ref: attempt.dispatch_claim_ref, dispatch_claim_hash: attempt.dispatch_claim_hash,
+    dispatch_closure_ref: attempt.dispatch_closure_ref, dispatch_closure_hash: attempt.dispatch_closure_hash,
+    evidence_ref: accepted.evidence_ref, evidence_hash: accepted.evidence_hash, review_ref: accepted.review_ref, review_hash: accepted.review_hash,
+    reviewed_commit: accepted.reviewed_commit, attempt_reviews: accepted.attempt_reviews, merge_commit: mergeCommit,
+  });
+  const ownerAccepted = {
+    id: "owner", declared_paths: ["src/owner/**"], effective_paths: ["src/owner/**"], attempts: 1,
+    attempt_reviews: [ownerAttempt], evidence_ref: ownerAttempt.evidence_ref, evidence_hash: ownerAttempt.evidence_hash,
+    review_ref: ownerAttempt.review_ref, review_hash: ownerAttempt.review_hash, reviewed_commit: ownerReviewed, merge_commit: ownerMerge,
+  };
+  const runPath = join(fixture.runDir, "run.json");
+  const run = JSON.parse(readFileSync(runPath, "utf8"));
+  run.slices = [
+    fullSlice(ownerAccepted, ownerAttempt, "issue128-owner", ownerMerge),
+    fullSlice(catalog.source, catalog.source.attempt_reviews[0], "issue128-consumer", catalog.source.merge_commit),
+    { id: "remaining", stack: "backend", depends_on: ["consumer"], declared_paths: ["src/remaining/**"], effective_paths: ["src/remaining/**"], status: "pending", attempts: 0 },
+  ];
+  run.base_commit = baseCommit;
+  run.branch = fixture.runId;
+  run.worktree = fixture.repo;
+  run.steps.find(({ agent }) => agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
+  writeJson(runPath, run);
+  fixture.baseCommit = baseCommit;
+  fixture.reviewedCommits = { owner: ownerReviewed, consumer: catalog.source.reviewed_commit };
+  fixture.mergeCommits = { owner: ownerMerge, consumer: catalog.source.merge_commit };
+  fixture.actualMergeOrder = [ownerMerge, catalog.source.merge_commit];
+  fixture.issue128Catalog = catalog;
+  fixture.issue128Sidecars = sidecars;
+  assert.deepEqual(issue128CarryForwardProjection(run.slices.find(({ id }) => id === "consumer")), catalog.source, `${runId}: exact accepted source before checked continue`);
+  return fixture;
+}
+
+function issue128CarryForwardProjection(slice) {
+  return {
+    id: slice.id,
+    declared_paths: slice.declared_paths,
+    effective_paths: slice.effective_paths,
+    attempts: slice.attempts,
+    attempt_reviews: slice.attempt_reviews,
+    evidence_ref: slice.evidence_ref,
+    evidence_hash: slice.evidence_hash,
+    review_ref: slice.review_ref,
+    review_hash: slice.review_hash,
+    reviewed_commit: slice.reviewed_commit,
+    merge_commit: slice.merge_commit,
+  };
+}
+
+function createIssue128ContinuationGit() {
+  const repo = mkdtempSync(join(tmpdir(), "issue128-continuation-git-"));
+  mkdirSync(join(repo, "docs"), { recursive: true });
+  mkdirSync(join(repo, "src", "owner"), { recursive: true });
+  runGit(repo, ["init", "-q", "-b", "main"]);
+  writeFileSync(join(repo, "README.md"), "fixture\n");
+  writeFileSync(join(repo, "docs", "consumer.md"), "baseline consumer\n");
+  writeFileSync(join(repo, "src", "owner", "shared.js"), "export const shared = 1;\n");
+  runGit(repo, ["add", "README.md", "docs/consumer.md", "src/owner/shared.js"]);
+  issue128GitCommit(repo, "2026-01-01T00:00:00Z", ["commit", "-q", "-m", "issue 128 baseline"]);
+  const base = gitStdout(repo, ["rev-parse", "HEAD"]);
+  assert.equal(base, "8b20ea435c507974bec4acb19f81e17969a8cf23");
+  runGit(repo, ["branch", "issue128-owner", base]);
+  runGit(repo, ["branch", "issue128-sibling", base]);
+  runGit(repo, ["checkout", "-q", "issue128-owner"]);
+  writeFileSync(join(repo, "src", "owner", "owned.js"), "export const owned = true;\n");
+  runGit(repo, ["add", "src/owner/owned.js"]);
+  issue128GitCommit(repo, "2026-01-01T00:01:00Z", ["commit", "-q", "-m", "issue 128 owner"]);
+  assert.equal(gitStdout(repo, ["rev-parse", "HEAD"]), "ff72597376c2c7c3771198a766a1ba1c049da558");
+  runGit(repo, ["checkout", "-q", "main"]);
+  issue128GitCommit(repo, "2026-01-01T00:02:00Z", ["merge", "-q", "--no-ff", "-m", "merge issue 128 owner", "issue128-owner"]);
+  const ownerMerge = gitStdout(repo, ["rev-parse", "HEAD"]);
+  assert.equal(ownerMerge, "84ae9626ea3f547d151a9bc024393e5737805355");
+  runGit(repo, ["checkout", "-q", "issue128-sibling"]);
+  writeFileSync(join(repo, "src", "owner", "shared.js"), "export const shared = 2;\n");
+  runGit(repo, ["add", "src/owner/shared.js"]);
+  issue128GitCommit(repo, "2026-01-01T00:07:00Z", ["commit", "-q", "-m", "issue 128 sibling consumer"]);
+  assert.equal(gitStdout(repo, ["rev-parse", "HEAD"]), "ddc920e780e08f2a3561d407b880f22a726b7c9d");
+  runGit(repo, ["checkout", "-q", "-b", "issue128-sibling-main", ownerMerge]);
+  issue128GitCommit(repo, "2026-01-01T00:08:00Z", ["merge", "-q", "--no-ff", "-m", "merge issue 128 sibling consumer", "issue128-sibling"]);
+  assert.equal(gitStdout(repo, ["rev-parse", "HEAD"]), "d209b10df237a6893c2aae54e4a36676588feda9");
+  return repo;
+}
+
+function issue128GitCommit(repo, date, args) {
+  const proc = spawnSync("git", args, {
+    cwd: repo,
+    encoding: "utf8",
+    env: { ...process.env, GIT_AUTHOR_NAME: "Issue 128 Oracle", GIT_AUTHOR_EMAIL: "oracle@example.com", GIT_AUTHOR_DATE: date, GIT_COMMITTER_NAME: "Issue 128 Oracle", GIT_COMMITTER_EMAIL: "oracle@example.com", GIT_COMMITTER_DATE: date },
+  });
+  assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+}
+
+function exerciseIssue128ContinuationMutations(fixture, recordId, chunk, chunkCount) {
+  const row = ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG.find(({ id }) => id === recordId);
+  const cases = emitIssue128FinishAndDiscloseMutations(row);
+  const selectedCases = cases.map((mutation, index) => ({ mutation, index })).filter(({ index }) => index % chunkCount === chunk);
+  const runPath = join(fixture.runDir, "run.json");
+  const originalRun = readFileSync(runPath);
+  const originalRunHash = hashFile(runPath);
+  const attributionMismatches = [];
+  for (const { mutation, index } of selectedCases) {
+    restoreIssue128ContinuationBaseline(fixture, runPath, originalRun, originalRunHash, mutation);
+    if (mutation.code === "B") {
+      const source = row.external_sources[mutation.path[1]];
+      const sidecar = fixture.issue128Sidecars.get(source.ref);
+      writeFileSync(sidecar.path, `${sidecar.bytes} `);
+    } else {
+      updateRun(fixture, (run) => {
+        const source = run.slices.find(({ id }) => id === (mutation.path[0] === "owner_source" ? "owner" : "consumer"));
+        applyIssue128PhysicalMutation(source, mutation);
+      });
+    }
+    const childRunId = `${fixture.runId}-oracle-${index}-next`;
+    let rejection = null;
+    try {
+      continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, dryRun: true });
+    } catch (error) {
+      rejection = error;
+    }
+    const expectedCheck = recordId.startsWith("checkpoint-") ? "continueFactory checkpoint carry-forward authority" : "continueFactory ordinary carry-forward authority";
+    assert.equal(mutation.expected_check, expectedCheck, `${mutation.name}: concrete checked continuation consumer`);
+    assert.ok(rejection, `${mutation.name}: ${expectedCheck} must reject`);
+    if (!new RegExp(mutation.expected_rejection, "iu").test(rejection.message)) {
+      attributionMismatches.push(`${mutation.name}: /${mutation.expected_rejection}/ did not match ${JSON.stringify(rejection.message)}`);
+    }
+    assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false, mutation.name);
+    assert.equal(refOid(fixture.repo, `refs/heads/${childRunId}`), null, mutation.name);
+  }
+  restoreIssue128ContinuationBaseline(fixture, runPath, originalRun, originalRunHash, selectedCases.at(-1).mutation);
+  assert.deepEqual(attributionMismatches, [], `${recordId}: every mutation must reach its target-specific ${cases[0].expected_check} rejection`);
+  const mutationNames = selectedCases.map(({ mutation }) => mutation.name);
+  return { executed: mutationNames.length, mutationNames, mutationDigest: issue128MutationNameDigest(mutationNames) };
+}
+
+function restoreIssue128ContinuationBaseline(fixture, runPath, originalRun, originalRunHash, mutation) {
+  writeFileSync(runPath, originalRun);
+  assert.deepEqual(readFileSync(runPath), originalRun, `${mutation.name}: exact restored parent run bytes`);
+  assert.equal(hashFile(runPath), originalRunHash, `${mutation.name}: exact restored parent run hash`);
+  for (const sidecar of fixture.issue128Sidecars.values()) {
+    writeFileSync(sidecar.path, sidecar.bytes);
+    assert.deepEqual(readFileSync(sidecar.path), Buffer.from(sidecar.bytes), `${mutation.name}: exact restored parent sidecar bytes`);
+    assert.equal(hashFile(sidecar.path), sidecar.hash, `${mutation.name}: exact restored parent sidecar hash`);
+  }
+  if (mutation.code === "B") {
+    const source = fixture.issue128Catalog.external_sources[mutation.path[1]];
+    assert.equal(source.bytes, mutation.expected, `${mutation.name}: exact sidecar target before physical mutation`);
+  }
+}
+
+function applyIssue128PhysicalMutation(source, mutation) {
+  const path = mutation.path.slice(1);
+  let owner = source;
+  if (mutation.operation === "unknown-key") {
+    for (const segment of path) owner = owner[segment];
+    const observedBoundary = mutation.path.length === 1 && mutation.path[0] === "source" ? issue128CarryForwardProjection(owner) : owner;
+    assert.deepEqual(observedBoundary, mutation.expected, `${mutation.name}: exact continuation object boundary before unsupported-key insertion`);
+    assert.equal(Object.hasOwn(owner, mutation.key), false, `${mutation.name}: unsupported continuation key must be new`);
+    owner[mutation.key] = mutation.value;
+    assert.equal(owner[mutation.key], mutation.value, `${mutation.name}: unsupported continuation key must be physically inserted`);
+    return;
+  }
+  for (const segment of path.slice(0, -1)) owner = owner[segment];
+  const key = path.at(-1);
+  assert.deepEqual(owner[key], mutation.expected, `${mutation.name}: exact continuation field before physical mutation`);
+  if (mutation.code === "K") delete owner[key];
+  else if (mutation.code === "V") owner[key] = typeof owner[key] === "string" ? "invalid" : "invalid-type";
+  else if (mutation.code === "R") owner[key] = owner[key].startsWith("evidence/") ? "evidence/missing.json" : owner[key].startsWith("dispatch/") ? "dispatch/missing.json" : "reviews/missing.json";
+  else if (mutation.code === "H") owner[key] = `sha256:${"0".repeat(64)}`;
+  else if (mutation.code === "D") owner[key] = Array.isArray(owner[key]) ? [...owner[key], "synthetic/path"] : `drift-${owner[key]}`;
+  else if (mutation.code === "I") owner[key] = Number.isInteger(owner[key]) ? owner[key] + 1 : owner[key]?.length === 40 ? "0".repeat(40) : "cross-bound-owner";
+  else if (mutation.code === "X") owner[key] = "1".repeat(40);
+  else throw new Error(`unsupported issue #128 physical mutation ${mutation.code}`);
+}
+
+function issue128BaselineIdsForRoute(route) {
+  return Object.entries(ISSUE128_BASELINE_ROUTE_INVENTORY)
+    .filter(([, assignment]) => assignment.route === route)
+    .map(([id]) => id);
 }
 
 function bindCheckpointContinuationFixture(fixture, reviewTier) {

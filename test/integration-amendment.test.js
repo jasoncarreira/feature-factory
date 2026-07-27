@@ -2,7 +2,7 @@ import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -13,7 +13,7 @@ import { DURABLE_AUTHORITY_CATALOG, DURABLE_AUTHORITY_REQUIRED_RECORD_IDS, emitD
 import { hashFile, hashValue } from "../src/refs.js";
 import { completeIntegrationAmendmentReviewTaskDispatch, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, createPostPrState, hasInFlightHeartbeatWork, heartbeatOnce, inspectContinuationRouteSchema, prepareIntegrationAmendmentReviewTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionContinuationAdoption, transitionGateDecision, transitionIntegrationAmendment, transitionMergedSliceRepair, transitionPanelVerdicts, transitionPostPrState, transitionPrCreated, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
 import { checkRunConsistency, inspectIntegrationAmendmentInventory, integrationAmendmentId, validateIntegrationAmendment, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateRun } from "../src/validate.js";
-import { buildContinuation, cleanupRun, continueFactory, executeIntegrationAmendment, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startHeartbeat, stopHeartbeat } from "../src/factory.js";
+import { buildContinuation, cleanupRun, collectCleanupTargets, continueFactory, executeIntegrationAmendment, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startHeartbeat, stopHeartbeat } from "../src/factory.js";
 import plugin from "../src/plugin.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 
@@ -1021,11 +1021,42 @@ describe("generic integration amendment", () => {
               writeJson(join(fixture.runDir, "run.json"), verified.run);
             },
           },
-        }), /cleanup rejected: integration amendment authority is verified|integration amendment.*stale|does not resolve/u, name);
+        }), /cleanup rejected: integration amendment authority is verified|integration amendment.*stale|persisted sibling owner reviewed branch\/worktree head is stale|does not resolve/u, name);
         assert.equal(fired, true, name);
         assert.equal(existsSync(fixture.runDir), true, name);
       } finally { cleanup(fixture); }
     }
+  });
+
+  it("previews merged amendment cleanup without deleting candidate worktrees, branches, or run authority", async () => {
+    const fixture = createFixture();
+    try {
+      await reachMerged(fixture);
+      const run = readRun(fixture);
+      const targets = collectCleanupTargets(run);
+      const runBytes = readFileSync(join(fixture.runDir, "run.json"));
+
+      const preview = await cleanupRun(RUN_ID, {
+        cwd: fixture.repo,
+        force: true,
+        dryRun: true,
+        now: NOW,
+      });
+
+      assert.equal(preview.dry_run, true);
+      assert.equal(preview.removed_run_dir, false);
+      assert.equal(preview.removed_worktrees.length > 0, true, "preview reports removable worktrees");
+      assert.equal(preview.deleted_branches.length > 0, true, "preview reports deletable branches");
+      const ownerWorktree = targets.worktrees.find(({ branch }) => branch === "owner-build").worktree;
+      assert.equal(preview.removed_worktrees.includes(realpathSync(ownerWorktree)), true);
+      assert.equal(preview.deleted_branches.includes("owner-build"), true);
+      assert.equal(existsSync(fixture.runDir), true);
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), runBytes);
+      for (const { branch, worktree } of targets.worktrees) {
+        assert.equal(existsSync(worktree), true, worktree);
+        assert.equal(git(fixture.repo, ["show-ref", "--verify", `refs/heads/${branch}`]).trim().length > 0, true, branch);
+      }
+    } finally { cleanup(fixture); }
   });
 
   it("fences heartbeat stop/tick/publication and generic semantic-writer commit races", async () => {
@@ -2240,7 +2271,7 @@ function createFixture({ managedFeatureWorktree = false, publishReport = true, o
   for (const unit of plan.delivery_envelope.delivery_units) unit.verification_artifacts[0].timeout_ms = 1000;
   writeJson(join(runDir, "plan", "slices.json"), plan);
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
-  const family = writeVerificationArtifactReceipt({ runDir, runId: RUN_ID, plan, sliceId: "owner", attempt: 1, reviewedCommit, artifactId: "fixture-artifact-1", evidenceRef: "evidence/owner-family.json", result: { type: "verification-result", outcome: "pass", summary: "owner passed" } });
+  const family = writeVerificationArtifactReceipt({ runDir, runId: RUN_ID, plan, sliceId: "owner", attempt: 1, reviewedCommit, artifactId: "fixture-artifact-1", evidenceRef: "evidence/owner-family.json", result: { type: "verification-result", outcome: "pass", summary: "Verify owner behavior passed" } });
   writeJson(join(runDir, "evidence", "owner.json"), { subject: "owner", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit, ownership_disclosure: [] });
   const ownerReview = createSliceReviewRecord({ subject: "owner", attempt: 1, reviewedCommit });
   ownerReview.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "owner", reviewedCommit, evidenceRef: family.ref, evidenceHash: family.hash });
@@ -2450,6 +2481,7 @@ async function advanceMergedAmendmentConsumer(fixture, { assertCurrentDispatchTa
   const reviewRef = "reviews/consumer.json";
   writeJson(join(fixture.runDir, evidenceRef), { subject: "consumer", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit, ownership_disclosure: [] });
   const review = createSliceReviewRecord({ subject: "consumer", attempt: 1, reviewedCommit });
+  review.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
   review.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "consumer", reviewedCommit, evidenceRef: family.ref, evidenceHash: family.hash });
   writeJson(join(fixture.runDir, reviewRef), review);
   const reviewedResult = await transitionRunSlice(fixture.runDir, "consumer", {
@@ -2502,6 +2534,7 @@ async function publishConsumerReview(fixture, { attempt, reviewedCommit, verdict
     subject: "consumer", attempt, reviewedCommit, verdict, requiredFixes,
     likelyPaths: ["src/consumer/index.js"], fixOwner: "consumer",
   });
+  review.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
   review.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "consumer", reviewedCommit, evidenceRef: family.ref, evidenceHash: family.hash });
   writeJson(join(fixture.runDir, reviewRef), review);
   return transitionRunSlice(fixture.runDir, "consumer", { status: "review", attempts: attempt, evidence_ref: evidenceRef, review_ref: reviewRef }, { mustExist: true, now: NOW });

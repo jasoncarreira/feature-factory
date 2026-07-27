@@ -29,6 +29,9 @@ import {
 import { acquireLaunchFence, releaseLaunchFence } from "../src/process-evidence.js";
 import { hashValue } from "../src/refs.js";
 import { checkWorktreeIdentity } from "../src/worktrees.js";
+import { completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
+import { createSliceReviewRecord } from "./helpers/review-record-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
@@ -91,6 +94,110 @@ describe("factory public state operations", { concurrency: false }, () => {
       assert.deepEqual(result.run.slices, []);
       assert.equal(result.run.steps[0].status, "accepted");
       assert.equal(result.run.terminal_result.reason, "oversized-plan-checkpoint-routing-required");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("completes the parked issue-103-reseed shared-test lifecycle without a plan amendment", async () => {
+    const fixture = createIssue103ReseedFixture();
+    try {
+      const planPath = join(fixture.runDir, "plan", "slices.json");
+      const acceptedPlanBytes = readFileSync(planPath);
+      const acceptedPlanHash = hashFile(planPath);
+      const declaredPaths = ["src/**"];
+
+      await transitionRunSlice(fixture.runDir, "reseed", {
+        status: "running",
+        attempts: 1,
+        branch: fixture.sliceBranch,
+        worktree: fixture.sliceWorktree,
+      });
+      const completionToken = "issue-103-reseed-completion";
+      const dispatch = await prepareSliceBuilderTaskDispatch(fixture.repo, {
+        run_id: fixture.runId,
+        slice_id: "reseed",
+        attempt: 1,
+        agent: "backend-builder",
+      }, { claimDispatch: true, completionToken });
+
+      for (const path of fixture.sharedPaths) {
+        writeFileSync(join(fixture.sliceWorktree, path), `reviewed ${path}\n`);
+      }
+      runGit(fixture.sliceWorktree, ["add", "--", ...fixture.sharedPaths]);
+      runGit(fixture.sliceWorktree, ["commit", "-m", "finish parked issue-103 reseed"]);
+      const reviewedCommit = branchHead(fixture.repo, fixture.sliceBranch);
+      await completeSliceBuilderTaskDispatch(fixture.repo, {
+        run_id: fixture.runId,
+        slice_id: "reseed",
+        attempt: 1,
+        agent: "backend-builder",
+        claim_ref: dispatch.dispatch_claim.ref,
+        claim_hash: dispatch.dispatch_claim.hash,
+        completion_token: completionToken,
+      });
+
+      const rationales = new Map(fixture.sharedPaths.map((path) => [path, `The parked issue-103 reseed requires updating ${path}.`]));
+      writeJson(join(fixture.runDir, "evidence", "reseed.json"), {
+        subject: "reseed",
+        attempt: 1,
+        status: "pass",
+        review_ready: true,
+        head_sha: reviewedCommit,
+        ownership_disclosure: fixture.sharedPaths.map((path) => ({ path, rationale: rationales.get(path) })),
+      });
+      const familyEvidence = writeVerificationArtifactReceipt({
+        runDir: fixture.runDir,
+        runId: fixture.runId,
+        plan: fixture.plan,
+        sliceId: "reseed",
+        attempt: 1,
+        reviewedCommit,
+        artifactId: "fixture-artifact-1",
+        evidenceRef: "evidence/reseed-family.json",
+        result: { type: "verification-result", outcome: "pass", summary: "Verify reseed behavior passed" },
+      });
+      const review = createSliceReviewRecord({ subject: "reseed", attempt: 1, reviewedCommit });
+      review.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
+      review.invariant_family_ledger = passingInvariantFamilyLedger({
+        plan: fixture.plan,
+        sliceId: "reseed",
+        reviewedCommit,
+        evidenceRef: familyEvidence.ref,
+        evidenceHash: familyEvidence.hash,
+      });
+      writeJson(join(fixture.runDir, "reviews", "reseed.json"), review);
+
+      const published = await transitionRunSlice(fixture.runDir, "reseed", {
+        status: "review",
+        attempts: 1,
+        evidence_ref: "evidence/reseed.json",
+        review_ref: "reviews/reseed.json",
+      });
+      assert.deepEqual(published.slice.attempt_reviews[0].modified_extensions, fixture.sharedPaths.map((path) => ({
+        kind: "modified-extension",
+        path,
+        rationale: rationales.get(path),
+        authority: "unowned",
+      })));
+      assert.deepEqual(published.slice.effective_paths, [...declaredPaths, ...fixture.sharedPaths]);
+
+      runGit(fixture.repo, ["merge", "--no-ff", fixture.sliceBranch, "-m", "merge parked issue-103 reseed"]);
+      const mergeCommit = branchHead(fixture.repo, "main");
+      const merged = await transitionSliceMerged(fixture.runDir, "reseed", { merge_commit: mergeCommit });
+      assert.equal(merged.slice.status, "merged");
+      assert.deepEqual(merged.slice.effective_paths, [...declaredPaths, ...fixture.sharedPaths]);
+      assert.deepEqual(merged.slice.declared_paths, declaredPaths);
+
+      const finalRun = readJson(join(fixture.runDir, "run.json"));
+      assert.deepEqual(readFileSync(planPath), acceptedPlanBytes);
+      assert.equal(hashFile(planPath), acceptedPlanHash);
+      assert.deepEqual(finalRun.slices[0].declared_paths, declaredPaths);
+      for (const key of ["integration_amendment", "merged_slice_repair", "special_builder_dispatch"]) {
+        assert.equal(Object.hasOwn(finalRun, key), false, key);
+      }
+      assert.equal(finalRun.steps.some(({ agent }) => /amendment/u.test(agent)), false, "no amendment writer step was invoked");
+      assert.equal(readdirSync(fixture.runDir, { recursive: true }).some((path) => /amendment/u.test(path)), false, "no amendment sidecar was written");
     } finally {
       cleanup(fixture.repo);
     }
@@ -1220,6 +1327,87 @@ function checkpointCanonicalHash(value) {
       ? Object.fromEntries(Object.keys(input).sort().map((key) => [key, canonical(input[key])]))
       : input;
   return `sha256:${createHash("sha256").update(`${JSON.stringify(canonical(value), null, 2)}\n`).digest("hex")}`;
+}
+
+function createIssue103ReseedFixture() {
+  const repo = mkdtempSync(join(tmpdir(), "factory-issue-103-reseed-"));
+  const runId = "issue-103-reseed";
+  const sliceBranch = `${runId}--reseed`;
+  const sharedPaths = ["test/factory-continue.test.js", "test/factory.test.js"];
+  runGit(repo, ["init", "-b", "main"]);
+  runGit(repo, ["config", "user.email", "test@example.com"]);
+  runGit(repo, ["config", "user.name", "Test"]);
+  mkdirSync(join(repo, "test"), { recursive: true });
+  writeFileSync(join(repo, ".gitignore"), ".opencode/\n");
+  for (const path of sharedPaths) writeFileSync(join(repo, path), `baseline ${path}\n`);
+  runGit(repo, ["add", ".gitignore", "--", ...sharedPaths]);
+  runGit(repo, ["commit", "-m", "seed parked issue-103 shared tests"]);
+  runGit(repo, ["branch", sliceBranch]);
+
+  const runDir = join(repo, ".opencode", "factory", runId);
+  const sliceWorktree = join(repo, ".opencode", "worktrees", "reseed");
+  for (const directory of ["artifacts", "plan", "reviews", "evidence"]) mkdirSync(join(runDir, directory), { recursive: true });
+  mkdirSync(dirname(sliceWorktree), { recursive: true });
+  runGit(repo, ["worktree", "add", sliceWorktree, sliceBranch]);
+
+  const plan = withDeliveryEnvelope({
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    slices: [{
+      id: "reseed",
+      stack: "backend",
+      paths: ["src/**"],
+      depends_on: [],
+      acceptance: ["Complete the parked issue-103 shared-test reseed"],
+      test_plan: ["node --test test/factory.test.js test/factory-continue.test.js"],
+    }],
+  });
+  writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "Accepted parked issue-103 reseed brief.\n");
+  writeJson(join(runDir, "plan", "slices.json"), plan);
+  writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", required_fixes: [] });
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE", required_fixes: [] });
+  writeJson(join(runDir, "run.json"), {
+    schema_version: 1,
+    run_id: runId,
+    status: "running",
+    branch: "main",
+    worktree: repo,
+    gates: {},
+    slices: [{
+      id: "reseed",
+      stack: "backend",
+      depends_on: [],
+      declared_paths: ["src/**"],
+      effective_paths: ["src/**"],
+      status: "pending",
+      attempts: 0,
+    }],
+    steps: [{
+      agent: "spec-writer",
+      status: "accepted",
+      attempts: 1,
+      artifact_ref: "artifacts/technical-brief.md",
+      review_ref: "reviews/spec-writer.json",
+      acceptance: {
+        artifact_ref: "artifacts/technical-brief.md",
+        artifact_hash: hashFile(join(runDir, "artifacts", "technical-brief.md")),
+        review_ref: "reviews/spec-writer.json",
+        review_hash: hashFile(join(runDir, "reviews", "spec-writer.json")),
+      },
+    }, {
+      agent: "work-decomposer",
+      status: "accepted",
+      attempts: 1,
+      artifact_ref: "plan/slices.json",
+      review_ref: "reviews/work-decomposer.json",
+      acceptance: {
+        artifact_ref: "plan/slices.json",
+        artifact_hash: hashFile(join(runDir, "plan", "slices.json")),
+        review_ref: "reviews/work-decomposer.json",
+        review_hash: hashFile(join(runDir, "reviews", "work-decomposer.json")),
+      },
+    }],
+  });
+  return { repo, runDir, runId, sliceBranch, sliceWorktree, sharedPaths, plan };
 }
 
 function createFixture(runId, { gate = false, terminal = false, git = false, repo = mkdtempSync(join(tmpdir(), "factory-simplified-")), updatedAt = undefined } = {}) {

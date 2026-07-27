@@ -2,13 +2,14 @@ import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "./helpers/git-fixture.js";
-import { createPanelReviewRecord, createReviewRecord, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
+import { createPanelReviewRecord, createReviewRecord, createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { publishSyntheticV2Parent } from "./helpers/v2-parent-fixture.js";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertSliceAttemptHistoryCurrent,
   assertSliceReviewBindingCurrent,
   classifyWholeStoryTestRoute,
   claimCheckedTestExecution,
@@ -25,6 +26,7 @@ import {
   transitionCheckpointProgressMerged,
   transitionCheckpointProgressReserved,
   transitionGateDecision,
+  transitionIntegrationAmendment,
   transitionPanelVerdicts,
   transitionPrePrFenceEstablished,
   transitionLifecycleRun,
@@ -48,13 +50,22 @@ import {
   withRunJsonLock,
 } from "../src/run-state.js";
 import { MAX_COST_ATTRIBUTION_ENTRIES, recomputeCostAttribution } from "../src/cost-attribution.js";
-import { checkRunConsistency } from "../src/validate.js";
+import { assertIntegrationAmendmentConsistency, checkRunConsistency, integrationAmendmentId } from "../src/validate.js";
 import { hashFile } from "../src/refs.js";
 import { git } from "../src/git.js";
 import { deliveryEnvelopeForSlices, passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 const NOW = "2026-07-08T12:00:00.000Z";
 const HASH = `sha256:${"a".repeat(64)}`;
+const ISSUE128_PUBLICATION_STATE_MODEL = Object.freeze({
+  verdict: Object.freeze({ APPROVE: "admit-only-if-eligible", REJECT: "publish-empty-authority-after-exact-disclosure" }),
+  git_status: Object.freeze({ A: "eligible-added", M: "eligible-content-modification", D: "deny", "R-source": "deny", "R-destination": "deny", "C-source": "deny", "C-destination": "deny", T: "deny", U: "deny", X: "deny", B: "deny", malformed: "deny", unobservable: "deny" }),
+  tree_form: Object.freeze({ absent: "eligible-only-as-added-baseline", "100644 blob": "eligible-regular-file", "100755 blob": "eligible-regular-file", "mode-changed": "deny", symlink: "deny", submodule: "deny", other: "deny" }),
+  owner_cardinality: Object.freeze({ 0: "eligible", 1: "eligible-only-for-qualified-content-modification", ">1": "deny" }),
+  sole_owner_state: Object.freeze({ pending: "deny", running: "deny", "review-APPROVE": "eligible", "review-REJECT": "deny", merged: "eligible", blocked: "deny" }),
+  owner_diff: Object.freeze({ touching: "deny", "non-touching": "eligible", unobservable: "deny" }),
+  freshness: Object.freeze({ current: "eligible", "missing-ref": "deny", "ref-drift": "deny", "hash-drift": "deny", "byte-drift": "deny", "history-stale": "deny", "cross-bound": "deny" }),
+});
 const CONTROL_PLANE_PATH_CASES = Object.freeze([
   { name: "opencode-skills", path: ".opencode/skills/local/SKILL.md" },
   { name: "opencode-agents", path: ".opencode/agents/security.md" },
@@ -2424,6 +2435,10 @@ describe("simplified run-state transitions", () => {
       assert.equal(published.slice.status, "review");
       assert.equal(published.slice.review_ref, "reviews/slice.json");
       assert.equal(published.slice.review_hash, hashFile(prepared.reviewPath));
+      assert.equal(published.slice.attempt_reviews[0].ownership_schema_version, 2);
+      assert.deepEqual(published.slice.attempt_reviews[0].ratified_paths, []);
+      assert.deepEqual(published.slice.attempt_reviews[0].modified_extensions, []);
+      assert.deepEqual(published.slice.effective_paths, published.slice.declared_paths);
       const beforeMerge = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       await assert.rejects(
         transitionSliceMerged(fixture.runDir, "slice", { merge_commit: "abc123" }),
@@ -2753,15 +2768,872 @@ describe("simplified run-state transitions", () => {
     });
   }
 
-  it("rejects APPROVE ratification outside newly added private regular files", async () => {
+  it("derives exact v2 authority for a disclosed content-only modification of a pre-existing unowned file", async () => {
+    const fixture = createFixture("ownership-modified-unowned-v2");
+    try {
+      initGitRepo(fixture.repo);
+      mkdirSync(join(fixture.repo, "docs"), { recursive: true });
+      writeFileSync(join(fixture.repo, "docs", "pre-existing.md"), "baseline bytes\n");
+      chmodSync(join(fixture.repo, "docs", "pre-existing.md"), 0o755);
+      runGit(fixture.repo, ["add", "docs/pre-existing.md"]);
+      runGit(fixture.repo, ["commit", "-m", "seed unowned file"]);
+      runGit(fixture.repo, ["branch", "slice-branch"]);
+      const sliceWorktree = join(fixture.repo, ".opencode", "worktrees", "slice");
+      mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
+      runGit(fixture.repo, ["worktree", "add", sliceWorktree, "slice-branch"]);
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...baseRun(fixture.runId), branch: "main", worktree: fixture.repo,
+        slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "pending", attempts: 0 }],
+      });
+      seedBuilderDispatchAuthority(fixture);
+      await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: sliceWorktree });
+      let reviewedCommit;
+      await closeBuilderDispatch(fixture, 1, () => {
+        writeFileSync(join(sliceWorktree, "docs", "pre-existing.md"), "reviewed bytes\n");
+        runGit(sliceWorktree, ["add", "docs/pre-existing.md"]);
+        runGit(sliceWorktree, ["commit", "-m", "modify unowned file"]);
+        reviewedCommit = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]);
+      });
+      mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+      const rationale = "The existing documentation file must change with this slice behavior.";
+      writeJson(join(fixture.runDir, "evidence", "slice.json"), {
+        subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
+        ownership_disclosure: [{ path: "docs/pre-existing.md", rationale }],
+      });
+      const successorReview = createV2SliceReviewRecord({
+        runDir: fixture.runDir, evidenceRef: "evidence/slice.json", subject: "slice", attempt: 1, reviewedCommit,
+      });
+      writeJson(join(fixture.runDir, "reviews", "slice.json"), successorReview);
+      for (const [status, expected] of [
+        ["A", /must be absent at the first checked dispatch baseline/u],
+        ["D", /unsafe Git change kind 'deleted'/u],
+        ["T", /unsafe Git change kind 'type-changed'/u],
+        ["U", /unsafe Git change kind 'unmerged'/u],
+        ["X", /unsafe Git change kind 'unknown'/u],
+        ["B", /unsafe Git change kind 'broken'/u],
+        ["Q", /change kinds contain an invalid status/u],
+        [null, /slice ownership change kinds cannot be observed/u],
+      ]) {
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(
+          transitionRunSlice(fixture.runDir, "slice", {
+            status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
+          }, {
+            gitFn(cwd, args) {
+              if (args[0] === "diff" && args[1] === "--name-status") {
+                return status === null
+                  ? { ok: false, status: 1, stdout: "", stderr: "unobservable" }
+                  : { ok: true, status: 0, stdout: `${status}\0docs/pre-existing.md\0`, stderr: "" };
+              }
+              return observedGit(cwd, args);
+            },
+          }),
+          expected,
+          status ?? "unobservable",
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, status ?? "unobservable");
+      }
+      for (const [name, statusBytes, expectedKind] of [
+        ["rename-source", "R100\0docs/pre-existing.md\0docs/other.md\0", "renamed"],
+        ["rename-destination", "R100\0docs/other.md\0docs/pre-existing.md\0", "renamed"],
+        ["copy-source", "C100\0docs/pre-existing.md\0docs/other.md\0", "copied"],
+        ["copy-destination", "C100\0docs/other.md\0docs/pre-existing.md\0", "copied"],
+        ["rename-source-then-modified", "R100\0docs/pre-existing.md\0docs/other.md\0M\0docs/pre-existing.md\0", "renamed"],
+        ["rename-destination-then-modified", "R100\0docs/other.md\0docs/pre-existing.md\0M\0docs/pre-existing.md\0", "renamed"],
+        ["copy-source-then-modified", "C100\0docs/pre-existing.md\0docs/other.md\0M\0docs/pre-existing.md\0", "copied"],
+        ["copy-destination-then-modified", "C100\0docs/other.md\0docs/pre-existing.md\0M\0docs/pre-existing.md\0", "copied"],
+      ]) {
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(
+          transitionRunSlice(fixture.runDir, "slice", {
+            status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
+          }, {
+            gitFn(cwd, args) {
+              if (args[0] === "diff" && args[1] === "--name-status") return { ok: true, status: 0, stdout: statusBytes, stderr: "" };
+              return observedGit(cwd, args);
+            },
+          }),
+          new RegExp(`unsafe Git change kind '${expectedKind}'`, "u"),
+          name,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
+      }
+      for (const [name, treeResult, expected] of [
+        ["absent", { ok: true, status: 0, stdout: "", stderr: "" }, /must remain a private regular file/u],
+        ["submodule", { ok: true, status: 0, stdout: `160000 commit ${"a".repeat(40)}\tdocs/pre-existing.md\0`, stderr: "" }, /must remain a private regular file/u],
+        ["other", { ok: true, status: 0, stdout: `040000 tree ${"a".repeat(40)}\tdocs/pre-existing.md\0`, stderr: "" }, /must remain a private regular file/u],
+        ["malformed", { ok: true, status: 0, stdout: "malformed\0", stderr: "" }, /tree entry 'docs\/pre-existing\.md' is malformed or ambiguous/u],
+        ["unobservable", { ok: false, status: 1, stdout: "", stderr: "unobservable" }, /cannot observe ratification tree entry/u],
+      ]) {
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(
+          transitionRunSlice(fixture.runDir, "slice", {
+            status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
+          }, {
+            gitFn(cwd, args) {
+              if (args[0] === "ls-tree" && args[2] === reviewedCommit && args.at(-1) === ":(literal)docs/pre-existing.md") return treeResult;
+              return observedGit(cwd, args);
+            },
+          }),
+          expected,
+          name,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
+      }
+      writeJson(join(fixture.runDir, "reviews", "slice.json"), {
+        ...successorReview,
+        ownership_ratification: { schema_version: 1, paths: ["docs/pre-existing.md"] },
+      });
+      const beforeLegacyPublication = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", {
+          status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
+        }),
+        /new checked review publication requires pathless ownership_ratification schema_version 2/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeLegacyPublication);
+      writeJson(join(fixture.runDir, "reviews", "slice.json"), successorReview);
+
+      const published = await transitionRunSlice(fixture.runDir, "slice", {
+        status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
+      });
+      assert.deepEqual(published.slice.effective_paths, ["src/**", "docs/pre-existing.md"]);
+      assert.equal(published.slice.attempt_reviews[0].ownership_schema_version, 2);
+      assert.deepEqual(published.slice.attempt_reviews[0].ratified_paths, ["docs/pre-existing.md"]);
+      assert.deepEqual(published.slice.attempt_reviews[0].modified_extensions, [
+        { kind: "modified-extension", path: "docs/pre-existing.md", rationale, authority: "unowned" },
+      ]);
+      assert.match(gitOutput(fixture.repo, ["ls-tree", reviewedCommit, "docs/pre-existing.md"]), /^100755 blob /u);
+
+      runGit(fixture.repo, ["merge", "--no-ff", "slice-branch", "-m", "merge modified unowned file"]);
+      const mergeCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      const runPath = join(fixture.runDir, "run.json");
+      const evidencePath = join(fixture.runDir, "evidence", "slice.json");
+      const originalRunBytes = readFileSync(runPath, "utf8");
+      const originalEvidenceBytes = readFileSync(evidencePath, "utf8");
+      const changedEvidence = readJson(evidencePath);
+      changedEvidence.ownership_disclosure[0].rationale = "A different rationale must not inherit the reviewed authority.";
+      writeJson(evidencePath, changedEvidence);
+      const changedRun = readJson(runPath);
+      const changedSlice = changedRun.slices.find((slice) => slice.id === "slice");
+      changedSlice.evidence_hash = hashFile(evidencePath);
+      changedSlice.attempt_reviews[0].evidence_hash = changedSlice.evidence_hash;
+      writeJson(runPath, changedRun);
+      const tamperedRunBytes = readFileSync(runPath, "utf8");
+      await assert.rejects(
+        transitionSliceMerged(fixture.runDir, "slice", { merge_commit: mergeCommit }),
+        /modified-extension evidence is stale|persisted modified-extension authority is stale|review history is stale/u,
+      );
+      assert.equal(readFileSync(runPath, "utf8"), tamperedRunBytes);
+      writeFileSync(evidencePath, originalEvidenceBytes);
+      writeFileSync(runPath, originalRunBytes);
+      const merged = await transitionSliceMerged(fixture.runDir, "slice", { merge_commit: mergeCommit });
+      assert.equal(merged.slice.status, "merged");
+      assert.deepEqual(merged.slice.effective_paths, ["src/**", "docs/pre-existing.md"]);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("keeps an immutable historical v1 review mergeable only through its original policy", async () => {
+    const fixture = createFixture("ownership-historical-v1-merge");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      const prepared = prepareSliceMergeState(fixture, { reviewedPath: "extension/slice.txt" });
+      const reviewPath = join(fixture.runDir, "reviews", "slice.json");
+      const review = readJson(reviewPath);
+      review.ownership_ratification = { schema_version: 1, paths: [] };
+      writeJson(reviewPath, review);
+      const runPath = join(fixture.runDir, "run.json");
+      const run = readJson(runPath);
+      const slice = run.slices.find((candidate) => candidate.id === "slice");
+      const history = slice.attempt_reviews[0];
+      const planPath = join(fixture.runDir, "plan", "slices.json");
+      const plan = readJson(planPath);
+      plan.slices[0].paths = ["src/**"];
+      writeJson(planPath, plan);
+      run.steps.find((step) => step.agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
+      slice.declared_paths = ["src/**"];
+      slice.effective_paths = ["src/**", "extension/slice.txt"];
+      history.ratified_paths = ["extension/slice.txt"];
+      delete history.ownership_schema_version;
+      delete history.modified_extensions;
+      const evidencePath = join(fixture.runDir, "evidence", "slice.json");
+      const evidence = readJson(evidencePath);
+      evidence.ownership_disclosure = [{
+        path: "extension/slice.txt",
+        rationale: "The historical review disclosed its newly added unowned extension.",
+      }];
+      writeJson(evidencePath, evidence);
+      slice.evidence_hash = hashFile(evidencePath);
+      history.evidence_hash = slice.evidence_hash;
+      review.ownership_ratification = { schema_version: 1, paths: ["extension/slice.txt"] };
+      const unit = plan.delivery_envelope.delivery_units.find((candidate) => candidate.slice_id === "slice");
+      const familyEvidence = writeVerificationArtifactReceipt({
+        runDir: fixture.runDir, runId: fixture.runId, plan, sliceId: "slice", attempt: 1,
+        reviewedCommit: prepared.reviewedCommit, artifactId: unit.verification_artifacts[0].id,
+        evidenceRef: "evidence/slice-family.json",
+        result: { type: "verification-result", outcome: "pass", summary: `${unit.invariant_families[0].description} passed` },
+      });
+      review.invariant_family_ledger = passingInvariantFamilyLedger({
+        plan, sliceId: "slice", reviewedCommit: prepared.reviewedCommit,
+        evidenceRef: "evidence/slice-family.json", evidenceHash: familyEvidence.hash,
+      });
+      writeJson(reviewPath, review);
+      slice.review_hash = hashFile(reviewPath);
+      history.review_hash = slice.review_hash;
+      writeJson(runPath, run);
+
+      const validRunBytes = readFileSync(runPath);
+      const validEvidenceBytes = readFileSync(evidencePath);
+      for (const [label, ownershipDisclosure] of [
+        ["missing", undefined],
+        ["inaccurate", [{ path: "extension/other.txt", rationale: "This path was not in the reviewed diff." }]],
+      ]) {
+        const invalidEvidence = readJson(evidencePath);
+        if (ownershipDisclosure === undefined) delete invalidEvidence.ownership_disclosure;
+        else invalidEvidence.ownership_disclosure = ownershipDisclosure;
+        writeJson(evidencePath, invalidEvidence);
+        const invalidRun = readJson(runPath);
+        const invalidSlice = invalidRun.slices.find((candidate) => candidate.id === "slice");
+        invalidSlice.evidence_hash = hashFile(evidencePath);
+        invalidSlice.attempt_reviews[0].evidence_hash = invalidSlice.evidence_hash;
+        writeJson(runPath, invalidRun);
+        const before = readFileSync(runPath);
+        await assert.rejects(
+          transitionSliceMerged(fixture.runDir, "slice", { merge_commit: prepared.mergeCommit }),
+          /ownership_disclosure/u,
+          label,
+        );
+        assert.deepEqual(readFileSync(runPath), before, label);
+        writeFileSync(evidencePath, validEvidenceBytes);
+        writeFileSync(runPath, validRunBytes);
+      }
+
+      const merged = await transitionSliceMerged(fixture.runDir, "slice", { merge_commit: prepared.mergeCommit });
+      assert.equal(merged.slice.status, "merged");
+      assert.equal(Object.hasOwn(merged.slice.attempt_reviews[0], "ownership_schema_version"), false);
+      assert.equal(Object.hasOwn(merged.slice.attempt_reviews[0], "modified_extensions"), false);
+      assert.deepEqual(merged.slice.attempt_reviews[0].ratified_paths, ["extension/slice.txt"]);
+      assert.deepEqual(merged.slice.effective_paths, ["src/**", "extension/slice.txt"]);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("freezes sole non-touching sibling authority and defers modifying merge until that owner merges unchanged", async () => {
+    const fixture = createFixture("ownership-modified-sibling-v2");
+    try {
+      const prepared = await prepareSiblingModificationFixture(fixture);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      const owner = run.slices.find((slice) => slice.id === "owner");
+      const modifier = run.slices.find((slice) => slice.id === "modifier");
+      const ownerAttempt = owner.attempt_reviews[0];
+      const rationale = "The modifier must update the existing sibling-owned compatibility fixture.";
+      assert.equal(owner.status, "review");
+      assert.deepEqual(modifier.effective_paths, ["src/**", "test/shared.test.js"]);
+      assert.deepEqual(modifier.attempt_reviews[0].modified_extensions, [{
+        kind: "modified-extension",
+        path: "test/shared.test.js",
+        rationale,
+        authority: "non-conflicting-sibling",
+        owner_slice_id: "owner",
+        owner_attempt: 1,
+        owner_evidence_ref: owner.evidence_ref,
+        owner_evidence_hash: owner.evidence_hash,
+        owner_review_ref: owner.review_ref,
+        owner_review_hash: owner.review_hash,
+        owner_dispatch_claim_ref: ownerAttempt.dispatch_claim_ref,
+        owner_dispatch_claim_hash: ownerAttempt.dispatch_claim_hash,
+        owner_dispatch_closure_ref: ownerAttempt.dispatch_closure_ref,
+        owner_dispatch_closure_hash: ownerAttempt.dispatch_closure_hash,
+        owner_reviewed_commit: owner.reviewed_commit,
+        owner_diff_base_commit: ownerAttempt.diff_base_commit,
+      }]);
+
+      runGit(fixture.repo, ["merge", "--no-ff", "modifier-branch", "-m", "integrate modifier first"]);
+      const modifierIntegration = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      const beforeDeniedMerge = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionSliceMerged(fixture.runDir, "modifier", { merge_commit: modifierIntegration }),
+        /cannot merge sibling-owned path 'test\/shared\.test\.js' while owner 'owner' remains in review/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeDeniedMerge);
+
+      runGit(fixture.repo, ["reset", "--hard", prepared.baseline]);
+      runGit(fixture.repo, ["merge", "--no-ff", "owner-branch", "-m", "integrate owner"]);
+      const ownerIntegration = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      const ownerMerged = await transitionSliceMerged(fixture.runDir, "owner", { merge_commit: ownerIntegration });
+      assert.equal(ownerMerged.slice.status, "merged");
+      runGit(fixture.repo, ["worktree", "remove", prepared.ownerWorktree]);
+      runGit(fixture.repo, ["branch", "-D", "owner-branch"]);
+      runGit(fixture.repo, ["merge", "--no-ff", "modifier-branch", "-m", "integrate modifier after owner"]);
+      const combinedIntegration = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      const modifierMerged = await transitionSliceMerged(fixture.runDir, "modifier", { merge_commit: combinedIntegration });
+      assert.equal(modifierMerged.slice.status, "merged");
+      assert.deepEqual(modifierMerged.slice.attempt_reviews[0].modified_extensions, modifier.attempt_reviews[0].modified_extensions);
+      assert.deepEqual(modifierMerged.slice.effective_paths, ["src/**", "test/shared.test.js"]);
+      assert.equal(prepared.modifierReviewedCommit, modifier.reviewed_commit);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("publishes the same frozen sibling provenance when the sole owner is already merged", async () => {
+    const fixture = createFixture("ownership-modified-sibling-owner-merged");
+    try {
+      const prepared = await prepareSiblingModificationFixture(fixture, { publishModifier: false });
+      runGit(fixture.repo, ["merge", "--no-ff", "owner-branch", "-m", "integrate owner before modifier review"]);
+      const ownerMerge = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      await transitionSliceMerged(fixture.runDir, "owner", { merge_commit: ownerMerge });
+      runGit(fixture.repo, ["worktree", "remove", prepared.ownerWorktree]);
+      runGit(fixture.repo, ["branch", "-D", "owner-branch"]);
+      const runPath = join(fixture.runDir, "run.json");
+      const validRun = readFileSync(runPath);
+      const invalid = readJson(runPath);
+      invalid.slices.find((slice) => slice.id === "owner").merge_commit = prepared.baseline;
+      writeJson(runPath, invalid);
+      const before = readFileSync(runPath);
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "modifier", {
+          status: "review", attempts: 1, evidence_ref: "evidence/modifier.json", review_ref: "reviews/modifier.json",
+        }),
+        /merge commit must have exactly two ordered parents/u,
+      );
+      assert.deepEqual(readFileSync(runPath), before);
+      writeFileSync(runPath, validRun);
+      const published = await transitionRunSlice(fixture.runDir, "modifier", {
+        status: "review", attempts: 1, evidence_ref: "evidence/modifier.json", review_ref: "reviews/modifier.json",
+      });
+      assert.equal(published.slice.attempt_reviews[0].modified_extensions[0].authority, "non-conflicting-sibling");
+      assert.equal(published.slice.attempt_reviews[0].modified_extensions[0].owner_slice_id, "owner");
+      assert.deepEqual(published.slice.effective_paths, ["src/**", "test/shared.test.js"]);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("denies every incomplete, stale, touching, or ineligible sole-sibling authority state without publication", async () => {
+    const cases = [
+      {
+        name: "pending",
+        expected: /owner 'owner' is not in review or merged/u,
+        mutate: async (fixture) => {
+          const run = readJson(join(fixture.runDir, "run.json"));
+          const owner = run.slices.find((slice) => slice.id === "owner");
+          run.slices[run.slices.indexOf(owner)] = {
+            id: "owner", stack: "backend", depends_on: [], declared_paths: ["test/**"], effective_paths: ["test/**"], status: "pending", attempts: 0,
+          };
+          writeJson(join(fixture.runDir, "run.json"), run);
+        },
+      },
+      {
+        name: "running",
+        expected: /owner 'owner' is not in review or merged/u,
+        mutate: async (fixture) => {
+          const run = readJson(join(fixture.runDir, "run.json"));
+          const owner = run.slices.find((slice) => slice.id === "owner");
+          owner.status = "running";
+          owner.attempts = 2;
+          owner.effective_paths = [...owner.declared_paths];
+          for (const key of ["evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]) delete owner[key];
+          writeJson(join(fixture.runDir, "run.json"), run);
+        },
+      },
+      {
+        name: "blocked",
+        expected: /owner 'owner' is not in review or merged/u,
+        mutate: async (fixture) => { await transitionRunSlice(fixture.runDir, "owner", { status: "blocked", blocked_reason: "owner blocked" }); },
+      },
+      {
+        name: "missing-ref",
+        expected: /missing reviews ref/u,
+        mutate: async (fixture) => { rmSync(join(fixture.runDir, "reviews", "owner.json")); },
+      },
+      {
+        name: "ref-drift",
+        expected: /must equal the current attempt_reviews review_ref/u,
+        mutate: async (fixture) => {
+          const run = readJson(join(fixture.runDir, "run.json"));
+          run.slices.find((slice) => slice.id === "owner").review_ref = "reviews/modifier.json";
+          writeJson(join(fixture.runDir, "run.json"), run);
+        },
+      },
+      {
+        name: "hash-drift",
+        expected: /successor review hashes are stale/u,
+        mutate: async (fixture) => {
+          const run = readJson(join(fixture.runDir, "run.json"));
+          const owner = run.slices.find((slice) => slice.id === "owner");
+          owner.review_hash = `sha256:${"f".repeat(64)}`;
+          owner.attempt_reviews[0].review_hash = owner.review_hash;
+          writeJson(join(fixture.runDir, "run.json"), run);
+        },
+      },
+      {
+        name: "byte-drift",
+        expected: /successor review hashes are stale/u,
+        mutate: async (fixture) => {
+          const path = join(fixture.runDir, "reviews", "owner.json");
+          writeFileSync(path, `${readFileSync(path, "utf8")} `);
+        },
+      },
+      {
+        name: "history-stale",
+        expected: /must equal the current attempt_reviews evidence_hash/u,
+        mutate: async (fixture) => {
+          const run = readJson(join(fixture.runDir, "run.json"));
+          run.slices.find((slice) => slice.id === "owner").attempt_reviews[0].evidence_hash = `sha256:${"f".repeat(64)}`;
+          writeJson(join(fixture.runDir, "run.json"), run);
+        },
+      },
+      {
+        name: "cross-bound",
+        expected: /history is cross-bound|stored diff baseline must equal the first checked dispatch commit/u,
+        mutate: async (fixture, prepared) => {
+          const run = readJson(join(fixture.runDir, "run.json"));
+          run.slices.find((slice) => slice.id === "owner").attempt_reviews[0].diff_base_commit = gitOutput(fixture.repo, ["rev-parse", `${prepared.baseline}^`]);
+          writeJson(join(fixture.runDir, "run.json"), run);
+        },
+      },
+      {
+        name: "unobservable",
+        expected: /requires existing branch 'owner-branch'/u,
+        mutate: async (fixture, prepared) => {
+          runGit(fixture.repo, ["worktree", "remove", prepared.ownerWorktree]);
+          runGit(fixture.repo, ["branch", "-D", "owner-branch"]);
+        },
+      },
+    ];
+
+    for (const { name, expected, mutate } of cases) {
+      const fixture = createFixture(`ownership-sibling-${name}`);
+      try {
+        const prepared = await prepareSiblingModificationFixture(fixture, { publishModifier: false });
+        await mutate(fixture, prepared);
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(
+          transitionRunSlice(fixture.runDir, "modifier", {
+            status: "review", attempts: 1, evidence_ref: "evidence/modifier.json", review_ref: "reviews/modifier.json",
+          }),
+          expected,
+          name,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+
+    for (const [name, options, expected] of [
+      ["review-REJECT", { ownerVerdict: "REJECT", publishModifier: false }, /review is not APPROVE/u],
+      ["touching", { ownerTouchesShared: true, publishModifier: false }, /reviewed diff touches it/u],
+    ]) {
+      const fixture = createFixture(`ownership-sibling-${name}`);
+      try {
+        await prepareSiblingModificationFixture(fixture, options);
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(
+          transitionRunSlice(fixture.runDir, "modifier", {
+            status: "review", attempts: 1, evidence_ref: "evidence/modifier.json", review_ref: "reviews/modifier.json",
+          }),
+          expected,
+          name,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+
+    const unobservable = createFixture("ownership-sibling-full-diff-unobservable");
+    try {
+      const prepared = await prepareSiblingModificationFixture(unobservable, { publishModifier: false });
+      const before = readFileSync(join(unobservable.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionRunSlice(unobservable.runDir, "modifier", {
+          status: "review", attempts: 1, evidence_ref: "evidence/modifier.json", review_ref: "reviews/modifier.json",
+        }, {
+          gitFn(cwd, args) {
+            if (args[0] === "diff" && args[1] === "--name-only" && args.at(-1) === prepared.ownerReviewedCommit) {
+              return { ok: false, status: 1, stdout: "", stderr: "unobservable sibling full diff" };
+            }
+            return observedGit(cwd, args);
+          },
+        }),
+        /full sibling reviewed diff cannot be observed/u,
+      );
+      assert.equal(readFileSync(join(unobservable.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(unobservable.repo);
+    }
+  });
+
+  it("executes the closed issue-128 publication model and exact REJECT disclosure boundary", async () => {
+    assert.deepEqual(ISSUE128_PUBLICATION_STATE_MODEL, {
+      verdict: { APPROVE: "admit-only-if-eligible", REJECT: "publish-empty-authority-after-exact-disclosure" },
+      git_status: { A: "eligible-added", M: "eligible-content-modification", D: "deny", "R-source": "deny", "R-destination": "deny", "C-source": "deny", "C-destination": "deny", T: "deny", U: "deny", X: "deny", B: "deny", malformed: "deny", unobservable: "deny" },
+      tree_form: { absent: "eligible-only-as-added-baseline", "100644 blob": "eligible-regular-file", "100755 blob": "eligible-regular-file", "mode-changed": "deny", symlink: "deny", submodule: "deny", other: "deny" },
+      owner_cardinality: { 0: "eligible", 1: "eligible-only-for-qualified-content-modification", ">1": "deny" },
+      sole_owner_state: { pending: "deny", running: "deny", "review-APPROVE": "eligible", "review-REJECT": "deny", merged: "eligible", blocked: "deny" },
+      owner_diff: { touching: "deny", "non-touching": "eligible", unobservable: "deny" },
+      freshness: { current: "eligible", "missing-ref": "deny", "ref-drift": "deny", "hash-drift": "deny", "byte-drift": "deny", "history-stale": "deny", "cross-bound": "deny" },
+    });
+
+    const fixture = createFixture("ownership-reject-disclosure-model");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      runGit(fixture.repo, ["checkout", "slice-branch"]);
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...baseRun(fixture.runId), branch: "slice-branch", worktree: fixture.repo,
+        slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "pending", attempts: 0 }],
+      });
+      seedBuilderDispatchAuthority(fixture);
+      await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
+      let reviewedCommit;
+      await closeBuilderDispatch(fixture, 1, () => {
+        mkdirSync(join(fixture.repo, "docs"), { recursive: true });
+        writeFileSync(join(fixture.repo, "docs", "a.md"), "a\n");
+        writeFileSync(join(fixture.repo, "docs", "z.md"), "z\n");
+        runGit(fixture.repo, ["add", "docs/a.md", "docs/z.md"]);
+        runGit(fixture.repo, ["commit", "-m", "add disclosed reject paths"]);
+        reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      });
+      mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+      const evidencePath = join(fixture.runDir, "evidence", "slice.json");
+      const reviewPath = join(fixture.runDir, "reviews", "slice.json");
+      writeJson(reviewPath, createV2SliceReviewRecord({
+        runDir: fixture.runDir, evidenceRef: "evidence/slice.json", subject: "slice", attempt: 1, reviewedCommit,
+        verdict: "REJECT", requiredFixes: ["Repair the rejected implementation"],
+      }));
+      const validDisclosure = [
+        { path: "docs/a.md", rationale: "The first documentation fixture is required by this rejected attempt." },
+        { path: "docs/z.md", rationale: "The second documentation fixture is required by this rejected attempt." },
+      ];
+      const invalidCases = [
+        ["missing", undefined, /must include ownership_disclosure/u],
+        ["extra", [...validDisclosure, { path: "docs/zz.md", rationale: "Extra path." }], /must exactly equal/u],
+        ["unsorted", [...validDisclosure].reverse(), /sorted and unique/u],
+        ["duplicate", [validDisclosure[0], validDisclosure[0], validDisclosure[1]], /sorted and unique/u],
+        ["wrong-path", [validDisclosure[0], { ...validDisclosure[1], path: "docs/y.md" }], /must exactly equal/u],
+        ["empty-rationale", [{ ...validDisclosure[0], rationale: "" }, validDisclosure[1]], /nonempty normalized text/u],
+        ["non-nfc-rationale", [{ ...validDisclosure[0], rationale: "Cafe\u0301 rationale" }, validDisclosure[1]], /nonempty normalized text/u],
+      ];
+      for (const [name, ownershipDisclosure, expected] of invalidCases) {
+        const evidence = { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit };
+        if (ownershipDisclosure !== undefined) evidence.ownership_disclosure = ownershipDisclosure;
+        writeJson(evidencePath, evidence);
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(publishPreparedSliceReview(fixture), expected, name);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
+      }
+      for (const codePoint of [...Array.from({ length: 32 }, (_unused, index) => index), 0x7f, ...Array.from({ length: 32 }, (_unused, index) => 0x80 + index)]) {
+        writeJson(evidencePath, {
+          subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
+          ownership_disclosure: [{ ...validDisclosure[0], rationale: `Control${String.fromCodePoint(codePoint)}rationale` }, validDisclosure[1]],
+        });
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(publishPreparedSliceReview(fixture), /nonempty normalized text/u, `U+${codePoint.toString(16).padStart(4, "0")}`);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, `U+${codePoint.toString(16).padStart(4, "0")}`);
+      }
+      writeJson(evidencePath, { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit, ownership_disclosure: validDisclosure });
+      const published = await publishPreparedSliceReview(fixture);
+      assert.deepEqual(published.slice.attempt_reviews[0].ratified_paths, []);
+      assert.deepEqual(published.slice.attempt_reviews[0].modified_extensions, []);
+      assert.deepEqual(published.slice.effective_paths, ["src/**"]);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("re-derives every persisted v2 sibling authority field in history and consistency readers", async () => {
+    const fixture = createFixture("ownership-v2-field-reobservation");
+    try {
+      await prepareSiblingModificationFixture(fixture);
+      const runPath = join(fixture.runDir, "run.json");
+      const original = readJson(runPath);
+      const extension = original.slices.find((slice) => slice.id === "modifier").attempt_reviews[0].modified_extensions[0];
+      const fieldMutations = Object.keys(extension).map((key) => [key, (value) => {
+        value[key] = typeof value[key] === "number" ? value[key] + 1 : `${value[key]}-stale`;
+      }]);
+      fieldMutations.push(
+        ["ownership_schema_version", (_extension, entry) => { entry.ownership_schema_version = 1; }],
+        ["ratified_paths", (_extension, entry) => { entry.ratified_paths = ["test/other.test.js"]; }],
+        ["modified_extensions", (_extension, entry) => { entry.modified_extensions = []; }],
+      );
+      for (const [field, mutate] of fieldMutations) {
+        const candidate = structuredClone(original);
+        const slice = candidate.slices.find((item) => item.id === "modifier");
+        const entry = slice.attempt_reviews[0];
+        mutate(entry.modified_extensions[0], entry);
+        writeJson(runPath, candidate);
+        assert.throws(() => assertSliceAttemptHistoryCurrent(fixture.runDir, "modifier", slice), /stale|invalid|unsafe|authority|must equal|must exactly|must be/u, field);
+        assert.equal(checkRunConsistency(fixture.runDir, candidate).ok, false, field);
+      }
+      writeJson(runPath, original);
+      assert.doesNotThrow(() => assertSliceAttemptHistoryCurrent(fixture.runDir, "modifier", original.slices.find((slice) => slice.id === "modifier")));
+      assert.equal(checkRunConsistency(fixture.runDir, original).ok, true);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("re-observes every frozen sibling authority source before accepting persisted v2 history", async () => {
+    const cases = [
+      ["owner-evidence-result", (fixture, run, owner, extension) => {
+        const evidencePath = join(fixture.runDir, owner.evidence_ref);
+        const evidence = readJson(evidencePath);
+        evidence.status = "fail";
+        writeJson(evidencePath, evidence);
+        owner.evidence_hash = hashFile(evidencePath);
+        owner.attempt_reviews[0].evidence_hash = owner.evidence_hash;
+        extension.owner_evidence_hash = owner.evidence_hash;
+      }, /evidence authority is stale|review authority is stale/u],
+      ["checked-invariant-receipt", (fixture, run, owner, extension) => {
+        const reviewPath = join(fixture.runDir, owner.review_ref);
+        const review = readJson(reviewPath);
+        const ledgerEntry = review.invariant_family_ledger.dispositions[0];
+        const receiptPath = join(fixture.runDir, ledgerEntry.evidence_ref);
+        const receipt = readJson(receiptPath);
+        receipt.review_ready = false;
+        writeJson(receiptPath, receipt);
+        const receiptHash = hashFile(receiptPath);
+        ledgerEntry.evidence_hash = receiptHash;
+        const claimPath = join(fixture.runDir, ledgerEntry.evidence_ref.replace(/\.json$/u, ".claim.json"));
+        const claim = readJson(claimPath);
+        claim.receipt_hash = receiptHash;
+        writeJson(claimPath, claim);
+        writeJson(reviewPath, review);
+        owner.review_hash = hashFile(reviewPath);
+        owner.attempt_reviews[0].review_hash = owner.review_hash;
+        extension.owner_review_hash = owner.review_hash;
+      }, /review_ready|invariant-family checked receipt authority is stale or cross-bound/u],
+      ["dispatch-claim-binding", (fixture, run, owner, extension) => {
+        const entry = owner.attempt_reviews[0];
+        const claimPath = join(fixture.runDir, entry.dispatch_claim_ref);
+        const closurePath = join(fixture.runDir, entry.dispatch_closure_ref);
+        const claim = readJson(claimPath);
+        claim.branch = "cross-bound-owner-branch";
+        writeJson(claimPath, claim);
+        entry.dispatch_claim_hash = hashFile(claimPath);
+        const closure = readJson(closurePath);
+        closure.branch = claim.branch;
+        closure.claim_hash = entry.dispatch_claim_hash;
+        writeJson(closurePath, closure);
+        entry.dispatch_closure_hash = hashFile(closurePath);
+        owner.dispatch_claim_hash = entry.dispatch_claim_hash;
+        owner.dispatch_closure_hash = entry.dispatch_closure_hash;
+        extension.owner_dispatch_claim_hash = entry.dispatch_claim_hash;
+        extension.owner_dispatch_closure_hash = entry.dispatch_closure_hash;
+      }, /dispatch claim authority is stale or cross-bound/u],
+      ["dispatch-completion-head", (fixture, run, owner, extension) => {
+        const entry = owner.attempt_reviews[0];
+        const closurePath = join(fixture.runDir, entry.dispatch_closure_ref);
+        const closure = readJson(closurePath);
+        closure.completion_head = entry.diff_base_commit;
+        writeJson(closurePath, closure);
+        entry.dispatch_closure_hash = hashFile(closurePath);
+        owner.dispatch_closure_hash = entry.dispatch_closure_hash;
+        extension.owner_dispatch_closure_hash = entry.dispatch_closure_hash;
+      }, /dispatch closure authority is stale or cross-bound/u],
+      ["reviewed-worktree-head", (fixture, _run, owner) => {
+        writeFileSync(join(owner.worktree, "unreviewed-source.txt"), "unreviewed\n");
+      }, /reviewed branch\/worktree head is stale/u],
+    ];
+
+    for (const [name, mutate, expected] of cases) {
+      const fixture = createFixture(`ownership-v2-source-${name}`);
+      try {
+        await prepareSiblingModificationFixture(fixture);
+        const runPath = join(fixture.runDir, "run.json");
+        const run = readJson(runPath);
+        const owner = run.slices.find((slice) => slice.id === "owner");
+        const modifier = run.slices.find((slice) => slice.id === "modifier");
+        const extension = modifier.attempt_reviews[0].modified_extensions[0];
+        mutate(fixture, run, owner, extension);
+        writeJson(runPath, run);
+        const before = readFileSync(runPath, "utf8");
+        assert.throws(() => assertSliceAttemptHistoryCurrent(fixture.runDir, "modifier", modifier), expected, name);
+        assert.equal(checkRunConsistency(fixture.runDir, run).ok, false, name);
+        assert.equal(readFileSync(runPath, "utf8"), before, name);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("denies every persisted v2 sibling field drift at merge without mutating durable state", async () => {
+    const fixture = createFixture("ownership-v2-merge-fields");
+    try {
+      const prepared = await prepareSiblingModificationFixture(fixture);
+      runGit(fixture.repo, ["merge", "--no-ff", "owner-branch", "-m", "integrate owner for field drift test"]);
+      const ownerMerge = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      await transitionSliceMerged(fixture.runDir, "owner", { merge_commit: ownerMerge });
+      runGit(fixture.repo, ["merge", "--no-ff", "modifier-branch", "-m", "integrate modifier for field drift test"]);
+      const modifierMerge = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      const runPath = join(fixture.runDir, "run.json");
+      const original = readJson(runPath);
+
+      for (const [name, mutate] of persistedV2FieldMutationCases({ sibling: true })) {
+        const candidate = structuredClone(original);
+        const modifier = candidate.slices.find((slice) => slice.id === "modifier");
+        const entry = modifier.attempt_reviews[0];
+        mutate(entry, entry.modified_extensions[0]);
+        writeJson(runPath, candidate);
+        const before = readFileSync(runPath, "utf8");
+        await assert.rejects(
+          transitionSliceMerged(fixture.runDir, "modifier", { merge_commit: modifierMerge }),
+          /stale|invalid|unsafe|must equal|must exactly|modified-extension|integer from 2|not allowed/u,
+          name,
+        );
+        assert.equal(readFileSync(runPath, "utf8"), before, name);
+        assert.equal(modifier.reviewed_commit, prepared.modifierReviewedCommit, name);
+      }
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("denies every frozen sibling source drift at merge without mutating durable state", async () => {
+    for (const [name, mutate] of persistedSiblingSourceMutationCases()) {
+      const fixture = createFixture(`ownership-v2-merge-source-${name}`);
+      try {
+        await prepareSiblingModificationFixture(fixture);
+        runGit(fixture.repo, ["merge", "--no-ff", "owner-branch", "-m", "integrate owner for source drift test"]);
+        const ownerMerge = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+        await transitionSliceMerged(fixture.runDir, "owner", { merge_commit: ownerMerge });
+        runGit(fixture.repo, ["merge", "--no-ff", "modifier-branch", "-m", "integrate modifier for source drift test"]);
+        const modifierMerge = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+        const runPath = join(fixture.runDir, "run.json");
+        const run = readJson(runPath);
+        mutate(fixture, run, run.slices.find((slice) => slice.id === "owner"));
+        const before = readFileSync(runPath, "utf8");
+        await assert.rejects(
+          transitionSliceMerged(fixture.runDir, "modifier", { merge_commit: modifierMerge }),
+          /stale|cross-bound|review_ready|authority|binding/u,
+          name,
+        );
+        assert.equal(readFileSync(runPath, "utf8"), before, name);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("denies every applicable owner U2 field drift in integration amendment consistency", async () => {
+    const fixture = await prepareReportedIntegrationAmendmentFixture("amendment-owner-u2-fields");
+    try {
+      const runPath = join(fixture.runDir, "run.json");
+      const original = readJson(runPath);
+      const originalOwner = original.slices.find((slice) => slice.id === "owner");
+      assert.equal(original.integration_amendment.status, "reported");
+      assert.equal(originalOwner.attempt_reviews[0].modified_extensions[0].authority, "unowned");
+      assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, original));
+      runGit(fixture.repo, ["worktree", "remove", originalOwner.worktree]);
+      runGit(fixture.repo, ["branch", "-D", originalOwner.branch]);
+      assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, original));
+
+      for (const [name, mutate] of persistedV2FieldMutationCases({ sibling: false })) {
+        const candidate = structuredClone(original);
+        const owner = candidate.slices.find((slice) => slice.id === "owner");
+        const entry = owner.attempt_reviews[0];
+        mutate(entry, entry.modified_extensions[0]);
+        writeJson(runPath, candidate);
+        const before = readFileSync(runPath, "utf8");
+        assert.throws(
+          () => assertIntegrationAmendmentConsistency(fixture.runDir, candidate),
+          /snapshot is stale|stale|invalid|must equal|modified-extension/u,
+          name,
+        );
+        assert.equal(readFileSync(runPath, "utf8"), before, name);
+      }
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("denies every progressed-consumer S2 field drift in integration amendment consistency", async () => {
+    const fixture = await prepareReportedIntegrationAmendmentFixture("amendment-consumer-s2-fields", { progressedConsumer: true });
+    try {
+      const runPath = join(fixture.runDir, "run.json");
+      const original = readJson(runPath);
+      const originalConsumer = original.slices.find((slice) => slice.id === "consumer");
+      const originalOwner = original.slices.find((slice) => slice.id === "owner");
+      assert.equal(originalConsumer.status, "running");
+      assert.equal(originalConsumer.attempt_reviews[0].modified_extensions[0].authority, "non-conflicting-sibling");
+      assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, original));
+      runGit(fixture.repo, ["worktree", "remove", originalOwner.worktree]);
+      runGit(fixture.repo, ["branch", "-D", originalOwner.branch]);
+      assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, original));
+
+      for (const [name, mutate] of persistedV2FieldMutationCases({ sibling: true })) {
+        const candidate = structuredClone(original);
+        const consumer = candidate.slices.find((slice) => slice.id === "consumer");
+        const entry = consumer.attempt_reviews[0];
+        mutate(entry, entry.modified_extensions[0]);
+        writeJson(runPath, candidate);
+        const before = readFileSync(runPath, "utf8");
+        assert.throws(
+          () => assertIntegrationAmendmentConsistency(fixture.runDir, candidate),
+          /consumer attempt 1 review authority is stale|stale|invalid|must equal|modified-extension/u,
+          name,
+        );
+        assert.equal(readFileSync(runPath, "utf8"), before, name);
+      }
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("denies every progressed-consumer S2 owner-source drift without mutating durable state", async () => {
+    for (const [name, mutate] of persistedSiblingSourceMutationCases()) {
+      const fixture = await prepareReportedIntegrationAmendmentFixture(`amendment-consumer-s2-source-${name}`, { progressedConsumer: true });
+      try {
+        const runPath = join(fixture.runDir, "run.json");
+        const run = readJson(runPath);
+        const owner = run.slices.find((slice) => slice.id === "owner");
+        assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, run), `${name}:baseline`);
+        runGit(fixture.repo, ["worktree", "remove", owner.worktree]);
+        runGit(fixture.repo, ["branch", "-D", owner.branch]);
+        assert.doesNotThrow(() => assertIntegrationAmendmentConsistency(fixture.runDir, run), `${name}:cleaned`);
+        mutate(fixture, run, owner);
+        const before = readFileSync(runPath, "utf8");
+        assert.throws(
+          () => assertIntegrationAmendmentConsistency(fixture.runDir, run),
+          /stale|cross-bound|review_ready|authority|binding/u,
+          name,
+        );
+        assert.equal(readFileSync(runPath, "utf8"), before, name);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("denies a progressed amendment consumer with a non-feature baseline without mutating durable state", async () => {
+    const fixture = await prepareReportedIntegrationAmendmentFixture("amendment-progressed-consumer-baseline", { progressedConsumer: true });
+    try {
+      const runPath = join(fixture.runDir, "run.json");
+      const run = readJson(runPath);
+      const consumer = run.slices.find((slice) => slice.id === "consumer");
+      consumer.authorized_baseline_commit = run.integration_amendment.admission.owner.reviewed_commit;
+      writeJson(runPath, run);
+      const before = readFileSync(runPath, "utf8");
+      assert.throws(() => assertIntegrationAmendmentConsistency(fixture.runDir, run), /authorized baseline is not an exact checked feature head/u);
+      assert.equal(readFileSync(runPath, "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects unsafe APPROVE extension kinds and added sibling-owned files", async () => {
     for (const [name, changedPath, addSibling, expected, kind = "file", disclosedPaths = [changedPath]] of [
-      ["sibling", "test/sibling.test.js", true, /has declared plan ownership/u],
-      ["modified", "docs/modified.md", false, /must be a newly added private regular file/u, "modify"],
-      ["mode", "docs/mode.md", false, /must be a newly added private regular file/u, "mode"],
+      ["sibling", "test/sibling.test.js", true, /cannot be inside a sibling ownership lane/u],
+      ["mode", "docs/mode.md", false, /must be content-only with unchanged mode/u, "mode"],
       ["symlink", "docs/link.md", false, /cannot ratify symlink or submodule path 'docs\/link\.md'/u, "symlink"],
-      ["deleted", "docs/deleted.md", false, /must be a newly added private regular file/u, "delete"],
-      ["renamed", "docs/new.md", false, /must be a newly added private regular file/u, "rename", ["docs/new.md", "docs/old.md"]],
-      ["copied", "docs/copied.md", false, /must be a newly added private regular file/u, "copy"],
+      ["deleted", "docs/deleted.md", false, /unsafe Git change kind 'deleted'/u, "delete"],
+      ["renamed", "docs/new.md", false, /unsafe Git change kind 'renamed'/u, "rename", ["docs/new.md", "docs/old.md"]],
+      ["copied", "docs/copied.md", false, /unsafe Git change kind 'copied'/u, "copy"],
     ]) {
       const fixture = createFixture(`ownership-ratification-${name}`);
       try {
@@ -4145,7 +5017,7 @@ function writeModernReviewedSlice(runDir, id, { status = "review", mergeCommit, 
   writeJson(join(runDir, reviewRef), createV2SliceReviewRecord({ subject: id, attempt: 1, reviewedCommit }));
   const evidenceHash = hashFile(join(runDir, evidenceRef));
   const reviewHash = hashFile(join(runDir, reviewRef));
-  const history = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 };
+  const history = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ownership_schema_version: 2, ratified_paths: [], modified_extensions: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 };
   return {
     id, stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status, attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
     reviewed_commit: reviewedCommit, attempt_reviews: [history], ...(status === "merged" ? { merge_commit: mergeCommit ?? reviewedCommit } : {}),
@@ -4387,6 +5259,7 @@ function publishPreparedSliceReview(fixture) {
 
 function createV2SliceReviewRecord({ runDir, evidenceRef, scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = "slice", ...input } = {}) {
   const review = createSliceReviewRecord(input);
+  review.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
   review.remediation_context = {
     schema_version: 2,
     fixes: review.remediation_context.fixes.map((fix) => ({
@@ -4418,15 +5291,184 @@ function createV2SliceReviewRecord({ runDir, evidenceRef, scopeEffect = "in-lane
   return review;
 }
 
-async function closeBuilderDispatch(fixture, attempt, taskWork = () => {}) {
+function persistedV2FieldMutationCases({ sibling }) {
+  const cases = [
+    ["ownership_schema_version", (entry) => { entry.ownership_schema_version = 1; }],
+    ["ratified_paths", (entry) => { entry.ratified_paths = ["docs/stale-extension.md"]; }],
+    ["modified_extensions", (entry) => { entry.modified_extensions = []; }],
+    ["kind", (_entry, extension) => { extension.kind = "stale-extension"; }],
+    ["path", (_entry, extension) => { extension.path = `${extension.path}.stale`; }],
+    ["rationale", (_entry, extension) => { extension.rationale = `${extension.rationale} Stale.`; }],
+    ["authority", (_entry, extension) => { extension.authority = sibling ? "unowned" : "non-conflicting-sibling"; }],
+  ];
+  if (!sibling) return cases;
+  return cases.concat([
+    ["owner_slice_id", (_entry, extension) => { extension.owner_slice_id = "other-owner"; }],
+    ["owner_attempt", (_entry, extension) => { extension.owner_attempt += 1; }],
+    ["owner_evidence_ref", (_entry, extension) => { extension.owner_evidence_ref = "evidence/stale-owner.json"; }],
+    ["owner_evidence_hash", (_entry, extension) => { extension.owner_evidence_hash = `sha256:${"0".repeat(64)}`; }],
+    ["owner_review_ref", (_entry, extension) => { extension.owner_review_ref = "reviews/stale-owner.json"; }],
+    ["owner_review_hash", (_entry, extension) => { extension.owner_review_hash = `sha256:${"1".repeat(64)}`; }],
+    ["owner_dispatch_claim_ref", (_entry, extension) => { extension.owner_dispatch_claim_ref = "dispatch/stale-owner.json"; }],
+    ["owner_dispatch_claim_hash", (_entry, extension) => { extension.owner_dispatch_claim_hash = `sha256:${"2".repeat(64)}`; }],
+    ["owner_dispatch_closure_ref", (_entry, extension) => { extension.owner_dispatch_closure_ref = "dispatch/stale-owner.closed.json"; }],
+    ["owner_dispatch_closure_hash", (_entry, extension) => { extension.owner_dispatch_closure_hash = `sha256:${"3".repeat(64)}`; }],
+    ["owner_reviewed_commit", (_entry, extension) => { extension.owner_reviewed_commit = extension.owner_diff_base_commit; }],
+    ["owner_diff_base_commit", (_entry, extension) => { extension.owner_diff_base_commit = extension.owner_reviewed_commit; }],
+  ]);
+}
+
+function persistedSiblingSourceMutationCases() {
+  return [
+    ["owner-evidence-status", (fixture, _run, owner) => {
+      const path = join(fixture.runDir, owner.evidence_ref);
+      const evidence = readJson(path);
+      evidence.status = "fail";
+      writeJson(path, evidence);
+    }],
+    ["owner-evidence-review-ready", (fixture, _run, owner) => {
+      const path = join(fixture.runDir, owner.evidence_ref);
+      const evidence = readJson(path);
+      evidence.review_ready = false;
+      writeJson(path, evidence);
+    }],
+    ["owner-invariant-receipt", (fixture, _run, owner) => {
+      const review = readJson(join(fixture.runDir, owner.review_ref));
+      const path = join(fixture.runDir, review.invariant_family_ledger.dispositions[0].evidence_ref);
+      const receipt = readJson(path);
+      receipt.review_ready = false;
+      writeJson(path, receipt);
+    }],
+    ["owner-dispatch-claim-identity", (fixture, _run, owner) => {
+      const path = join(fixture.runDir, owner.attempt_reviews[0].dispatch_claim_ref);
+      const claim = readJson(path);
+      claim.branch = "cross-bound-owner-branch";
+      writeJson(path, claim);
+    }],
+    ["owner-dispatch-completion-head", (fixture, _run, owner) => {
+      const entry = owner.attempt_reviews[0];
+      const path = join(fixture.runDir, entry.dispatch_closure_ref);
+      const closure = readJson(path);
+      closure.completion_head = entry.diff_base_commit;
+      writeJson(path, closure);
+    }],
+  ];
+}
+
+async function prepareSiblingModificationFixture(fixture, {
+  publishModifier = true,
+  ownerVerdict = "APPROVE",
+  ownerTouchesShared = false,
+  beforeModifier = async () => {},
+} = {}) {
+  initGitRepo(fixture.repo);
+  mkdirSync(join(fixture.repo, "test"), { recursive: true });
+  writeFileSync(join(fixture.repo, "test", "shared.test.js"), "baseline shared bytes\n");
+  runGit(fixture.repo, ["add", "test/shared.test.js"]);
+  runGit(fixture.repo, ["commit", "-m", "seed sibling-owned shared file"]);
+  const baseline = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+  runGit(fixture.repo, ["branch", "owner-branch"]);
+  runGit(fixture.repo, ["branch", "modifier-branch"]);
+  const worktreesRoot = join(fixture.repo, ".opencode", "worktrees");
+  const ownerWorktree = join(worktreesRoot, "owner");
+  const modifierWorktree = join(worktreesRoot, "modifier");
+  mkdirSync(worktreesRoot, { recursive: true });
+  runGit(fixture.repo, ["worktree", "add", ownerWorktree, "owner-branch"]);
+  runGit(fixture.repo, ["worktree", "add", modifierWorktree, "modifier-branch"]);
+
+  const plan = withDeliveryEnvelope({
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    slices: [
+      { id: "owner", stack: "backend", paths: ["test/**"], depends_on: [], acceptance: ["owner works"], test_plan: ["test owner"] },
+      { id: "modifier", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["modifier works"], test_plan: ["test modifier"] },
+    ],
+  });
+  mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
+  mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
+  mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+  writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "accepted sibling brief\n");
+  writeJson(join(fixture.runDir, "plan", "slices.json"), plan);
+  writeJson(join(fixture.runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", required_fixes: [] });
+  writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE", required_fixes: [] });
+  writeJson(join(fixture.runDir, "run.json"), {
+    ...baseRun(fixture.runId),
+    branch: "main",
+    worktree: fixture.repo,
+    slices: [
+      { id: "owner", stack: "backend", depends_on: [], declared_paths: ["test/**"], effective_paths: ["test/**"], status: "pending", attempts: 0 },
+      { id: "modifier", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "pending", attempts: 0 },
+    ],
+    steps: [{
+      agent: "spec-writer", status: "accepted", attempts: 1, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json",
+      acceptance: {
+        artifact_ref: "artifacts/technical-brief.md", artifact_hash: hashFile(join(fixture.runDir, "artifacts", "technical-brief.md")),
+        review_ref: "reviews/spec-writer.json", review_hash: hashFile(join(fixture.runDir, "reviews", "spec-writer.json")),
+      },
+    }, {
+      agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+      acceptance: {
+        artifact_ref: "plan/slices.json", artifact_hash: hashFile(join(fixture.runDir, "plan", "slices.json")),
+        review_ref: "reviews/work-decomposer.json", review_hash: hashFile(join(fixture.runDir, "reviews", "work-decomposer.json")),
+      },
+    }],
+  });
+
+  await transitionRunSlice(fixture.runDir, "owner", { status: "running", attempts: 1, branch: "owner-branch", worktree: ownerWorktree });
+  let ownerReviewedCommit;
+  await closeBuilderDispatch(fixture, 1, () => {
+    const ownerPath = ownerTouchesShared ? "test/shared.test.js" : "test/owner-only.test.js";
+    writeFileSync(join(ownerWorktree, ownerPath), "owner reviewed bytes\n");
+    runGit(ownerWorktree, ["add", ownerPath]);
+    runGit(ownerWorktree, ["commit", "-m", "review owner without shared path"]);
+    ownerReviewedCommit = gitOutput(ownerWorktree, ["rev-parse", "HEAD"]);
+  }, "owner");
+  writeJson(join(fixture.runDir, "evidence", "owner.json"), {
+    subject: "owner", status: "pass", review_ready: true, attempt: 1, head_sha: ownerReviewedCommit,
+  });
+  writeJson(join(fixture.runDir, "reviews", "owner.json"), createV2SliceReviewRecord({
+    runDir: fixture.runDir, evidenceRef: "evidence/owner.json", subject: "owner", attempt: 1, reviewedCommit: ownerReviewedCommit,
+    verdict: ownerVerdict, requiredFixes: ownerVerdict === "REJECT" ? ["Repair the owner review finding"] : [],
+    fixOwner: "owner", likelyPaths: ["test/owner-only.test.js"],
+  }));
+  await transitionRunSlice(fixture.runDir, "owner", {
+    status: "review", attempts: 1, evidence_ref: "evidence/owner.json", review_ref: "reviews/owner.json",
+  });
+
+  await beforeModifier({ fixture, baseline, ownerReviewedCommit, ownerWorktree, modifierWorktree });
+
+  await transitionRunSlice(fixture.runDir, "modifier", { status: "running", attempts: 1, branch: "modifier-branch", worktree: modifierWorktree });
+  let modifierReviewedCommit;
+  await closeBuilderDispatch(fixture, 1, () => {
+    writeFileSync(join(modifierWorktree, "test", "shared.test.js"), "modifier reviewed bytes\n");
+    runGit(modifierWorktree, ["add", "test/shared.test.js"]);
+    runGit(modifierWorktree, ["commit", "-m", "modify sibling-owned shared file"]);
+    modifierReviewedCommit = gitOutput(modifierWorktree, ["rev-parse", "HEAD"]);
+  }, "modifier");
+  const rationale = "The modifier must update the existing sibling-owned compatibility fixture.";
+  writeJson(join(fixture.runDir, "evidence", "modifier.json"), {
+    subject: "modifier", status: "pass", review_ready: true, attempt: 1, head_sha: modifierReviewedCommit,
+    ownership_disclosure: [{ path: "test/shared.test.js", rationale }],
+  });
+  writeJson(join(fixture.runDir, "reviews", "modifier.json"), createV2SliceReviewRecord({
+    runDir: fixture.runDir, evidenceRef: "evidence/modifier.json", subject: "modifier", attempt: 1, reviewedCommit: modifierReviewedCommit,
+  }));
+  if (publishModifier) {
+    await transitionRunSlice(fixture.runDir, "modifier", {
+      status: "review", attempts: 1, evidence_ref: "evidence/modifier.json", review_ref: "reviews/modifier.json",
+    });
+  }
+  return { baseline, ownerReviewedCommit, modifierReviewedCommit, ownerWorktree, modifierWorktree };
+}
+
+async function closeBuilderDispatch(fixture, attempt, taskWork = () => {}, sliceId = "slice") {
   const completionToken = `run-state-completion-${attempt}`;
   const context = await prepareSliceBuilderTaskDispatch(fixture.repo, {
-    run_id: fixture.runId, slice_id: "slice", attempt, agent: "backend-builder",
+    run_id: fixture.runId, slice_id: sliceId, attempt, agent: "backend-builder",
   }, { claimDispatch: true, completionToken });
   await taskWork();
   await completeSliceBuilderTaskDispatch(fixture.repo, {
     run_id: fixture.runId,
-    slice_id: "slice",
+    slice_id: sliceId,
     attempt,
     agent: "backend-builder",
     claim_ref: context.dispatch_claim.ref,
@@ -4507,7 +5549,9 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
     review_hash: reviewHash,
     reviewed_commit: reviewedCommit,
     diff_base_commit: diffBaseCommit,
+    ownership_schema_version: 2,
     ratified_paths: [],
+    modified_extensions: [],
     verdict,
     convergence: review.convergence,
     late_discovery_strike: review.late_discovery_strike,
@@ -4662,7 +5706,8 @@ function prepareAdditionalSliceConflict(fixture, { sliceId, branch, reviewedPath
   const closureHash = hashFile(join(fixture.runDir, closureRef));
   const attemptReview = {
     attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
-    reviewed_commit: reviewedCommit, diff_base_commit: baseline, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
+    reviewed_commit: reviewedCommit, diff_base_commit: baseline, ownership_schema_version: 2, ratified_paths: [], modified_extensions: [],
+    verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
     dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash, dispatch_closure_ref: closureRef, dispatch_closure_hash: closureHash,
   };
   const planPath = join(fixture.runDir, "plan", "slices.json");
@@ -4728,7 +5773,7 @@ function makeConflictPathUndeclared(fixture, path) {
   evidence.ownership_disclosure = [{ path, rationale: "The adversarial fixture models a formerly ratified control-plane excursion." }];
   writeJson(evidencePath, evidence);
   const review = readJson(reviewPath);
-  review.ownership_ratification.paths = [path];
+  review.ownership_ratification = { schema_version: 1, paths: [path] };
   writeJson(reviewPath, review);
   const run = readJson(join(fixture.runDir, "run.json"));
   const slice = run.slices[0];
@@ -4736,6 +5781,8 @@ function makeConflictPathUndeclared(fixture, path) {
   slice.effective_paths = ["src/**", path];
   slice.evidence_hash = hashFile(evidencePath);
   slice.review_hash = hashFile(reviewPath);
+  delete slice.attempt_reviews[0].ownership_schema_version;
+  delete slice.attempt_reviews[0].modified_extensions;
   Object.assign(slice.attempt_reviews[0], { ratified_paths: [path], evidence_hash: slice.evidence_hash, review_hash: slice.review_hash });
   run.steps.find((step) => step.agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
   writeJson(join(fixture.runDir, "run.json"), run);
@@ -4888,7 +5935,9 @@ function writeReadyPrRun(fixture, overrides = {}) {
     review_hash: slice.review_hash,
     reviewed_commit: head,
     diff_base_commit: head,
+    ownership_schema_version: 2,
     ratified_paths: [],
+    modified_extensions: [],
     verdict: "APPROVE",
     convergence: "converging",
     late_discovery_strike: false,
@@ -4913,6 +5962,17 @@ function writeReadyPrRun(fixture, overrides = {}) {
       return modern;
     })
     : [slice];
+  mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
+  writeJson(join(fixture.runDir, "plan", "slices.json"), {
+    slices: slices.map((candidate) => ({
+      id: candidate.id,
+      stack: candidate.stack || "backend",
+      paths: candidate.declared_paths || ["src/**"],
+      depends_on: candidate.depends_on || [],
+      acceptance: [`${candidate.id} works`],
+      test_plan: [`test ${candidate.id}`],
+    })),
+  });
   writeJson(join(fixture.runDir, "run.json"), {
     ...baseRun(fixture.runId),
     branch,
@@ -5118,6 +6178,201 @@ function makeSyntheticV2Run(runDir, input, { accepted = [], remaining = [] } = {
   if (!existsSync(inheritedReport)) writeFileSync(inheritedReport, "synthetic parent validation report\n");
   publishSyntheticV2Parent(runDir, continuation);
   return run;
+}
+
+async function prepareReportedIntegrationAmendmentFixture(runId, { progressedConsumer = false } = {}) {
+  const fixture = createFixture(runId);
+  initGitRepo(fixture.repo, ["owner-branch"]);
+  writeFileSync(join(fixture.repo, ".gitignore"), ".opencode/\n");
+  mkdirSync(join(fixture.repo, "src", "owner"), { recursive: true });
+  mkdirSync(join(fixture.repo, "docs"), { recursive: true });
+  writeFileSync(join(fixture.repo, "src", "owner", "shared.js"), "export const shared = 1;\n");
+  writeFileSync(join(fixture.repo, "docs", "owner-extension.md"), "owner baseline\n");
+  runGit(fixture.repo, ["add", ".gitignore", "src/owner/shared.js", "docs/owner-extension.md"]);
+  runGit(fixture.repo, ["commit", "-m", "seed amendment owner baseline"]);
+  runGit(fixture.repo, ["branch", "-f", "owner-branch", "HEAD"]);
+  const base = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+  const ownerWorktree = join(fixture.repo, ".opencode", "worktrees", "owner-branch");
+  mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
+  runGit(fixture.repo, ["worktree", "add", ownerWorktree, "owner-branch"]);
+  mkdirSync(join(ownerWorktree, "src", "owner"), { recursive: true });
+  writeFileSync(join(ownerWorktree, "src", "owner", "api.js"), "export const value = 1;\n");
+  writeFileSync(join(ownerWorktree, "docs", "owner-extension.md"), "owner extension\n");
+  runGit(ownerWorktree, ["add", "src/owner/api.js", "docs/owner-extension.md"]);
+  runGit(ownerWorktree, ["commit", "-m", "owner implementation"]);
+  const reviewedCommit = gitOutput(ownerWorktree, ["rev-parse", "HEAD"]);
+  const featureBranch = `${runId}-feature`;
+  runGit(fixture.repo, ["checkout", "-b", featureBranch, base]);
+  runGit(fixture.repo, ["merge", "--no-ff", "owner-branch", "-m", "merge owner implementation"]);
+  const baseline = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+  const baselineTree = gitOutput(fixture.repo, ["rev-parse", `${baseline}^{tree}`]);
+  for (const dir of ["plan", "evidence", "reviews", "dispatch"]) mkdirSync(join(fixture.runDir, dir), { recursive: true });
+  const plan = withDeliveryEnvelope({
+    slices: [
+      { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["owner works"], test_plan: ["node --test test/owner.test.js"] },
+      { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["consumer works"], test_plan: ["node --test test/consumer.test.js"] },
+    ],
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+  });
+  writeJson(join(fixture.runDir, "plan", "slices.json"), plan);
+  writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+  const family = writeVerificationArtifactReceipt({
+    runDir: fixture.runDir, runId, plan, sliceId: "owner", attempt: 1, reviewedCommit,
+    artifactId: "fixture-artifact-1", evidenceRef: "evidence/owner-family.json",
+    result: { type: "verification-result", outcome: "pass", summary: "Verify owner behavior passed" },
+  });
+  const ownerExtensionPath = "docs/owner-extension.md";
+  const ownerExtensionRationale = "The owner requires this private documentation extension for the amendment fixture.";
+  writeJson(join(fixture.runDir, "evidence", "owner.json"), {
+    subject: "owner", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit,
+    ownership_disclosure: [{ path: ownerExtensionPath, rationale: ownerExtensionRationale }],
+  });
+  const ownerReview = createSliceReviewRecord({ subject: "owner", attempt: 1, reviewedCommit });
+  ownerReview.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
+  ownerReview.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "owner", reviewedCommit, evidenceRef: family.ref, evidenceHash: family.hash });
+  writeJson(join(fixture.runDir, "reviews", "owner.json"), ownerReview);
+  const claimStem = createHash("sha256").update(`${runId}\0owner\0${1}`, "utf8").digest("hex");
+  const claimRef = `dispatch/${claimStem}.json`;
+  const closureRef = `dispatch/${claimStem}.closed.json`;
+  const token = "integration-amendment-owner-token";
+  writeJson(join(fixture.runDir, claimRef), {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-claim", run_id: runId, slice_id: "owner", attempt: 1,
+    agent: "backend-builder", branch: "owner-branch", worktree: ownerWorktree, head: base,
+    context_hash: HASH, completion_token_hash: `sha256:${createHash("sha256").update(token).digest("hex")}`,
+    claimed_at: NOW, closure_ref: closureRef,
+  });
+  const claimHash = hashFile(join(fixture.runDir, claimRef));
+  writeJson(join(fixture.runDir, closureRef), {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-closure", claim_ref: claimRef, claim_hash: claimHash,
+    run_id: runId, slice_id: "owner", attempt: 1, agent: "backend-builder", branch: "owner-branch", worktree: ownerWorktree,
+    head: base, completion_head: reviewedCommit, context_hash: HASH, completion_token: token, returned_at: NOW,
+  });
+  const dispatch = { dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash, dispatch_closure_ref: closureRef, dispatch_closure_hash: hashFile(join(fixture.runDir, closureRef)) };
+  const legacyOrderedAttemptReview = createSliceAttemptReview({
+    attempt: 1, evidenceRef: "evidence/owner.json", evidenceHash: hashFile(join(fixture.runDir, "evidence", "owner.json")),
+    reviewRef: "reviews/owner.json", reviewHash: hashFile(join(fixture.runDir, "reviews", "owner.json")), reviewedCommit, diffBaseCommit: base,
+    ratifiedPaths: [ownerExtensionPath],
+  });
+  const { ratified_paths: ownerRatifiedPaths, verdict: ownerVerdict, convergence: ownerConvergence,
+    late_discovery_strike: ownerLateDiscoveryStrike, remaining_fix_count: ownerRemainingFixCount, ...ownerAttemptIdentity } = legacyOrderedAttemptReview;
+  const attemptReview = { ...ownerAttemptIdentity, ownership_schema_version: 2, ratified_paths: ownerRatifiedPaths, modified_extensions: [{
+    kind: "modified-extension", path: ownerExtensionPath, rationale: ownerExtensionRationale, authority: "unowned",
+  }], verdict: ownerVerdict, convergence: ownerConvergence, late_discovery_strike: ownerLateDiscoveryStrike,
+    remaining_fix_count: ownerRemainingFixCount, ...dispatch };
+  const owner = {
+    id: "owner", stack: "backend", depends_on: [], declared_paths: ["src/owner/**"], effective_paths: ["src/owner/**", ownerExtensionPath], status: "merged",
+    branch: "owner-branch", worktree: ownerWorktree, attempts: 1, dispatch_required: true, ...dispatch, attempt_reviews: [attemptReview],
+    evidence_ref: attemptReview.evidence_ref, evidence_hash: attemptReview.evidence_hash, review_ref: attemptReview.review_ref,
+    review_hash: attemptReview.review_hash, reviewed_commit: reviewedCommit, merge_commit: baseline,
+  };
+  const consumer = { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**"], status: "pending", attempts: 0 };
+  writeJson(join(fixture.runDir, "run.json"), {
+    schema_version: 1, run_id: runId, status: "running", branch: featureBranch, worktree: fixture.repo, gates: {}, slices: [owner, consumer],
+    steps: [{ agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+      acceptance: { artifact_ref: "plan/slices.json", artifact_hash: hashFile(join(fixture.runDir, "plan", "slices.json")), review_ref: "reviews/work-decomposer.json", review_hash: hashFile(join(fixture.runDir, "reviews", "work-decomposer.json")) } }],
+  });
+  const unit = plan.delivery_envelope.delivery_units.find((entry) => entry.slice_id === "consumer");
+  const artifact = unit.verification_artifacts[0];
+  const admission = {
+    baseline_ref: `refs/heads/${featureBranch}`, baseline_commit: baseline, baseline_tree: baselineTree, worktree: fixture.repo,
+    probe: { schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: unit.id, consumer_slice_id: "consumer", verification_artifact_id: artifact.id,
+      test_plan_index: artifact.test_plan_index, test_plan_entry: artifact.test_plan_entry, program: "node", args: ["--test", "test/consumer.test.js"], timeout_ms: artifact.timeout_ms, substrate: "feature-baseline" },
+    owner: Object.fromEntries(["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"].map((key) => [key, structuredClone(owner[key])])),
+    consumer: structuredClone(consumer),
+  };
+  const identity = { schema_version: 1, kind: "integration-amendment-identity", run_id: runId, defect_path: "src/owner/api.js", admission };
+  const amendmentId = integrationAmendmentId(identity);
+  const nonce = "integration-amendment-report-nonce";
+  const receiptRef = `evidence/integration-amendment-${amendmentId}.report.receipt.json`;
+  const stream = { captured_bytes: 0, sha256: `sha256:${createHash("sha256").update("").digest("hex")}`, truncated: false };
+  const receipt = { schema_version: 1, kind: "integration-amendment-execution-receipt", phase: "report", subject: `integration-amendment:${amendmentId}:report`, run_id: runId,
+    amendment_id: amendmentId, claim_nonce: nonce, probe: admission.probe, head_sha: baseline, tree_sha: baselineTree, cwd: fixture.repo, timeout_ms: artifact.timeout_ms,
+    started_at: NOW, completed_at: NOW, duration_ms: 1, status: "fail", review_ready: true,
+    commands: [{ index: 0, program: "node", args: ["--test", "test/consumer.test.js"], outcome: "exited", status: "fail", exit_code: 1, signal: null, error_code: null, duration_ms: 1, stdout: stream, stderr: stream }] };
+  writeJson(join(fixture.runDir, receiptRef), receipt);
+  writeJson(join(fixture.runDir, "evidence", "integration-amendment.report.claim.json"), {
+    schema_version: 1, kind: "integration-amendment-execution-claim", phase: "report", subject: receipt.subject, state: "completed", nonce, amendment_id: amendmentId,
+    identity, run_id: runId, probe: admission.probe, head_sha: baseline, tree_sha: baselineTree, cwd: fixture.repo, timeout_ms: artifact.timeout_ms,
+    receipt_ref: receiptRef, claimed_at: NOW, completed_at: NOW, status: "fail", receipt_hash: hashFile(join(fixture.runDir, receiptRef)),
+  });
+  await transitionIntegrationAmendment(fixture.runDir, { action: "report", owner_slice_id: "owner", consumer_slice_id: "consumer", defect_path: "src/owner/api.js", verification_artifact_id: artifact.id }, { repoRoot: fixture.repo, now: NOW });
+  if (progressedConsumer) {
+    const consumerBranch = "consumer-branch";
+    const consumerWorktree = join(fixture.repo, ".opencode", "worktrees", consumerBranch);
+    runGit(fixture.repo, ["branch", consumerBranch, baseline]);
+    runGit(fixture.repo, ["worktree", "add", consumerWorktree, consumerBranch]);
+    writeFileSync(join(consumerWorktree, "src", "owner", "shared.js"), "export const shared = 2;\n");
+    runGit(consumerWorktree, ["add", "src/owner/shared.js"]);
+    runGit(consumerWorktree, ["commit", "-m", "consumer modifies sibling-owned shared file"]);
+    const consumerReviewedCommit = gitOutput(consumerWorktree, ["rev-parse", "HEAD"]);
+    const consumerRationale = "The consumer must update the sibling-owned shared compatibility module.";
+    const consumerFamily = writeVerificationArtifactReceipt({
+      runDir: fixture.runDir, runId, plan, sliceId: "consumer", attempt: 1, reviewedCommit: consumerReviewedCommit,
+      artifactId: plan.delivery_envelope.delivery_units.find((entry) => entry.slice_id === "consumer").verification_artifacts[0].id,
+      evidenceRef: "evidence/consumer-family.json",
+      result: { type: "verification-result", outcome: "pass", summary: "Verify consumer behavior passed" },
+    });
+    writeJson(join(fixture.runDir, "evidence", "consumer.json"), {
+      subject: "consumer", attempt: 1, status: "pass", review_ready: true, head_sha: consumerReviewedCommit,
+      ownership_disclosure: [{ path: "src/owner/shared.js", rationale: consumerRationale }],
+    });
+    const consumerReview = createSliceReviewRecord({ subject: "consumer", attempt: 1, reviewedCommit: consumerReviewedCommit });
+    consumerReview.ownership_ratification = { schema_version: 2, kind: "factory-derived-modified-extension" };
+    consumerReview.invariant_family_ledger = passingInvariantFamilyLedger({
+      plan, sliceId: "consumer", reviewedCommit: consumerReviewedCommit,
+      evidenceRef: consumerFamily.ref, evidenceHash: consumerFamily.hash,
+    });
+    writeJson(join(fixture.runDir, "reviews", "consumer.json"), consumerReview);
+    const consumerClaimStem = createHash("sha256").update(`${runId}\0consumer\0${1}`, "utf8").digest("hex");
+    const consumerClaimRef = `dispatch/${consumerClaimStem}.json`;
+    const consumerClosureRef = `dispatch/${consumerClaimStem}.closed.json`;
+    const consumerToken = "integration-amendment-consumer-token";
+    writeJson(join(fixture.runDir, consumerClaimRef), {
+      schema_version: 1, kind: "checked-slice-builder-dispatch-claim", run_id: runId, slice_id: "consumer", attempt: 1,
+      agent: "backend-builder", branch: consumerBranch, worktree: consumerWorktree, head: baseline,
+      context_hash: HASH, completion_token_hash: `sha256:${createHash("sha256").update(consumerToken).digest("hex")}`,
+      claimed_at: NOW, closure_ref: consumerClosureRef,
+    });
+    const consumerClaimHash = hashFile(join(fixture.runDir, consumerClaimRef));
+    writeJson(join(fixture.runDir, consumerClosureRef), {
+      schema_version: 1, kind: "checked-slice-builder-dispatch-closure", claim_ref: consumerClaimRef, claim_hash: consumerClaimHash,
+      run_id: runId, slice_id: "consumer", attempt: 1, agent: "backend-builder", branch: consumerBranch, worktree: consumerWorktree,
+      head: baseline, completion_head: consumerReviewedCommit, context_hash: HASH, completion_token: consumerToken, returned_at: NOW,
+    });
+    const consumerDispatch = {
+      dispatch_claim_ref: consumerClaimRef,
+      dispatch_claim_hash: consumerClaimHash,
+      dispatch_closure_ref: consumerClosureRef,
+      dispatch_closure_hash: hashFile(join(fixture.runDir, consumerClosureRef)),
+    };
+    const run = readJson(join(fixture.runDir, "run.json"));
+    const currentOwner = run.slices.find((slice) => slice.id === "owner");
+    const ownerEntry = currentOwner.attempt_reviews[0];
+    const consumerExtension = {
+      kind: "modified-extension", path: "src/owner/shared.js", rationale: consumerRationale, authority: "non-conflicting-sibling",
+      owner_slice_id: "owner", owner_attempt: 1,
+      owner_evidence_ref: ownerEntry.evidence_ref, owner_evidence_hash: ownerEntry.evidence_hash,
+      owner_review_ref: ownerEntry.review_ref, owner_review_hash: ownerEntry.review_hash,
+      owner_dispatch_claim_ref: ownerEntry.dispatch_claim_ref, owner_dispatch_claim_hash: ownerEntry.dispatch_claim_hash,
+      owner_dispatch_closure_ref: ownerEntry.dispatch_closure_ref, owner_dispatch_closure_hash: ownerEntry.dispatch_closure_hash,
+      owner_reviewed_commit: ownerEntry.reviewed_commit, owner_diff_base_commit: ownerEntry.diff_base_commit,
+    };
+    const consumerAttemptReview = {
+      attempt: 1,
+      evidence_ref: "evidence/consumer.json", evidence_hash: hashFile(join(fixture.runDir, "evidence", "consumer.json")),
+      review_ref: "reviews/consumer.json", review_hash: hashFile(join(fixture.runDir, "reviews", "consumer.json")),
+      reviewed_commit: consumerReviewedCommit, diff_base_commit: baseline, ownership_schema_version: 2,
+      ratified_paths: ["src/owner/shared.js"], modified_extensions: [consumerExtension],
+      verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
+      ...consumerDispatch,
+    };
+    Object.assign(run.slices.find((slice) => slice.id === "consumer"), {
+      status: "running", attempts: 2, branch: consumerBranch, worktree: consumerWorktree,
+      authorized_baseline_commit: baseline, attempt_reviews: [consumerAttemptReview],
+    });
+    writeJson(join(fixture.runDir, "run.json"), run);
+  }
+  return { ...fixture, baseline, reviewedCommit };
 }
 
 // The init + config + README-commit base is identical across all ~40 callers;

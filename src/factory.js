@@ -14,7 +14,7 @@ import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv, startB6Span } from "./telemetry.js";
 import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLaunchFence, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, inspectProcessIdentity, matchesProcessLaunchToken, readProcessEvidence, releaseLaunchClaim, releaseLaunchFence, transitionLaunchClaimPhase } from "./process-evidence.js";
-import { encodeFeatureCommandPayload } from "./feature-command-payload.js";
+import { assertCarryForwardSiblingOwnerPairs, encodeFeatureCommandPayload } from "./feature-command-payload.js";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
 import { publicLivenessBoolean, probeLegacyBooleanLiveness, probeProcessLiveness } from "./hardening/process-verification.js";
@@ -93,6 +93,7 @@ const PACKAGED_SEED_HASHES = {
     "ac371f1ff25bc971cb29af8d33f8f9e4c7d125fe1913bb4bc88b2a0ae23fa273",
     "b0e3bbbce7bda0ebd046144579fc3841e05cebc41e77552fa8a096e186b42a46",
     "bcd0b29cbe6fad88e6e1d9e034a807982fbafa9cd44e397366b79ac5c07e7e5b",
+    "d17a4e2e6515e9fd8960108fd153717a8df00addc195f567127e0d545c825aca",
     "d939622ea2aaea5eb15e38d515a6b782b4169083c626cb62f325df7adada91e8",
     "e2eb954d0336a1d8733f99878636e8a06e3952704f27fcce88bdb1a0827e8d89",
     "ea21a5414569997ad5559f2cd2c567322943840978676aef91958bcaa83ab38a",
@@ -116,6 +117,7 @@ const PACKAGED_SEED_HASHES = {
     "7976502dc6cae98238232dfb507bb41eece62ac0313dcdbcd8422721c0058eed",
     "82f969ca7a19d2305c3b27b3c17f99bb3f5f9b40f63c9cc1b2c7e20621194496",
     "842f5e0dd17c69210c7eaac430122117da8d17bcc45edaebdea4a5787e68c898",
+    "8c103c6118ae7053f2604a614e374491e08194d7981493b1efceaebd2d068dc7",
     "985e240f0928a154469659bb611c7fd376503b883c19c499e1a4e2cd1970a54f",
     "ba015daa7d57195af8f0c3099fca7f54fd7353caa952b8998d43fb98c36cb355",
     "d3ff2926643924237cbaacf1d4a4203572eb5927efc58d93f254fa17d920f209",
@@ -2883,10 +2885,10 @@ export function probeFactorySlices(runId, opts = {}) {
   return probeSlicesPlanAdmission(runDir, opts);
 }
 
-function observeFactoryAmendmentAuthority(runDir, run) {
+function observeFactoryAmendmentAuthority(runDir, run, options = {}) {
   const inventory = inspectIntegrationAmendmentInventory(runDir, run);
   const amendment = run.integration_amendment;
-  if (amendment?.status === "merged") assertIntegrationAmendmentConsistency(runDir, run);
+  if (amendment?.status === "merged") assertIntegrationAmendmentConsistency(runDir, run, options);
   return { inventory, amendment };
 }
 
@@ -2911,8 +2913,8 @@ function assertFactoryAmendmentContinuationAbsent(runDir, run) {
   if (inventory.classification !== "all-absent") throw new Error("integration-amendment-continuation-unsupported");
 }
 
-function assertFactoryAmendmentCleanupAuthority(runDir, run) {
-  const { inventory, amendment } = observeFactoryAmendmentAuthority(runDir, run);
+function assertFactoryAmendmentCleanupAuthority(runDir, run, options = {}) {
+  const { inventory, amendment } = observeFactoryAmendmentAuthority(runDir, run, options);
   if (inventory.classification === "all-absent" || amendment?.status === "merged") return;
   throw new Error(`cleanup rejected: integration amendment authority is ${amendment?.status || inventory.classification}`);
 }
@@ -3716,29 +3718,39 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
     removed_run_dir: false,
     run_dir: runDir,
   };
+  const cleanupRemovedWorktrees = [];
+  const cleanupDeletedBranches = [];
+  const assertCleanupAuthority = () => assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")), {
+    cleanup_removed_worktrees: cleanupRemovedWorktrees,
+    cleanup_deleted_branches: cleanupDeletedBranches,
+  });
 
   for (const worktree of targets.worktrees) {
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     opts.cleanupHooks?.beforeWorktreeRemove?.({ runDir, worktree: { ...worktree } });
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
+    const removedCount = result.removed_worktrees.length;
     removeWorktree(repo, worktree, result, opts);
+    if (!opts.dryRun && result.removed_worktrees.length > removedCount) cleanupRemovedWorktrees.push(resolve(worktree.worktree));
   }
   for (const branch of targets.branches) {
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     opts.cleanupHooks?.beforeBranchDelete?.({ runDir, branch });
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
+    const deletedCount = result.deleted_branches.length;
     deleteBranch(repo, branch, result, opts);
+    if (!opts.dryRun && result.deleted_branches.length > deletedCount) cleanupDeletedBranches.push(result.deleted_branches.at(-1));
   }
 
   if (!opts.dryRun) {
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     opts.cleanupHooks?.beforeRunDirectoryRemove?.({ runDir });
-    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertCleanupAuthority();
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     rmSync(runDir, { recursive: true, force: true });
   }
@@ -4868,6 +4880,8 @@ function collectCarryForwardPublicationInputs(parentRunDir, continuation) {
       add(attempt.evidence_ref, readExactCarryForwardFile(parentRunDir, attempt.evidence_ref, attempt.evidence_hash));
       const reviewBytes = readExactCarryForwardFile(parentRunDir, attempt.review_ref, attempt.review_hash);
       add(attempt.review_ref, reviewBytes);
+      addCarryForwardDispatchSidecars(parentRunDir, add, attempt);
+      addCarryForwardSiblingAuthoritySidecars(parentRunDir, add, attempt);
       const review = JSON.parse(reviewBytes.toString("utf8"));
       for (const disposition of review.invariant_family_ledger?.dispositions || []) {
         const binding = continuation.parent_evidence.find((item) => item.ref === disposition.evidence_ref);
@@ -4902,6 +4916,30 @@ function readExactCarryForwardFile(parentRunDir, ref, hash) {
   const bytes = readFileSync(path);
   if (sha256Buffer(bytes) !== hash) throw new Error(`carry-forward source '${ref}' changed before publication staging`);
   return bytes;
+}
+
+function addCarryForwardDispatchSidecars(parentRunDir, add, attempt) {
+  for (const [refKey, hashKey] of [
+    ["dispatch_claim_ref", "dispatch_claim_hash"],
+    ["dispatch_closure_ref", "dispatch_closure_hash"],
+  ]) {
+    if (attempt[refKey] === undefined && attempt[hashKey] === undefined) continue;
+    add(attempt[refKey], readExactCarryForwardFile(parentRunDir, attempt[refKey], attempt[hashKey]));
+  }
+}
+
+function addCarryForwardSiblingAuthoritySidecars(parentRunDir, add, attempt) {
+  for (const extension of attempt.modified_extensions || []) {
+    if (extension.authority !== "non-conflicting-sibling") continue;
+    for (const [refKey, hashKey] of [
+      ["owner_evidence_ref", "owner_evidence_hash"],
+      ["owner_review_ref", "owner_review_hash"],
+      ["owner_dispatch_claim_ref", "owner_dispatch_claim_hash"],
+      ["owner_dispatch_closure_ref", "owner_dispatch_closure_hash"],
+    ]) {
+      add(extension[refKey], readExactCarryForwardFile(parentRunDir, extension[refKey], extension[hashKey]));
+    }
+  }
 }
 
 function assertStagedCarryForwardBytes(stagingRoot, childRun, inputs) {
@@ -5180,7 +5218,9 @@ function canonicalCarryForwardRef(value, rootName) {
 }
 
 function collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, options = {}) {
-  return observeCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, options);
+  return assertCarryForwardSiblingOwnerPairs(
+    observeCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, options),
+  );
 }
 
 function continuationOutcomeError(code, message) {

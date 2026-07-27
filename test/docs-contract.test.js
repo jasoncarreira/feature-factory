@@ -1285,7 +1285,8 @@ describe("consolidated reviewer decision procedure contract", () => {
       assert.match(WORK_REVIEWER_PROMPT, new RegExp(`REJECT[^\\n]*${escapeRegExp(failClosedCase)}`, "i"), `work reviewer must reject ${failClosedCase}`);
     }
 
-    assert.match(WORK_REVIEWER_PROMPT, /REJECT[\s\S]*out-of-lane edits outside slice `paths`[\s\S]*acceptance criterion that is unimplemented or untested/i);
+    assert.match(WORK_REVIEWER_PROMPT, /REJECT[\s\S]*centrally classified privileged unexpected path[\s\S]*incomplete, extra, duplicate, unsorted, or non-normalized `ownership_disclosure`[\s\S]*acceptance criterion that is unimplemented or untested/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Do not reject a required non-privileged unowned or potentially non-conflicting sibling edit merely because it is outside slice `paths`[\s\S]*checked publication independently derive eligibility[\s\S]*Genuine sibling conflicts remain fail-closed/i);
     assert.match(WORK_REVIEWER_PROMPT, /REJECT serious correctness, repository-convention, migration, generated-code, or compatibility risk/i);
     for (const decompositionFailure of ["orphan acceptance criteria", "cyclic dependencies", "same-wave path overlap", "un-serialized hotspots", "dependency path deeper than four waves"]) {
       assert.match(WORK_REVIEWER_PROMPT, new RegExp(`For decomposition, REJECT[^\\n]*${escapeRegExp(decompositionFailure)}`, "i"), `work reviewer must reject ${decompositionFailure}`);
@@ -1519,7 +1520,31 @@ describe("producer self-check contract", () => {
       assert.match(prompt, /Verified, not masked[\s\S]*never worked around by weakening an assertion/i, `${name}-builder must self-check honest verification`);
     }
     // Reviewer still owns the enforcing bar these self-checks mirror.
-    assert.match(WORK_REVIEWER_PROMPT, /out-of-lane edits outside slice `paths`/i, "work-reviewer must classify lane feasibility");
+    assert.match(WORK_REVIEWER_PROMPT, /incomplete, extra, duplicate, unsorted, or non-normalized `ownership_disclosure`/i, "work-reviewer must enforce exact disclosure");
+  });
+
+  it("makes builders finish and disclose ordinary unexpected work without self-ratification", () => {
+    const ordinaryRule = "- For `PLUGIN_CHECKED_SLICE_CONTEXT_START`, implement only the slice acceptance criteria. Treat `slice.ownership.declared_paths` as the declared lane and `slice.ownership.effective_paths` as already reviewed authority. Finish every required non-privileged edit, including a necessary ordinary unowned path or potentially non-conflicting sibling path, and exactly disclose every actual changed path outside `slice.ownership.declared_paths`. Do not stop merely because such a path is absent from the declared lane.";
+    const hardStopRule = "- A centrally classified privileged unexpected path is the only mid-build hard stop. Stop before editing it and report the routed owner or amendment need. Ordinary unowned and sibling-path edits may finish, but checked publication remains fail-closed: genuine sibling conflicts continue through the existing owner or amendment policy.";
+    const authorityRule = "- Never self-ratify. Caller text, forecasts such as `unowned-extension`, builder prose, and disclosure records grant no edit, ownership, review, publication, or merge authority; checked publication alone decides whether an unexpected path is eligible.";
+    for (const [name, prompt] of [["backend", BACKEND_BUILDER_PROMPT], ["frontend", FRONTEND_BUILDER_PROMPT]]) {
+      assert.equal(prompt.split("\n").find((line) => line.startsWith("- For `PLUGIN_CHECKED_SLICE_CONTEXT_START`")), ordinaryRule, `${name}-builder ordinary rule`);
+      assert.equal(prompt.split("\n").find((line) => line.startsWith("- A centrally classified privileged unexpected path")), hardStopRule, `${name}-builder hard-stop rule`);
+      assert.equal(prompt.split("\n").find((line) => line.startsWith("- Never self-ratify")), authorityRule, `${name}-builder authority rule`);
+    }
+  });
+
+  it("requires complete-diff review and the exact pathless v2 ratification verdict", () => {
+    const reviewExample = WORK_REVIEWER_PROMPT.match(/For a slice review, use this separate closed JSON object:\n\n```json\n([\s\S]*?)\n```/u)?.[1];
+    assert.ok(reviewExample, "work-reviewer must retain the slice review JSON object");
+    const parsed = JSON.parse(reviewExample);
+    assert.deepEqual(parsed.ownership_ratification, {
+      schema_version: 2,
+      kind: "factory-derived-modified-extension",
+    });
+    assert.equal(Object.hasOwn(parsed.ownership_ratification, "paths"), false);
+    assert.match(WORK_REVIEWER_PROMPT, /inspect the complete checked diff[\s\S]*reconcile every changed path outside the declared lane with the exact `ownership_disclosure`/iu);
+    assert.match(WORK_REVIEWER_PROMPT, /Never echo paths or rationales[\s\S]*checked publication derives them from the complete checked diff and exact disclosure/iu);
   });
 
   it("gives test-verifier a self-review with an exact-value assertion floor", () => {
@@ -2073,9 +2098,9 @@ describe("implemented v2 reviewed carry-forward docs contract", () => {
       assert.match(text, /closed to exactly `scope`, `plan_ref`, `plan_hash`, `start_commit`, `accepted_slices`, and `remaining_slice_ids`/i);
       assert.match(text, /`scope` is exactly `full-remaining-plan`|`scope: "full-remaining-plan"`/i);
       assert.match(text, /closed to exactly `id`, `declared_paths`, `effective_paths`, `attempts`, (?:exact )?`attempt_reviews`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`/i);
-      assert.match(text, /ownership arrays[^.]*exact immutable parent values/i);
-      assert.match(text, /`accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order/i);
-      assert.match(text, /`remaining_slice_ids` contains every nonmerged slice ID, in PLAN order/i);
+      assert.match(text, /ownership arrays[^.]*(?:exact immutable parent values|copied byte-for-byte)/i);
+      assert.match(text, /`accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order|Each accepted entry must match an exact parent `?merged`? slice/i);
+      assert.match(text, /`remaining_slice_ids` contains every nonmerged slice ID, in PLAN order|Accepted rows and remaining IDs stay in PLAN order/i);
       assert.match(text, /unique[\s\S]*disjoint[\s\S]*set union[\s\S]*exactly[\s\S]*(?:complete `slices\[\]\.id` set|full plan)/i);
       assert.match(text, /remaining[\s\S]*inherit[^.]*no|Remaining rows inherit only[\s\S]*never status/i);
       assert.doesNotMatch(text, /accepted (?:is|slices are)[^.]*exact prefix|remaining[^.]*non-empty suffix/i);
@@ -2084,8 +2109,8 @@ describe("implemented v2 reviewed carry-forward docs contract", () => {
 
   it("permits non-prefix accepted slices and out-of-plan-order integration merges", () => {
     for (const text of [design, futureSchema, README]) {
-      assert.match(text, /`accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order/i);
-      assert.match(text, /`remaining_slice_ids` contains every nonmerged slice ID, in PLAN order/i);
+      assert.match(text, /`accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order|Each accepted entry must match an exact parent `?merged`? slice/i);
+      assert.match(text, /`remaining_slice_ids` contains every nonmerged slice ID, in PLAN order|Accepted rows and remaining IDs stay in PLAN order/i);
       assert.match(text, /PLAN order `\[A, B, C\]`[\s\S]*merged `A` and `C`[\s\S]*`accepted_slices: \[A, C\]`[\s\S]*`remaining_slice_ids: \[B\]`[\s\S]*valid/i);
       assert.match(text, /actual integration merge order may differ from PLAN and dependency-execution order/i);
       assert.match(text, /does not require `accepted_slices` order to equal first-parent chain order/i);
@@ -2349,12 +2374,12 @@ describe("remediation context reuse docs contract", () => {
     assert.match(WORK_REVIEWER_PROMPT, /Do not request or introduce another agent call/i);
     assert.match(SKILL, /exact hash-bound review must classify every required fix as `narrow-correction`/i);
     assert.match(SKILL, /do not pass `task_id`; start a fresh implementer Task/i);
-    assert.match(SCHEMA, /schema version 1, missing context, duplicate positions, extra fields, unknown values, or reordered fixes reject before review publication/i);
+    assert.match(SCHEMA, /missing context, duplicate positions, extra fields, unknown values, or reordered fixes reject before review publication/i);
     assert.match(SCHEMA, /selects only ephemeral implementer context and grants no merge, test, acceptance, lane, or mutation authority/i);
     const canonicalReviewExample = SCHEMA.match(/Slice review shape:[\s\S]*?```json([\s\S]*?)```/iu)?.[1];
     assert.ok(canonicalReviewExample, "SCHEMA must retain one canonical slice review JSON example");
     assert.match(canonicalReviewExample, /"schema_version": 2/u);
-    assert.match(canonicalReviewExample, /"ownership_ratification"\s*:\s*\{\s*"schema_version": 1/u);
+    assert.match(canonicalReviewExample, /"ownership_ratification"\s*:\s*\{\s*"schema_version": 2/u);
     assert.doesNotMatch(canonicalReviewExample, /"remediation_context"\s*:\s*\{\s*"schema_version": 1/u);
     for (const field of ["required_fix_index", "classification", "scope_effect", "likely_paths", "fix_owner"]) {
       assert.match(canonicalReviewExample, new RegExp(`"${field}"`, "u"), `canonical slice review example must include ${field}`);
@@ -2385,12 +2410,13 @@ describe("remediation context reuse docs contract", () => {
     for (const text of [SKILL, SCHEMA]) {
       assert.match(text, /ownership_disclosure[\s\S]*path[\s\S]*rationale/i);
       assert.match(text, /APPROVE[\s\S]*ratification[\s\S]*exactly equal/i);
-      assert.match(text, /REJECT[\s\S]*ratification is empty/i);
+      assert.match(text, /REJECT[\s\S]*(?:ratification is empty|empty `modified_extensions` and `ratified_paths`)/i);
       assert.match(text, /pending\/running\/review sibling|pending\/running\/review siblings/i);
       assert.match(text, /contract-change[\s\S]*plan\/brief amendment/i);
       assert.match(text, /orchestrator[\s\S]*never edit|orchestrator[\s\S]*never edits/i);
       assert.match(text, /fresh checked test-verifier[\s\S]*independent (?:approving )?review[\s\S]*holistic panels/i);
-      assert.match(text, /newly added private regular[\s\S]*privileged\/control-plane/i);
+      assert.match(text, /newly added[\s\S]{0,100}private regular/i);
+      assert.match(text, /privileged\/control-plane/i);
       assert.match(text, /workflow[\s\S]*CI[\s\S]*(?:agent\/skill\/command|assets\/agent[\s\S]*assets\/skills[\s\S]*assets\/command)[\s\S]*dependency[\s\S]*migration[\s\S]*generated/i);
       assert.match(text, /unique merge base[\s\S]*both parent diffs[\s\S]*rename\/copy/i);
       assert.match(text, /merged slice(?:'s)?[\s\S]*(?:append-only|own|integration_conflict)[\s\S]*(?:conflict|authority)/i);

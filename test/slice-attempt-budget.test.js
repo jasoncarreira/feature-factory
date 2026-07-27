@@ -165,7 +165,7 @@ describe("uniform slice attempt evidence", () => {
 
       await assert.rejects(
         transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 3 }),
-        /attempt 1 review history is stale/u,
+        /attempt 1 review history is stale|persisted ownership sidecar identity is stale/u,
       );
       assert.equal(readRun(fixture).slices[0].attempts, 2);
     } finally {
@@ -1028,7 +1028,7 @@ function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "co
     late_discovery_strike: lateDiscoveryStrike,
     remaining_fix_count: fixes.length,
     required_fixes: fixes,
-    ownership_ratification: { schema_version: 1, paths: [] },
+    ownership_ratification: { schema_version: 2, kind: "factory-derived-modified-extension" },
     remediation_context: {
       schema_version: 2,
       fixes: fixes.map((_, required_fix_index) => ({
