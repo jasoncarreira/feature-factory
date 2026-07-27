@@ -1356,7 +1356,7 @@ describe("consolidated reviewer decision procedure contract", () => {
     for (const [name, text] of documentEntries({ WORK_REVIEWER_PROMPT, IMPLEMENTATION_VALIDATOR_PROMPT })) for (const findingClass of classPatterns) {
       assert.doesNotMatch(text, findingClass, `${name} must not duplicate ${findingClass}`);
     }
-    assert.doesNotMatch(SECURITY_REVIEWER_PROMPT, /REVIEW\.md/i, "security reviewer must not gain a repository-rubric policy");
+    assert.match(SECURITY_REVIEWER_PROMPT, /Apply the repository's `REVIEW\.md` and security conventions as a binding rubric when present/i, "security reviewer must own repository-specific security policy");
   });
 
   it("keeps severity mappings and role-specific fail-closed thresholds distinct", () => {
