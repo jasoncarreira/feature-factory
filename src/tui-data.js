@@ -9,6 +9,8 @@ import {
   DIAGNOSTIC_CONDITIONS,
   DIAGNOSTIC_SEVERITIES,
   DIAGNOSTIC_STATUSES,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  MIN_STALE_HEARTBEAT_MS,
   diagnoseRunFile,
   diagnoseRunObject,
   diagnosticEnvelope,
@@ -272,17 +274,14 @@ function parseErrorDiagnostics(file, error) {
   ], { checkedAt, authoritative: false });
 }
 
-// Staleness must match run-state's authoritative `inspectHeartbeatLiveness`
-// exactly: max(2 * interval_ms, MIN_STALE_HEARTBEAT_MS), with interval_ms taken
-// from the heartbeat record and DEFAULT_HEARTBEAT_INTERVAL_MS when it is absent
-// or invalid. Hardcoding the floor alone would classify a still-current
-// heartbeat as stale for any interval above 60s and probe the process early.
-// These constants are duplicated from run-state deliberately rather than
-// importing them, because that module is being rewritten by the legacy
-// retirement work; folding them into one shared constants module is #113's job.
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000;
-const MIN_STALE_HEARTBEAT_MS = 120000;
-
+// Staleness must match the authoritative calculation in run-state's
+// `inspectHeartbeatLiveness` and factory-diagnostics' heartbeat projection:
+// max(2 * interval_ms, MIN_STALE_HEARTBEAT_MS), taking interval_ms from the
+// heartbeat record and falling back to DEFAULT_HEARTBEAT_INTERVAL_MS. Using the
+// floor alone would classify a still-current heartbeat as stale for any
+// interval above 60s and probe the process early. The constants are imported
+// from factory-diagnostics rather than redefined so this reader cannot drift
+// from them independently.
 function heartbeatStaleMs(intervalMs) {
   const interval = Number.isInteger(intervalMs) && intervalMs > 0 ? intervalMs : DEFAULT_HEARTBEAT_INTERVAL_MS;
   return Math.max(2 * interval, MIN_STALE_HEARTBEAT_MS);
