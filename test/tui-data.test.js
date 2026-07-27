@@ -1417,13 +1417,16 @@ describe("process activity projection", () => {
   const FRESH = "2026-07-27T18:19:30.000Z"; // 30s old
   const STALE = "2026-07-27T18:10:00.000Z"; // 10m old
 
-  function fixture({ processState, lastTick, evidence = {} }) {
+  function fixture({ processState, lastTick, intervalMs, evidence = {} }) {
     const root = mkdtempSync(join(tmpdir(), "tui-process-activity-"));
     const runDir = join(root, ".opencode", "factory", "run-1");
     mkdirSync(runDir, { recursive: true });
     writeFileSync(join(runDir, "run.json"), JSON.stringify({ schema_version: 1, run_id: "run-1", status: "running" }));
     if (lastTick) {
-      writeFileSync(join(runDir, "heartbeat.json"), JSON.stringify({ schema_version: 1, run_id: "run-1", last_tick_at: lastTick }));
+      writeFileSync(join(runDir, "heartbeat.json"), JSON.stringify({
+        schema_version: 1, run_id: "run-1", last_tick_at: lastTick,
+        ...(intervalMs === undefined ? {} : { interval_ms: intervalMs }),
+      }));
     }
     const record = processState === null
       ? { ok: false, missing: true, reason: "missing process evidence", evidence: null }
@@ -1431,8 +1434,8 @@ describe("process activity projection", () => {
     return { root, factoryRoot: join(root, ".opencode", "factory"), record };
   }
 
-  function activity({ processState, lastTick, verify, evidence }) {
-    const f = fixture({ processState, lastTick, evidence });
+  function activity({ processState, lastTick, verify, evidence, intervalMs }) {
+    const f = fixture({ processState, lastTick, intervalMs, evidence });
     try {
       const [row] = readRuns([f.factoryRoot], {
         diagnostics: false,
@@ -1502,6 +1505,48 @@ describe("process activity projection", () => {
 
   it("omits the projection when the run has no process record", () => {
     assert.equal(activity({ processState: null, lastTick: FRESH }), null);
+  });
+
+  it("derives staleness from interval_ms exactly as run-state does", () => {
+    // run-state's inspectHeartbeatLiveness uses max(2 * interval_ms,
+    // MIN_STALE_HEARTBEAT_MS). Hardcoding only the 120s floor made a current
+    // heartbeat look stale for any interval above 60s, which then probed the
+    // process and reported working/orphaned while run-state still called it fresh.
+    const tick = (msAgo) => new Date(NOW - msAgo).toISOString();
+
+    // interval 300s -> threshold 600s: a 5-minute-old tick is still fresh.
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(300000), intervalMs: 300000 }).classification,
+      "running",
+    );
+    // ...and the same tick with the default interval is stale, since the 120s floor governs.
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(300000), verify: "absent" }).classification,
+      "orphaned",
+    );
+
+    // Boundary: threshold is exactly 2 * interval when that exceeds the floor.
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(179000), intervalMs: 90000 }).classification,
+      "running",
+      "just inside 2 * 90s",
+    );
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(181000), intervalMs: 90000, verify: "absent" }).classification,
+      "orphaned",
+      "just outside 2 * 90s",
+    );
+
+    // Floor still applies when 2 * interval is below it (2 * 30s < 120s).
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(119000), intervalMs: 30000 }).classification,
+      "running",
+    );
+    // An invalid interval falls back to the default rather than trusting the record.
+    assert.equal(
+      activity({ processState: "running", lastTick: tick(119000), intervalMs: -5 }).classification,
+      "running",
+    );
   });
 
   it("reads a real process record without injection", () => {

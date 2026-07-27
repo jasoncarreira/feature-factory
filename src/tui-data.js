@@ -272,10 +272,21 @@ function parseErrorDiagnostics(file, error) {
   ], { checkedAt, authoritative: false });
 }
 
-// Heartbeat staleness mirrors run-state's MIN_STALE_HEARTBEAT_MS. Past that
-// point the heartbeat alone can no longer answer the operator's question, so
-// the process record is consulted.
-const HEARTBEAT_STALE_MS = 120000;
+// Staleness must match run-state's authoritative `inspectHeartbeatLiveness`
+// exactly: max(2 * interval_ms, MIN_STALE_HEARTBEAT_MS), with interval_ms taken
+// from the heartbeat record and DEFAULT_HEARTBEAT_INTERVAL_MS when it is absent
+// or invalid. Hardcoding the floor alone would classify a still-current
+// heartbeat as stale for any interval above 60s and probe the process early.
+// These constants are duplicated from run-state deliberately rather than
+// importing them, because that module is being rewritten by the legacy
+// retirement work; folding them into one shared constants module is #113's job.
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000;
+const MIN_STALE_HEARTBEAT_MS = 120000;
+
+function heartbeatStaleMs(intervalMs) {
+  const interval = Number.isInteger(intervalMs) && intervalMs > 0 ? intervalMs : DEFAULT_HEARTBEAT_INTERVAL_MS;
+  return Math.max(2 * interval, MIN_STALE_HEARTBEAT_MS);
+}
 
 // Display-only liveness classification. Heartbeat freshness and process state
 // fail in opposite directions — a heartbeat can go stale while work continues,
@@ -342,17 +353,18 @@ function verifiedProcessStatus(runDir, options = {}) {
 
 function heartbeatIsStale(runDir, options = {}) {
   const nowMs = typeof options.now === "function" ? options.now() : Date.now();
-  const tickMs = readHeartbeatTickMs(runDir);
-  if (tickMs === null) return true;
-  return nowMs - tickMs > HEARTBEAT_STALE_MS;
+  const record = readHeartbeatRecord(runDir);
+  if (record === null || record.tickMs === null) return true;
+  return nowMs - record.tickMs > heartbeatStaleMs(record.intervalMs);
 }
 
-function readHeartbeatTickMs(runDir) {
+function readHeartbeatRecord(runDir) {
   try {
     const file = join(runDir, "heartbeat.json");
     if (!safeIsFile(file)) return null;
-    const parsed = Date.parse(JSON.parse(readFileSync(file, "utf8"))?.last_tick_at || "");
-    return Number.isFinite(parsed) ? parsed : null;
+    const heartbeat = JSON.parse(readFileSync(file, "utf8"));
+    const parsed = Date.parse(heartbeat?.last_tick_at || "");
+    return { tickMs: Number.isFinite(parsed) ? parsed : null, intervalMs: heartbeat?.interval_ms };
   } catch {
     return null;
   }
