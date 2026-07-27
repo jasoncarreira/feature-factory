@@ -1219,7 +1219,8 @@ describe("consolidated reviewer decision procedure contract", () => {
   });
 
   it("keeps acceptance expected values independent of implementation output", () => {
-    assert.match(WORK_REVIEWER_PROMPT, /representative sample of exact expected values[\s\S]*approved story, technical brief, or an independent external oracle/i);
+    assert.match(WORK_REVIEWER_PROMPT, /every exact expected value[\s\S]*approved story or technical-brief `path:line`/i);
+    assert.match(WORK_REVIEWER_PROMPT, /external standard or oracle may supplement that required citation, never replace it/i);
     assert.match(WORK_REVIEWER_PROMPT, /REJECT expected values[\s\S]*derivable only from the implementation[\s\S]*same table, helper, serializer, or code path under test/i);
     assert.match(TEST_VERIFIER_PROMPT, /Before opening or running any implementation file[\s\S]*author the acceptance assertions[\s\S]*path:line.*every exact expected value/i);
     assert.match(TEST_VERIFIER_PROMPT, /Only after those assertions and sources are fixed[\s\S]*inspect implementation files[\s\S]*never derive an expected value from implementation/i);
@@ -1350,9 +1351,10 @@ describe("consolidated reviewer decision procedure contract", () => {
   it("keeps the adversarial security class checklist solely with security-reviewer", () => {
     const classPatterns = [/\*\*Trust boundaries:\*\*/u, /\*\*Injection:\*\*/u, /\*\*Forgeable identity \/ authz:\*\*/u, /\*\*Secrets:\*\*/u, /\*\*Supply chain[^*]*:\*\*/u, /\*\*Security regression:\*\*/u];
     for (const findingClass of classPatterns) assert.match(SECURITY_REVIEWER_PROMPT, findingClass, `security reviewer missing ${findingClass}`);
-    for (const [name, text] of documentEntries({ WORK_REVIEWER_PROMPT, IMPLEMENTATION_VALIDATOR_PROMPT })) {
-      assert.match(text, /Do not repeat the holistic adversarial .* review owned by .*security-reviewer/i, name);
-      for (const findingClass of classPatterns) assert.doesNotMatch(text, findingClass, `${name} must not duplicate ${findingClass}`);
+    assert.equal(numberedProcedureStep(WORK_REVIEWER_PROMPT, 5), "5. **Preserve security-reviewer ownership.** Do not repeat the holistic adversarial security class review owned by `security-reviewer`. For build subjects, assess explicit security acceptance criteria and concrete security regressions visible in the supplied changed-path evidence, cite `path:line`, and route broader trust-boundary, injection, authorization, secret-exposure, and supply-chain analysis to the independent security panel.");
+    assert.equal(numberedProcedureStep(IMPLEMENTATION_VALIDATOR_PROMPT, 4), "4. **Preserve security-reviewer ownership.** Do not repeat the holistic adversarial class review owned by the parallel `security-reviewer` panel. During holistic correctness validation, report explicit security acceptance-criterion failures and concrete security regressions visible in the bounded diff, but route broader trust-boundary, injection, authorization, secret-exposure, and supply-chain analysis to `security-reviewer`.");
+    for (const [name, text] of documentEntries({ WORK_REVIEWER_PROMPT, IMPLEMENTATION_VALIDATOR_PROMPT })) for (const findingClass of classPatterns) {
+      assert.doesNotMatch(text, findingClass, `${name} must not duplicate ${findingClass}`);
     }
     assert.doesNotMatch(SECURITY_REVIEWER_PROMPT, /REVIEW\.md/i, "security reviewer must not gain a repository-rubric policy");
   });
@@ -3298,6 +3300,13 @@ function markdownSection(text, heading) {
   const bodyStart = match.index + match[0].length;
   const nextHeading = new RegExp(`^#{1,${level}} \\S.*$`, "mu").exec(text.slice(bodyStart));
   return text.slice(match.index, nextHeading ? bodyStart + nextHeading.index : text.length);
+}
+
+function numberedProcedureStep(text, number) {
+  const procedure = markdownSection(text, "Ordered decision procedure");
+  const step = new RegExp(`^${number}\\. [\\s\\S]*?(?=^${number + 1}\\. |^## |(?![\\s\\S]))`, "mu").exec(procedure);
+  assert.ok(step, `missing ordered decision procedure step ${number}`);
+  return step[0].trim();
 }
 
 function markdownTableRow(text, authorityClass) {
