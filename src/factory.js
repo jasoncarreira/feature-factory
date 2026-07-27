@@ -4425,13 +4425,32 @@ function buildContinuationCandidate(parentRunId, opts = {}) {
 
 export function assertContinuationBindingsCurrent(repo, parentRunDir, continuation, options = {}) {
   if (!continuation || continuation.kind !== "blocked-run-continuation") throw new Error("continuation binding check requires blocked-run-continuation metadata");
+  const configuration = continuation.configuration;
+  const postPrPolicy = configuration?.post_pr_policy;
   const candidateRun = {
     schema_version: 1,
     run_id: continuation.target?.run_id,
+    mode: configuration?.mode,
     status: "running",
     branch: continuation.target?.branch,
     worktree: continuation.target?.worktree,
-    max_retries: continuation.draft_spec_reuse?.max_retries ?? 3,
+    github_account: configuration?.github_account,
+    pr_mode: configuration?.pr_mode,
+    max_parallel_slices: configuration?.max_parallel_slices,
+    max_retries: configuration?.max_retries,
+    ...(configuration?.review_tier === null || configuration?.review_tier === undefined ? {} : { review_tier: configuration.review_tier }),
+    post_pr: {
+      schema_version: 1,
+      policy: postPrPolicy,
+      phase: postPrPolicy?.enabled === true ? "awaiting-pr" : "disabled",
+      attempt: 0,
+      observation: null,
+      remediation: null,
+      evidence_refs: [],
+      continuation_review: null,
+      terminal_fact: null,
+      pr_operation: null,
+    },
     gates: {},
     continuation,
   };
@@ -5135,11 +5154,6 @@ function validateCarryForwardCandidate(run) {
     throw new Error("carry-forward candidate must be a schema-version 2 blocked-run-continuation");
   }
   if (continuation.post_pr !== undefined) throw new Error("carry-forward candidate cannot contain post_pr authority");
-  const legacyContinuation = { ...continuation, schema_version: 1 };
-  delete legacyContinuation.carry_forward;
-  delete legacyContinuation.configuration;
-  delete legacyContinuation.checkpoint_source_hash;
-  delete legacyContinuation.configuration_hash;
   if (isCheckpointPlanningReuse(continuation)) {
     assertExactCandidateKeys(continuation.planning_reuse, CHECKPOINT_PLANNING_REUSE_KEYS, "continuation.planning_reuse");
     if (continuation.planning_reuse.eligible !== true || continuation.planning_reuse.plan_ref !== "plan/slices.json"
@@ -5148,9 +5162,8 @@ function validateCarryForwardCandidate(run) {
       || !CARRY_FORWARD_HASH_PATTERN.test(String(continuation.planning_reuse.review_hash || ""))) {
       throw new Error("checkpoint continuation.planning_reuse is invalid");
     }
-    delete legacyContinuation.planning_reuse;
   }
-  validateRun({ ...run, continuation: legacyContinuation });
+  validateRun(run);
   if (!continuation.target?.base_ref?.startsWith("refs/remotes/origin/")) throw new Error("carry-forward candidate target.base_ref must identify origin");
   assertExactCandidateKeysWithOptional(continuation.configuration, CARRY_FORWARD_CONFIGURATION_KEYS, CARRY_FORWARD_CONFIGURATION_OPTIONAL_KEYS, "continuation.configuration");
   if (!CARRY_FORWARD_MODES.has(continuation.configuration.mode) || !["draft", "ready"].includes(continuation.configuration.pr_mode)
