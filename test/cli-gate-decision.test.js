@@ -220,16 +220,22 @@ function runBehaviorGateCli(fixture, reasonCode) {
     const metricsPath = ${JSON.stringify(join(fixture.runDir, "matrix-metrics.json"))};
     const metrics = { spawnAttempts: 0, signalAttempts: 0, sleepCalls: [], now: 0, args: [] };
     const persistMetrics = () => writeFileSync(metricsPath, JSON.stringify(metrics));
-    const inspectorFn = (pid) => ({
-      ok: true,
-      inspector: "test-inspector",
-      pid,
-      start_marker: reasonCode === "process-identity-mismatch" ? "different-start" : "test-start",
-      command_name: pid === 9876 ? "opencode" : "node",
-      cwd: repo
-    });
+    const processOptions = {
+      platform: "linux",
+      hostname: "test-host",
+      livenessProbe: () => ({ status: "live" }),
+      procReadFile: (path) => {
+        const pid = Number(path.split("/")[2]);
+        if (path.endsWith("/stat")) {
+          const marker = reasonCode === "process-identity-mismatch" ? "222" : "111";
+          return pid + " (opencode) S " + Array(18).fill("0").join(" ") + " " + marker + "\\n";
+        }
+        return (pid === 9876 ? "opencode" : "node") + "\\n";
+      },
+      procReadlink: () => repo
+    };
     const gateDecisionOptions = {
-      inspectorFn,
+      ...processOptions,
       acquireLaunchClaimFn: (dir, input, opts) => {
         try { return acquireLaunchClaim(dir, input, opts); }
         catch (error) { metrics.acquireError = String(error?.stack || error); persistMetrics(); throw error; }
@@ -263,7 +269,7 @@ function runBehaviorGateCli(fixture, reasonCode) {
           pid: 9876,
           cwd: repo,
           logRef: "processes/behavior.log",
-          inspectorFn
+          ...processOptions
         });
         return { status: "started", pid: 9876 };
       };
@@ -312,7 +318,7 @@ async function prepareMatrixCondition(fixture, code) {
   if (code === "launch-claim-invalid") { mkdirSync(join(fixture.runDir, "process-launch.lock")); return writeFileSync(join(fixture.runDir, "process-launch.lock", "owner.json"), "malformed claim bytes\n"); }
   if (code === "launch-owner-indeterminate") return writeMatrixClaim(fixture, { hostname: "foreign-host" });
   if (code === "launch-claim-conflict") {
-    return acquireLaunchClaim(fixture.runDir, { runId: fixture.runId, executionId: "conflicting-execution", launchKind: "approval-handoff", phase: "spawning", pid: process.pid, cwd: fixture.repo }, { inspectorFn: matrixInspector(fixture) });
+    return acquireLaunchClaim(fixture.runDir, { runId: fixture.runId, executionId: "conflicting-execution", launchKind: "approval-handoff", phase: "spawning", pid: process.pid, cwd: fixture.repo }, matrixProcessOptions(fixture));
   }
   if (code === "process-evidence-invalid") return writeFileSync(join(fixture.runDir, "process.json"), "malformed process bytes\n");
   if (code === "process-identity-mismatch") return writeMatrixProcess(fixture, "running", "mismatch");
@@ -323,16 +329,27 @@ function writeMatrixProcess(fixture, state, executionId, overrides = {}) {
   mkdirSync(join(fixture.runDir, "processes"), { recursive: true });
   writeFileSync(join(fixture.runDir, "processes", "behavior.log"), "evidence\n");
   const now = new Date().toISOString();
-  writeProcessEvidence(fixture.runDir, { schema_version: 1, kind: "opencode-process", run_id: fixture.runId, execution_id: executionId, pid: 9876, started_at: now, updated_at: now, state, cwd: fixture.repo, identity: { inspector: "test-inspector", start_marker: "test-start", command_name: "opencode" }, log_ref: "processes/behavior.log", cancel: state === "cancelled" ? { requested_at: now, signal: "SIGTERM", confirmed_at: now, result: "cancelled", reason: null } : null, ...overrides });
+  writeProcessEvidence(fixture.runDir, { schema_version: 1, kind: "opencode-process", run_id: fixture.runId, execution_id: executionId, pid: 9876, started_at: now, updated_at: now, state, cwd: fixture.repo, identity: { inspector: "node-process", start_marker: "linux-procfs:111", command_name: "opencode" }, log_ref: "processes/behavior.log", cancel: state === "cancelled" ? { requested_at: now, signal: "SIGTERM", confirmed_at: now, result: "cancelled", reason: null } : null, ...overrides });
 }
 
 function writeMatrixClaim(fixture, overrides = {}) {
   mkdirSync(join(fixture.runDir, "process-launch.lock"));
-  writeJson(join(fixture.runDir, "process-launch.lock", "owner.json"), { schema_version: 1, kind: "opencode-launch-claim", run_id: fixture.runId, execution_id: "claim-execution", launch_kind: "approval-handoff", phase: "spawning", pid: process.pid, hostname: "test-host", acquired_at: new Date().toISOString(), identity: { inspector: "test-inspector", start_marker: "test-start", command_name: "node", cwd: fixture.repo }, approval: null, nonce: "opaque-matrix-token-1234", ...overrides });
+  writeJson(join(fixture.runDir, "process-launch.lock", "owner.json"), { schema_version: 1, kind: "opencode-launch-claim", run_id: fixture.runId, execution_id: "claim-execution", launch_kind: "approval-handoff", phase: "spawning", pid: process.pid, hostname: "test-host", acquired_at: new Date().toISOString(), identity: { inspector: "node-process", start_marker: "linux-procfs:111", command_name: "node", cwd: fixture.repo }, approval: null, nonce: "opaque-matrix-token-1234", ...overrides });
 }
 
-function matrixInspector(fixture) {
-  return (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "node", cwd: fixture.repo });
+function matrixProcessOptions(fixture) {
+  return {
+    platform: "linux",
+    hostname: "test-host",
+    livenessProbe: () => ({ status: "live" }),
+    procReadFile: (path) => {
+      const pid = Number(path.split("/")[2]);
+      return path.endsWith("/stat")
+        ? `${pid} (node) S ${Array(18).fill("0").join(" ")} 111\n`
+        : "node\n";
+    },
+    procReadlink: () => fixture.repo,
+  };
 }
 
 function readMatrixMetrics(fixture) {

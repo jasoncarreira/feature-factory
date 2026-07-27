@@ -405,7 +405,7 @@ describe("pre-manifest detached launch recovery", () => {
         updated_at: NOW,
         state: "running",
         cwd: repo,
-        identity: { inspector: "test-inspector", start_marker: "start-1", command_name: "opencode" },
+        identity: { inspector: "node-process", start_marker: "linux-procfs:111", command_name: "opencode" },
         log_ref: "processes/opencode.log",
         cancel: null,
       });
@@ -414,7 +414,8 @@ describe("pre-manifest detached launch recovery", () => {
 
       const cancelled = await cancelFactoryRun(runId, {
         cwd: repo,
-        inspectorFn: () => ({ ok: false, inspector: "test-inspector", reason: "ESRCH: no such process" }),
+        platform: "linux",
+        livenessProbe: () => ({ status: "absent" }),
         signalFn: () => {},
       });
       assert.equal(cancelled.ok, true);

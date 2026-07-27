@@ -15,14 +15,12 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
     const signals = [];
     try {
       writeProcessEvidence(fixture, { pid: 4242 });
-      const live = matchingInspector(fixture, 4242);
-
       const result = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
         now: NOW,
         cancelWaitMs: 500,
         // The process stays alive until it receives the signal, then exits.
-        inspectorFn: (pid) => (signals.length > 0 ? { ok: false, inspector: "test-inspector", reason: "ESRCH: no such process" } : live(pid)),
+        ...linuxProcessOptions(fixture, { liveness: () => signals.length > 0 ? "absent" : "live" }),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
       });
 
@@ -53,14 +51,13 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
         last_tick_at: NOW,
         identity: { inspector: "test-heartbeat", start_marker: "heartbeat-start", command_name: "node", cwd: fixture.repo },
       });
-      const live = matchingInspector(fixture, 4242);
-
       const result = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
         now: NOW,
         cancelWaitMs: 500,
-        inspectorFn: (pid) => (signals.some((item) => item.pid === 4242) ? { ok: false, inspector: "test-inspector", reason: "ESRCH: no such process" } : live(pid)),
-        processAliveFn: (pid) => pid === 9876,
+        ...linuxProcessOptions(fixture, {
+          liveness: (pid) => pid === 9876 || !signals.some((item) => item.pid === 4242) ? "live" : "absent",
+        }),
         heartbeatInspectorFn: (pid) => ({ ok: true, inspector: "test-heartbeat", pid, start_marker: "heartbeat-start", command_name: "node", cwd: fixture.repo }),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
       });
@@ -85,7 +82,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
         cwd: fixture.repo,
         now: NOW,
         cancelWaitMs: 0,
-        inspectorFn: matchingInspector(fixture, 4242),
+        ...linuxProcessOptions(fixture),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
       });
 
@@ -102,7 +99,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
       const confirmed = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
         now: NOW,
-        inspectorFn: () => ({ ok: false, inspector: "test-inspector", reason: "ESRCH: no such process" }),
+        ...linuxProcessOptions(fixture, { liveness: () => "absent" }),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
       });
 
@@ -124,7 +121,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
 
       const result = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
-        inspectorFn: matchingInspector(fixture, 4242),
+        ...linuxProcessOptions(fixture),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
       });
 
@@ -153,7 +150,6 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
 
       const result = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
-        inspectorFn: () => ({ ok: true, inspector: "test-inspector", pid: 9876, start_marker: "heartbeat", command_name: "opencode", cwd: fixture.repo }),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
       });
 
@@ -177,7 +173,6 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
       await assert.rejects(
         () => cancelFactoryRun(undefined, {
           cwd: fixture.repo,
-          inspectorFn: matchingInspector(fixture, 4242),
           signalFn: (pid, signal) => signals.push({ pid, signal }),
         }),
         /factory cancel requires exactly one <run-id>/u,
@@ -201,7 +196,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
           cwd: fixture.repo,
           commandName: "opencode",
           logRef: "processes/opencode.log",
-          inspectorFn: matchingInspector(fixture, 4242),
+          ...linuxProcessOptions(fixture),
         }),
         /refusing to overwrite live running process evidence/u,
       );
@@ -222,18 +217,18 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
         cwd: fixture.repo,
         commandName: "opencode",
         logRef: "processes/opencode.log",
-        inspectorFn: (pid) => {
-          if (pid === 4242) return { ok: false, inspector: "test-inspector", reason: "ESRCH: no such process" };
-          return { ok: true, inspector: "test-inspector", pid, start_marker: "start-2", command_name: "opencode", cwd: fixture.repo };
-        },
+        ...linuxProcessOptions(fixture, {
+          liveness: (pid) => pid === 4242 ? "absent" : "live",
+          marker: (pid) => pid === 5252 ? "222" : "111",
+        }),
       });
 
       assert.equal(evidence.pid, 5252);
       assert.equal(evidence.state, "running");
-      assert.equal(evidence.identity.start_marker, "start-2");
+      assert.equal(evidence.identity.start_marker, "linux-procfs:222");
       const persisted = readJson(join(fixture.runDir, "process.json"));
       assert.equal(persisted.pid, 5252);
-      assert.equal(persisted.identity.start_marker, "start-2");
+      assert.equal(persisted.identity.start_marker, "linux-procfs:222");
     } finally {
       cleanup(fixture.repo);
     }
@@ -249,7 +244,8 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
           cwd: fixture.repo,
           commandName: "opencode",
           logRef: "processes/opencode.log",
-          inspectorFn: () => ({ ok: false, inspector: "test-inspector", reason: "process inspector unsupported on platform test" }),
+          platform: "unsupported-test-platform",
+          livenessProbe: () => ({ status: "live" }),
         }),
         /requires verifiable live process identity/u,
       );
@@ -260,9 +256,9 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
           cwd: fixture.repo,
           commandName: "opencode",
           logRef: "processes/opencode.log",
-          inspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "start-2", command_name: "opencode" }),
+          ...linuxProcessOptions(fixture, { cwd: () => resolve(tmpdir()) }),
         }),
-        /missing process cwd/u,
+        /process cwd mismatch/u,
       );
       assert.equal(existsSync(join(fixture.runDir, "process.json")), false);
     } finally {
@@ -283,7 +279,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
           cwd: fixture.repo,
           commandName: "opencode",
           logRef: "processes/opencode.log",
-          inspectorFn: () => ({ ok: false, inspector: "test-inspector", reason: "process liveness unknown: EPERM" }),
+          ...linuxProcessOptions(fixture, { liveness: () => "indeterminate" }),
         }),
         /stale\/exited state could not be proven/u,
       );
@@ -306,7 +302,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
           cwd: fixture.repo,
           commandName: "opencode",
           logRef: "processes/opencode.log",
-          inspectorFn: matchingInspector(fixture, 5252),
+          ...linuxProcessOptions(fixture, { liveness: () => "live", marker: () => "222" }),
         }),
         /refusing to overwrite invalid process evidence/u,
       );
@@ -344,8 +340,8 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
     try {
       const result = inspectProcessIdentity(4242, {
         platform: "darwin",
-        processAliveFn: (pid) => pid === 4242,
-        commandRunnerFn: (command, args) => {
+        livenessProbe: (pid) => ({ status: pid === 4242 ? "live" : "absent" }),
+        commandRunner: (command, args) => {
           commands.push([command, ...args]);
           if (command === "ps" && args.join(" ") === "-p 4242 -o lstart=") return "Thu Jul  9 15:00:00 2026\n";
           if (command === "ps" && args.join(" ") === "-p 4242 -o comm=") return "/opt/homebrew/bin/opencode\n";
@@ -381,7 +377,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
         cwd: fixture.repo,
         commandName: "opencode",
         logRef: "processes/opencode.log",
-        inspectorFn: darwinInspector(5252, { cwd: fixture.repo }),
+        ...darwinProcessOptions(5252, { cwd: fixture.repo }),
       });
 
       assert.equal(evidence.pid, 5252);
@@ -390,7 +386,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
 
       const mismatch = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
-        inspectorFn: darwinInspector(5252, { cwd: resolve(tmpdir()) }),
+        ...darwinProcessOptions(5252, { cwd: resolve(tmpdir()) }),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
       });
 
@@ -398,11 +394,10 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
       assert.match(mismatch.reason, /cwd mismatch/u);
       assert.deepEqual(signals, []);
 
-      const live = darwinInspector(5252, { cwd: fixture.repo });
       const result = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
         cancelWaitMs: 500,
-        inspectorFn: (pid) => (signals.length > 0 ? { ok: false, inspector: "node-process", reason: "ESRCH: no such process" } : live(pid)),
+        ...darwinProcessOptions(5252, { cwd: fixture.repo, liveness: () => signals.length > 0 ? "absent" : "live" }),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
       });
 
@@ -418,45 +413,45 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
       {
         name: "run-id-mismatch",
         evidence: { run_id: "other-run" },
-        inspector: (fixture) => matchingInspector(fixture, 4242),
+        options: () => ({}),
         reason: /run_id must match requested run/u,
       },
       {
         name: "bad-log-ref",
         evidence: { log_ref: "../processes/out.log" },
-        inspector: (fixture) => matchingInspector(fixture, 4242),
+        options: () => ({}),
         reason: /log_ref must stay under processes/u,
       },
       {
-        name: "stale-pid",
-        inspector: () => () => ({ ok: false, inspector: "test-inspector", reason: "stale pid" }),
-        reason: /stale pid/u,
+        name: "indeterminate-liveness",
+        options: (fixture) => linuxProcessOptions(fixture, { liveness: () => "indeterminate" }),
+        reason: /liveness could not be determined/u,
       },
       {
         name: "start-marker-mismatch",
-        inspector: (fixture) => () => ({ ok: true, inspector: "test-inspector", pid: 4242, start_marker: "new-start", command_name: "opencode", cwd: fixture.repo }),
+        options: (fixture) => linuxProcessOptions(fixture, { marker: () => "222" }),
         reason: /start marker mismatch/u,
       },
       {
         name: "unverified-start-marker",
         evidence: { identity: { start_marker: `unverified:4242:${NOW}` } },
-        inspector: (fixture) => matchingInspector(fixture, 4242),
+        options: () => ({}),
         reason: /identity\.start_marker must be verifiable process evidence/u,
       },
       {
         name: "unsupported-inspector",
         evidence: { identity: { inspector: "unsupported-inspector" } },
-        inspector: (fixture) => matchingInspector(fixture, 4242),
+        options: (fixture) => linuxProcessOptions(fixture),
         reason: /unsupported inspector/u,
       },
       {
         name: "command-mismatch",
-        inspector: (fixture) => () => ({ ok: true, inspector: "test-inspector", pid: 4242, start_marker: "start-1", command_name: "node", cwd: fixture.repo }),
+        options: (fixture) => linuxProcessOptions(fixture, { command: () => "node" }),
         reason: /command mismatch/u,
       },
       {
         name: "cwd-mismatch",
-        inspector: () => () => ({ ok: true, inspector: "test-inspector", pid: 4242, start_marker: "start-1", command_name: "opencode", cwd: resolve(tmpdir()) }),
+        options: (fixture) => linuxProcessOptions(fixture, { cwd: () => resolve(tmpdir()) }),
         reason: /cwd mismatch/u,
       },
     ];
@@ -469,7 +464,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
         writeProcessEvidence(fixture, item.evidence || {});
         const result = await cancelFactoryRun(fixture.runId, {
           cwd: fixture.repo,
-          inspectorFn: item.inspector(fixture),
+          ...item.options(fixture),
           signalFn: (pid, signal) => signals.push({ pid, signal }),
         });
 
@@ -507,8 +502,8 @@ function createFixture(runId) {
 
 function writeProcessEvidence(fixture, overrides = {}) {
   const identity = {
-    inspector: "test-inspector",
-    start_marker: "start-1",
+    inspector: "node-process",
+    start_marker: "linux-procfs:111",
     command_name: "opencode",
     ...(overrides.identity || {}),
   };
@@ -530,29 +525,43 @@ function writeProcessEvidence(fixture, overrides = {}) {
   });
 }
 
-function matchingInspector(fixture, pid) {
-  return (inspectedPid) => ({
-    ok: inspectedPid === pid,
-    inspector: "test-inspector",
-    pid: inspectedPid,
-    start_marker: "start-1",
-    command_name: "opencode",
-    cwd: fixture.repo,
-    reason: inspectedPid === pid ? null : "stale pid",
-  });
+function linuxProcessOptions(fixture, {
+  liveness = () => "live",
+  marker = () => "111",
+  command = () => "opencode",
+  cwd = () => fixture.repo,
+} = {}) {
+  return {
+    platform: "linux",
+    hostname: "test-host",
+    livenessProbe: (pid) => ({ status: liveness(pid) }),
+    procReadFile: (path) => {
+      const pid = Number(path.split("/")[2]);
+      return path.endsWith("/stat")
+        ? `${pid} (opencode) S ${Array(18).fill("0").join(" ")} ${marker(pid)}\n`
+        : `${command(pid)}\n`;
+    },
+    procReadlink: (path) => cwd(Number(path.split("/")[2])),
+  };
 }
 
-function darwinInspector(expectedPid, { cwd, command = "/opt/homebrew/bin/opencode", start = "Thu Jul  9 15:00:00 2026" } = {}) {
-  return (pid) => inspectProcessIdentity(pid, {
+function darwinProcessOptions(expectedPid, {
+  cwd,
+  command = "/opt/homebrew/bin/opencode",
+  start = "Thu Jul  9 15:00:00 2026",
+  liveness = (pid) => pid === expectedPid ? "live" : "absent",
+} = {}) {
+  return {
     platform: "darwin",
-    processAliveFn: (inspectedPid) => inspectedPid === expectedPid,
-    commandRunnerFn: (cmd, args) => {
+    hostname: "test-host",
+    livenessProbe: (pid) => ({ status: liveness(pid) }),
+    commandRunner: (cmd, args) => {
       if (cmd === "ps" && args.join(" ") === `-p ${expectedPid} -o lstart=`) return `${start}\n`;
       if (cmd === "ps" && args.join(" ") === `-p ${expectedPid} -o comm=`) return `${command}\n`;
       if (cmd === "lsof" && args.join(" ") === `-a -p ${expectedPid} -d cwd -Fn`) return `p${expectedPid}\nfcwd\nn${cwd}\n`;
       throw new Error(`unexpected command: ${cmd} ${args.join(" ")}`);
     },
-  });
+  };
 }
 
 function readJson(file) {

@@ -23,7 +23,7 @@ describe("factory resume", () => {
   });
 
   const behavioralCases = [
-    { code: "matching-detached-shepherd-live", setup: (f) => writeRunningEvidence(f, "matching-live"), options: (f) => ({ inspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: f.repo }) }) },
+    { code: "matching-detached-shepherd-live", setup: (f) => writeRunningEvidence(f, "matching-live"), options: (f) => canonicalProcessOptions(f) },
     { code: "run-mode-not-interactive", setup: (f) => mutateRun(f, (run) => { run.mode = "headless"; delete run.gates.story.handoff_receipt; }) },
     { code: "protected-gate-pending", setup: async (f) => {
       writeFileSync(join(f.runDir, "artifacts", "brief.md"), "brief\n");
@@ -44,7 +44,7 @@ describe("factory resume", () => {
     { code: "launch-owner-indeterminate", setup: (f) => writeClaim(f, { hostname: "foreign-host" }) },
     { code: "launch-claim-conflict", options: (f) => ({ inspectLaunchClaimFn: () => ({ ok: true, missing: false, owner_status: "live", claim: fakeClaim(f, { phase: "foreground-live" }) }) }) },
     { code: "process-evidence-invalid", setup: (f) => writeFileSync(join(f.runDir, "process.json"), "malformed process bytes\n") },
-    { code: "process-identity-mismatch", setup: (f) => writeRunningEvidence(f, "exec-mismatch"), options: (f) => ({ inspectorFn: () => ({ ok: true, inspector: "test-inspector", pid: 9876, start_marker: "different", command_name: "opencode", cwd: f.repo }) }) },
+    { code: "process-identity-mismatch", setup: (f) => writeRunningEvidence(f, "exec-mismatch"), options: (f) => canonicalProcessOptions(f, { marker: () => "222" }) },
     { code: "prior-process-stopped", setup: (f) => writeStoppedEvidence(f, "exited") },
     { code: "claim-acquisition-failed", options: () => ({ inspectLaunchClaimFn: () => ({ ok: false, missing: true }), acquireLaunchClaimFn: () => { throw new Error("injected acquisition failure"); } }) },
     { code: "foreground-release-failed", options: (f) => fakeLaunchOptions(f, { transitionFailure: "predecessor-released" }) },
@@ -122,13 +122,13 @@ describe("factory resume", () => {
       let payload;
       let launches = 0;
       const runBytesBefore = readFileSync(join(fixture.runDir, "run.json"));
-      const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "node", cwd: pid === process.pid ? process.cwd() : fixture.repo });
+      const processOptions = canonicalProcessOptions(fixture, { currentCwd: process.cwd() });
       const capture = async (_repo, args, launchOpts) => {
         launches += 1;
         payload = decodeFeatureCommandPayload(args.at(-1)).payload;
         if (row.detached) {
           ensureProcessLog(fixture);
-          recordDetachedProcessEvidence(fixture.runDir, { runId: fixture.runId, executionId: launchOpts.executionId, pid: 9876, cwd: fixture.repo, logRef: "processes/behavior.log", inspectorFn });
+          recordDetachedProcessEvidence(fixture.runDir, { runId: fixture.runId, executionId: launchOpts.executionId, pid: 9876, cwd: fixture.repo, logRef: "processes/behavior.log", ...processOptions });
           return { status: "started", pid: 9876 };
         }
         return { status: "completed", code: 0 };
@@ -136,7 +136,7 @@ describe("factory resume", () => {
       try {
         const result = await row.invoke(fixture, {
           cwd: fixture.repo,
-          inspectorFn,
+          ...processOptions,
           foregroundLaunchFn: capture,
           detachedLaunchFn: capture,
           recoverDisruptedRunFn: async () => ({ ok: true, run_dir: fixture.runDir, run_file: join(fixture.runDir, "run.json") }),
@@ -155,7 +155,7 @@ describe("factory resume", () => {
   for (const cleanupResult of [true, false]) {
     it(`${cleanupResult ? "releases before one spawn and starts" : "requires exact-token cleanup before reporting success"}`, async () => {
       const fixture = await createApprovedHandoffFixture(`handoff-cleanup-${cleanupResult}`);
-      const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo });
+      const processOptions = canonicalProcessOptions(fixture);
       let claim = null;
       let spawnCount = 0;
       let releaseCount = 0;
@@ -180,7 +180,7 @@ describe("factory resume", () => {
         const result = await transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, {
           cwd: fixture.repo,
           ...claimFns,
-          inspectorFn,
+          ...processOptions,
           handoffHooks: {
             beforeRelease: () => assert.equal(spawnCount, 0),
             afterRelease: () => assert.equal(spawnCount, 0),
@@ -190,7 +190,7 @@ describe("factory resume", () => {
             assert.equal(launchOpts.env[FACTORY_LAUNCH_CLAIM_ENV], claim.nonce);
             mkdirSync(join(fixture.runDir, "processes"), { recursive: true });
             writeFileSync(join(fixture.runDir, "processes", "handoff.log"), "ready\n", "utf8");
-            recordDetachedProcessEvidence(fixture.runDir, { runId: fixture.runId, executionId: launchOpts.executionId, launchToken: launchOpts.env[FACTORY_LAUNCH_CLAIM_ENV], pid: 9876, cwd: fixture.repo, logRef: "processes/handoff.log", inspectorFn });
+            recordDetachedProcessEvidence(fixture.runDir, { runId: fixture.runId, executionId: launchOpts.executionId, launchToken: launchOpts.env[FACTORY_LAUNCH_CLAIM_ENV], pid: 9876, cwd: fixture.repo, logRef: "processes/handoff.log", ...processOptions });
             return { status: "started", pid: 9876 };
           },
         });
@@ -221,7 +221,7 @@ describe("factory resume", () => {
       const executionId = `execution-${entry.name.replaceAll(" ", "-")}`;
       let now = 0;
       let published = false;
-      const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "node", cwd: fixture.repo });
+      const processOptions = canonicalProcessOptions(fixture);
       try {
         const claim = acquireLaunchClaim(fixture.runDir, {
           runId: fixture.runId,
@@ -230,7 +230,7 @@ describe("factory resume", () => {
           phase: "spawning",
           pid: process.pid,
           cwd: fixture.repo,
-        }, { inspectorFn });
+        }, processOptions);
         assert.equal(claim.acquired, true);
         const result = await entry.invoke(fixture, {
           cwd: fixture.repo,
@@ -246,12 +246,12 @@ describe("factory resume", () => {
                 pid: process.pid,
                 cwd: fixture.repo,
                 logRef: "processes/matching.log",
-                inspectorFn,
+                ...processOptions,
               });
             }
             now += ms;
           },
-          inspectorFn,
+          ...processOptions,
         });
         assert.equal(result.status, "already-running");
         assert.equal(result.execution_id, executionId);
@@ -366,7 +366,7 @@ describe("factory resume", () => {
     try {
       writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
       await assert.rejects(
-        resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, processAliveFn: (pid) => pid === process.pid }),
+        resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, livenessProbe: (pid) => ({ status: pid === process.pid ? "live" : "absent" }) }),
         /active-heartbeat/u,
       );
     } finally {
@@ -385,7 +385,7 @@ describe("factory resume", () => {
       const debugSnapshotBefore = readJson(join(fixture.runDir, "run.json")).debug_snapshot;
       let rejection;
       await assert.rejects(
-        persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z", processAliveFn: (pid) => pid === process.pid }),
+        persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z", livenessProbe: (pid) => ({ status: pid === process.pid ? "live" : "absent" }) }),
         (error) => {
           rejection = error;
           return /active-heartbeat/u.test(error.message);
@@ -525,7 +525,7 @@ function mutateRun(fixture, mutator) {
 }
 
 function processIdentity() {
-  return { inspector: "test-inspector", start_marker: "test-start", command_name: "opencode" };
+  return { inspector: "node-process", start_marker: "linux-procfs:111", command_name: "opencode" };
 }
 
 function ensureProcessLog(fixture) {
@@ -556,7 +556,7 @@ function fakeClaim(fixture, overrides = {}) {
   return {
     schema_version: 1, kind: "opencode-launch-claim", run_id: fixture.runId, execution_id: "claim-execution", launch_kind: "approval-handoff",
     phase: "spawning", pid: process.pid, hostname: "test-host", acquired_at: new Date().toISOString(),
-    identity: { inspector: "test-inspector", start_marker: "test-start", command_name: "node", cwd: fixture.repo }, approval: null,
+    identity: { inspector: "node-process", start_marker: "linux-procfs:111", command_name: "node", cwd: fixture.repo }, approval: null,
     nonce: "opaque-behavior-token-1234", ...overrides,
   };
 }
@@ -569,12 +569,12 @@ function writeClaim(fixture, overrides = {}) {
 function fakeLaunchOptions(fixture, options = {}) {
   let claim = null;
   const metrics = { spawnAttempts: 0, signalAttempts: 0, releaseAttempts: 0, sleepCalls: [], now: 0, claimBytes: null, processBytes: null };
-  const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "node", cwd: fixture.repo });
+  const processOptions = canonicalProcessOptions(fixture);
   return {
     metrics,
     inspectLaunchClaimFn: () => ({ ok: false, missing: true }),
     acquireLaunchClaimFn: (_runDir, input) => {
-      const acquired = acquireLaunchClaim(_runDir, { ...input, nonce: "opaque-behavior-token-1234" }, { inspectorFn });
+      const acquired = acquireLaunchClaim(_runDir, { ...input, nonce: "opaque-behavior-token-1234" }, processOptions);
       claim = acquired.claim;
       return acquired;
     },
@@ -583,7 +583,7 @@ function fakeLaunchOptions(fixture, options = {}) {
         metrics.claimBytes = readFileSync(join(_runDir, "process-launch.lock", "owner.json"));
         throw new Error("injected transition failure");
       }
-      const transitioned = transitionLaunchClaimPhase(_runDir, _token, phase, {}, { expectedPhase: claim.phase, inspectorFn });
+      const transitioned = transitionLaunchClaimPhase(_runDir, _token, phase, {}, { ...processOptions, expectedPhase: claim.phase });
       claim = transitioned.claim;
       metrics.claimBytes = readFileSync(join(_runDir, "process-launch.lock", "owner.json"));
       return transitioned;
@@ -597,10 +597,9 @@ function fakeLaunchOptions(fixture, options = {}) {
       if (options.launchError && !/readiness/iu.test(options.launchError)) throw new Error(options.launchError);
       if (/readiness/iu.test(options.launchError || "")) return { status: "started", pid: 9876 };
       ensureProcessLog(fixture);
-      const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo });
       recordDetachedProcessEvidence(fixture.runDir, {
         runId: fixture.runId, executionId: options.mismatchedEvidence ? "different-execution" : launchOpts.executionId,
-        pid: 9876, cwd: fixture.repo, logRef: "processes/behavior.log", inspectorFn,
+        pid: 9876, cwd: fixture.repo, logRef: "processes/behavior.log", ...processOptions,
       });
       metrics.processBytes = readFileSync(join(fixture.runDir, "process.json"));
       return { status: "started", pid: 9876 };
@@ -609,7 +608,25 @@ function fakeLaunchOptions(fixture, options = {}) {
     clock: () => metrics.now,
     sleep: async (ms) => { metrics.sleepCalls.push(ms); metrics.now += ms; },
     processSignalFn: () => { metrics.signalAttempts += 1; },
-    inspectorFn,
+    ...processOptions,
+  };
+}
+
+function canonicalProcessOptions(fixture, {
+  marker = () => "111",
+  liveness = () => "live",
+  currentCwd = fixture.repo,
+} = {}) {
+  return {
+    platform: "linux",
+    livenessProbe: (pid) => ({ status: liveness(pid) }),
+    procReadFile: (path) => {
+      const pid = Number(path.split("/")[2]);
+      return path.endsWith("/stat")
+        ? `${pid} (process) S ${Array(18).fill("0").join(" ")} ${marker(pid)}\n`
+        : `${pid === 9876 ? "opencode" : "node"}\n`;
+    },
+    procReadlink: (path) => Number(path.split("/")[2]) === process.pid ? currentCwd : fixture.repo,
   };
 }
 

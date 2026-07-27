@@ -146,7 +146,7 @@ describe("factory disrupted run recovery", () => {
     const fixture = createRecoveryFixture("self-owned-resume-run");
     const token = "opaque-self-owned-launch-token";
     const pid = 43210;
-    const inspectorFn = (observedPid) => ({ ok: true, inspector: "test-inspector", pid: observedPid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo });
+    const processOptions = canonicalProcessOptions(fixture, { detachedPid: pid });
     try {
       mkdirSync(join(fixture.runDir, "processes"), { recursive: true });
       writeFileSync(join(fixture.runDir, "processes", "resume.log"), "", "utf8");
@@ -157,7 +157,7 @@ describe("factory disrupted run recovery", () => {
         pid,
         cwd: fixture.repo,
         logRef: "processes/resume.log",
-        inspectorFn,
+        ...processOptions,
       });
       const claim = acquireLaunchClaim(fixture.runDir, {
         runId: fixture.runId,
@@ -167,13 +167,13 @@ describe("factory disrupted run recovery", () => {
         pid: process.pid,
         cwd: fixture.repo,
         nonce: token,
-      }, { inspectorFn });
+      }, processOptions);
       assert.equal(claim.acquired, true);
 
       const rejected = await recoverDisruptedRun(fixture.runId, {
         cwd: fixture.repo,
         env: { OPENCODE_FACTORY_LAUNCH_CLAIM: "different-launch-token" },
-        inspectorFn,
+        ...processOptions,
       });
       assert.equal(rejected.ok, false);
       assert.equal(rejected.ownership.reason_code, "matching-detached-shepherd-live");
@@ -182,17 +182,17 @@ describe("factory disrupted run recovery", () => {
       const accepted = await recoverDisruptedRun(fixture.runId, {
         cwd: fixture.repo,
         env: { OPENCODE_FACTORY_LAUNCH_CLAIM: token },
-        inspectorFn,
+        ...processOptions,
       });
       assert.equal(accepted.ok, true);
       assert.equal(accepted.status, "running");
       assert.equal(existsSync(join(fixture.worktree, ".git")), true);
 
-      assert.equal(releaseLaunchClaim(fixture.runDir, token, { expectedPhase: "spawning", runId: fixture.runId, inspectorFn }), true);
+      assert.equal(releaseLaunchClaim(fixture.runDir, token, { ...processOptions, expectedPhase: "spawning", runId: fixture.runId }), true);
       const acceptedAfterRelease = await recoverDisruptedRun(fixture.runId, {
         cwd: fixture.repo,
         env: { OPENCODE_FACTORY_LAUNCH_CLAIM: token },
-        inspectorFn,
+        ...processOptions,
       });
       assert.equal(acceptedAfterRelease.ok, true);
       assert.equal(acceptedAfterRelease.status, "running");
@@ -434,7 +434,11 @@ describe("factory disrupted run recovery", () => {
         return true;
       };
 
-      const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z", processAliveFn: () => true });
+      const result = await recoverDisruptedRun(fixture.runId, {
+        cwd: fixture.repo,
+        now: "2026-07-08T12:00:00.000Z",
+        livenessProbe: () => ({ status: "live" }),
+      });
       const heartbeat = readJson(join(fixture.runDir, "heartbeat.json"));
 
       assert.equal(result.status, "blocked");
@@ -574,6 +578,20 @@ function createRecoveryFixture(runId, { baseMismatch = false, worktree } = {}) {
 
 function tempRepo(name) {
   return mkdtempSync(join(tmpdir(), `factory-disrupted-${name}-`));
+}
+
+function canonicalProcessOptions(fixture, { detachedPid } = {}) {
+  return {
+    platform: "linux",
+    livenessProbe: () => ({ status: "live" }),
+    procReadFile: (path) => {
+      const pid = Number(path.split("/")[2]);
+      return path.endsWith("/stat")
+        ? `${pid} (process) S ${Array(18).fill("0").join(" ")} 111\n`
+        : `${pid === detachedPid ? "opencode" : "node"}\n`;
+    },
+    procReadlink: () => fixture.repo,
+  };
 }
 
 function initGitRepo(repo) {

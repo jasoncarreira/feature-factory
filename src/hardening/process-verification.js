@@ -100,7 +100,7 @@ class InspectionFailure extends Error {
 export function probeProcessLiveness(pid, options = {}) {
   if (!positivePid(pid)) return result("indeterminate", "INVALID_PID", pid);
 
-  const injectedProbe = firstFunction(options.livenessProbe, options.livenessProbeFn, options.processLivenessProbe);
+  const injectedProbe = firstFunction(options.livenessProbe);
   if (injectedProbe) {
     try {
       return normalizeLivenessResult(injectedProbe(pid), pid);
@@ -233,9 +233,9 @@ export async function signalVerifiedProcess(expected, options = {}) {
 }
 
 function inspectLinuxIdentity(pid, options) {
-  const readFile = firstFunction(options.procReadFile, options.procReadFileFn, options.readProcFileFn)
+  const readFile = firstFunction(options.procReadFile)
     || ((path) => readFileSync(path, "utf8"));
-  const readLink = firstFunction(options.procReadlink, options.procReadlinkFn, options.readProcLinkFn)
+  const readLink = firstFunction(options.procReadlink)
     || ((path) => readlinkSync(path));
 
   let firstStat;
@@ -273,7 +273,7 @@ function inspectDarwinIdentity(pid, options) {
   const timeout = positiveBound(options.commandTimeoutMs, DEFAULT_COMMAND_TIMEOUT_MS);
   const maxBuffer = positiveBound(options.commandMaxBuffer, DEFAULT_COMMAND_MAX_BUFFER);
   if (!timeout || !maxBuffer) throw new InspectionFailure("METADATA_MALFORMED");
-  const runCommand = firstFunction(options.commandRunner, options.commandRunnerFn)
+  const runCommand = firstFunction(options.commandRunner)
     || ((command, args, commandOptions) => execFileSync(command, args, commandOptions));
   const commandOptions = {
     encoding: "utf8",
@@ -349,8 +349,8 @@ function normalizePollingOptions(options) {
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   if (!Number.isInteger(waitForExitMs) || waitForExitMs < 0) return null;
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs <= 0) return null;
-  const clock = firstFunction(options.clock, options.clockFn) || Date.now;
-  const sleep = firstFunction(options.sleep, options.sleepFn)
+  const clock = firstFunction(options.clock) || Date.now;
+  const sleep = firstFunction(options.sleep)
     || ((ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)));
   return { waitForExitMs, pollIntervalMs, clock, sleep };
 }
@@ -478,22 +478,15 @@ function strictOutputLines(value) {
 }
 
 function resolvePlatform(options) {
-  const provider = firstFunction(options.platformFn);
   try {
-    return provider ? provider() : (options.platform ?? process.platform);
+    return options.platform ?? process.platform;
   } catch {
     return null;
   }
 }
 
 function resolveHostname(options) {
-  const provider = firstFunction(options.hostnameFn, options.hostnameProvider);
-  let value;
-  try {
-    value = provider ? provider() : (options.hostname ?? systemHostname());
-  } catch {
-    throw new InspectionFailure("METADATA_UNAVAILABLE");
-  }
+  const value = options.hostname ?? systemHostname();
   if (!nonEmptyExactString(value)) throw new InspectionFailure("METADATA_MALFORMED");
   return value;
 }

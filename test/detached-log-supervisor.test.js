@@ -69,7 +69,7 @@ describe("detached log supervisor", () => {
         recordEvidence: true,
       }, {
         send() {},
-        inspectorFn: (pid) => ({ ok: true, inspector: "test", pid, start_marker: "start-1", command_name: "opencode", cwd: fixture.root }),
+        ...inspectionOptions(fixture),
         stopHeartbeatFn: async (scopedRunDir) => calls.push(scopedRunDir),
       });
 
@@ -102,16 +102,56 @@ describe("detached log supervisor", () => {
         spawnFn: () => child,
         send() {},
         // Close arrives while the supervisor is awaiting identity settling.
-        sleepFn: async () => {
+        sleep: async () => {
           child.stdout.end();
           child.stderr.end();
           child.emit("close", 0, null);
         },
-        inspectorFn: (pid) => ({ ok: true, inspector: "test", pid, start_marker: "start-1", command_name: "opencode", cwd: fixture.root }),
+        ...inspectionOptions(fixture),
         stopHeartbeatFn: async () => {},
       }));
 
       assert.deepEqual(result, { pid: child.pid, status: "exited" });
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires two equal non-environment identity fingerprints before recording", async () => {
+    const fixture = createFixture("stable-fingerprint");
+    const runDir = join(fixture.root, ".opencode", "factory", "scoped-run");
+    const child = stubChild();
+    let commandReads = 0;
+    mkdirSync(join(runDir, "processes"), { recursive: true });
+    try {
+      const result = await superviseDetachedLaunch({
+        ...init(fixture),
+        runDir,
+        runId: "scoped-run",
+        executionId: "execution-1",
+        logRef: "processes/child.log",
+        recordEvidence: true,
+      }, {
+        spawnFn: () => child,
+        send(message) {
+          if (message.type !== "ready") return;
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("close", 0, null);
+        },
+        ...inspectionOptions(fixture),
+        procReadFile(path) {
+          if (path.endsWith("/stat")) return `${child.pid} (opencode) S ${Array(18).fill("0").join(" ")} 111\n`;
+          commandReads += 1;
+          return `${commandReads === 1 ? "env" : "opencode"}\n`;
+        },
+        sleep: async () => {},
+        stopHeartbeatFn: async () => {},
+      });
+
+      assert.deepEqual(result, { pid: child.pid, status: "exited" });
+      assert.equal(commandReads, 4);
+      assert.equal(JSON.parse(readFileSync(join(runDir, "process.json"), "utf8")).identity.command_name, "opencode");
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }
@@ -180,4 +220,20 @@ function init(fixture) {
     log: fixture.log,
     recordEvidence: false,
   };
+}
+
+function inspectionOptions(fixture) {
+  return {
+    platform: "linux",
+    hostname: "test-host",
+    livenessProbe: () => ({ status: "live" }),
+    procReadFile: (path) => path.endsWith("/stat")
+      ? `${stubChildPid(path)} (opencode) S ${Array(18).fill("0").join(" ")} 111\n`
+      : "opencode\n",
+    procReadlink: () => fixture.root,
+  };
+}
+
+function stubChildPid(path) {
+  return Number(path.split("/")[2]);
 }
