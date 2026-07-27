@@ -17,18 +17,32 @@ import { DEFAULT_CHECKED_EXECUTION_TIMEOUT_MS, MAX_CHECKED_EXECUTION_TIMEOUT_MS,
 const FINAL_COMMAND = Object.freeze({ program: "npm", args: Object.freeze(["run", "check"]) });
 
 describe("plan integration_gate command contract", () => {
-  it("keeps explicit legacy reads valid but requires the gate in creation mode", () => {
-    const legacy = { slices: [plannedSlice()] };
+  it("accepts exactly one of 32 gate, command, envelope, and timeout presence combinations", () => {
+    let accepted = 0;
+    let rejected = 0;
+    for (let mask = 0; mask < 32; mask += 1) {
+      const plan = planWithCommands([FINAL_COMMAND]);
+      if (!(mask & 1)) delete plan.integration_gate;
+      else {
+        if (!(mask & 2)) delete plan.integration_gate.required_commands;
+        if (!(mask & 4)) delete plan.integration_gate.timeout_ms;
+      }
+      if (!(mask & 8)) delete plan.delivery_envelope;
+      else if (!(mask & 16)) delete plan.delivery_envelope.delivery_units[0].verification_artifacts[0].timeout_ms;
 
-    assert.equal(validateSlicesPlan(legacy), legacy);
-    assert.throws(
-      () => validateSlicesPlan(legacy, { requireIntegrationGate: true }),
-      (error) => validationIncludes(error, "plan.integration_gate", "is required for newly produced and schema-v2 plans"),
-    );
-    assert.throws(
-      () => validateSlices(legacy),
-      (error) => validationIncludes(error, "plan.integration_gate", "is required for newly produced and schema-v2 plans"),
-    );
+      if (mask === 31) {
+        assert.equal(validateSlicesPlan(plan), plan);
+        assert.equal(validateSlices(plan), plan);
+        accepted += 1;
+      } else {
+        assert.throws(() => validateSlicesPlan(plan), ValidationError, `plan mask ${mask}`);
+        assert.throws(() => validateSlices(plan), ValidationError, `factory mask ${mask}`);
+        rejected += 1;
+      }
+    }
+    assert.equal(accepted + rejected, 32);
+    assert.equal(accepted, 1);
+    assert.equal(rejected, 31);
   });
 
   it("accepts 1-32 ordered structured argv commands with npm run check exactly once and last", () => {
@@ -81,22 +95,22 @@ describe("plan integration_gate command contract", () => {
     assert.equal(MAX_CHECKED_EXECUTION_TIMEOUT_MS, 1_800_000);
   });
 
-  it("requires explicit timeouts at new-plan admission while preserving accepted legacy reads", () => {
+  it("requires explicit current execution timeouts without a compatibility override", () => {
     const missingGateTimeout = planWithCommands([FINAL_COMMAND]);
     delete missingGateTimeout.integration_gate.timeout_ms;
     assert.throws(
-      () => validateSlicesPlan(missingGateTimeout, { requireIntegrationGate: true }),
-      (error) => validationIncludes(error, "plan.integration_gate.timeout_ms", "is required for newly produced and schema-v2 plans"),
+      () => validateSlicesPlan(missingGateTimeout),
+      (error) => validationIncludes(error, "plan.integration_gate.timeout_ms", "is required"),
     );
-    assert.equal(validateSlicesPlan(missingGateTimeout, { requireIntegrationGate: true, allowLegacyExecutionTimeouts: true }), missingGateTimeout);
+    assert.throws(() => validateSlicesPlan(missingGateTimeout, { allowLegacyExecutionTimeouts: true }), /integration_gate\.timeout_ms: is required/u);
 
     const missingArtifactTimeout = planWithCommands([FINAL_COMMAND]);
     delete missingArtifactTimeout.delivery_envelope.delivery_units[0].verification_artifacts[0].timeout_ms;
     assert.throws(
-      () => validateSlicesPlan(missingArtifactTimeout, { requireIntegrationGate: true }),
+      () => validateSlicesPlan(missingArtifactTimeout),
       (error) => validationIncludes(error, "plan.delivery_envelope.delivery_units[0].verification_artifacts[0].timeout_ms", "is required for newly produced and schema-v2 plans"),
     );
-    assert.equal(validateSlicesPlan(missingArtifactTimeout, { requireIntegrationGate: true, allowLegacyExecutionTimeouts: true }), missingArtifactTimeout);
+    assert.throws(() => validateSlicesPlan(missingArtifactTimeout, { allowLegacyExecutionTimeouts: true }), /verification_artifacts\[0\]\.timeout_ms/u);
   });
 
   it("enforces command count, program UTF-8 byte, trim, and control-character bounds", () => {

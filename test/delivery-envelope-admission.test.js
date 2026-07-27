@@ -10,13 +10,12 @@ import { DeliveryContractValidationError } from "../src/delivery-envelope/extens
 import { validateSlicesPlan } from "../src/validate.js";
 
 describe("B4 delivery-envelope admission", () => {
-  it("requires a delivery envelope for new plans while preserving inactive legacy authority", () => {
-    const legacy = { slices: [slice("legacy")] };
-    assert.deepEqual(evaluateDeliveryEnvelopeAdmission({ plan: legacy }), inactiveAdmission());
-
-    const reservedLegacy = planWithUnits([unitSpec("legacy")], { newPlan: false });
-    assert.deepEqual(evaluateDeliveryEnvelopeAdmission({ plan: reservedLegacy }), inactiveAdmission());
-
+  it("rejects missing current gates and delivery envelopes outright", () => {
+    assert.throws(
+      () => evaluateDeliveryEnvelopeAdmission({ plan: { slices: [slice("missing-gate")] } }),
+      (error) => error instanceof DeliveryContractValidationError
+        && error.message === "plan.integration_gate: is required",
+    );
     assert.throws(
       () => evaluateDeliveryEnvelopeAdmission({ plan: { integration_gate: integrationGate(), slices: [slice("new-slice")] } }),
       (error) => error instanceof DeliveryContractValidationError
@@ -116,7 +115,7 @@ describe("B4 delivery-envelope admission", () => {
   });
 });
 
-function planWithUnits(specs, { newPlan = true } = {}) {
+function planWithUnits(specs) {
   const slices = specs.map((spec) => slice(spec.id, spec.dependsOn, spec.obligations));
   const plan = {
     slices,
@@ -125,7 +124,7 @@ function planWithUnits(specs, { newPlan = true } = {}) {
       delivery_units: specs.map((spec, index) => deliveryUnit(spec, slices[index])),
     },
   };
-  if (newPlan) plan.integration_gate = integrationGate();
+  plan.integration_gate = integrationGate();
   return plan;
 }
 
@@ -184,16 +183,6 @@ function replaceUnitShape(plan, index, families, obligations) {
 
 function integrationGate() {
   return { required_commands: [{ program: "npm", args: ["run", "check"] }], timeout_ms: 600_000 };
-}
-
-function inactiveAdmission() {
-  return {
-    schema_version: 1,
-    extension: "delivery-envelope-admission",
-    status: "inactive",
-    grants_b4_authority: false,
-    reason: "b4-admission-policy-inactive",
-  };
 }
 
 function activeAdmission(decision, reasons) {

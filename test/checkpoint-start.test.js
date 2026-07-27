@@ -152,15 +152,40 @@ describe("B4.3 normal checkpoint child start", () => {
       const sourceDisposition = readFileSync(join(sourceRunDir, "reviews", "work-decomposer.json"));
       const sourceDecompositionStep = structuredClone(published.steps.find((step) => step.agent === "work-decomposer"));
       const continuationReviewRef = "reviews/continuation.json";
+      const securityReviewRef = "reviews/security-reviewer.json";
+      const validationReportRef = "artifacts/validation-report.md";
       writeJson(join(sourceRunDir, continuationReviewRef), {
         subject: sourceRunId,
         attempt: 1,
+        verdict: "NO-GO",
+        reviewed_head_sha: published.base_commit,
         summary: "Continue the blocked checkpoint child.",
         required_fixes: ["Complete the remaining checkpoint slice"],
       });
+      writeJson(join(sourceRunDir, securityReviewRef), {
+        subject: sourceRunId,
+        attempt: 1,
+        verdict: "PASS",
+        reviewed_head_sha: published.base_commit,
+      });
+      mkdirSync(join(sourceRunDir, "artifacts"));
+      writeFileSync(join(sourceRunDir, validationReportRef), "Continuation required.\n");
       published.status = "blocked";
       published.updated_at = "2026-07-19T12:02:00.000Z";
-      published.validator = { verdict: "NO-GO", review_ref: continuationReviewRef };
+      published.validator = {
+        verdict: "NO-GO",
+        report: validationReportRef,
+        report_hash: hashBytes(readFileSync(join(sourceRunDir, validationReportRef))),
+        review_ref: continuationReviewRef,
+        review_hash: hashBytes(readFileSync(join(sourceRunDir, continuationReviewRef))),
+        reviewed_head_sha: published.base_commit,
+      };
+      published.security_review = {
+        verdict: "PASS",
+        review_ref: securityReviewRef,
+        review_hash: hashBytes(readFileSync(join(sourceRunDir, securityReviewRef))),
+        reviewed_head_sha: published.base_commit,
+      };
       published.terminal_result = {
         status: "blocked",
         run_id: sourceRunId,
@@ -1154,7 +1179,7 @@ function routingFixture() {
 function parentPlan() {
   const testPlan = Array.from({ length: 6 }, (_, index) => `test api ${index + 1}`);
   return {
-    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }], timeout_ms: 600_000 },
     slices: [{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["AC1", "AC2"], test_plan: testPlan }],
     delivery_envelope: {
       schema_version: 1,
@@ -1168,7 +1193,7 @@ function parentPlan() {
           invariant_family_id: `api-family-${(index % 2) + 1}`,
           verification_artifact_id: `api-artifact-${index + 1}`,
         })),
-        verification_artifacts: testPlan.map((entry, index) => ({ id: `api-artifact-${index + 1}`, test_plan_index: index, test_plan_entry: entry })),
+        verification_artifacts: testPlan.map((entry, index) => ({ id: `api-artifact-${index + 1}`, test_plan_index: index, test_plan_entry: entry, timeout_ms: 600_000 })),
       }],
     },
   };
