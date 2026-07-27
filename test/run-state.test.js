@@ -6209,8 +6209,8 @@ async function prepareReportedIntegrationAmendmentFixture(runId, { progressedCon
   for (const dir of ["plan", "evidence", "reviews", "dispatch"]) mkdirSync(join(fixture.runDir, dir), { recursive: true });
   const plan = withDeliveryEnvelope({
     slices: [
-      { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["owner works"], test_plan: ["node --test test/owner.test.js"] },
-      { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["consumer works"], test_plan: ["node --test test/consumer.test.js"] },
+      { id: "owner", stack: "backend", paths: ["src/owner/**", "test/owner.test.js"], depends_on: [], acceptance: ["owner works"], test_plan: ["node --test test/owner.test.js"] },
+      { id: "consumer", stack: "backend", paths: ["src/consumer/**", "test/consumer.test.js"], depends_on: ["owner"], acceptance: ["consumer works"], test_plan: ["node --test test/consumer.test.js"] },
     ],
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
   });

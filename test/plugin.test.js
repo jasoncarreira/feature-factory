@@ -355,8 +355,8 @@ describe("checked slice builder Task dispatch", () => {
   it("does not guess pruned compaction authority across ambiguous parallel builder children", async () => {
     const fixture = createBuilderDispatchFixture({
       slices: [
-        { id: "slice-a", stack: "backend", paths: ["src/a/**"], depends_on: [], acceptance: ["a works"], test_plan: ["node --test test/a.test.js"] },
-        { id: "slice-b", stack: "backend", paths: ["src/b/**"], depends_on: [], acceptance: ["b works"], test_plan: ["node --test test/b.test.js"] },
+        { id: "slice-a", stack: "backend", paths: ["src/a/**", "test/a.test.js"], depends_on: [], acceptance: ["a works"], test_plan: ["node --test test/a.test.js"] },
+        { id: "slice-b", stack: "backend", paths: ["src/b/**", "test/b.test.js"], depends_on: [], acceptance: ["b works"], test_plan: ["node --test test/b.test.js"] },
       ],
     });
     try {
@@ -2203,8 +2203,8 @@ async function createRealAmendmentReviewerFixture(label) {
   for (const directory of ["plan", "evidence", "reviews", "dispatch"]) mkdirSync(join(runDir, directory), { recursive: true });
   const plan = withDeliveryEnvelope({
     slices: [
-      { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["owner works"], test_plan: ["node --test test/owner.test.js"] },
-      { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["consumer works"], test_plan: ["node --test test/consumer.test.js"] },
+      { id: "owner", stack: "backend", paths: ["src/owner/**", "test/owner.test.js"], depends_on: [], acceptance: ["owner works"], test_plan: ["node --test test/owner.test.js"] },
+      { id: "consumer", stack: "backend", paths: ["src/consumer/**", "test/consumer.test.js"], depends_on: ["owner"], acceptance: ["consumer works"], test_plan: ["node --test test/consumer.test.js"] },
     ],
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
   });

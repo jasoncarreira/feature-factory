@@ -1465,9 +1465,9 @@ function publishedSiblingAuthorityFixture() {
       { program: "npm", args: ["run", "check"] },
     ] },
     slices: [
-      { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["owner works"], test_plan: ["node --test test/owner.test.js"] },
-      { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["consumer works"], test_plan: ["node --test test/consumer.test.js"] },
-      { id: "remaining", stack: "backend", paths: ["src/remaining/**"], depends_on: ["consumer"], acceptance: ["remaining works"], test_plan: ["node --test test/remaining.test.js"] },
+      { id: "owner", stack: "backend", paths: ["src/owner/**", "test/owner.test.js"], depends_on: [], acceptance: ["owner works"], test_plan: ["node --test test/owner.test.js"] },
+      { id: "consumer", stack: "backend", paths: ["src/consumer/**", "test/consumer.test.js"], depends_on: ["owner"], acceptance: ["consumer works"], test_plan: ["node --test test/consumer.test.js"] },
+      { id: "remaining", stack: "backend", paths: ["src/remaining/**", "test/remaining.test.js"], depends_on: ["consumer"], acceptance: ["remaining works"], test_plan: ["node --test test/remaining.test.js"] },
     ],
   });
   writeJson(join(parentRunDir, "plan", "slices.json"), plan);

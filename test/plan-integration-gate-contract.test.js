@@ -178,7 +178,7 @@ function planWithCommands(requiredCommands) {
 }
 
 function plannedSlice() {
-  return { id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/backend.test.js"] };
+  return { id: "backend", stack: "backend", paths: ["src/**", "test/backend.test.js"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/backend.test.js"] };
 }
 
 function validationIncludes(error, path, message) {

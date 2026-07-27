@@ -4769,7 +4769,66 @@ function validatePlannedSlices(errors, slices, path, { enforceDependencyDepth })
     validateStringArray(errors, slice.test_plan, `${path}[${index}].test_plan`, { required: true, nonEmpty: true });
   }
   const acyclic = validateAcyclic(errors, slices, ids, path);
+  if (errors.length === 0 && acyclic) validateTestPlanOwnership(errors, slices, ids, path);
   if (enforceDependencyDepth && errors.length === 0 && acyclic) validateDependencyDepth(errors, slices, path);
+}
+
+// `depends_on` acyclicity is not enough to make a plan buildable. A slice is
+// also required to make its own `test_plan` pass, so every test file it runs
+// must be one this slice is allowed to change - meaning a file it owns, or one
+// owned by a slice that has already run. A test owned by a later slice, by an
+// unrelated parallel slice, or by nobody at all is a cycle in the effective
+// graph even when the declared graph is a clean DAG: the slice cannot edit the
+// file, and it cannot publish a failure that touches it either.
+//
+// Observed on issue-110, twice. Slice 1 owned `src/validate.js` and its
+// test_plan ran `test/checkpoint-start.test.js`, which exercises
+// `src/factory.js` - owned by a slice two hops downstream and therefore not yet
+// built. Nothing rejected the plan, so the run reached slice 1, discovered the
+// contradiction, and could not even record the failure because the test file
+// was owned by no slice and counted as an unexpected changed path.
+//
+// Only concrete `*.test.js` tokens are checked. Runner name filters like
+// `npm test -- api.feature.test` name no file and are left alone.
+function validateTestPlanOwnership(errors, slices, ids, path) {
+  const owners = slices
+    .filter((slice) => isRecord(slice) && ids.has(slice.id) && Array.isArray(slice.paths))
+    .map((slice) => ({ id: slice.id, lanes: slice.paths.map((lane) => canonicalPlanOwnershipLane(lane, [], "")).filter(Boolean) }));
+  const reachable = new Map();
+  for (const slice of slices) {
+    if (!isRecord(slice) || !ids.has(slice.id)) continue;
+    const seen = new Set([slice.id]);
+    const walk = (id) => {
+      const current = slices.find((candidate) => isRecord(candidate) && candidate.id === id);
+      for (const dep of Array.isArray(current?.depends_on) ? current.depends_on : []) {
+        if (ids.has(dep) && !seen.has(dep)) { seen.add(dep); walk(dep); }
+      }
+    };
+    walk(slice.id);
+    reachable.set(slice.id, seen);
+  }
+
+  for (const [index, slice] of slices.entries()) {
+    if (!isRecord(slice) || !ids.has(slice.id) || !Array.isArray(slice.test_plan)) continue;
+    const allowed = reachable.get(slice.id) || new Set([slice.id]);
+    for (const [entryIndex, entry] of slice.test_plan.entries()) {
+      if (typeof entry !== "string") continue;
+      for (const token of testFileTokens(entry)) {
+        const holders = owners.filter((owner) => owner.lanes.some((lane) => planLaneOwnsConcretePath(lane, token))).map((owner) => owner.id);
+        const entryPath = `${path}[${index}].test_plan[${entryIndex}]`;
+        if (holders.length === 0) {
+          errors.push({ path: entryPath, message: `runs '${safeValidationIdentifier(token)}', which no slice declares in paths` });
+        } else if (holders.some((holder) => !allowed.has(holder))) {
+          const blocking = holders.filter((holder) => !allowed.has(holder)).map((holder) => safeValidationIdentifier(holder));
+          errors.push({ path: entryPath, message: `runs '${safeValidationIdentifier(token)}', owned by non-dependency slice ${blocking.join(", ")}` });
+        }
+      }
+    }
+  }
+}
+
+function testFileTokens(entry) {
+  return entry.split(/\s+/u).filter((token) => token.endsWith(".test.js") && validatePlanPath(token) === token);
 }
 
 function validateSliceIDs(errors, slices, path) {

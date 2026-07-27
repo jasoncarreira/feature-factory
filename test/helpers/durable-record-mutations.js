@@ -252,14 +252,14 @@ const PLAN_EXTERNAL = Object.freeze({
   plan: { ref: "plan/slices.json", bytes: "{\"slices\":[{\"id\":\"B0.2\",\"stack\":\"backend\",\"paths\":[\"src/**\"],\"depends_on\":[],\"acceptance\":[\"AC2\"],\"test_plan\":[\"node --test\"]},{\"id\":\"B0.3\",\"stack\":\"backend\",\"paths\":[\"test/**\"],\"depends_on\":[\"B0.2\"],\"acceptance\":[\"AC3\"],\"test_plan\":[\"node --test\"]}]}\n" },
 });
 const PLAN_V2 = withDeliveryEnvelope({
-  slices: [{ id: "B1C", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/acceptance.test.js"] }],
+  slices: [{ id: "B1C", stack: "backend", paths: ["src/**", "test/acceptance.test.js"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/acceptance.test.js"] }],
   integration_gate: { required_commands: [{ program: "node", args: ["--test", "test/acceptance.test.js"] }, { program: "npm", args: ["run", "check"] }] },
 }, { explicitExecutionTimeouts: true });
 const PLAN_V2_EXTERNAL = Object.freeze({
   plan: { ref: "plan/slices.json", bytes: `${JSON.stringify(PLAN_V2)}\n` },
 });
 const DELIVERY_ENVELOPE_PLAN = Object.freeze({
-  slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/backend.test.js"] }],
+  slices: [{ id: "backend", stack: "backend", paths: ["src/**", "test/backend.test.js"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/backend.test.js"] }],
   integration_gate: { timeout_ms: 600_000, required_commands: [{ program: "npm", args: ["run", "check"] }] },
   delivery_envelope: {
     schema_version: 1,
@@ -328,7 +328,7 @@ const INVARIANT_FAMILY_LEDGER = Object.freeze({
   }],
 });
 const CHECKPOINT_PLAN = {
-  slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1", "AC2"], test_plan: ["node --test test/backend-1.test.js", "node --test test/security-1.test.js", "node --test test/backend-2.test.js", "node --test test/security-2.test.js", "node --test test/backend-3.test.js", "node --test test/security-3.test.js"] }],
+  slices: [{ id: "backend", stack: "backend", paths: ["src/**", "test/backend-1.test.js", "test/security-1.test.js", "test/backend-2.test.js", "test/security-2.test.js", "test/backend-3.test.js", "test/security-3.test.js"], depends_on: [], acceptance: ["AC1", "AC2"], test_plan: ["node --test test/backend-1.test.js", "node --test test/security-1.test.js", "node --test test/backend-2.test.js", "node --test test/security-2.test.js", "node --test test/backend-3.test.js", "node --test test/security-3.test.js"] }],
   integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
   delivery_envelope: {
     schema_version: 1,

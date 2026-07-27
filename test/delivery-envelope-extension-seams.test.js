@@ -162,8 +162,8 @@ describe("B4 delivery-contract extension seams", () => {
 function deliveryPlan() {
   return {
     slices: [
-      { id: "api", stack: "backend", paths: ["src/api/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/api.test.js"] },
-      { id: "contract", stack: "backend", paths: ["test/contract/**"], depends_on: ["api"], acceptance: ["AC2"], test_plan: ["node --test test/contract.test.js"] },
+      { id: "api", stack: "backend", paths: ["src/api/**", "test/api.test.js"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/api.test.js"] },
+      { id: "contract", stack: "backend", paths: ["test/contract/**", "test/contract.test.js"], depends_on: ["api"], acceptance: ["AC2"], test_plan: ["node --test test/contract.test.js"] },
     ],
     delivery_envelope: {
       schema_version: 1,
@@ -205,7 +205,7 @@ function invariantFamilyLedger() {
 }
 
 function reviewedCheckpointPlan() {
-  const slice = { id: "api", stack: "backend", paths: ["src/api/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/api.test.js"] };
+  const slice = { id: "api", stack: "backend", paths: ["src/api/**", "test/api.test.js"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/api.test.js"] };
   const family = { id: "api-behavior", description: "API behavior remains stable" };
   const obligation = { id: "api-response-obligation", description: "Return the specified API response", invariant_family_id: family.id, verification_artifact_id: "api-tests" };
   const artifact = { id: "api-tests", test_plan_index: 0, test_plan_entry: slice.test_plan[0] };
