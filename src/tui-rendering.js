@@ -63,9 +63,27 @@ export function renderRunTextFields(run) {
     panel_line: run?.panel ? `panel: ${renderFreeformText(run.panel)}` : null,
     pr_line: run?.pr_url ? `PR: ${renderFreeformText(run.pr_url, 34)}` : null,
     terminal_reason_line: run?.terminal_reason ? `reason: ${renderFreeformText(run.terminal_reason, 30)}` : null,
+    process_line: renderProcessLine(run?.process),
     diagnostic_line: `diagnostic: ${diagnostic}`,
     branch_line: run?.branch ? `branch: ${renderBranch(run.branch)}` : null,
   };
+}
+
+// Only surfaced when the process record disagrees with a healthy reading: a
+// running process with a current heartbeat needs no extra line, while stopped,
+// orphaned, and unknown states are exactly what the operator is looking for.
+const PROCESS_LABELS = Object.freeze({
+  stopped: "process stopped",
+  working: "working (heartbeat stale)",
+  orphaned: "process gone (heartbeat stale)",
+  "heartbeat-orphaned": "heartbeat outlived process",
+  unknown: "process state unknown",
+});
+
+export function renderProcessLine(process) {
+  const label = PROCESS_LABELS[process?.classification];
+  if (!label) return null;
+  return `${label}: ${renderFreeformText(process.detail, 34)}`;
 }
 
 function renderRunId(value) {
