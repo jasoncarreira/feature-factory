@@ -2235,7 +2235,12 @@ function v2GitTemplate(accepted, mergeOrder) {
   const cached = v2Templates.get(key);
   if (cached) return cached;
   const dir = mkdtempSync(join(tmpdir(), "factory-carry-template-"));
-  initGitRepo(dir);
+  runGit(dir, ["init", "-b", "main"]);
+  runGit(dir, ["config", "user.email", "test@example.com"]);
+  runGit(dir, ["config", "user.name", "Test"]);
+  writeFileSync(join(dir, "README.md"), "test\n", "utf8");
+  runGit(dir, ["add", "README.md"]);
+  runGit(dir, ["commit", "-m", "init"]);
   runGit(dir, ["init", "--bare", join(dir, ".git", "test-origin.git")]);
   runGit(dir, ["remote", "add", "origin", join(dir, ".git", "test-origin.git")]);
   runGit(dir, ["push", "origin", "main:main"]);
