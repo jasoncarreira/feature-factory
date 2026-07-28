@@ -226,8 +226,9 @@ export function validateSliceReviewResult(review, { sliceId = "slice", priorRevi
   requiredEnum(errors, review, "verdict", SLICE_REVIEW_VERDICTS, `${path}.verdict`);
   requiredEnum(errors, review, "convergence", SLICE_REVIEW_CONVERGENCE, `${path}.convergence`);
   appendSliceReviewStrikePolicyErrors(errors, review, path, priorReviews);
-  // remaining_fix_count is required_fixes.length restated. Nothing outside this
-  // validator reads it, so it fails the routed-fields test: a reviewer that
+  // remaining_fix_count is required_fixes.length restated. Nothing routes on the
+  // reviewer's copy - the one other reader, integration-amendment consumer
+  // progress, compares the derived projection - so it fails the routed-fields test: a reviewer that
   // miscounts it agrees about every fix and still fails closed. Accepted when
   // present so current prompt output keeps validating, but no longer compared.
   if (review.remaining_fix_count !== undefined) {
@@ -1809,7 +1810,11 @@ function assertIntegrationAmendmentConsumerProgress(runDir, run, consumer) {
       || review.reviewed_commit !== entry.reviewed_commit || review.verdict !== entry.verdict || review.convergence !== entry.convergence
       || result.late_discovery_strike !== entry.late_discovery_strike
       || entry.diff_base_commit !== consumer.authorized_baseline_commit
-      || review.remaining_fix_count !== entry.remaining_fix_count
+      // Derived, not raw: the sidecar's own remaining_fix_count is now accepted
+      // absent or miscounted, so comparing it here would let a review that
+      // validateSliceReviewResult admitted fail as stale later. `result` is
+      // already the validated projection used for late_discovery_strike above.
+      || result.remaining_fix_count !== entry.remaining_fix_count
       || !attemptOwnershipEquals(entry, observePersistedSliceAttemptOwnership(runDir, run, consumer, entry))) {
       throw new Error(`integration amendment consumer attempt ${entry.attempt} review authority is stale`);
     }
