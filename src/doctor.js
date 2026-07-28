@@ -14,7 +14,7 @@ import {
   scrubSensitiveData,
   scrubSensitiveString,
 } from "./hardening/sensitive-data.js";
-import { freeformSegment, projectFreeformData, renderTerminalSegments } from "./hardening/output-policy.js";
+import { freeformSegment, identitySegment, projectFreeformData, renderTerminalSegments } from "./hardening/output-policy.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 import { FEATURE_FACTORY_AGENT_FILES, formatGlobalDefinitionsDetail, inspectGlobalDefinitions } from "./global-definitions.js";
 
@@ -49,6 +49,7 @@ export async function runDoctor(options = {}) {
   add(checks, "opencode config", existsSync(configPath), configPath);
   add(checks, "plugin configured", Boolean(pluginEntry), pluginSpec);
   add(checks, "profile config shape", staleProfileKeys(pluginOptions).length === 0, staleProfileKeys(pluginOptions).join(", ") || "profiles", "warn");
+  add(checks, "configured feature-factory plugin identity", Object.values(env.plugin_identity).every(Boolean), formatCliIdentity(env.plugin_identity), "warn");
   add(checks, "feature-factory CLI identity", Object.values(env.cli_identity).every(Boolean), formatCliIdentity(env.cli_identity), "warn");
   add(checks, "opencode CLI", env.capabilities.opencode, env.opencode_version || "opencode");
   add(checks, "opencode run --command", env.capabilities.opencode_run_command, "opencode run --help");
@@ -107,7 +108,10 @@ export async function runDoctor(options = {}) {
   const payload = projectFreeformData(telemetry ? { checks, env, telemetry } : { checks, env });
   // The closed normalizer already redacted these fields; retain exact paths and
   // hashes that the generic high-entropy policy would otherwise hide.
+  payload.env.plugin_identity = env.plugin_identity;
   payload.env.cli_identity = env.cli_identity;
+  const pluginIdentityCheck = payload.checks.find((check) => check.label === "configured feature-factory plugin identity");
+  if (pluginIdentityCheck) pluginIdentityCheck.detail = formatCliIdentity(env.plugin_identity);
   const cliIdentityCheck = payload.checks.find((check) => check.label === "feature-factory CLI identity");
   if (cliIdentityCheck) cliIdentityCheck.detail = formatCliIdentity(env.cli_identity);
   if (options.json) {
@@ -586,9 +590,12 @@ function printProfileMap(models, variants) {
 }
 
 function renderDoctorRow(check) {
+  const detail = check.label === "configured feature-factory plugin identity" || check.label === "feature-factory CLI identity"
+    ? identitySegment(check.detail)
+    : freeformSegment(check.detail);
   return [
     renderDoctorValue(check.level), ": ", renderDoctorValue(check.label),
-    " (", renderDoctorValue(check.detail), ")",
+    " (", renderTerminalSegments([detail]), ")",
   ].join("");
 }
 

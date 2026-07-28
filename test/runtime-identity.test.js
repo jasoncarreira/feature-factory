@@ -78,6 +78,14 @@ describe("runtime identity observation", () => {
       writeFileSync(configuredPlugin, readFileSync(join(ROOT, "src", "plugin.js")));
       writeFileSync(configuredCli, readFileSync(CLI));
       writeFileSync(configuredEntrypoint, "export { default } from './plugin.js';\n");
+      writeFileSync(join(configuredRoot, "src", "factory.js"), readFileSync(join(ROOT, "src", "factory.js")));
+      writeFileSync(join(configuredRoot, "src", "validate.js"), readFileSync(join(ROOT, "src", "validate.js")));
+      writeFileSync(join(configuredRoot, "src", "run-state.js"), readFileSync(join(ROOT, "src", "run-state.js")));
+      for (const path of ["assets/command/feature.md", "assets/skills/feature/SKILL.md", "assets/skills/feature/SCHEMA.md"]) {
+        const target = join(configuredRoot, ...path.split("/"));
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, readFileSync(join(ROOT, ...path.split("/"))));
+      }
 
       const cases = [
         [join(home, ".config", "opencode", "opencode.jsonc"), configuredRoot, { HOME: home }],

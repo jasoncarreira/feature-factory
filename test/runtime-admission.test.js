@@ -40,6 +40,7 @@ describe("runtime launch admission", () => {
   it("rejects local plugin A with stale package and PATH CLI B before foreground or detached launch", () => {
     const fixture = runtimeFixture("configured-plugin-a-cli-b");
     const configured = createPackage(fixture.root, "plugin-a", {
+      ...packageContents(fixture),
       cli: "#!/bin/sh\nprintf 'plugin-a-cli\\n'\n",
       plugin: "export default { configured: 'a' };\n",
     });
@@ -61,12 +62,9 @@ describe("runtime launch admission", () => {
     } finally { cleanup(fixture); }
   });
 
-  it("accepts a different configured local package only when plugin and CLI bytes are exact", () => {
+  it("accepts a different configured local package only when the complete runtime closure is exact", () => {
     const fixture = runtimeFixture("configured-same-bytes");
-    const configured = createPackage(fixture.root, "plugin-a", {
-      cli: readFileSync(fixture.packageCli),
-      plugin: readFileSync(fixture.packagePlugin),
-    });
+    const configured = createPackage(fixture.root, "plugin-a", packageContents(fixture));
     try {
       writePluginConfig(fixture, join(configured.root, "src", "opencode-plugin.js"));
       symlinkSync(fixture.packageCli, fixture.effectiveCli);
@@ -74,16 +72,39 @@ describe("runtime launch admission", () => {
       assert.equal(binding.configured_local, true);
       assert.equal(binding.configured_plugin.source, realpathSync(configured.plugin));
       assert.equal(binding.configured_package_cli.source, realpathSync(configured.cli));
+      assert.equal(binding.package_closure.hash, binding.configured_package_closure.hash);
+      assert.notEqual(binding.package_closure.source, binding.configured_package_closure.source);
       assert.equal(revalidateRuntimeLaunchBinding(JSON.parse(JSON.stringify(binding)), options(fixture)), realpathSync(fixture.opencode));
+    } finally { cleanup(fixture); }
+  });
+
+  it("rejects unchanged CLI/plugin packages with divergent imported runtime closure before foreground or detached launch", () => {
+    const fixture = runtimeFixture("configured-divergent-factory");
+    const configured = createPackage(fixture.root, "plugin-a", {
+      ...packageContents(fixture),
+      factory: "export const runtime = 'divergent';\n",
+      entrypoint: "export { default } from './plugin.js'; // divergent entrypoint\n",
+    });
+    let launches = 0;
+    try {
+      writePluginConfig(fixture, configured.root);
+      symlinkSync(fixture.packageCli, fixture.effectiveCli);
+      for (const invoke of [
+        () => runForegroundFactory(fixture.root, ["run"], { ...options(fixture), foregroundLaunchFn: () => { launches += 1; } }),
+        () => startDetached(fixture.root, ["run"], { ...options(fixture), detachedLaunchFn: () => { launches += 1; } }),
+        () => startDetached(fixture.root, ["run"], { ...options(fixture), supervisorSpawnFn: () => { launches += 1; } }),
+      ]) {
+        assert.throws(invoke, /runtime package closure differs/u);
+      }
+      assert.equal(readFileSync(configured.cli, "utf8"), readFileSync(fixture.packageCli, "utf8"));
+      assert.equal(readFileSync(configured.plugin, "utf8"), readFileSync(fixture.packagePlugin, "utf8"));
+      assert.equal(launches, 0);
     } finally { cleanup(fixture); }
   });
 
   it("re-reads config and configured plugin bytes immediately before every launch seam", () => {
     const fixture = runtimeFixture("configured-pre-spawn-drift");
-    const configured = createPackage(fixture.root, "plugin-a", {
-      cli: readFileSync(fixture.packageCli),
-      plugin: readFileSync(fixture.packagePlugin),
-    });
+    const configured = createPackage(fixture.root, "plugin-a", packageContents(fixture));
     let launches = 0;
     try {
       symlinkSync(fixture.packageCli, fixture.effectiveCli);
@@ -97,12 +118,17 @@ describe("runtime launch admission", () => {
       writeFileSync(configured.plugin, "export default { drifted: true };\n");
       assert.throws(() => revalidateRuntimeLaunchBinding(pluginBinding, options(fixture)), /configured plugin implementation bytes changed before spawn/u);
 
+      writeFileSync(configured.plugin, readFileSync(fixture.packagePlugin));
+      const closureBinding = admit(fixture);
+      writeFileSync(configured.factory, "export const runtime = 'drifted';\n");
+      assert.throws(() => revalidateRuntimeLaunchBinding(closureBinding, options(fixture)), /configured runtime package closure bytes changed before spawn/u);
+
       for (const [launchOption, launch] of [
         ["foregroundLaunchFn", runForegroundFactory],
         ["detachedLaunchFn", startDetached],
         ["supervisorSpawnFn", startDetached],
       ]) {
-        writeFileSync(configured.plugin, readFileSync(fixture.packagePlugin));
+        restorePackage(configured, fixture);
         writePluginConfig(fixture, configured.root);
         const launchOptions = {
           ...options(fixture),
@@ -122,8 +148,7 @@ describe("runtime launch admission", () => {
   it("fails closed for multiple or unreadable local feature-factory registrations", () => {
     const fixture = runtimeFixture("configured-ambiguous");
     const configured = createPackage(fixture.root, "plugin-a", {
-      cli: readFileSync(fixture.packageCli),
-      plugin: readFileSync(fixture.packagePlugin),
+      ...packageContents(fixture),
     });
     try {
       symlinkSync(fixture.packageCli, fixture.effectiveCli);
@@ -167,26 +192,39 @@ describe("runtime launch admission", () => {
     } finally { cleanup(fixture); }
   });
 
-  it("rejects simultaneous symlink-backed package and PATH CLI drift", () => {
+  it("rejects a symlink-backed package closure before launch", () => {
     const fixture = runtimeFixture("package-path-lockstep-drift");
     try {
       const accepted = join(fixture.root, "accepted-cli.js");
-      const replacement = join(fixture.root, "replacement-cli.js");
       writeExecutable(accepted, "#!/bin/sh\nexit 0\n");
-      writeExecutable(replacement, "#!/bin/sh\nprintf 'replacement\\n'\n");
       rmSync(fixture.packageCli);
       symlinkSync(accepted, fixture.packageCli);
       symlinkSync(fixture.packageCli, fixture.effectiveCli);
-      const binding = admit(fixture);
-
-      rmSync(fixture.packageCli);
-      symlinkSync(replacement, fixture.packageCli);
-      assert.equal(realpathSync(fixture.effectiveCli), realpathSync(replacement));
-      assert.throws(
-        () => revalidateRuntimeLaunchBinding(binding, options(fixture)),
-        /package CLI source changed before spawn/u,
-      );
+      assert.throws(() => admit(fixture), (error) => error.code === "RUNTIME_ADMISSION_FAILED"
+        && /runtime package closure is incomplete, unreadable, or unsafe/u.test(error.message));
     } finally { cleanup(fixture); }
+  });
+
+  it("rejects incomplete, unreadable, and excessive runtime package closures", { skip: process.platform === "win32" }, () => {
+    const cases = [
+      ["incomplete", (fixture) => rmSync(join(fixture.packageRoot, "src", "validate.js"))],
+      ["unreadable", (fixture) => chmodSync(join(fixture.packageRoot, "src", "factory.js"), 0o000)],
+      ["files", (fixture) => {
+        const directory = join(fixture.packageRoot, "assets", "generated");
+        mkdirSync(directory, { recursive: true });
+        for (let index = 0; index < 512; index += 1) writeFileSync(join(directory, `${index}.md`), "x");
+      }],
+      ["bytes", (fixture) => writeFileSync(join(fixture.packageRoot, "assets", "large.md"), Buffer.alloc((16 * 1024 * 1024) + 1))],
+    ];
+    for (const [name, corrupt] of cases) {
+      const fixture = runtimeFixture(`closure-${name}`);
+      try {
+        symlinkSync(fixture.packageCli, fixture.effectiveCli);
+        corrupt(fixture);
+        assert.throws(() => admit(fixture), (error) => error.code === "RUNTIME_ADMISSION_FAILED"
+          && /runtime package closure is incomplete, unreadable, or unsafe/u.test(error.message), name);
+      } finally { cleanup(fixture); }
+    }
   });
 
   it("rejects package CLI byte drift when the PATH CLI follows the same file", () => {
@@ -261,7 +299,7 @@ describe("runtime launch admission", () => {
         repo: fixture.root,
         commandArgs: ["run"],
         env: fixture.env,
-        runtimeBinding: binding,
+        runtimeBinding: JSON.parse(JSON.stringify(binding)),
         log: join(fixture.root, "pre-child.log"),
         recordEvidence: false,
       }, {
@@ -354,6 +392,11 @@ function runtimeFixture(name) {
   writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "opencode-feature-factory", version: "1.2.3" }));
   writeExecutable(packageCli, "#!/bin/sh\nexit 0\n");
   writeFileSync(packagePlugin, "export default {};\n");
+  writeFileSync(join(packageRoot, "src", "opencode-plugin.js"), "export { default } from './plugin.js';\n");
+  writeFileSync(join(packageRoot, "src", "factory.js"), "export const runtime = 'exact';\n");
+  writeFileSync(join(packageRoot, "src", "validate.js"), "export const validate = true;\n");
+  writeFileSync(join(packageRoot, "src", "run-state.js"), "export const runState = true;\n");
+  writeWorkflowAssets(packageRoot);
   writeExecutable(opencode, "#!/bin/sh\nprintf 'opencode-test 1\\n'\n");
   const env = { ...process.env, HOME: join(root, "home"), XDG_CONFIG_HOME: join(root, "xdg"), PATH: bin };
   delete env.OPENCODE_CONFIG_DIR;
@@ -376,7 +419,7 @@ function writeExecutable(path, contents) {
   chmodSync(path, 0o755);
 }
 
-function createPackage(parent, name, { cli, plugin }) {
+function createPackage(parent, name, { cli, plugin, factory, entrypoint, validate, runState }) {
   const packageRoot = join(parent, name, "opencode-feature-factory");
   const packageCli = join(packageRoot, "src", "cli.js");
   const packagePlugin = join(packageRoot, "src", "plugin.js");
@@ -384,8 +427,42 @@ function createPackage(parent, name, { cli, plugin }) {
   writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "opencode-feature-factory", version: "1.2.3" }));
   writeExecutable(packageCli, cli);
   writeFileSync(packagePlugin, plugin);
-  writeFileSync(join(packageRoot, "src", "opencode-plugin.js"), "export { default } from './plugin.js';\n");
-  return { root: packageRoot, cli: packageCli, plugin: packagePlugin };
+  writeFileSync(join(packageRoot, "src", "opencode-plugin.js"), entrypoint);
+  const packageFactory = join(packageRoot, "src", "factory.js");
+  writeFileSync(packageFactory, factory);
+  writeFileSync(join(packageRoot, "src", "validate.js"), validate);
+  writeFileSync(join(packageRoot, "src", "run-state.js"), runState);
+  writeWorkflowAssets(packageRoot);
+  return { root: packageRoot, cli: packageCli, plugin: packagePlugin, factory: packageFactory };
+}
+
+function packageContents(fixture) {
+  return {
+    cli: readFileSync(fixture.packageCli),
+    plugin: readFileSync(fixture.packagePlugin),
+    factory: readFileSync(join(fixture.packageRoot, "src", "factory.js")),
+    entrypoint: readFileSync(join(fixture.packageRoot, "src", "opencode-plugin.js")),
+    validate: readFileSync(join(fixture.packageRoot, "src", "validate.js")),
+    runState: readFileSync(join(fixture.packageRoot, "src", "run-state.js")),
+  };
+}
+
+function restorePackage(configured, fixture) {
+  writeFileSync(configured.plugin, readFileSync(fixture.packagePlugin));
+  writeFileSync(configured.factory, readFileSync(join(fixture.packageRoot, "src", "factory.js")));
+}
+
+function writeWorkflowAssets(packageRoot) {
+  const files = [
+    ["assets/command/feature.md", "# Feature command\n"],
+    ["assets/skills/feature/SKILL.md", "# Feature skill\n"],
+    ["assets/skills/feature/SCHEMA.md", "# Feature schema\n"],
+  ];
+  for (const [path, contents] of files) {
+    const target = join(packageRoot, ...path.split("/"));
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, contents);
+  }
 }
 
 function writePluginConfig(fixture, target) {

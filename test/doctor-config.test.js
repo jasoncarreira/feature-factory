@@ -226,6 +226,7 @@ describe("doctor output projection", () => {
     try {
       const human = runDoctorFixture(fixture, ["--profiles"]);
       assert.match(human.stdout, /profile: backend-builder -> model=provider\/safe-model variant=safe-variant/u);
+      assert.match(human.stdout, /ok: configured feature-factory plugin identity \(source=.*src\/plugin\.js version=0\.2\.1 hash=sha256:[0-9a-f]{64}\)/u);
       assert.match(human.stdout, /provider\/control\\u001B/u);
       assert.doesNotMatch(human.stdout, /[\u001B\u0007\u009B\u202E]/u);
 
@@ -234,6 +235,10 @@ describe("doctor output projection", () => {
       assert.equal(payload.env.cli_identity.source, CLI);
       assert.equal(payload.env.cli_identity.version, "0.2.1");
       assert.match(payload.env.cli_identity.hash, /^sha256:[0-9a-f]{64}$/u);
+      assert.equal(payload.env.plugin_identity.source, fileURLToPath(new URL("../src/plugin.js", import.meta.url)));
+      assert.equal(payload.env.plugin_identity.version, "0.2.1");
+      assert.match(payload.env.plugin_identity.hash, /^sha256:[0-9a-f]{64}$/u);
+      assert.match(payload.checks.find((check) => check.label === "configured feature-factory plugin identity").detail, /^source=.*src\/plugin\.js version=0\.2\.1 hash=sha256:[0-9a-f]{64}$/u);
       assert.equal(payload.env.resolved_models["backend-builder"], "provider/safe-model");
       assert.equal(payload.env.resolved_models["test-verifier"], "provider/control\u001B]0;pwned\u0007");
       assert.equal(payload.env.opencode_version, "safe?[2J");
@@ -288,7 +293,7 @@ describe("doctor output projection", () => {
         for (const output of [human.stdout, human.stderr, json.stdout, json.stderr]) {
           assert.equal(output.includes(fragmented), false, name);
         }
-        assert.match(human.stdout, /feature-factory CLI identity \(\[redacted\]\)/u);
+        assert.match(human.stdout, /feature-factory CLI identity \(source=\[redacted\] version=\[redacted\] hash=sha256:[0-9a-f]{64}\)/u);
         assert.match(human.stdout, /opencode CLI \(\[redacted\]\)/u);
         assert.deepEqual(payload.env.cli_identity, {
           source: REDACTED_ENV_VALUE,

@@ -1,5 +1,17 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  accessSync,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  opendirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +23,22 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const PACKAGE_NAME = "opencode-feature-factory";
 const DEFAULT_UNIX_EXECUTABLE_PATH = "/usr/bin:/bin";
 const CONFIG_FILE_MAX = 1024 * 1024;
+const RUNTIME_CLOSURE_MAX_ENTRIES = 1024;
+const RUNTIME_CLOSURE_MAX_FILES = 512;
+const RUNTIME_CLOSURE_MAX_BYTES = 16 * 1024 * 1024;
+const RUNTIME_CLOSURE_DOMAIN = Buffer.from("opencode-feature-factory-runtime-closure-v1\0", "utf8");
+const REQUIRED_RUNTIME_CLOSURE_PATHS = new Set([
+  "package.json",
+  "src/cli.js",
+  "src/factory.js",
+  "src/plugin.js",
+  "src/opencode-plugin.js",
+  "src/run-state.js",
+  "src/validate.js",
+  "assets/command/feature.md",
+  "assets/skills/feature/SKILL.md",
+  "assets/skills/feature/SCHEMA.md",
+]);
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const UNSAFE_TERMINAL_TEXT = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 const UNSAFE_TERMINAL_TEXT_GLOBAL = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
@@ -45,8 +73,10 @@ export function admitRuntimeLaunch(options = {}) {
   return {
     package_plugin: { source: identity.package_plugin.source, hash: identity.package_plugin.hash },
     package_cli: { source: identity.package_cli.source, hash: identity.package_cli.hash },
+    package_closure: { source: identity.package_closure.source, hash: identity.package_closure.hash },
     configured_plugin: { source: identity.configured_plugin.source, hash: identity.configured_plugin.hash },
     configured_package_cli: { source: identity.configured_package_cli.source, hash: identity.configured_package_cli.hash },
+    configured_package_closure: { source: identity.configured_package_closure.source, hash: identity.configured_package_closure.hash },
     configured_local: identity.configured_local,
     opencode: { source: identity.opencode.source, hash: identity.opencode.hash },
   };
@@ -55,8 +85,10 @@ export function admitRuntimeLaunch(options = {}) {
 export function revalidateRuntimeLaunchBinding(binding, options = {}) {
   if (!completeFileIdentity(binding?.package_plugin)
     || !completeFileIdentity(binding?.package_cli)
+    || !completeClosureIdentity(binding?.package_closure)
     || !completeFileIdentity(binding?.configured_plugin)
     || !completeFileIdentity(binding?.configured_package_cli)
+    || !completeClosureIdentity(binding?.configured_package_closure)
     || typeof binding?.configured_local !== "boolean"
     || !completeFileIdentity(binding?.opencode)) {
     throw admissionError("launch identity binding is invalid");
@@ -69,11 +101,13 @@ export function revalidateRuntimeLaunchBinding(binding, options = {}) {
   if (identity.package_cli.hash !== binding.package_cli.hash) {
     throw admissionError(`package CLI bytes changed before spawn at ${publicSource(binding.package_cli)}; retry after the package update is complete`);
   }
+  assertBoundIdentity(identity.package_closure, binding.package_closure, "executing runtime package closure");
   if (identity.configured_local !== binding.configured_local) {
     throw admissionError("configured local opencode-feature-factory plugin registration changed or was removed before spawn; restore the accepted registration and retry");
   }
   assertBoundIdentity(identity.configured_plugin, binding.configured_plugin, "configured plugin implementation");
   assertBoundIdentity(identity.configured_package_cli, binding.configured_package_cli, "configured plugin package CLI");
+  assertBoundIdentity(identity.configured_package_closure, binding.configured_package_closure, "configured runtime package closure");
   assertMatchingConfiguredPackage(identity);
   assertMatchingPackageCli(identity);
   if (!completeFileIdentity(identity.opencode)) {
@@ -89,18 +123,26 @@ export function revalidateRuntimeLaunchBinding(binding, options = {}) {
 }
 
 function observeRuntimeIdentity(options = {}, { probeOpenCodeVersion = true } = {}) {
-  const packageRoot = realpathOrResolve(options.packageRoot || root);
+  const packageRoot = checkedPackageRoot(options.packageRoot || root);
   const pkg = readPackage(packageRoot);
   const packagePlugin = fileIdentity(join(packageRoot, "src", "plugin.js"), pkg.version);
   const packageCli = fileIdentity(join(packageRoot, "src", "cli.js"), pkg.version);
-  const configured = configuredPluginPackage(options, { plugin: packagePlugin, cli: packageCli, root: packageRoot });
+  let packageClosure;
+  try {
+    packageClosure = runtimePackageClosureIdentity(packageRoot);
+  } catch {
+    throw admissionError(`executing opencode-feature-factory runtime package closure is incomplete, unreadable, or unsafe; remediation: ${packageRemediation(packageRoot)}`);
+  }
+  const configured = configuredPluginPackage(options, { plugin: packagePlugin, cli: packageCli, closure: packageClosure, root: packageRoot });
   return {
     schema_version: 1,
     plugin: configured.plugin,
     package_plugin: packagePlugin,
     package_cli: packageCli,
+    package_closure: packageClosure,
     configured_plugin: configured.plugin,
     configured_package_cli: configured.cli,
+    configured_package_closure: configured.closure,
     configured_package_root: configured.root,
     configured_local: configured.local,
     cli: commandIdentity("feature-factory", options, false),
@@ -164,10 +206,14 @@ function commandIdentity(command, options, probeVersion) {
 
 function assertMatchingConfiguredPackage(identity) {
   const remediation = packageRemediation(identity.configured_package_root);
-  if (!completeFileIdentity(identity.package_plugin) || !completeFileIdentity(identity.package_cli)) {
+  if (!completeFileIdentity(identity.package_plugin)
+    || !completeFileIdentity(identity.package_cli)
+    || !completeClosureIdentity(identity.package_closure)) {
     throw admissionError(`executing opencode-feature-factory package is incomplete; remediation: ${remediation}`);
   }
-  if (!completeFileIdentity(identity.configured_plugin) || !completeFileIdentity(identity.configured_package_cli)) {
+  if (!completeFileIdentity(identity.configured_plugin)
+    || !completeFileIdentity(identity.configured_package_cli)
+    || !completeClosureIdentity(identity.configured_package_closure)) {
     throw admissionError(`configured opencode-feature-factory plugin package is incomplete or unreadable; remediation: ${remediation}`);
   }
   if (identity.package_plugin.hash !== identity.configured_plugin.hash) {
@@ -175,6 +221,9 @@ function assertMatchingConfiguredPackage(identity) {
   }
   if (identity.package_cli.hash !== identity.configured_package_cli.hash) {
     throw admissionError(`executing package CLI bytes differ from the configured local plugin package CLI bytes; configured plugin source=${publicSource(identity.configured_plugin)}; executing package CLI source=${publicSource(identity.package_cli)}; remediation: ${remediation}`);
+  }
+  if (identity.package_closure.hash !== identity.configured_package_closure.hash) {
+    throw admissionError(`executing runtime package closure differs from the configured local plugin package closure; configured package source=${publicSource(identity.configured_package_closure)}; executing package source=${publicSource(identity.package_closure)}; remediation: ${remediation}`);
   }
 }
 
@@ -210,6 +259,10 @@ function admissionError(message) {
 
 function completeFileIdentity(value) {
   return typeof value?.source === "string" && isAbsolute(value.source) && HASH_PATTERN.test(value.hash ?? "");
+}
+
+function completeClosureIdentity(value) {
+  return completeFileIdentity(value);
 }
 
 function publicSource(value) {
@@ -337,7 +390,10 @@ function localPluginRegistration(spec) {
     return null;
   }
   let target;
-  try { target = realpathSync(requested); } catch {
+  try {
+    if (lstatSync(requested).isSymbolicLink()) throw new Error("symlink local plugin registration");
+    target = realpathSync(requested);
+  } catch {
     if (looksRelevant) throw new Error("unreadable local plugin registration");
     return null;
   }
@@ -358,11 +414,137 @@ function localPluginRegistration(spec) {
   const plugin = fileIdentity(join(packageRoot, "src", "plugin.js"), pkg.version);
   const cli = fileIdentity(join(packageRoot, "src", "cli.js"), pkg.version);
   const entrypoint = fileIdentity(join(packageRoot, "src", "opencode-plugin.js"), pkg.version);
+  const closure = runtimePackageClosureIdentity(packageRoot);
   const acceptedTargets = [realpathOrNull(packageRoot), entrypoint.source, plugin.source].filter(Boolean);
   if (!acceptedTargets.includes(target) || !completeFileIdentity(plugin) || !completeFileIdentity(cli)) {
     throw new Error("incomplete local plugin registration");
   }
-  return { root: realpathSync(packageRoot), plugin, cli, local: true };
+  return { root: realpathSync(packageRoot), plugin, cli, closure, local: true };
+}
+
+function checkedPackageRoot(path) {
+  const requested = resolve(path);
+  try {
+    const entry = lstatSync(requested);
+    if (entry.isSymbolicLink() || !entry.isDirectory()) throw new Error("unsafe package root");
+    return realpathSync(requested);
+  } catch {
+    throw admissionError("executing opencode-feature-factory package root is unavailable, unreadable, or not a real directory");
+  }
+}
+
+function runtimePackageClosureIdentity(packageRoot) {
+  const source = realpathSync(packageRoot);
+  const files = [];
+  let entries = 0;
+  let totalBytes = 0;
+  const visit = (relativePath) => {
+    const directory = join(source, relativePath);
+    const names = [];
+    const handle = opendirSync(directory);
+    try {
+      let child;
+      while ((child = handle.readSync()) !== null) {
+        entries += 1;
+        if (entries > RUNTIME_CLOSURE_MAX_ENTRIES) throw new Error("runtime package closure has excessive entries");
+        names.push(child.name);
+      }
+    } finally {
+      handle.closeSync();
+    }
+    names.sort(compareUtf8);
+    for (const name of names) {
+      const childRelative = relativePath ? `${relativePath}/${name}` : name;
+      const child = join(source, ...childRelative.split("/"));
+      const entry = lstatSync(child);
+      if (entry.isSymbolicLink()) throw new Error("runtime package closure contains a symlink");
+      if (entry.isDirectory()) {
+        visit(childRelative);
+        continue;
+      }
+      if (!entry.isFile()) throw new Error("runtime package closure contains a nonregular entry");
+      if (childRelative.startsWith("src/") && !childRelative.endsWith(".js")) continue;
+      if (entry.size > RUNTIME_CLOSURE_MAX_BYTES - totalBytes) throw new Error("runtime package closure exceeds byte limits");
+      const bytes = readStableRegularFile(child, entry, RUNTIME_CLOSURE_MAX_BYTES - totalBytes);
+      totalBytes += bytes.length;
+      if (files.length + 1 > RUNTIME_CLOSURE_MAX_FILES || totalBytes > RUNTIME_CLOSURE_MAX_BYTES) {
+        throw new Error("runtime package closure exceeds file or byte limits");
+      }
+      files.push({ path: childRelative, bytes });
+    }
+  };
+
+  const packageJson = readStableRegularFile(join(source, "package.json"), null, RUNTIME_CLOSURE_MAX_BYTES);
+  totalBytes = packageJson.length;
+  if (totalBytes > RUNTIME_CLOSURE_MAX_BYTES) throw new Error("runtime package closure exceeds byte limits");
+  files.push({ path: "package.json", bytes: packageJson });
+  for (const directory of ["src", "assets"]) {
+    const entry = lstatSync(join(source, directory));
+    if (entry.isSymbolicLink() || !entry.isDirectory()) throw new Error("runtime package closure is incomplete");
+    visit(directory);
+  }
+  const paths = new Set(files.map((file) => file.path));
+  if ([...REQUIRED_RUNTIME_CLOSURE_PATHS].some((path) => !paths.has(path))) {
+    throw new Error("runtime package closure is incomplete");
+  }
+  files.sort((left, right) => compareUtf8(left.path, right.path));
+  const hash = createHash("sha256").update(RUNTIME_CLOSURE_DOMAIN);
+  hash.update(uint64(files.length));
+  for (const file of files) {
+    const pathBytes = Buffer.from(file.path, "utf8");
+    hash.update(uint64(pathBytes.length));
+    hash.update(pathBytes);
+    hash.update(uint64(file.bytes.length));
+    hash.update(file.bytes);
+  }
+  return { source, hash: `sha256:${hash.digest("hex")}` };
+}
+
+function readStableRegularFile(path, initial = null, maxBytes = Number.MAX_SAFE_INTEGER) {
+  const beforePath = initial ?? lstatSync(path);
+  if (beforePath.isSymbolicLink() || !beforePath.isFile()) throw new Error("runtime package closure contains an unreadable or nonregular file");
+  if (beforePath.size > maxBytes) throw new Error("runtime package closure exceeds byte limits");
+  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  const descriptor = openSync(path, constants.O_RDONLY | noFollow);
+  try {
+    const before = fstatSync(descriptor);
+    if (!before.isFile() || before.dev !== beforePath.dev || before.ino !== beforePath.ino) {
+      throw new Error("runtime package closure entry changed while reading");
+    }
+    if (before.size > maxBytes) throw new Error("runtime package closure exceeds byte limits");
+    const bytes = Buffer.allocUnsafe(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+    const growthProbe = Buffer.allocUnsafe(1);
+    const grew = readSync(descriptor, growthProbe, 0, 1, before.size) !== 0;
+    const after = fstatSync(descriptor);
+    if (before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs
+      || offset !== bytes.length
+      || grew) {
+      throw new Error("runtime package closure file changed while reading");
+    }
+    return bytes;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function compareUtf8(left, right) {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+function uint64(value) {
+  const bytes = Buffer.allocUnsafe(8);
+  bytes.writeBigUInt64BE(BigInt(value));
+  return bytes;
 }
 
 function pathExists(path) {
