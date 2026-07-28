@@ -12,11 +12,12 @@ import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { assertContinuationBindingsCurrent, buildContinuation, continueFactory, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory, startFactory } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
-import { assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
+import { CARRY_FORWARD_REQUIRED_SUMMARY, assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, transitionIntegrationAmendment, transitionTerminalResult, completeSpecialBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
 import { ISSUE128_BASELINE_ROUTE_INVENTORY, ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG, emitIssue128FinishAndDiscloseMutations } from "./helpers/durable-record-mutations.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { deliveryEnvelopeForSlices, passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
+import { publishAmendmentReportFor, writeOwnerDispatch } from "./helpers/integration-amendment/fixture.js";
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 const currentTestPath = fileURLToPath(import.meta.url);
@@ -883,6 +884,94 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
       assert.equal(existsSync(join(crossed.repo, ".opencode", "worktrees", "checkpoint-b1-crossed-next")), false);
       assert.equal(existsSync(join(crossed.repo, ".opencode", "factory", "checkpoint-b1-crossed-next")), false);
     } finally { cleanup(crossed.repo); }
+  });
+
+  it("publishes a child from a parent whose settled blocked amendment is retained", async () => {
+    // #150 restored the documented recovery path for a blocked integration
+    // amendment: the parent terminalizes `carry-forward-required`, keeps the
+    // blocked amendment authority, and continues in a fresh schema-v2 child.
+    // Its regression proved the admission gate, but stopped before reservation
+    // and publication because the amendment fixture's git history has no
+    // accepted merge commits. This drives the whole path on the carry-forward
+    // fixture, which does, and pins the two facts that make the gate safe:
+    // the parent keeps its amendment, and the child inherits none of it.
+    const fixture = createV2Fixture("amendment-carry", { accepted: ["A"], mergeOrder: ["A"], pathPrefix: "src/" });
+    const childRunId = "amendment-carry-next";
+    try {
+      // A is merged, so it is a legal amendment owner; B is pristine pending and
+      // depends on A, so it is a legal consumer.
+      // createV2Fixture writes a parent already blocked at the pre-PR gate, but an
+      // amendment can only be reported against a running run. Restore that
+      // earlier point so the sequence is the real one: running run acquires an
+      // amendment, the amendment blocks, and only then does the run terminalize
+      // carry-forward-required.
+      const parent = JSON.parse(readFileSync(join(fixture.runDir, "run.json")));
+      // An amendment is excluded once panel, pre-PR, PR, or post-PR authority
+      // exists, so wind the parent back to the point before those: a running run
+      // with quiescent slices and no verdicts recorded yet.
+      const running = { ...parent, status: "running" };
+      for (const key of ["terminal_result", "validator", "security_review"]) delete running[key];
+      if (running.gates) delete running.gates.pre_pr;
+      // The amendment owner must retain complete dispatch authority on its
+      // current attempt review; ordinary carry-forward never reads it, so the
+      // carry-forward fixture does not publish one.
+      const ownerSlice = running.slices.find((slice) => slice.id === "A");
+      const ownerDispatch = writeOwnerDispatch(fixture.runDir, fixture.baseCommit, fixture.reviewedCommits.A, fixture.repo, {
+        runId: fixture.runId, sliceId: "A", branch: `${fixture.runId}--A`,
+      });
+      // assertNoUnresolvedSliceDispatches binds the *current* attempt on the slice
+      // itself, while the amendment owner check reads the last attempt review, so
+      // both carry the sidecar refs.
+      Object.assign(ownerSlice, ownerDispatch, { dispatch_required: true, branch: `${fixture.runId}--A`, worktree: fixture.repo });
+      Object.assign(ownerSlice.attempt_reviews.at(-1), ownerDispatch);
+      writeJson(join(fixture.runDir, "run.json"), running);
+      const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json")));
+      // Read the artifact id from the consumer's own delivery unit rather than
+      // assuming the generator's numbering.
+      const consumerUnit = plan.delivery_envelope.delivery_units.find((unit) => unit.slice_id === "B");
+      const request = { owner_slice_id: "A", consumer_slice_id: "B", defect_path: "src/A.txt", verification_artifact_id: consumerUnit.verification_artifacts[0].id };
+      publishAmendmentReportFor({ runDir: fixture.runDir, run: JSON.parse(readFileSync(join(fixture.runDir, "run.json"))), request });
+      await transitionIntegrationAmendment(fixture.runDir, { action: "report", ...request }, { repoRoot: fixture.repo });
+      await transitionIntegrationAmendment(fixture.runDir, { action: "block", reason: "amendment unsupported for this run state" }, { repoRoot: fixture.repo });
+      assert.equal(JSON.parse(readFileSync(join(fixture.runDir, "run.json"))).integration_amendment.status, "blocked");
+
+      // A blocked amendment terminalizes with no steering boundary at all.
+      const terminal = await transitionTerminalResult(fixture.runDir, {
+        status: "blocked", reason: "carry-forward-required", summary: CARRY_FORWARD_REQUIRED_SUMMARY, artifacts: {},
+      }, { blockedAmendmentTerminal: true });
+      assert.equal(terminal.terminal_result.reason, "carry-forward-required");
+      assert.equal(terminal.run.integration_amendment.status, "blocked", "terminalization retains the amendment");
+
+      let launched;
+      const result = await continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        // No validator exists on this parent (an amendment is excluded after panel
+        // authority), so the continuation consumes the merged slice review, which
+        // continuationReviewSources accepts as a `slice` kind.
+        review: "A.json",
+        runId: childRunId,
+        carryForward: true,
+        foregroundLaunchFn: async (repo, args) => { launched = { repo, args }; return { status: "started", run_id: childRunId }; },
+      });
+
+      // Reservation and publication both completed.
+      assert.equal(result.status, "started");
+      assert.equal(launched.repo, gitStdout(fixture.repo, ["rev-parse", "--show-toplevel"]));
+      assertPublishedCarryForwardRun(launched.repo, result.payload.continuation, { driver: result.payload.driver });
+
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const child = JSON.parse(readFileSync(join(childRunDir, "run.json")));
+      // The adopted merged parent slice and the remaining pending slices.
+      const childSlices = Object.fromEntries(child.slices.map((slice) => [slice.id, slice.status]));
+      assert.deepEqual(childSlices, { A: "merged", B: "pending", C: "pending" });
+
+      // The two facts that make admitting a blocked parent safe: the parent's
+      // authority is untouched, and none of it reaches the child.
+      assert.equal(JSON.parse(readFileSync(join(fixture.runDir, "run.json"))).integration_amendment.status, "blocked", "publication must not mutate parent amendment authority");
+      assert.equal(child.integration_amendment, undefined, "child must inherit no amendment authority");
+      assert.equal(child.terminal_result, null);
+      assert.equal(child.pr_url, null);
+    } finally { cleanup(fixture.repo); }
   });
 
   it("atomically publishes and launches the complete canonical child after exact allocation", async () => {
@@ -2230,8 +2319,13 @@ function configureConvergingSliceRoute(fixture) {
   return { evidenceRef, reviewRef, source };
 }
 
-function v2GitTemplate(accepted, mergeOrder) {
-  const key = JSON.stringify([accepted, mergeOrder]);
+// `pathPrefix` places slice files under a directory. Bare top-level files are
+// classified as privileged control-plane paths, so a fixture whose slice owns
+// `A.txt` cannot be used as an integration-amendment defect path; `src/A.txt`
+// can. Defaults to "" so every existing caller keeps today's layout, and the
+// prefix joins the cache key so prefixed and bare templates never alias.
+function v2GitTemplate(accepted, mergeOrder, pathPrefix = "") {
+  const key = JSON.stringify([accepted, mergeOrder, pathPrefix]);
   const cached = v2Templates.get(key);
   if (cached) return cached;
   const dir = mkdtempSync(join(tmpdir(), "factory-carry-template-"));
@@ -2250,8 +2344,10 @@ function v2GitTemplate(accepted, mergeOrder) {
   const mergeCommits = {};
   for (const id of accepted) {
     runGit(dir, ["checkout", "-b", `${V2_TEMPLATE_RUN}--${id}`, baseCommit]);
-    writeFileSync(join(dir, `${id}.txt`), `${id}\n`);
-    runGit(dir, ["add", `${id}.txt`]);
+    const slicePath = `${pathPrefix}${id}.txt`;
+    mkdirSync(dirname(join(dir, slicePath)), { recursive: true });
+    writeFileSync(join(dir, slicePath), `${id}\n`);
+    runGit(dir, ["add", slicePath]);
     runGit(dir, ["commit", "-m", `reviewed ${id}`]);
     reviewedCommits[id] = gitStdout(dir, ["rev-parse", "HEAD"]);
   }
@@ -2267,9 +2363,9 @@ function v2GitTemplate(accepted, mergeOrder) {
   return template;
 }
 
-function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panels = false, fixturePrefix = "factory-carry-forward-" } = {}) {
+function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panels = false, fixturePrefix = "factory-carry-forward-", pathPrefix = "" } = {}) {
   const repo = mkdtempSync(join(tmpdir(), fixturePrefix));
-  const template = v2GitTemplate(accepted, mergeOrder);
+  const template = v2GitTemplate(accepted, mergeOrder, pathPrefix);
   cpSync(template.dir, repo, { recursive: true });
   // Repoint the copied bare origin at this repo's copy, not the template's.
   runGit(repo, ["remote", "set-url", "origin", join(repo, ".git", "test-origin.git")]);
@@ -2297,13 +2393,16 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
   const plan = withDeliveryEnvelope({
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [
-      { id: "A", stack: "backend", paths: ["A.txt"], depends_on: [], acceptance: ["A accepted"], test_plan: ["test A"] },
-      { id: "B", stack: "backend", paths: ["B.txt"], depends_on: ["A"], acceptance: ["B accepted"], test_plan: ["test B"] },
-      { id: "C", stack: "backend", paths: ["C.txt"], depends_on: [], acceptance: ["C accepted"], test_plan: ["test C"] },
+      { id: "A", stack: "backend", paths: [`${pathPrefix}A.txt`], depends_on: [], acceptance: ["A accepted"], test_plan: ["test A"] },
+      { id: "B", stack: "backend", paths: [`${pathPrefix}B.txt`], depends_on: ["A"], acceptance: ["B accepted"], test_plan: ["test B"] },
+      { id: "C", stack: "backend", paths: [`${pathPrefix}C.txt`], depends_on: [], acceptance: ["C accepted"], test_plan: ["test C"] },
     ],
   });
   writeJson(join(runDir, "plan", "slices.json"), plan);
-  writeJson(join(runDir, "reviews", "work-decomposer.json"), createReviewRecord({ subject: "work-decomposer", verdict: "APPROVE", required_fixes: [], summary: "accepted decomposition" }));
+  // `attempt` must equal the accepted step's `attempts` for any consumer that
+  // checks decomposition authority with requireApprovingReview. The acceptance
+  // review_hash below is derived from these bytes, so this stays self-consistent.
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), createReviewRecord({ subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [], summary: "accepted decomposition" }));
 
   const slices = plan.slices.map((planned) => {
     if (!accepted.includes(planned.id)) return { id: planned.id, stack: planned.stack, depends_on: planned.depends_on, declared_paths: [...planned.paths], effective_paths: [...planned.paths], status: "pending", attempts: 0 };
