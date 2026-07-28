@@ -2248,7 +2248,6 @@ function v2GitTemplate(accepted, mergeOrder) {
   const cached = v2Templates.get(key);
   if (cached) return cached;
   const dir = mkdtempSync(join(tmpdir(), "factory-carry-template-"));
-  v2TemplateDirs.push(dir);
   initGitRepo(dir);
   runGit(dir, ["init", "--bare", join(dir, ".git", "test-origin.git")]);
   runGit(dir, ["remote", "add", "origin", join(dir, ".git", "test-origin.git")]);
@@ -2270,6 +2269,8 @@ function v2GitTemplate(accepted, mergeOrder) {
     mergeCommits[id] = gitStdout(dir, ["rev-parse", "HEAD"]);
   }
   const template = { dir, baseCommit, reviewedCommits, mergeCommits };
+  // Teardown must never observe and remove a template still being built.
+  v2TemplateDirs.push(dir);
   v2Templates.set(key, template);
   return template;
 }
