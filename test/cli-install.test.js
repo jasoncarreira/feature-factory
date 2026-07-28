@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
+import { SANCTIONED_GLOBAL_FEATURE_SKILL } from "../src/global-definitions.js";
 
 const repo = resolve(new URL("..", import.meta.url).pathname);
 const cli = join(repo, "src", "cli.js");
@@ -88,6 +89,23 @@ describe("feature-factory install", () => {
     }
   });
 
+  it("accepts exact packaged and sanctioned global feature skills", () => {
+    for (const [name, contents] of [
+      ["packaged", readFileSync(join(repo, "assets", "skills", "feature", "SKILL.md"))],
+      ["delegator", SANCTIONED_GLOBAL_FEATURE_SKILL],
+    ]) {
+      const home = tempHome();
+      try {
+        writeFile(join(home, ".config", "opencode", "skills", "feature", "SKILL.md"), contents);
+        const proc = runInstall(home);
+        assert.equal(proc.status, 0, proc.stderr);
+        assert.doesNotMatch(proc.stderr, /global feature skill/u, name);
+      } finally {
+        cleanup(home);
+      }
+    }
+  });
+
   it("warns when stale global agent definitions may shadow plugin agents", () => {
     const home = tempHome();
     const researcher = join(home, ".config", "opencode", "agent", "codebase-researcher.md");
@@ -104,7 +122,23 @@ describe("feature-factory install", () => {
       assert.match(proc.stderr, /can shadow the plugin's current prompts/);
       assert.match(proc.stderr, new RegExp(escapeRegExp(researcher)));
       assert.match(proc.stderr, new RegExp(escapeRegExp(reviewer)));
-      assert.match(proc.stderr, /replace them with delegators that defer to the plugin-owned agents/);
+      assert.match(proc.stderr, /exact copies of the current plugin-owned agent definitions/);
+    } finally {
+      cleanup(home);
+    }
+  });
+
+  it("accepts exact global agent definitions", () => {
+    const home = tempHome();
+    const agent = "codebase-researcher.md";
+    try {
+      writeFile(
+        join(home, ".config", "opencode", "agent", agent),
+        readFileSync(join(repo, "assets", "agent", agent)),
+      );
+      const proc = runInstall(home);
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.doesNotMatch(proc.stderr, /global feature-factory agent definitions/u);
     } finally {
       cleanup(home);
     }

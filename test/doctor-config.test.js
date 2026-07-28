@@ -125,6 +125,30 @@ describe("doctor output projection", () => {
     }
   });
 
+  it("fails deterministically for stale global definitions in human and JSON output", () => {
+    const fixture = doctorFixture();
+    const stale = join(fixture.home, ".config", "opencode", "skills", "feature", "SKILL.md");
+    try {
+      mkdirSync(join(fixture.home, ".config", "opencode", "skills", "feature"), { recursive: true });
+      writeFileSync(stale, "stale feature instructions\n", "utf8");
+
+      const human = runDoctorFixture(fixture);
+      assert.equal(human.status, 1);
+      assert.match(human.stdout, /missing: global feature-factory definitions \(stale global feature-factory definitions detected/u);
+      assert.match(human.stdout, /replace them with exact current packaged definitions; then restart opencode/u);
+
+      const json = runDoctorFixture(fixture, ["--json"]);
+      const payload = JSON.parse(json.stdout);
+      const check = payload.checks.find((item) => item.label === "global feature-factory definitions");
+      assert.equal(json.status, 1);
+      assert.equal(check.level, "missing");
+      assert.match(check.detail, /stale global feature-factory definitions detected/u);
+      assert.match(check.detail, /restart opencode/u);
+    } finally {
+      cleanup(fixture.dir);
+    }
+  });
+
   it("projects the whole JSON payload and human profile rows", () => {
     const fixture = doctorFixture({
       profiles: {

@@ -33,6 +33,7 @@ import { checkedExecutionEnvironment, executeCheckedCommand } from "./test-execu
 import { BASE_ADVANCE_ERROR_CODES } from "./base-advance/state-model.js";
 import { effectiveCheckedExecutionTimeoutMs } from "./checked-execution-timeout.js";
 import { admitRuntimeLaunch, isRuntimeAdmissionError, revalidateRuntimeLaunchBinding, RuntimeAdmissionError } from "./runtime-identity.js";
+import { assertGlobalDefinitionsCurrent, StaleGlobalDefinitionsError } from "./global-definitions.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -174,6 +175,7 @@ export async function startFactory(args, opts = {}) {
 
 async function startFactoryImplementation(args, opts = {}, telemetry) {
   if (!args.length) throw new Error("factory start requires a feature prompt");
+  assertLaunchDefinitionsCurrent(opts);
   const repo = repoRoot(opts.cwd || process.cwd());
   telemetry.repo = repo;
   const resumeRunId = resumePromptRunId(args, opts);
@@ -233,12 +235,13 @@ async function startFactoryImplementation(args, opts = {}, telemetry) {
   }
   if (opts.detached) {
     const runDir = join(factoryRoot(repo), detachedRunId);
-    return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: detachedRunId, runDir }), env: launchEnv });
+    return (opts.detachedLaunchFn || startDetached)(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: detachedRunId, runDir }), env: launchEnv });
   }
-  return runForegroundFactory(repo, commandArgs, { ...opts, env: launchEnv });
+  return (opts.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...opts, env: launchEnv });
 }
 
 export async function startFactoryCheckpoint(parentRunId, checkpointId, opts = {}) {
+  assertLaunchDefinitionsCurrent(opts);
   const repo = repoRoot(opts.cwd || process.cwd());
   const childRunId = normalizeRequestedStartRunId(opts.runId);
   if (!childRunId) throw new Error("factory checkpoint-start requires --run-id <child-run-id>");
@@ -1658,6 +1661,7 @@ export function continueFactory(parentRunId, opts = {}) {
 }
 
 function continueFactoryImplementation(parentRunId, opts = {}, telemetry) {
+  assertLaunchDefinitionsCurrent(opts);
   const repo = repoRoot(opts.cwd || process.cwd());
   telemetry.repo = repo;
   const allocationReplay = !opts.dryRun;
@@ -1714,6 +1718,7 @@ export async function resumeFactory(runId, opts = {}) {
 }
 
 async function resumeFactoryImplementation(runId, opts = {}, telemetry) {
+  assertLaunchDefinitionsCurrent(opts);
   assertPostPrCliOptions(opts, { command: "factory resume", resume: true });
   const repo = repoRoot(opts.cwd || process.cwd());
   telemetry.repo = repo;
@@ -2018,7 +2023,7 @@ export async function transitionGateDecisionAndHandoff(runIdOrDir, gateName, dec
   try {
     handoff = await handoffApprovedInteractiveRun(runDir, run, gateName, { ...opts, repo });
   } catch (error) {
-    if (isRuntimeAdmissionError(error)) throw error;
+    if (isRuntimeAdmissionError(error) || error instanceof StaleGlobalDefinitionsError) throw error;
     handoff = handoffEnvelope(run.run_id, gateName, error?.handoffCode || "claim-acquisition-failed", error?.preservedClaim ? { claim: true } : {});
   }
   return { ...transition, gate_accepted: true, handoff };
@@ -2042,6 +2047,7 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
   let eligibility;
   try { eligibility = resumeEligibility(runDir, run, { ...opts, repoRoot: opts.repo || factoryRepoFromRunDir(runDir), ignoreLaunchOwnership: true }); } catch { return handoffEnvelope(runId, gateName, "resume-ineligible"); }
   if (!eligibility.eligible) return handoffEnvelope(runId, gateName, "resume-ineligible");
+  assertLaunchDefinitionsCurrent(opts);
 
   const claimFunctions = launchClaimFunctions(opts);
   let claim;
@@ -5997,6 +6003,13 @@ export function seedRepoSkill(repo, opts = {}) {
   writeManagedSeedFileAtomic(repo, dest, seedHashPath, `${JSON.stringify(nextHashes, null, 2)}\n`);
   ensureGitInfoExclude(repo, ".opencode/skills/feature/");
   return dest;
+}
+
+function assertLaunchDefinitionsCurrent(opts = {}) {
+  return assertGlobalDefinitionsCurrent({
+    home: opts.home,
+    inspect: opts.inspectGlobalDefinitionsFn,
+  });
 }
 
 function ensureRepoSeedSkillDirectory(repo) {

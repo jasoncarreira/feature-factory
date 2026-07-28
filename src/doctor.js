@@ -16,22 +16,10 @@ import {
 } from "./hardening/sensitive-data.js";
 import { freeformSegment, projectFreeformData, renderTerminalSegments } from "./hardening/output-policy.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
+import { FEATURE_FACTORY_AGENT_FILES, formatGlobalDefinitionsDetail, inspectGlobalDefinitions } from "./global-definitions.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const SUBAGENTS = [
-  "backend-builder",
-  "codebase-researcher",
-  "design-interpreter",
-  "frontend-builder",
-  "implementation-validator",
-  "security-reviewer",
-  "spec-writer",
-  "story-reader",
-  "story-writer",
-  "test-verifier",
-  "work-decomposer",
-  "work-reviewer",
-];
+const SUBAGENTS = FEATURE_FACTORY_AGENT_FILES.map((name) => name.replace(/\.md$/u, ""));
 const EDIT_AGENTS = new Set(["feature-factory", "backend-builder", "frontend-builder", "test-verifier"]);
 const NON_INTERACTIVE_ALLOW = ["read", "glob", "grep", "list", "bash", "webfetch", "todowrite"];
 const FACTORY_DENY = ["external_directory"];
@@ -55,6 +43,7 @@ export async function runDoctor(options = {}) {
   const env = await collectEnv({ cwd: options.cwd, pluginSpec, pluginOptions });
   const providers = providerAuthState();
   const checks = [];
+  const globalDefinitions = inspectGlobalDefinitions();
 
   add(checks, "HOME", Boolean(process.env.HOME), process.env.HOME || "unset");
   add(checks, "opencode config", existsSync(configPath), configPath);
@@ -67,9 +56,10 @@ export async function runDoctor(options = {}) {
   add(checks, "/feature command registered", Boolean(registered.command?.feature), "command.feature");
   add(checks, "/feature command uses primary agent", registered.command?.feature?.agent === "feature-factory", registered.command?.feature?.agent || "unset");
   add(checks, "feature-factory primary agent", Boolean(registered.agent?.["feature-factory"]), "agent.feature-factory");
-  add(checks, "12 subagents registered", missingSubagents(registered.agent).length === 0, missingSubagents(registered.agent).length ? `missing ${missingSubagents(registered.agent).join(", ")}` : "12 subagents");
+  add(checks, `${SUBAGENTS.length} subagents registered`, missingSubagents(registered.agent).length === 0, missingSubagents(registered.agent).length ? `missing ${missingSubagents(registered.agent).join(", ")}` : `${SUBAGENTS.length} subagents`);
   add(checks, "factory permissions non-interactive", permissionFailures(registered.agent).length === 0, permissionFailures(registered.agent).join("; ") || "factory agent permissions");
   add(checks, "feature skill path", Boolean(registered.skills?.paths?.length), registered.skills?.paths?.join(", ") || "none");
+  add(checks, "global feature-factory definitions", globalDefinitions.ok, formatGlobalDefinitionsDetail(globalDefinitions));
   add(checks, "TUI sidebar export", hasTuiExport(), "package.json exports[\"./tui\"]", "warn");
   add(checks, "repo-local feature skill", existsSync(join(options.cwd || process.cwd(), ".opencode", "skills", "feature", "SKILL.md")), ".opencode/skills/feature/SKILL.md", "warn");
   add(checks, "repo-local feature schema", existsSync(join(options.cwd || process.cwd(), ".opencode", "skills", "feature", "SCHEMA.md")), ".opencode/skills/feature/SCHEMA.md", "warn");

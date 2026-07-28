@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -23,6 +23,7 @@ import { renderCleanupSweepReport } from "./cleanup-sweep-output.js";
 import { executeCleanupSweep, previewCleanupSweep } from "./cleanup-sweep.js";
 import { executeCheckedTestExecution, executeCheckedVerificationArtifact } from "./test-execution.js";
 import { resolveRuntimeIdentity } from "./runtime-identity.js";
+import { inspectGlobalDefinitions } from "./global-definitions.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
@@ -150,16 +151,9 @@ function install(args) {
   console.log(`updated: ${renderCliPath(configPath)}`);
   console.log(renderCliIdentity(resolveRuntimeIdentity().cli));
   console.log("restart opencode for plugin changes to take effect");
-  warnGlobalFeatureSkillConflicts(findGlobalFeatureSkillConflicts(home));
-  warnGlobalAgentConflicts(findGlobalAgentConflicts(home));
-}
-
-function findGlobalAgentConflicts(home) {
-  const names = readdirSync(join(root, "assets", "agent")).filter((name) => name.endsWith(".md"));
-  return names.flatMap((name) => [
-    join(home, ".config", "opencode", "agent", name),
-    join(home, ".config", "opencode", "agents", name),
-  ]).filter((path) => existsSync(path));
+  const definitions = inspectGlobalDefinitions({ home });
+  warnGlobalFeatureSkillConflicts(definitions.findings.filter((item) => item.kind === "skill").map((item) => item.path));
+  warnGlobalAgentConflicts(definitions.findings.filter((item) => item.kind === "agent").map((item) => item.path));
 }
 
 function warnGlobalAgentConflicts(paths) {
@@ -169,18 +163,9 @@ function warnGlobalAgentConflicts(paths) {
     "WARNING: existing global feature-factory agent definitions detected.",
     "These files are not managed by opencode-feature-factory and can shadow the plugin's current prompts:",
     ...paths.map((path) => `- ${renderCliPath(path)}`),
-    "Remove stale files, or replace them with delegators that defer to the plugin-owned agents.",
+    "Reconcile unsafe paths; remove stale files or replace them with exact copies of the current plugin-owned agent definitions.",
     "Restart opencode after changing agent files.",
   ].join("\n"));
-}
-
-function findGlobalFeatureSkillConflicts(home) {
-  return [
-    join(home, ".config", "opencode", "skills", "feature", "SKILL.md"),
-    join(home, ".config", "opencode", "skill", "feature", "SKILL.md"),
-    join(home, ".claude", "skills", "feature", "SKILL.md"),
-    join(home, ".agents", "skills", "feature", "SKILL.md"),
-  ].filter((path) => existsSync(path));
 }
 
 function warnGlobalFeatureSkillConflicts(paths) {
@@ -190,7 +175,7 @@ function warnGlobalFeatureSkillConflicts(paths) {
     "WARNING: existing global feature skill detected.",
     "These files are not installed or managed by opencode-feature-factory and can shadow or conflict with the plugin's current feature workflow:",
     ...paths.map((path) => `- ${renderCliPath(path)}`),
-    "Remove stale files, or replace them with a delegator that reads the repo-seeded .opencode/skills/feature/SKILL.md before mutating factory state.",
+    "Reconcile unsafe paths; remove stale files or replace them with the sanctioned delegator that reads the repo-seeded .opencode/skills/feature/SKILL.md before mutating factory state.",
     "Restart opencode after changing skill files.",
   ].join("\n"));
 }
