@@ -347,12 +347,14 @@ describe("run schema and consistency", () => {
 
   it("accepts debug snapshots", () => {
     const cliIdentity = { source: "/usr/local/bin/feature-factory", version: "0.2.1", hash: HASH };
+    const pluginIdentity = { source: "/opt/factory/src/plugin.js", version: "0.2.1", hash: HASH };
     const run = validateRun({
       ...runningRun(),
-      debug_snapshot: snapshotRoot({ env: { tool: "opencode", token_value: REDACTED_ENV_VALUE, cli_identity: cliIdentity } }),
+      debug_snapshot: snapshotRoot({ env: { tool: "opencode", token_value: REDACTED_ENV_VALUE, plugin_identity: pluginIdentity, cli_identity: cliIdentity } }),
     });
 
     assert.equal(run.debug_snapshot.resume_count, 0);
+    assert.deepEqual(run.debug_snapshot.created_with.env.plugin_identity, pluginIdentity);
     assert.deepEqual(run.debug_snapshot.created_with.env.cli_identity, cliIdentity);
   });
 

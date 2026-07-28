@@ -137,12 +137,14 @@ describe("environment snapshot redaction", () => {
       event: "run-created",
       now: "2026-07-08T12:00:00.000Z",
       runtimeIdentity: {
+        plugin: { source: "/tmp/configured-plugin.js", version: "1.2.3", hash: `sha256:${"c".repeat(64)}` },
         cli: { source: "/tmp/secret-cli\u001b[2J", version: "secret-version", hash: `sha256:${"a".repeat(64)}` },
       },
     });
     assert.equal(snapshot.event, "run-created");
     assert.equal(snapshot.diagnostic_only, true);
     assert.equal(typeof snapshot.env, "object");
+    assert.deepEqual(snapshot.env.plugin_identity, { source: "/tmp/configured-plugin.js", version: "1.2.3", hash: `sha256:${"c".repeat(64)}` });
     assert.deepEqual(snapshot.env.cli_identity, { source: REDACTED_ENV_VALUE, version: REDACTED_ENV_VALUE, hash: `sha256:${"a".repeat(64)}` });
     assert.doesNotMatch(JSON.stringify(snapshot), /[\u001b\u009b]/u);
     assert.equal(snapshot.provenance, undefined);

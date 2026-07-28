@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
 import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join, parse, resolve } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync as defaultSpawnSync } from "node:child_process";
+import { parseJsoncConfig } from "./config.js";
 import { containsRecognizedSensitiveFragment, isSensitiveValue } from "./hardening/sensitive-data.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const PACKAGE_NAME = "opencode-feature-factory";
 const DEFAULT_UNIX_EXECUTABLE_PATH = "/usr/bin:/bin";
+const CONFIG_FILE_MAX = 1024 * 1024;
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const UNSAFE_TERMINAL_TEXT = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 const UNSAFE_TERMINAL_TEXT_GLOBAL = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
@@ -34,28 +37,45 @@ export function resolveRuntimeIdentity(options = {}) {
 
 export function admitRuntimeLaunch(options = {}) {
   const identity = observeRuntimeIdentity(options);
-  assertMatchingPackageCli(identity, options.packageRoot || root);
+  assertMatchingConfiguredPackage(identity);
+  assertMatchingPackageCli(identity);
   if (!completeFileIdentity(identity.opencode)) {
     throw admissionError("effective PATH opencode executable is unavailable; install OpenCode and ensure PATH resolves it before retrying");
   }
   return {
+    package_plugin: { source: identity.package_plugin.source, hash: identity.package_plugin.hash },
     package_cli: { source: identity.package_cli.source, hash: identity.package_cli.hash },
+    configured_plugin: { source: identity.configured_plugin.source, hash: identity.configured_plugin.hash },
+    configured_package_cli: { source: identity.configured_package_cli.source, hash: identity.configured_package_cli.hash },
+    configured_local: identity.configured_local,
     opencode: { source: identity.opencode.source, hash: identity.opencode.hash },
   };
 }
 
 export function revalidateRuntimeLaunchBinding(binding, options = {}) {
-  if (!completeFileIdentity(binding?.package_cli) || !completeFileIdentity(binding?.opencode)) {
+  if (!completeFileIdentity(binding?.package_plugin)
+    || !completeFileIdentity(binding?.package_cli)
+    || !completeFileIdentity(binding?.configured_plugin)
+    || !completeFileIdentity(binding?.configured_package_cli)
+    || typeof binding?.configured_local !== "boolean"
+    || !completeFileIdentity(binding?.opencode)) {
     throw admissionError("launch identity binding is invalid");
   }
   const identity = observeRuntimeIdentity(options, { probeOpenCodeVersion: false });
-  assertMatchingPackageCli(identity, options.packageRoot || root);
+  assertBoundIdentity(identity.package_plugin, binding.package_plugin, "package plugin implementation");
   if (identity.package_cli.source !== binding.package_cli.source) {
     throw admissionError(`package CLI source changed before spawn; accepted source=${publicSource(binding.package_cli)}, observed source=${publicSource(identity.package_cli)}; retry after restoring the accepted package installation`);
   }
   if (identity.package_cli.hash !== binding.package_cli.hash) {
     throw admissionError(`package CLI bytes changed before spawn at ${publicSource(binding.package_cli)}; retry after the package update is complete`);
   }
+  if (identity.configured_local !== binding.configured_local) {
+    throw admissionError("configured local opencode-feature-factory plugin registration changed or was removed before spawn; restore the accepted registration and retry");
+  }
+  assertBoundIdentity(identity.configured_plugin, binding.configured_plugin, "configured plugin implementation");
+  assertBoundIdentity(identity.configured_package_cli, binding.configured_package_cli, "configured plugin package CLI");
+  assertMatchingConfiguredPackage(identity);
+  assertMatchingPackageCli(identity);
   if (!completeFileIdentity(identity.opencode)) {
     throw admissionError("effective PATH opencode executable became unavailable before spawn; retry after restoring the accepted OpenCode executable");
   }
@@ -71,10 +91,18 @@ export function revalidateRuntimeLaunchBinding(binding, options = {}) {
 function observeRuntimeIdentity(options = {}, { probeOpenCodeVersion = true } = {}) {
   const packageRoot = realpathOrResolve(options.packageRoot || root);
   const pkg = readPackage(packageRoot);
+  const packagePlugin = fileIdentity(join(packageRoot, "src", "plugin.js"), pkg.version);
+  const packageCli = fileIdentity(join(packageRoot, "src", "cli.js"), pkg.version);
+  const configured = configuredPluginPackage(options, { plugin: packagePlugin, cli: packageCli, root: packageRoot });
   return {
     schema_version: 1,
-    plugin: fileIdentity(join(packageRoot, "src", "plugin.js"), pkg.version),
-    package_cli: fileIdentity(join(packageRoot, "src", "cli.js"), pkg.version),
+    plugin: configured.plugin,
+    package_plugin: packagePlugin,
+    package_cli: packageCli,
+    configured_plugin: configured.plugin,
+    configured_package_cli: configured.cli,
+    configured_package_root: configured.root,
+    configured_local: configured.local,
     cli: commandIdentity("feature-factory", options, false),
     opencode: commandIdentity("opencode", options, probeOpenCodeVersion),
   };
@@ -134,18 +162,45 @@ function commandIdentity(command, options, probeVersion) {
   };
 }
 
-function assertMatchingPackageCli(identity, packageRoot) {
-  if (!completeFileIdentity(identity.package_cli)) {
-    throw admissionError("accepted package CLI bytes are unavailable; reinstall opencode-feature-factory from a complete package before retrying");
+function assertMatchingConfiguredPackage(identity) {
+  const remediation = packageRemediation(identity.configured_package_root);
+  if (!completeFileIdentity(identity.package_plugin) || !completeFileIdentity(identity.package_cli)) {
+    throw admissionError(`executing opencode-feature-factory package is incomplete; remediation: ${remediation}`);
   }
-  const accepted = publicSource(identity.package_cli);
-  const installRoot = publicPath(realpathOrResolve(packageRoot));
-  const remediation = `run npm with exact argv [\"install\",\"--global\",\"--\",${JSON.stringify(installRoot)}], then ensure PATH feature-factory resolves to the accepted bytes`;
+  if (!completeFileIdentity(identity.configured_plugin) || !completeFileIdentity(identity.configured_package_cli)) {
+    throw admissionError(`configured opencode-feature-factory plugin package is incomplete or unreadable; remediation: ${remediation}`);
+  }
+  if (identity.package_plugin.hash !== identity.configured_plugin.hash) {
+    throw admissionError(`executing package plugin implementation bytes differ from the configured local plugin implementation; configured plugin source=${publicSource(identity.configured_plugin)}; executing plugin source=${publicSource(identity.package_plugin)}; remediation: ${remediation}`);
+  }
+  if (identity.package_cli.hash !== identity.configured_package_cli.hash) {
+    throw admissionError(`executing package CLI bytes differ from the configured local plugin package CLI bytes; configured plugin source=${publicSource(identity.configured_plugin)}; executing package CLI source=${publicSource(identity.package_cli)}; remediation: ${remediation}`);
+  }
+}
+
+function assertMatchingPackageCli(identity) {
+  const accepted = publicSource(identity.configured_package_cli);
+  const remediation = packageRemediation(identity.configured_package_root);
   if (!completeFileIdentity(identity.cli)) {
     throw admissionError(`effective PATH feature-factory CLI is unavailable; accepted package CLI source=${accepted}; remediation: ${remediation}`);
   }
-  if (identity.cli.hash !== identity.package_cli.hash) {
+  if (identity.cli.hash !== identity.configured_package_cli.hash) {
     throw admissionError(`effective PATH feature-factory CLI bytes differ from the plugin/package CLI bytes; accepted package CLI source=${accepted}; observed PATH CLI source=${publicSource(identity.cli)}; remediation: ${remediation}`);
+  }
+}
+
+function packageRemediation(packageRoot) {
+  const installRoot = publicPath(realpathOrResolve(packageRoot));
+  return `npm executable with exact argv [\"install\",\"--global\",\"--\",${JSON.stringify(installRoot)}], then ensure PATH feature-factory resolves to the accepted bytes`;
+}
+
+function assertBoundIdentity(observed, accepted, label) {
+  if (!completeFileIdentity(observed)) throw admissionError(`${label} became unavailable before spawn; retry after restoring the accepted package installation`);
+  if (observed.source !== accepted.source) {
+    throw admissionError(`${label} source changed before spawn; accepted source=${publicSource(accepted)}, observed source=${publicSource(observed)}; retry after restoring the accepted package installation`);
+  }
+  if (observed.hash !== accepted.hash) {
+    throw admissionError(`${label} bytes changed before spawn at ${publicSource(accepted)}; retry after the package update is complete`);
   }
 }
 
@@ -195,6 +250,131 @@ function inspectExecutable(candidate, cwd = process.cwd()) {
   } catch {
     return null;
   }
+}
+
+function configuredPluginPackage(options, fallback) {
+  const local = [];
+  try {
+    for (const configPath of effectiveOpenCodeConfigFiles(options)) {
+      for (const spec of pluginSpecs(configPath)) {
+        const registration = localPluginRegistration(spec);
+        if (registration) local.push(registration);
+      }
+    }
+  } catch {
+    throw admissionError("effective OpenCode plugin configuration is unreadable or ambiguous; reconcile opencode-feature-factory registrations and retry");
+  }
+  if (local.length > 1) {
+    throw admissionError("multiple local opencode-feature-factory plugin registrations are effective; keep exactly one readable package registration and retry");
+  }
+  return local[0] ?? { ...fallback, local: false };
+}
+
+function effectiveOpenCodeConfigFiles(options) {
+  const env = options.env ?? process.env;
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const home = resolve(options.home || env?.HOME || homedir());
+  const xdgConfigHome = stringValue(env?.XDG_CONFIG_HOME) ? resolve(cwd, env.XDG_CONFIG_HOME) : join(home, ".config");
+  const globalConfig = join(xdgConfigHome, "opencode");
+  const projectDirectories = projectConfigDirectories(cwd);
+  const configDir = stringValue(env?.OPENCODE_CONFIG_DIR) ? resolve(cwd, env.OPENCODE_CONFIG_DIR) : null;
+  const candidates = [
+    ...["config.json", "opencode.json", "opencode.jsonc"].map((name) => join(globalConfig, name)),
+    ...projectDirectories.flatMap((directory) => [
+      join(directory, "opencode.jsonc"),
+      join(directory, "opencode.json"),
+      join(directory, ".opencode", "opencode.json"),
+      join(directory, ".opencode", "opencode.jsonc"),
+    ]),
+    join(home, ".opencode", "opencode.json"),
+    join(home, ".opencode", "opencode.jsonc"),
+    ...(configDir ? [join(configDir, "opencode.json"), join(configDir, "opencode.jsonc")] : []),
+  ];
+  return [...new Set(candidates.map((candidate) => resolve(candidate)))];
+}
+
+function projectConfigDirectories(cwd) {
+  const directories = [];
+  let current = cwd;
+  while (true) {
+    directories.push(current);
+    if (pathExists(join(current, ".git"))) return directories.reverse();
+    const parent = dirname(current);
+    if (parent === current) return [cwd];
+    current = parent;
+  }
+}
+
+function pluginSpecs(configPath) {
+  let stat;
+  try {
+    stat = statSync(configPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  if (!stat.isFile() || stat.size > CONFIG_FILE_MAX) throw new Error("unsafe OpenCode config file");
+  const config = parseJsoncConfig(readFileSync(configPath, "utf8"), { label: "OpenCode config" });
+  if (config.plugin === undefined) return [];
+  if (!Array.isArray(config.plugin)) throw new Error("ambiguous OpenCode plugin registration");
+  return config.plugin.map((entry) => {
+    const spec = Array.isArray(entry) ? entry[0] : entry;
+    if (typeof spec !== "string" || !spec) throw new Error("ambiguous OpenCode plugin registration");
+    if (/\{(?:env|file):/u.test(spec)) throw new Error("dynamic OpenCode plugin registration");
+    return spec;
+  });
+}
+
+function localPluginRegistration(spec) {
+  let url;
+  try { url = new URL(spec); } catch { return null; }
+  if (url.protocol !== "file:") return null;
+  let requested;
+  try { requested = fileURLToPath(url); } catch { requested = ""; }
+  const looksRelevant = spec.includes(PACKAGE_NAME) || requested.includes(PACKAGE_NAME);
+  if (!requested || url.search || url.hash) {
+    if (looksRelevant) throw new Error("ambiguous local plugin registration");
+    return null;
+  }
+  let target;
+  try { target = realpathSync(requested); } catch {
+    if (looksRelevant) throw new Error("unreadable local plugin registration");
+    return null;
+  }
+  const targetStat = statSync(target);
+  let packageRoot;
+  if (targetStat.isDirectory()) packageRoot = target;
+  else if (targetStat.isFile() && ["src/opencode-plugin.js", "src/plugin.js"].includes(relative(dirname(dirname(target)), target).replaceAll("\\", "/"))) {
+    packageRoot = dirname(dirname(target));
+  } else {
+    if (looksRelevant) throw new Error("ambiguous local plugin registration");
+    return null;
+  }
+  const pkg = readPackage(packageRoot);
+  if (pkg.name !== PACKAGE_NAME) {
+    if (looksRelevant) throw new Error("ambiguous local plugin registration");
+    return null;
+  }
+  const plugin = fileIdentity(join(packageRoot, "src", "plugin.js"), pkg.version);
+  const cli = fileIdentity(join(packageRoot, "src", "cli.js"), pkg.version);
+  const entrypoint = fileIdentity(join(packageRoot, "src", "opencode-plugin.js"), pkg.version);
+  const acceptedTargets = [realpathOrNull(packageRoot), entrypoint.source, plugin.source].filter(Boolean);
+  if (!acceptedTargets.includes(target) || !completeFileIdentity(plugin) || !completeFileIdentity(cli)) {
+    throw new Error("incomplete local plugin registration");
+  }
+  return { root: realpathSync(packageRoot), plugin, cli, local: true };
+}
+
+function pathExists(path) {
+  try { statSync(path); return true; } catch { return false; }
+}
+
+function realpathOrNull(path) {
+  try { return realpathSync(path); } catch { return null; }
+}
+
+function stringValue(value) {
+  return typeof value === "string" && value.length > 0;
 }
 
 function commandVersion(source, options) {

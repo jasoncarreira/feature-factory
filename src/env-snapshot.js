@@ -41,6 +41,7 @@ export async function collectEnv(options = {}) {
     feature_factory_version: packageVersion(),
     opencode_version: runtimeIdentity.opencode.version,
     plugin_spec: options.pluginSpec || "opencode-feature-factory",
+    plugin_identity: runtimeIdentity.plugin,
     cli_identity: runtimeIdentity.cli,
     resolved_models: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.model || null])),
     resolved_variants: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.variant || null])),
@@ -57,8 +58,9 @@ export async function collectRunDebugSnapshot(options = {}) {
   const { event, now } = options;
   const collected = await collectEnv(options);
   const env = scrubSecretEnv(collected);
-  // This closed projection was already normalized for secrets and terminal
-  // controls; preserve its diagnostic hash from generic entropy redaction.
+  // These closed projections were already normalized for secrets and terminal
+  // controls; preserve their diagnostic hashes from generic entropy redaction.
+  env.plugin_identity = collected.plugin_identity;
   env.cli_identity = collected.cli_identity;
   return {
     collected_at: timestamp(now, "environment snapshot timestamp"),

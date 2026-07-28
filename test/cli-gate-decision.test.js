@@ -204,7 +204,9 @@ function createFixture(runId, options = {}) {
 }
 
 function runCli(repo, args, bin) {
-  return runSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: bin ? { ...process.env, PATH: `${bin}:${process.env.PATH || ""}` } : process.env });
+  const env = isolatedOpenCodeEnv(repo);
+  if (bin) env.PATH = `${bin}:${process.env.PATH || ""}`;
+  return runSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env });
 }
 
 function runBehaviorGateCli(fixture, reasonCode) {
@@ -287,8 +289,16 @@ function runBehaviorGateCli(fixture, reasonCode) {
   return runSync(process.execPath, ["--input-type=module", "--eval", source], {
     cwd: fixture.repo,
     encoding: "utf8",
-    env: { ...process.env },
+    env: isolatedOpenCodeEnv(fixture.repo),
   });
+}
+
+function isolatedOpenCodeEnv(repo) {
+  const env = { ...process.env, HOME: join(repo, ".test-home"), XDG_CONFIG_HOME: join(repo, ".test-xdg") };
+  delete env.OPENCODE_CONFIG_DIR;
+  delete env.OPENCODE_CONFIG;
+  delete env.OPENCODE_CONFIG_CONTENT;
+  return env;
 }
 
 async function createApprovedMatrixFixture(runId) {

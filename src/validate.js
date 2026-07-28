@@ -2895,9 +2895,10 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
     errors.push({ path: `${path}.env`, message: "must be an object" });
     return;
   }
+  if (Object.hasOwn(payload, "plugin_identity")) validateCliIdentity(errors, payload.plugin_identity, `${path}.env.plugin_identity`);
   if (Object.hasOwn(payload, "cli_identity")) validateCliIdentity(errors, payload.cli_identity, `${path}.env.cli_identity`);
   for (const [key, value] of Object.entries(payload)) {
-    if (key === "cli_identity") continue;
+    if (key === "plugin_identity" || key === "cli_identity") continue;
     const valuePath = `${path}.env.${key}`;
     if (isSensitiveEnvKey(key) && value !== REDACTED_ENV_VALUE) errors.push({ path: valuePath, message: "is not allowed in debug snapshot" });
     if (key === "opencode_version" && typeof value === "string" && normalizeRuntimeIdentityVersion(value) !== value) {

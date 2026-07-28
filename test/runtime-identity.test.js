@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { normalizeRuntimeIdentity, resolveRuntimeIdentity } from "../src/runtime-identity.js";
@@ -25,6 +25,7 @@ describe("runtime identity observation", () => {
     const fixture = executableFixture("exact");
     try {
       const identity = resolveRuntimeIdentity({
+        env: { ...process.env, HOME: fixture.root, XDG_CONFIG_HOME: join(fixture.root, "xdg") },
         commandCandidates: { "feature-factory": CLI, opencode: fixture.opencode },
       });
 
@@ -59,6 +60,44 @@ describe("runtime identity observation", () => {
       assert.equal(identity.cli.version, "9.9.9");
       assert.notEqual(identity.cli.hash, identity.package_cli.hash);
       assert.equal(Object.hasOwn(identity, "consistency"), false);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the configured local plugin implementation across effective child config locations", () => {
+    const fixture = executableFixture("configured-local");
+    const configuredRoot = join(fixture.root, "local", "opencode-feature-factory");
+    const configuredPlugin = join(configuredRoot, "src", "plugin.js");
+    const configuredCli = join(configuredRoot, "src", "cli.js");
+    const configuredEntrypoint = join(configuredRoot, "src", "opencode-plugin.js");
+    const home = join(fixture.root, "home");
+    try {
+      mkdirSync(dirname(configuredPlugin), { recursive: true });
+      writeFileSync(join(configuredRoot, "package.json"), JSON.stringify({ name: "opencode-feature-factory", version: "7.8.9" }));
+      writeFileSync(configuredPlugin, readFileSync(join(ROOT, "src", "plugin.js")));
+      writeFileSync(configuredCli, readFileSync(CLI));
+      writeFileSync(configuredEntrypoint, "export { default } from './plugin.js';\n");
+
+      const cases = [
+        [join(home, ".config", "opencode", "opencode.jsonc"), configuredRoot, { HOME: home }],
+        [join(fixture.root, "relative-xdg", "opencode", "opencode.json"), configuredEntrypoint, { HOME: home, XDG_CONFIG_HOME: "relative-xdg" }],
+        [join(fixture.root, "relative-config", "opencode.jsonc"), configuredPlugin, { HOME: home, XDG_CONFIG_HOME: "empty-xdg", OPENCODE_CONFIG_DIR: "relative-config" }],
+        [join(fixture.root, "opencode.json"), configuredRoot, { HOME: home, XDG_CONFIG_HOME: "empty-xdg" }],
+      ];
+      for (const [configPath, registration, childEnv] of cases) {
+        mkdirSync(dirname(configPath), { recursive: true });
+        writeFileSync(configPath, `{\n  // local runtime\n  \"plugin\": [\"${pathToFileURL(registration).href}\"],\n}\n`);
+        const identity = resolveRuntimeIdentity({
+          cwd: fixture.root,
+          env: { ...process.env, ...childEnv },
+          commandCandidates: { "feature-factory": CLI, opencode: fixture.opencode },
+        });
+        assert.equal(identity.plugin.source, realpathSync(configuredPlugin));
+        assert.equal(identity.plugin.version, "7.8.9");
+        assert.equal(identity.plugin.hash, executableIdentity(configuredPlugin, null).hash);
+        rmSync(configPath);
+      }
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
+import { pathToFileURL } from "node:url";
 import { admitRuntimeLaunch, revalidateRuntimeLaunchBinding, RuntimeAdmissionError } from "../src/runtime-identity.js";
 import { runForegroundFactory, startDetached } from "../src/factory.js";
 import { superviseDetachedLaunch } from "../src/detached-log-supervisor.js";
@@ -33,6 +34,106 @@ describe("runtime launch admission", () => {
       });
       rmSync(fixture.effectiveCli);
       assert.throws(() => admit(fixture), /effective PATH feature-factory CLI is unavailable/u);
+    } finally { cleanup(fixture); }
+  });
+
+  it("rejects local plugin A with stale package and PATH CLI B before foreground or detached launch", () => {
+    const fixture = runtimeFixture("configured-plugin-a-cli-b");
+    const configured = createPackage(fixture.root, "plugin-a", {
+      cli: "#!/bin/sh\nprintf 'plugin-a-cli\\n'\n",
+      plugin: "export default { configured: 'a' };\n",
+    });
+    let launches = 0;
+    try {
+      writePluginConfig(fixture, configured.root);
+      symlinkSync(fixture.packageCli, fixture.effectiveCli);
+      const expectedArgv = `[\"install\",\"--global\",\"--\",${JSON.stringify(realpathSync(configured.root))}]`;
+      for (const invoke of [
+        () => runForegroundFactory(fixture.root, ["run"], { ...options(fixture), foregroundLaunchFn: () => { launches += 1; } }),
+        () => startDetached(fixture.root, ["run"], { ...options(fixture), detachedLaunchFn: () => { launches += 1; } }),
+        () => startDetached(fixture.root, ["run"], { ...options(fixture), supervisorSpawnFn: () => { launches += 1; } }),
+      ]) {
+        assert.throws(invoke, (error) => error.code === "RUNTIME_ADMISSION_FAILED"
+          && /configured local plugin/u.test(error.message)
+          && error.message.includes(expectedArgv));
+      }
+      assert.equal(launches, 0);
+    } finally { cleanup(fixture); }
+  });
+
+  it("accepts a different configured local package only when plugin and CLI bytes are exact", () => {
+    const fixture = runtimeFixture("configured-same-bytes");
+    const configured = createPackage(fixture.root, "plugin-a", {
+      cli: readFileSync(fixture.packageCli),
+      plugin: readFileSync(fixture.packagePlugin),
+    });
+    try {
+      writePluginConfig(fixture, join(configured.root, "src", "opencode-plugin.js"));
+      symlinkSync(fixture.packageCli, fixture.effectiveCli);
+      const binding = admit(fixture);
+      assert.equal(binding.configured_local, true);
+      assert.equal(binding.configured_plugin.source, realpathSync(configured.plugin));
+      assert.equal(binding.configured_package_cli.source, realpathSync(configured.cli));
+      assert.equal(revalidateRuntimeLaunchBinding(JSON.parse(JSON.stringify(binding)), options(fixture)), realpathSync(fixture.opencode));
+    } finally { cleanup(fixture); }
+  });
+
+  it("re-reads config and configured plugin bytes immediately before every launch seam", () => {
+    const fixture = runtimeFixture("configured-pre-spawn-drift");
+    const configured = createPackage(fixture.root, "plugin-a", {
+      cli: readFileSync(fixture.packageCli),
+      plugin: readFileSync(fixture.packagePlugin),
+    });
+    let launches = 0;
+    try {
+      symlinkSync(fixture.packageCli, fixture.effectiveCli);
+      writePluginConfig(fixture, configured.root);
+      const binding = admit(fixture);
+      writePluginConfig(fixture, null);
+      assert.throws(() => revalidateRuntimeLaunchBinding(binding, options(fixture)), /registration changed or was removed before spawn/u);
+
+      writePluginConfig(fixture, configured.root);
+      const pluginBinding = admit(fixture);
+      writeFileSync(configured.plugin, "export default { drifted: true };\n");
+      assert.throws(() => revalidateRuntimeLaunchBinding(pluginBinding, options(fixture)), /configured plugin implementation bytes changed before spawn/u);
+
+      for (const [launchOption, launch] of [
+        ["foregroundLaunchFn", runForegroundFactory],
+        ["detachedLaunchFn", startDetached],
+        ["supervisorSpawnFn", startDetached],
+      ]) {
+        writeFileSync(configured.plugin, readFileSync(fixture.packagePlugin));
+        writePluginConfig(fixture, configured.root);
+        const launchOptions = {
+          ...options(fixture),
+          runtimeAdmissionFn(admissionOptions) {
+            const accepted = admitRuntimeLaunch(admissionOptions);
+            writePluginConfig(fixture, null);
+            return accepted;
+          },
+          [launchOption]: () => { launches += 1; },
+        };
+        assert.throws(() => launch(fixture.root, ["run"], launchOptions), /registration changed or was removed before spawn/u);
+      }
+      assert.equal(launches, 0);
+    } finally { cleanup(fixture); }
+  });
+
+  it("fails closed for multiple or unreadable local feature-factory registrations", () => {
+    const fixture = runtimeFixture("configured-ambiguous");
+    const configured = createPackage(fixture.root, "plugin-a", {
+      cli: readFileSync(fixture.packageCli),
+      plugin: readFileSync(fixture.packagePlugin),
+    });
+    try {
+      symlinkSync(fixture.packageCli, fixture.effectiveCli);
+      writePluginConfig(fixture, [configured.root, configured.plugin]);
+      assert.throws(() => admit(fixture), /multiple local opencode-feature-factory plugin registrations/u);
+      writePluginConfig(fixture, join(fixture.root, "missing-opencode-feature-factory"));
+      assert.throws(() => admit(fixture), /plugin configuration is unreadable or ambiguous/u);
+      const config = join(fixture.env.XDG_CONFIG_HOME, "opencode", "opencode.jsonc");
+      writeFileSync(config, JSON.stringify({ plugin: ["{env:FEATURE_FACTORY_PLUGIN}"] }));
+      assert.throws(() => admit(fixture), /plugin configuration is unreadable or ambiguous/u);
     } finally { cleanup(fixture); }
   });
 
@@ -254,8 +355,11 @@ function runtimeFixture(name) {
   writeExecutable(packageCli, "#!/bin/sh\nexit 0\n");
   writeFileSync(packagePlugin, "export default {};\n");
   writeExecutable(opencode, "#!/bin/sh\nprintf 'opencode-test 1\\n'\n");
-  const env = { ...process.env, PATH: bin };
-  return { root, packageRoot, packageCli, bin, effectiveCli, opencode, env };
+  const env = { ...process.env, HOME: join(root, "home"), XDG_CONFIG_HOME: join(root, "xdg"), PATH: bin };
+  delete env.OPENCODE_CONFIG_DIR;
+  delete env.OPENCODE_CONFIG;
+  delete env.OPENCODE_CONFIG_CONTENT;
+  return { root, packageRoot, packageCli, packagePlugin, bin, effectiveCli, opencode, env };
 }
 
 function admit(fixture) {
@@ -270,6 +374,25 @@ function writeExecutable(path, contents) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, contents);
   chmodSync(path, 0o755);
+}
+
+function createPackage(parent, name, { cli, plugin }) {
+  const packageRoot = join(parent, name, "opencode-feature-factory");
+  const packageCli = join(packageRoot, "src", "cli.js");
+  const packagePlugin = join(packageRoot, "src", "plugin.js");
+  mkdirSync(dirname(packageCli), { recursive: true });
+  writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "opencode-feature-factory", version: "1.2.3" }));
+  writeExecutable(packageCli, cli);
+  writeFileSync(packagePlugin, plugin);
+  writeFileSync(join(packageRoot, "src", "opencode-plugin.js"), "export { default } from './plugin.js';\n");
+  return { root: packageRoot, cli: packageCli, plugin: packagePlugin };
+}
+
+function writePluginConfig(fixture, target) {
+  const config = join(fixture.env.XDG_CONFIG_HOME, "opencode", "opencode.jsonc");
+  mkdirSync(dirname(config), { recursive: true });
+  const targets = Array.isArray(target) ? target : target ? [target] : [];
+  writeFileSync(config, JSON.stringify({ plugin: targets.map((path) => pathToFileURL(path).href) }));
 }
 
 function childProcessStub() {

@@ -92,23 +92,25 @@ Local installs configure the package root, not `src/plugin.js`, so the package e
 Runtime identity is observed at four operator-relevant points:
 
 - `feature-factory install` prints `feature-factory CLI: {"source":...,"version":...,"hash":"sha256:..."}` for the effective PATH-resolved CLI.
-- `feature-factory doctor` reports the same effective CLI `source`, package `version`, and SHA-256 `hash`; `--json` exposes them at `env.cli_identity`.
-- Every foreground or detached OpenCode launch observes the package/plugin CLI, effective PATH `feature-factory`, and effective PATH `opencode` before spawn. CLI version is diagnostic; exact CLI bytes and bound OpenCode source/bytes are the admission checks.
-- Run creation and every mutating resume persist that invocation's effective PATH CLI observation at `run.json.debug_snapshot.created_with.env.cli_identity` or `last_resumed_with.env.cli_identity` through `factory env record-created` / `record-resume`.
+- `feature-factory doctor` reports the effective CLI `source`, package `version`, and SHA-256 `hash`; `--json` exposes it at `env.cli_identity` and exposes the effective configured plugin implementation at `env.plugin_identity`.
+- Every foreground or detached OpenCode launch observes the executing package plugin/CLI, effective configured plugin package, effective PATH `feature-factory`, and effective PATH `opencode` before spawn. Versions are diagnostic; exact implementation/CLI bytes and bound OpenCode source/bytes are the admission checks.
+- Run creation and every mutating resume persist that invocation's configured plugin and effective PATH CLI observations at `run.json.debug_snapshot.created_with.env.plugin_identity` / `cli_identity` or the corresponding `last_resumed_with.env` fields through `factory env record-created` / `record-resume`.
 
-`cli_identity` exists only inside `debug_snapshot`. It is redacted diagnostic-only creation/resume metadata, never top-level workflow state, provenance, gate/review/merge/PR authority, or a substitute for fresh launch admission. Creation preserves the original observation; resume preserves it and records the latest observation separately.
+`plugin_identity` and `cli_identity` exist only inside `debug_snapshot`. They are redacted diagnostic-only creation/resume metadata, never top-level workflow state, provenance, gate/review/merge/PR authority, or a substitute for fresh launch admission. No config content is stored. Creation preserves the original observations; resume preserves them and records the latest observations separately.
 
 ### Launch admission
 
-Before any factory child launch, the SHA-256 bytes of the effective PATH `feature-factory` must exactly equal the package's `src/cli.js`; different absolute source paths are allowed only when their bytes are equal. A missing or mismatched PATH CLI fails with `RUNTIME_ADMISSION_FAILED` and a terminal-safe remediation expressed as exact argv, not shell text:
+Before any factory child launch, admission reads the effective OpenCode config files under effective `XDG_CONFIG_HOME/opencode` (default `HOME/.config/opencode`), from the child cwd upward through its nearest Git root, under project `.opencode` directories, and under non-empty `OPENCODE_CONFIG_DIR` resolved relative to the child cwd. A local `file://` registration may name the package root, `src/opencode-plugin.js`, or legacy `src/plugin.js`. Exactly one local feature-factory registration must resolve to a readable package; multiple, ambiguous, malformed, or unreadable local registrations fail closed without exposing config content. A bare `opencode-feature-factory` registration uses the executing package as its fallback identity. Non-empty `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT` remain unsupported and are rejected by definition admission before launch.
+
+For a local registration, the executing package's shared `src/plugin.js` implementation and `src/cli.js` must have exact SHA-256 byte equality with the configured local package's corresponding files. The effective PATH `feature-factory` must then exactly equal that configured package's `src/cli.js`; different absolute source paths are allowed only when their bytes are equal. A missing or mismatched package/PATH CLI fails with `RUNTIME_ADMISSION_FAILED` and a terminal-safe remediation targeting the configured local package root (package A) as exact argv, not shell text:
 
 ```text
 npm executable with exact argv ["install","--global","--","<observed-package-root>"]
 ```
 
-Run `npm` with that exact argv, then ensure PATH `feature-factory` resolves to the accepted package CLI bytes. Do not interpolate the displayed package path into a shell command.
+Run `npm` with that exact argv, then ensure PATH `feature-factory` resolves to the accepted configured-package CLI bytes. Do not interpolate the displayed package path into a shell command.
 
-Admission also binds the package CLI source/hash and effective PATH OpenCode absolute source/hash. Immediately before foreground spawn, both package CLI and OpenCode bindings are re-observed; detached launch performs the launcher recheck and the detached supervisor rechecks again before child spawn. Source or byte drift, disappearance, or an incomplete binding fails closed. The child is executed through the bound absolute OpenCode path with `shell:false`, not by resolving `opencode` again after admission.
+Admission binds the executing package plugin/CLI, configured plugin implementation and sibling CLI, local-registration state, and effective PATH OpenCode absolute source/hash. Immediately before foreground spawn it re-reads config and re-observes every binding; detached launch performs the launcher recheck and the detached supervisor repeats it before child spawn. Configured registration removal, source/hash drift, disappearance, or an incomplete binding fails closed. The child is executed through the bound absolute OpenCode path with `shell:false`, not by resolving `opencode` again after admission.
 
 These gates cover every production factory launch route: new `factory start`, start-as-resume, `factory resume`, schema-v2 `factory continue`, `factory checkpoint-start`, and interactive approval handoff, in foreground and detached forms.
 

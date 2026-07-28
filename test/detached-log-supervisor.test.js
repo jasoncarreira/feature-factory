@@ -254,7 +254,15 @@ process.stderr.write("err \\u001b]8;;https://evil.test\\u0007x\\n");
 }
 
 function init(fixture) {
-  const env = { ...process.env, PATH: `${fixture.bin}:${process.env.PATH || ""}` };
+  const env = {
+    ...process.env,
+    HOME: join(fixture.root, "home"),
+    XDG_CONFIG_HOME: join(fixture.root, "xdg"),
+    PATH: `${fixture.bin}:${process.env.PATH || ""}`,
+  };
+  delete env.OPENCODE_CONFIG_DIR;
+  delete env.OPENCODE_CONFIG;
+  delete env.OPENCODE_CONFIG_CONTENT;
   return {
     repo: fixture.root,
     commandArgs: ["run", "test"],

@@ -558,10 +558,15 @@ function spawnFactoryStart(repo, args, bin, capture) {
     encoding: "utf8",
     env: {
       ...process.env,
+      HOME: join(repo, ".test-home"),
+      XDG_CONFIG_HOME: join(repo, ".test-xdg"),
       FEATURE_FACTORY_CAPTURE: capture,
       GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_CONFIG_NOSYSTEM: "1",
       PATH: `${bin}:${process.env.PATH || ""}`,
+      OPENCODE_CONFIG_DIR: "",
+      OPENCODE_CONFIG: "",
+      OPENCODE_CONFIG_CONTENT: "",
     },
     timeout: 15000,
   });

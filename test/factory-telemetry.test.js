@@ -511,6 +511,11 @@ if (process.env.OPENCODE_KEEPALIVE === "1") setInterval(() => {}, 1000);
 async function withLaunchEnv(fixture, env, fn) {
   const keys = new Set([
     "PATH",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_CONTENT",
     "OPENCODE_CAPTURE_PATH",
     "OPENCODE_CREATE_RUN_ID",
     ...Object.keys(env),
@@ -527,6 +532,11 @@ async function withLaunchEnv(fixture, env, fn) {
       delete process.env[key];
     }
     process.env.PATH = `${fixture.bin}:${process.env.PATH}`;
+    process.env.HOME = join(fixture.root, "home");
+    process.env.XDG_CONFIG_HOME = join(fixture.root, "xdg");
+    delete process.env.OPENCODE_CONFIG_DIR;
+    delete process.env.OPENCODE_CONFIG;
+    delete process.env.OPENCODE_CONFIG_CONTENT;
     process.env.OPENCODE_CAPTURE_PATH = fixture.captureFile;
     for (const [key, value] of Object.entries(env)) process.env[key] = value;
     return await fn();

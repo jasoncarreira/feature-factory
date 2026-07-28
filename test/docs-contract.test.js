@@ -81,6 +81,8 @@ describe("runtime consistency documentation contract", () => {
       assert.match(text, /source[\s\S]*version[\s\S]*(?:SHA-256|hash)/i, `${name} must document the complete CLI identity tuple`);
       assert.match(text, /debug_snapshot[\s\S]*(?:created_with|creation)[\s\S]*(?:last_resumed_with|resume)/i, `${name} must document creation/resume persistence`);
       assert.match(text, /cli_identity[\s\S]*diagnostic-only|diagnostic-only[\s\S]*cli_identity/i, `${name} must classify CLI identity as diagnostic-only`);
+      assert.match(text, /plugin_identity/i, `${name} must document configured plugin identity`);
+      assert.match(text, /no config content|expose no config content/i, `${name} must exclude config content`);
       assert.match(text, /never[\s\S]{0,160}(?:provenance|authority)/i, `${name} must deny CLI identity authority`);
     }
     assert.match(README, /README is the current packaged operator contract/i);
@@ -97,6 +99,11 @@ describe("runtime consistency documentation contract", () => {
       assert.match(text, /detached[\s\S]*(?:supervisor|supervision)[\s\S]*(?:recheck|rechecks|repeats)/i, `${name} must document the detached recheck`);
       assert.match(text, /bound absolute OpenCode|bound OpenCode executable/i, `${name} must document absolute OpenCode spawn`);
       assert.match(text, /shell:false/u, `${name} must forbid shell resolution at spawn`);
+      assert.match(text, /file:\/\/[\s\S]*(?:src\/opencode-plugin\.js)[\s\S]*(?:src\/plugin\.js)/i, `${name} must cover supported local plugin registrations`);
+      assert.match(text, /configured[\s\S]*executing[\s\S]*PATH `feature-factory`/i, `${name} must bind configured, executing, and PATH bytes`);
+      assert.match(text, /plugin implementation|shared plugin/i, `${name} must bind the shared plugin implementation`);
+      assert.match(text, /config(?:ured)? (?:registration )?removal|config removal/i, `${name} must reject configured plugin removal`);
+      for (const source of ["HOME", "XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR"]) assert.match(text, literalPattern(source), `${name} must name plugin config source ${source}`);
     }
   });
 
