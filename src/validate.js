@@ -1151,7 +1151,7 @@ export function claimsCheckpointRoutingParent(runDir, run) {
   });
 }
 
-function assertExactCheckpointRoutingParent(runDir, run, plan) {
+export function assertExactCheckpointRoutingParent(runDir, run, plan) {
   const terminal = run?.terminal_result;
   const artifacts = terminal?.artifacts;
   const artifactKeys = isRecord(artifacts) ? Object.keys(artifacts) : [];

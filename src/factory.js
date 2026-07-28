@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
-import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertOrdinaryResumeRunById, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, parseSlicesPlanBytes, pendingProtectedGate, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -159,6 +159,7 @@ const HANDOFF_ROWS = Object.freeze({
 });
 
 export async function startFactory(args, opts = {}) {
+  if (Object.hasOwn(opts, "continuation")) throw new Error("factory start does not accept continuation authority");
   const span = startFactoryLifecycleSpan("start", opts);
   const telemetry = { span, repo: null, candidateRunId: null, expectedContinuation: null };
   try {
@@ -192,6 +193,7 @@ async function startFactoryImplementation(args, opts = {}, telemetry) {
     if (!ownershipTarget.error) {
       const ownershipRead = readDurableRecoveryRun(repo, ownershipTarget.runDir, ownershipTarget.runFile);
       if (!ownershipRead.error) {
+        await assertRunClaimRoute(repo, ownershipRead.run, opts);
         assertResumeConfiguration(ownershipRead.run, opts);
         setFactoryRunIdentity(telemetry.span, ownershipRead.run.run_id);
         const ownership = await existingRunOwnershipOutcome(ownershipTarget.runDir, ownershipRead.run, { ...opts, repo });
@@ -1730,7 +1732,7 @@ async function resumeFactoryImplementation(runId, opts = {}, telemetry) {
   const recovery = await reconcilePostPrCrash(runDir, opts);
   const run = readRunFile(join(runDir, "run.json"));
   assertResumeConfiguration(run, opts);
-  if (run.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(repo, runDir, run, opts);
+  await assertRunClaimRoute(repo, run, opts);
   if (recovery.action === "closed-dispatch-dirty-worktree") {
     return { status: "recovery-required", run_id: run.run_id, reason_code: "post-pr-closed-dispatch-dirty-worktree",
       reason: "the worktree became dirty after the checked post-PR remediation dispatch closed; its remediation state and closure remain unconsumed" };
@@ -1942,7 +1944,11 @@ async function coordinateOrdinaryExistingRunLaunch(runDir, run, opts) {
 }
 
 async function reconcileCheckpointLaunchAfterOwnership(repo, runDir, run, opts) {
-  const source = run.checkpoint_source;
+  const ordinaryCheckpoint = run.checkpoint_source?.kind === "delivery-checkpoint-source" && run.continuation?.schema_version !== 2;
+  const checked = ordinaryCheckpoint
+    ? assertOrdinaryResumeRunById(repo, run.run_id)
+    : run;
+  const source = checked.checkpoint_source;
   if (source?.kind !== "delivery-checkpoint-source") return null;
   const parentRunDir = resolve(directFactoryRoot(repo), source.parent_run_id);
   if (dirname(parentRunDir) !== directFactoryRoot(repo) || parentRunDir === runDir) {
@@ -1961,7 +1967,8 @@ async function reconcileCheckpointLaunchAfterOwnership(repo, runDir, run, opts) 
   }
   if (entry.state === "launched") return entry;
   if (entry.state === "merged") throw new Error("merged checkpoint progress cannot launch");
-  if (source.root_child_run_id !== run.run_id) throw new Error("checkpoint continuation cannot establish root child launch ownership");
+  if (source.root_child_run_id !== checked.run_id) throw new Error("checkpoint continuation cannot establish root child launch ownership");
+  if (ordinaryCheckpoint) assertOrdinaryResumeRunById(repo, checked.run_id);
   const launched = await recordCheckpointLaunched(parentRunDir, entry, opts);
   if (launched.state === "merged") throw new Error("merged checkpoint progress cannot launch");
   return launched;
@@ -6102,6 +6109,7 @@ async function assertRunClaimRoute(repo, run, opts = {}) {
   const runDir = resolveRunDir(run.run_id, { ...opts, cwd: repo });
   assertFactoryAmendmentOrdinaryAuthority(runDir, run, "resume or launch");
   if (run.continuation?.schema_version === 2) assertPublishedCarryForwardRun(repo, run.continuation, { postPrPolicy: run.post_pr?.policy });
+  else assertOrdinaryResumeRunById(repo, run.run_id);
   return run;
 }
 
@@ -6245,7 +6253,7 @@ function featureCommandPayload(prompt, opts) {
     mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
     ready: Boolean(opts.ready),
     pr_mode: runPrModeOverride(opts),
-    reviewer: stringValue(opts.reviewer) ? opts.reviewer : opts.continuation?.post_pr?.policy?.review?.reviewer_login || null,
+    reviewer: stringValue(opts.reviewer) ? opts.reviewer : null,
     github_account: githubAccount,
   };
   const postPrPolicy = postPrDriverOverride(opts);
@@ -6255,7 +6263,6 @@ function featureCommandPayload(prompt, opts) {
     operator_request: String(prompt),
     driver,
   };
-  if (opts.continuation !== undefined) payload.continuation = opts.continuation;
   return payload;
 }
 

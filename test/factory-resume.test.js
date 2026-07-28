@@ -274,6 +274,47 @@ describe("factory resume", () => {
     }
   });
 
+  it("rejects every supplied generic-start continuation before filesystem, Git, or launch effects", async () => {
+    const cases = [
+      ["empty", {}],
+      ["nested post-PR", { post_pr: { policy: { review: { reviewer_login: "untrusted-reviewer" } } } }],
+      ["null", null],
+      ["explicit undefined", undefined],
+    ];
+    assert.equal(cases.length, 4, "exact rejected generic-start continuation option shapes");
+    for (const [name, continuation] of cases) {
+      const fixture = createFixture(`start-continuation-${name.replaceAll(" ", "-")}`);
+      let launches = 0;
+      try {
+        const before = {
+          run: readFileSync(join(fixture.runDir, "run.json")),
+          paths: repoPaths(fixture.repo),
+          git: existsSync(join(fixture.repo, ".git")),
+          skill: existsSync(join(fixture.repo, ".opencode", "skills", "feature", "SKILL.md")),
+        };
+        await assert.rejects(
+          startFactory(["must not start"], {
+            cwd: fixture.repo,
+            continuation,
+            foregroundLaunchFn: async () => { launches += 1; },
+            detachedLaunchFn: async () => { launches += 1; },
+          }),
+          (error) => error?.message === "factory start does not accept continuation authority",
+          name,
+        );
+        assert.equal(launches, 0, `${name}: launch count`);
+        assert.deepEqual({
+          run: readFileSync(join(fixture.runDir, "run.json")),
+          paths: repoPaths(fixture.repo),
+          git: existsSync(join(fixture.repo, ".git")),
+          skill: existsSync(join(fixture.repo, ".opencode", "skills", "feature", "SKILL.md")),
+        }, before, `${name}: effect boundary`);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
   it("refuses start-resume against an active heartbeat without mutating durable state", async () => {
     const fixture = createFixture("start-resume-active-heartbeat", { mode: "interactive" });
     try {
@@ -723,4 +764,13 @@ function writeJson(file, value) {
 
 function cleanup(repo) {
   rmSync(repo, { recursive: true, force: true });
+}
+
+function repoPaths(root, directory = root, result = []) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    result.push(path.slice(root.length + 1));
+    if (entry.isDirectory()) repoPaths(root, path, result);
+  }
+  return result.sort();
 }

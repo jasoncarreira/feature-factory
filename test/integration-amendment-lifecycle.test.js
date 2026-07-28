@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { completeSliceBuilderTaskDispatch, observeIntegrationAmendmentExecutionAuthority, prepareSliceBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionRunJson, transitionRunSlice, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
 import { checkRunConsistency, validateRun } from "../src/validate.js";
 import { executeIntegrationAmendment } from "../src/factory.js";
-import { CARRY_FORWARD_REQUIRED_SUMMARY, FEATURE_BRANCH, NOW, RUN_ID, addAcceptedTechnicalBrief, advanceMergedAmendmentConsumer, bindAmendmentDispatch, blocked, carryForwardTerminalResult, cleanup, cleanupFixtures, commitCandidate, createFixture, executionOptions, git, publishAmendmentReview, publishConsumerReview, reachIntegrated, reachMerged, readJson, readRun, reportRequest, snapshotRuntimeFiles, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
+import { CARRY_FORWARD_REQUIRED_SUMMARY, FEATURE_BRANCH, NOW, RUN_ID, addAcceptedTechnicalBrief, advanceMergedAmendmentConsumer, bindAmendmentDispatch, blocked, carryForwardTerminalResult, cleanup, cleanupFixtures, commitCandidate, createFixture, executionOptions, git, publishAmendmentReview, publishConsumerReview, reachIntegrated, reachMerged, readJson, readRun, reportRequest, sha, snapshotRuntimeFiles, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
 
 after(cleanupFixtures);
 
@@ -63,28 +63,56 @@ describe("generic integration amendment lifecycle and execution", () => {
     }
   });
 
-  it("gives continuation and checkpoint state precedence over non-pristine consumer state", () => {
-    const parentCases = [
-      ["continuation", (run) => { run.continuation = { schema_version: 2 }; }],
-      ["checkpoint child", (run) => { run.checkpoint_source = { kind: "delivery-checkpoint-source" }; }],
-      ["checkpoint router", (run) => { run.status = "blocked"; run.checkpoint_progress = { kind: "delivery-checkpoint-progress" }; }],
+  it("executes the AC3 parent class x terminal precondition x review source matrix without effects", async () => {
+    const parentClasses = [
+      ["ordinary", ["running", "terminal"]],
+      ["checkpoint-child", ["running", "terminal"]],
+      ["checkpoint-router", ["terminal"]],
     ];
-    assert.equal(parentCases.length, 3);
-    for (const [name, markParent] of parentCases) {
-      const fixture = createFixture({ publishReport: false });
-      try {
-        const run = readRun(fixture);
-        Object.assign(run.slices.find((slice) => slice.id === "consumer"), { status: "blocked", blocked_reason: "prior terminal stop" });
-        markParent(run);
-        const beforeFiles = snapshotRuntimeFiles(fixture.runDir);
-        assert.throws(
-          () => observeIntegrationAmendmentExecutionAuthority(fixture.runDir, run, "report", reportRequest(), { repoRoot: fixture.repo }),
-          (error) => error?.message === "integration-amendment-continuation-unsupported",
-          name,
-        );
-        assert.deepEqual(snapshotRuntimeFiles(fixture.runDir), beforeFiles, name);
-      } finally { cleanup(fixture); }
+    const reviewSources = ["current", "stale"];
+    const expectedRows = 10;
+    assert.equal(parentClasses.length, 3, "exact AC3 parent classes");
+    assert.equal(reviewSources.length, 2, "exact AC3 review-source classes");
+    assert.equal(parentClasses.reduce((count, [, preconditions]) => count + preconditions.length * reviewSources.length, 0), expectedRows);
+    let assertedRows = 0;
+
+    for (const [parentClass, terminalPreconditions] of parentClasses) {
+      for (const terminalPrecondition of terminalPreconditions) {
+        for (const reviewSource of reviewSources) {
+          const fixture = createFixture({ publishReport: false });
+          try {
+            const run = readRun(fixture);
+            Object.assign(run.slices.find((slice) => slice.id === "consumer"), { status: "blocked", attempts: 0, blocked_reason: "prior terminal stop" });
+            applyAc3ParentClass(run, fixture, parentClass, terminalPrecondition);
+            validateRun(run);
+            writeJson(join(fixture.runDir, "run.json"), run);
+            if (reviewSource === "stale") writeFileSync(join(fixture.runDir, "reviews", "work-decomposer.json"), "{\"subject\":\"work-decomposer\",\"attempt\":1,\"verdict\":\"APPROVE\",\"required_fixes\":[]}\n");
+            const beforeFiles = snapshotRuntimeFiles(fixture.runDir);
+            const beforeRefs = git(fixture.repo, ["for-each-ref", "--format=%(refname) %(objectname)"]);
+            const beforeWorktrees = git(fixture.repo, ["worktree", "list", "--porcelain"]);
+            let spawns = 0;
+            const expected = ac3ExpectedError(parentClass, terminalPrecondition, reviewSource);
+
+            assert.throws(
+              () => observeIntegrationAmendmentExecutionAuthority(fixture.runDir, run, "report", reportRequest(), { repoRoot: fixture.repo }),
+              (error) => error?.message === expected,
+              `${parentClass}/${terminalPrecondition}/${reviewSource}: observer`,
+            );
+            await assert.rejects(
+              executeIntegrationAmendment(fixture.runDir, reportRequest(), { spawnFn() { spawns += 1; throw new Error("unexpected spawn"); } }),
+              (error) => error?.message === expected,
+              `${parentClass}/${terminalPrecondition}/${reviewSource}: executor`,
+            );
+            assert.equal(spawns, 0, `${parentClass}/${terminalPrecondition}/${reviewSource}: spawn count`);
+            assert.deepEqual(snapshotRuntimeFiles(fixture.runDir), beforeFiles, `${parentClass}/${terminalPrecondition}/${reviewSource}: durable files`);
+            assert.equal(git(fixture.repo, ["for-each-ref", "--format=%(refname) %(objectname)"]), beforeRefs, `${parentClass}/${terminalPrecondition}/${reviewSource}: refs`);
+            assert.equal(git(fixture.repo, ["worktree", "list", "--porcelain"]), beforeWorktrees, `${parentClass}/${terminalPrecondition}/${reviewSource}: worktrees`);
+            assertedRows += 1;
+          } finally { cleanup(fixture); }
+        }
+      }
     }
+    assert.equal(assertedRows, expectedRows, "every AC3 matrix row was executed and asserted");
   });
 
   it("terminalizes an ordinary rejected repair only through checked carry-forward authority", async () => {
@@ -571,3 +599,68 @@ describe("generic integration amendment lifecycle and execution", () => {
   });
 
 });
+
+function applyAc3ParentClass(run, fixture, parentClass, terminalPrecondition) {
+  const manifestHash = sha("current checkpoint routing manifest");
+  const manifestRef = `artifacts/checkpoint-routing-${manifestHash.slice("sha256:".length)}.json`;
+  if (parentClass === "checkpoint-child") {
+    run.base_ref = "refs/remotes/origin/main";
+    run.base_commit = fixture.base;
+    run.checkpoint_source = {
+      schema_version: 1,
+      kind: "delivery-checkpoint-source",
+      parent_run_id: "checkpoint-parent",
+      manifest_ref: manifestRef,
+      manifest_hash: manifestHash,
+      checkpoint_id: "checkpoint-001",
+      checkpoint_ordinal: 1,
+      root_child_run_id: run.run_id,
+      source_plan_ref: "plan/slices.json",
+      source_plan_hash: run.steps[0].acceptance.artifact_hash,
+      source_review_ref: "reviews/work-decomposer.json",
+      source_review_hash: run.steps[0].acceptance.review_hash,
+      source_review_attempt: run.steps[0].attempts,
+      parent_review_identity_hash: sha("current parent review identity"),
+      child_disposition_hash: run.steps[0].acceptance.review_hash,
+      admission_probe_hash: sha("current admission probe"),
+      brief_scope_hash: sha("current brief scope"),
+      child_plan_hash: run.steps[0].acceptance.artifact_hash,
+      acceptance_mapping_hash: sha("current acceptance mapping"),
+      initial_base_ref: "refs/remotes/origin/main",
+      initial_base_commit: fixture.base,
+    };
+  }
+  if (parentClass === "checkpoint-router") {
+    run.checkpoint_progress = {
+      schema_version: 1,
+      kind: "delivery-checkpoint-progress",
+      manifest_ref: manifestRef,
+      manifest_hash: manifestHash,
+      status: "active",
+      entries: [],
+      final_closure: null,
+    };
+    run.status = "blocked";
+    run.pr_url = null;
+    run.terminal_result = {
+      status: "blocked",
+      run_id: run.run_id,
+      pr_url: null,
+      reason: "oversized-plan-checkpoint-routing-required",
+      summary: "Resume checkpoint publication.",
+      artifacts: { checkpoint_routing: manifestRef },
+    };
+    return;
+  }
+  if (terminalPrecondition === "terminal") {
+    run.status = "blocked";
+    run.terminal_result = { status: "blocked", run_id: run.run_id, pr_url: null, reason: "repair rejected", summary: "Continue elsewhere.", artifacts: {} };
+  }
+}
+
+function ac3ExpectedError(parentClass, terminalPrecondition, reviewSource) {
+  if (parentClass !== "ordinary") return "integration-amendment-continuation-unsupported";
+  if (terminalPrecondition === "terminal") return "integration amendment requires a running run";
+  if (reviewSource === "stale") return "accepted work-decomposer review bytes changed after acceptance";
+  return "integration-amendment-consumer-not-pristine-pending";
+}
