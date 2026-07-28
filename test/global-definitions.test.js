@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { continueFactory, resumeFactory, startFactory, startFactoryCheckpoint } from "../src/factory.js";
 import { assertGlobalDefinitionsCurrent, inspectGlobalDefinitions } from "../src/global-definitions.js";
 import { spawnSync } from "./helpers/git-fixture.js";
+import { withTestRuntimeAdmission } from "./helpers/runtime-admission.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = join(ROOT, "src", "cli.js");
@@ -363,11 +364,11 @@ describe("global feature-factory definition inspection", () => {
     const env = cleanEnv(home, { OPENCODE_CONFIG_DIR: configDir, FEATURE_FACTORY_TEST_ENV: "inherited-exactly" });
     let launchedEnv;
     try {
-      await startFactory(["build feature"], {
+      await startFactory(["build feature"], withTestRuntimeAdmission({
         cwd: repo,
         env,
         foregroundLaunchFn: async (_repo, _args, options) => { launchedEnv = options.env; },
-      });
+      }));
       assert.equal(launchedEnv.HOME, home);
       assert.equal(launchedEnv.OPENCODE_CONFIG_DIR, configDir);
       assert.equal(launchedEnv.FEATURE_FACTORY_TEST_ENV, "inherited-exactly");
