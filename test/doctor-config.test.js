@@ -20,6 +20,13 @@ import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const LOCAL_PLUGIN_SPEC = pathToFileURL(fileURLToPath(new URL("..", import.meta.url))).href;
+const FRAGMENTED_SECRET_VARIANTS = [
+  ["mixed", "Q7M4-Z9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["uneven-1", "Q7-M4Z9N_2C8.V5B1X6:L3K 0P7R2-T9Y4_U8I5"],
+  ["uneven-2", "Q-7M4_Z9N2C.8V5:B1X6L 3K0-P7R2T_9Y4U8-I5"],
+  ["control-1", "Q7M4\u001bZ9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["control-2", "Q7M4-Z9N2\u202eC8V5.B1X6:L3K0\tP7R2-T9Y4_U8I5"],
+];
 
 describe("doctor package.json parsing", () => {
   it("returns true when package.json has a TUI export", () => {
@@ -132,11 +139,9 @@ describe("doctor output projection", () => {
     }
   });
 
-  it("keeps separator-fragmented high-entropy CLI credentials out of human and JSON output", () => {
-    const secret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
-    for (const separator of ["-", "_", ".", ":", " "]) {
+  it("keeps mixed, uneven, and control-interrupted identity credentials out of human and JSON output", () => {
+    for (const [name, fragmented] of FRAGMENTED_SECRET_VARIANTS) {
       const fixture = doctorFixture();
-      const fragmented = secret.match(/.{1,4}/gu).join(separator);
       const packageRoot = join(fixture.dir, `home ${fragmented}`, "node_modules", "opencode-feature-factory");
       const effectiveCli = join(packageRoot, "feature-factory");
       const bin = join(fixture.dir, "identity-bin");
@@ -149,21 +154,26 @@ describe("doctor output projection", () => {
         }), "utf8");
         writeExecutable(effectiveCli, "#!/bin/sh\nexit 0\n");
         symlinkSync(effectiveCli, join(bin, "feature-factory"));
-        const env = { PATH: `${bin}${delimiter}${fixture.bin}${delimiter}${process.env.PATH}` };
+        const env = {
+          PATH: `${bin}${delimiter}${fixture.bin}${delimiter}${process.env.PATH}`,
+          FAKE_OPENCODE_VERSION: `opencode ${fragmented}`,
+        };
 
         const human = runDoctorFixture(fixture, [], env);
         const json = runDoctorFixture(fixture, ["--json"], env);
         const payload = JSON.parse(json.stdout);
         for (const output of [human.stdout, human.stderr, json.stdout, json.stderr]) {
-          assert.equal(output.includes(fragmented), false, JSON.stringify(separator));
+          assert.equal(output.includes(fragmented), false, name);
         }
         assert.match(human.stdout, /feature-factory CLI identity \(\[redacted\]\)/u);
+        assert.match(human.stdout, /opencode CLI \(\[redacted\]\)/u);
         assert.deepEqual(payload.env.cli_identity, {
           source: REDACTED_ENV_VALUE,
           version: REDACTED_ENV_VALUE,
           hash: payload.env.cli_identity.hash,
-        }, JSON.stringify(separator));
+        }, name);
         assert.match(payload.env.cli_identity.hash, /^sha256:[0-9a-f]{64}$/u);
+        assert.equal(payload.env.opencode_version, REDACTED_ENV_VALUE, name);
       } finally {
         cleanup(fixture.dir);
       }

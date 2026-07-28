@@ -16,7 +16,7 @@ import { checkWorktreeIdentity } from "./worktrees.js";
 import { effectiveCheckedExecutionTimeoutMs, MAX_CHECKED_EXECUTION_TIMEOUT_MS, MIN_CHECKED_EXECUTION_TIMEOUT_MS } from "./checked-execution-timeout.js";
 import { privilegedControlPlanePathReason } from "./privileged-path-policy.js";
 import { verificationArtifactExecutionClaimRef } from "./verification-artifact-refs.js";
-import { RUNTIME_IDENTITY_SOURCE_MAX, RUNTIME_IDENTITY_VERSION_MAX, isRuntimeIdentityTextSafe, normalizeCliIdentity } from "./runtime-identity.js";
+import { RUNTIME_IDENTITY_SOURCE_MAX, RUNTIME_IDENTITY_VERSION_MAX, isRuntimeIdentityTextSafe, normalizeCliIdentity, normalizeRuntimeIdentityVersion } from "./runtime-identity.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -2900,6 +2900,9 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
     if (key === "cli_identity") continue;
     const valuePath = `${path}.env.${key}`;
     if (isSensitiveEnvKey(key) && value !== REDACTED_ENV_VALUE) errors.push({ path: valuePath, message: "is not allowed in debug snapshot" });
+    if (key === "opencode_version" && typeof value === "string" && normalizeRuntimeIdentityVersion(value) !== value) {
+      errors.push({ path: valuePath, message: "must be redacted in debug snapshot" });
+    }
     validateRedactedEnv(errors, value, valuePath);
   }
 }

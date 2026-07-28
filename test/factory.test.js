@@ -34,6 +34,13 @@ import { createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+const FRAGMENTED_SECRET_VARIANTS = [
+  ["mixed", "Q7M4-Z9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["uneven-1", "Q7-M4Z9N_2C8.V5B1X6:L3K 0P7R2-T9Y4_U8I5"],
+  ["uneven-2", "Q-7M4_Z9N2C.8V5:B1X6L 3K0-P7R2T_9Y4U8-I5"],
+  ["control-1", "Q7M4\u001bZ9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["control-2", "Q7M4-Z9N2\u202eC8V5.B1X6:L3K0\tP7R2-T9Y4_U8I5"],
+];
 
 describe("factory public state operations", { concurrency: false }, () => {
   it("lists and reads runs without authority proofs", () => {
@@ -393,12 +400,10 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
-  it("keeps separator-fragmented high-entropy CLI credentials out of persisted run snapshots", async () => {
-    const secret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+  it("keeps mixed, uneven, and control-interrupted identity credentials out of persisted factory env", async () => {
     const hash = `sha256:${"c".repeat(64)}`;
-    for (const [index, separator] of ["-", "_", ".", ":", " "].entries()) {
+    for (const [index, [name, fragmented]] of FRAGMENTED_SECRET_VARIANTS.entries()) {
       const fixture = createFixture(`env-redaction-run-${index}`);
-      const fragmented = secret.match(/.{1,4}/gu).join(separator);
       try {
         await persistFactoryRunCreatedEnv(fixture.runId, {
           cwd: fixture.repo,
@@ -408,6 +413,11 @@ describe("factory public state operations", { concurrency: false }, () => {
               version: `feature-factory 1.2.3 ${fragmented}`,
               hash,
             },
+            opencode: {
+              source: "/tmp/opencode",
+              version: `opencode ${fragmented}`,
+              hash: `sha256:${"d".repeat(64)}`,
+            },
           },
         });
         const run = readJson(join(fixture.runDir, "run.json"));
@@ -416,8 +426,9 @@ describe("factory public state operations", { concurrency: false }, () => {
           source: "[redacted]",
           version: "[redacted]",
           hash,
-        }, JSON.stringify(separator));
-        assert.equal(JSON.stringify(run).includes(fragmented), false, JSON.stringify(separator));
+        }, name);
+        assert.equal(run.debug_snapshot.created_with.env.opencode_version, "[redacted]", name);
+        assert.equal(JSON.stringify(run).includes(fragmented), false, name);
       } finally {
         cleanup(fixture.repo);
       }

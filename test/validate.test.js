@@ -14,6 +14,13 @@ import { hashValue } from "../src/refs.js";
 import { MAX_SLICE_DEPENDENCY_WAVES, ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
+const FRAGMENTED_SECRET_VARIANTS = [
+  ["mixed", "Q7M4-Z9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["uneven-1", "Q7-M4Z9N_2C8.V5B1X6:L3K 0P7R2-T9Y4_U8I5"],
+  ["uneven-2", "Q-7M4_Z9N2C.8V5:B1X6L 3K0-P7R2T_9Y4U8-I5"],
+  ["control-1", "Q7M4\u001bZ9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["control-2", "Q7M4-Z9N2\u202eC8V5.B1X6:L3K0\tP7R2-T9Y4_U8I5"],
+];
 const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
   "USD\u001b]0;pwned\u0007",
   "USD\u001b[2J",
@@ -361,21 +368,25 @@ describe("run schema and consistency", () => {
     }
   });
 
-  it("rejects unsanitized separator-fragmented high-entropy debug snapshot CLI identity", () => {
-    const secret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+  it("rejects unsanitized mixed, uneven, and control-interrupted debug snapshot identity", () => {
     const valid = { source: "/usr/local/bin/feature-factory", version: "0.2.1", hash: HASH };
-    for (const separator of ["-", "_", ".", ":", " "]) {
-      const fragmented = secret.match(/.{1,4}/gu).join(separator);
+    for (const [name, fragmented] of FRAGMENTED_SECRET_VARIANTS) {
+      const persisted = fragmented.replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, "?");
       for (const identity of [
-        { ...valid, source: `/tmp/home ${fragmented}/feature-factory` },
-        { ...valid, version: `feature-factory 1.2.3 ${fragmented}` },
+        { ...valid, source: `/tmp/home ${persisted}/feature-factory` },
+        { ...valid, version: `feature-factory 1.2.3 ${persisted}` },
       ]) {
         assert.throws(
           () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { cli_identity: identity } }) }),
           (error) => error instanceof ValidationError && error.message.includes("must be redacted in debug snapshot"),
-          JSON.stringify(separator),
+          name,
         );
       }
+      assert.throws(
+        () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { opencode_version: `opencode ${persisted}` } }) }),
+        (error) => error instanceof ValidationError && error.message.includes("must be redacted in debug snapshot"),
+        name,
+      );
     }
   });
 

@@ -10,6 +10,13 @@ import { normalizeRuntimeIdentity, resolveRuntimeIdentity } from "../src/runtime
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = join(ROOT, "src", "cli.js");
+const FRAGMENTED_SECRET_VARIANTS = [
+  ["mixed", "Q7M4-Z9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["uneven-1", "Q7-M4Z9N_2C8.V5B1X6:L3K 0P7R2-T9Y4_U8I5"],
+  ["uneven-2", "Q-7M4_Z9N2C.8V5:B1X6L 3K0-P7R2T_9Y4U8-I5"],
+  ["control-1", "Q7M4\u001bZ9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["control-2", "Q7M4-Z9N2\u202eC8V5.B1X6:L3K0\tP7R2-T9Y4_U8I5"],
+];
 
 describe("runtime identity observation", () => {
   it("reports exact plugin, package CLI, effective CLI, and OpenCode identities", () => {
@@ -153,20 +160,24 @@ describe("runtime identity observation", () => {
     assert.equal(JSON.stringify(identity).includes("ignored\":true"), false);
   });
 
-  it("redacts separator-fragmented high-entropy identity credentials", () => {
-    const secret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
-    for (const separator of ["-", "_", ".", ":", " "]) {
-      const fragmented = secret.match(/.{1,4}/gu).join(separator);
+  it("redacts mixed, uneven, and control-interrupted high-entropy identity credentials", () => {
+    for (const [name, fragmented] of FRAGMENTED_SECRET_VARIANTS) {
       const identity = normalizeRuntimeIdentity({
         cli: {
           source: `/tmp/home ${fragmented}/feature-factory`,
           version: `feature-factory 1.2.3 ${fragmented}`,
           hash: `sha256:${"b".repeat(64)}`,
         },
+        opencode: {
+          source: "/tmp/opencode",
+          version: `opencode ${fragmented}`,
+          hash: `sha256:${"d".repeat(64)}`,
+        },
       });
 
-      assert.deepEqual(identity.cli, { source: "[redacted]", version: "[redacted]", hash: `sha256:${"b".repeat(64)}` }, JSON.stringify(separator));
-      assert.equal(JSON.stringify(identity).includes(fragmented), false, JSON.stringify(separator));
+      assert.deepEqual(identity.cli, { source: "[redacted]", version: "[redacted]", hash: `sha256:${"b".repeat(64)}` }, name);
+      assert.deepEqual(identity.opencode, { source: "/tmp/opencode", version: "[redacted]", hash: `sha256:${"d".repeat(64)}` }, name);
+      assert.equal(JSON.stringify(identity).includes(fragmented), false, name);
     }
   });
 
@@ -178,6 +189,12 @@ describe("runtime identity observation", () => {
     };
 
     assert.deepEqual(normalizeRuntimeIdentity({ cli }).cli, cli);
+
+    const segmentedSource = {
+      ...cli,
+      source: "/tmp/Q7M4/Z9N2/C8V5/B1X6/L3K0/P7R2/T9Y4/U8I5/feature-factory",
+    };
+    assert.deepEqual(normalizeRuntimeIdentity({ cli: segmentedSource }).cli, segmentedSource);
   });
 });
 

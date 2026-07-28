@@ -11,10 +11,8 @@ const DEFAULT_UNIX_EXECUTABLE_PATH = "/usr/bin:/bin";
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const UNSAFE_TERMINAL_TEXT = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 const UNSAFE_TERMINAL_TEXT_GLOBAL = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
-const SEPARATOR_FRAGMENT_RUN_PATTERNS = Object.freeze([
-  /[A-Za-z0-9]+(?:[^\p{L}\p{N}\s/\\]+[A-Za-z0-9]+)+/gu,
-  /[A-Za-z0-9]+(?:\s+[A-Za-z0-9]+)+/gu,
-]);
+// Short fragments are an obfuscation shape; longer release words delimit runs.
+const SEPARATOR_FRAGMENT_RUN_PATTERN = /(?<![A-Za-z0-9])[A-Za-z0-9]{1,6}(?:[\s\p{P}\p{S}]+[A-Za-z0-9]{1,6})+(?![A-Za-z0-9])/gu;
 export const RUNTIME_IDENTITY_SOURCE_MAX = 4096;
 export const RUNTIME_IDENTITY_VERSION_MAX = 512;
 
@@ -44,7 +42,11 @@ export function normalizeCliIdentity(value = {}) {
   const source = normalizeIdentityText(value?.source, RUNTIME_IDENTITY_SOURCE_MAX, { pathSegments: true });
   const hash = HASH_PATTERN.test(value?.hash ?? "") ? value.hash : null;
   if (source === null || hash === null) return { source: null, version: null, hash: null };
-  return { source, version: normalizeIdentityText(value?.version, RUNTIME_IDENTITY_VERSION_MAX, { trim: true }), hash };
+  return { source, version: normalizeRuntimeIdentityVersion(value?.version), hash };
+}
+
+export function normalizeRuntimeIdentityVersion(value) {
+  return normalizeIdentityText(value, RUNTIME_IDENTITY_VERSION_MAX, { trim: true });
 }
 
 export function formatCliIdentity(value) {
@@ -182,16 +184,9 @@ function containsSensitiveDelimitedToken(value) {
 }
 
 function containsSensitiveSeparatorComposite(value) {
-  for (const pattern of SEPARATOR_FRAGMENT_RUN_PATTERNS) {
-    for (const match of value.matchAll(pattern)) {
-      const fragments = match[0].split(/[^A-Za-z0-9]+/u);
-      for (let start = 0; start < fragments.length;) {
-        let end = start + 1;
-        while (end < fragments.length && fragments[end].length === fragments[start].length) end += 1;
-        if (end - start > 1 && isSensitiveValue(fragments.slice(start, end).join(""))) return true;
-        start = end;
-      }
-    }
+  for (const match of value.matchAll(SEPARATOR_FRAGMENT_RUN_PATTERN)) {
+    const reconstructed = match[0].split(/[\s\p{P}\p{S}]+/u).join("");
+    if (isSensitiveValue(reconstructed)) return true;
   }
   return false;
 }

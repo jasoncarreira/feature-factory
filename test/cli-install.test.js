@@ -9,6 +9,13 @@ import { pathToFileURL } from "node:url";
 
 const repo = resolve(new URL("..", import.meta.url).pathname);
 const cli = join(repo, "src", "cli.js");
+const FRAGMENTED_SECRET_VARIANTS = [
+  ["mixed", "Q7M4-Z9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["uneven-1", "Q7-M4Z9N_2C8.V5B1X6:L3K 0P7R2-T9Y4_U8I5"],
+  ["uneven-2", "Q-7M4_Z9N2C.8V5:B1X6L 3K0-P7R2T_9Y4U8-I5"],
+  ["control-1", "Q7M4\u001bZ9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["control-2", "Q7M4-Z9N2\u202eC8V5.B1X6:L3K0\tP7R2-T9Y4_U8I5"],
+];
 
 describe("feature-factory install", () => {
   it("configures the plugin without warning when no global feature skill exists", () => {
@@ -145,11 +152,9 @@ describe("feature-factory install", () => {
     }
   });
 
-  it("redacts separator-fragmented high-entropy CLI credentials from install output", () => {
-    const secret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
-    for (const separator of ["-", "_", ".", ":", " "]) {
+  it("redacts mixed, uneven, and control-interrupted high-entropy CLI credentials from install output", () => {
+    for (const [name, fragmented] of FRAGMENTED_SECRET_VARIANTS) {
       const home = tempHome();
-      const fragmented = secret.match(/.{1,4}/gu).join(separator);
       const packageRoot = join(home, `home ${fragmented}`);
       const effectiveCli = join(packageRoot, "feature-factory");
       const bin = join(home, "bin");
@@ -170,8 +175,8 @@ describe("feature-factory install", () => {
           source: "[redacted]",
           version: "[redacted]",
           hash: hashFile(effectiveCli),
-        }, JSON.stringify(separator));
-        assert.equal(`${proc.stdout}${proc.stderr}`.includes(fragmented), false, JSON.stringify(separator));
+        }, name);
+        assert.equal(`${proc.stdout}${proc.stderr}`.includes(fragmented), false, name);
       } finally {
         cleanup(home);
       }

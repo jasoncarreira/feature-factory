@@ -15,6 +15,14 @@ import {
   scrubSecretEnv,
 } from "../src/env-snapshot.js";
 
+const FRAGMENTED_SECRET_VARIANTS = [
+  ["mixed", "Q7M4-Z9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["uneven-1", "Q7-M4Z9N_2C8.V5B1X6:L3K 0P7R2-T9Y4_U8I5"],
+  ["uneven-2", "Q-7M4_Z9N2C.8V5:B1X6L 3K0-P7R2T_9Y4U8-I5"],
+  ["control-1", "Q7M4\u001bZ9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["control-2", "Q7M4-Z9N2\u202eC8V5.B1X6:L3K0\tP7R2-T9Y4_U8I5"],
+];
+
 describe("environment snapshot redaction", () => {
   it("builds a fresh exact-account GitHub environment without inherited auth tokens", () => {
     const parent = {
@@ -138,11 +146,9 @@ describe("environment snapshot redaction", () => {
     assert.equal(snapshot.provenance, undefined);
   });
 
-  it("keeps separator-fragmented high-entropy CLI credentials out of run snapshots", async () => {
-    const secret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+  it("keeps mixed, uneven, and control-interrupted identity credentials out of run snapshots", async () => {
     const hash = `sha256:${"b".repeat(64)}`;
-    for (const separator of ["-", "_", ".", ":", " "]) {
-      const fragmented = secret.match(/.{1,4}/gu).join(separator);
+    for (const [name, fragmented] of FRAGMENTED_SECRET_VARIANTS) {
       const snapshot = await collectRunDebugSnapshot({
         cwd: process.cwd(),
         runtimeIdentity: {
@@ -151,11 +157,17 @@ describe("environment snapshot redaction", () => {
             version: `feature-factory 1.2.3 ${fragmented}`,
             hash,
           },
+          opencode: {
+            source: "/tmp/opencode",
+            version: `opencode ${fragmented}`,
+            hash: `sha256:${"d".repeat(64)}`,
+          },
         },
       });
 
-      assert.deepEqual(snapshot.env.cli_identity, { source: REDACTED_ENV_VALUE, version: REDACTED_ENV_VALUE, hash }, JSON.stringify(separator));
-      assert.equal(JSON.stringify(snapshot).includes(fragmented), false, JSON.stringify(separator));
+      assert.deepEqual(snapshot.env.cli_identity, { source: REDACTED_ENV_VALUE, version: REDACTED_ENV_VALUE, hash }, name);
+      assert.equal(snapshot.env.opencode_version, REDACTED_ENV_VALUE, name);
+      assert.equal(JSON.stringify(snapshot).includes(fragmented), false, name);
     }
   });
 
