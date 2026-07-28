@@ -26,7 +26,7 @@ describe("checked verification artifact execution", () => {
       for (const directory of ["plan", "reviews", "evidence"]) mkdirSync(join(runDir, directory), { recursive: true });
       const plan = {
         slices: [{ id: "slice", stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["node --version"] }],
-        integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+        integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }], timeout_ms: 600_000 },
         delivery_envelope: {
           schema_version: 1,
           delivery_units: [{
@@ -196,6 +196,7 @@ describe("checked verification artifact execution", () => {
           head_sha: authority.head_sha,
           verification_artifact_id: authority.verification_artifact_id,
           probe: authority.probe,
+          timeout_ms: authority.timeout_ms,
           receipt_ref: authority.receipt_ref,
           claimed_at: "2026-07-19T11:59:59.000Z",
           completed_at: receipt.completed_at,
@@ -352,11 +353,11 @@ function createArtifactFixture(runId, { sliceId = "slice" } = {}) {
   for (const directory of ["plan", "reviews", "evidence"]) mkdirSync(join(runDir, directory), { recursive: true });
   const plan = {
     slices: [{ id: sliceId, stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["node --version"] }],
-    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }], timeout_ms: 600_000 },
     delivery_envelope: { schema_version: 1, delivery_units: [{
       id: "slice-unit", slice_id: sliceId, invariant_families: [{ id: "slice-family", description: "Slice behavior" }],
       obligations: [{ id: "slice-obligation", description: "Verify behavior", invariant_family_id: "slice-family", verification_artifact_id: "slice-tests" }],
-      verification_artifacts: [{ id: "slice-tests", test_plan_index: 0, test_plan_entry: "node --version" }],
+      verification_artifacts: [{ id: "slice-tests", test_plan_index: 0, test_plan_entry: "node --version", timeout_ms: 420_000 }],
     }] },
   };
   writeJson(join(runDir, "plan", "slices.json"), plan);
@@ -375,7 +376,7 @@ function createArtifactFixture(runId, { sliceId = "slice" } = {}) {
 function artifactAuthority(fixture) {
   return {
     run_id: fixture.runId, slice_id: "slice", attempt: 1, plan_ref: "plan/slices.json", plan_hash: fixture.planHash,
-    head_sha: fixture.head, verification_artifact_id: "slice-tests",
+    head_sha: fixture.head, timeout_ms: 420_000, verification_artifact_id: "slice-tests",
     probe: { type: "verification-artifact", verification_artifact_id: "slice-tests", test_plan_index: 0, test_plan_entry: "node --version", program: "node", args: ["--version"] },
     worktree: fixture.repo, receipt_ref: verificationArtifactExecutionReceiptRef("slice", "slice-tests", 1),
   };
@@ -387,7 +388,7 @@ function artifactReceipt(authority, nonce) {
     schema_version: 1, kind: "checked-verification-artifact-execution-receipt", subject: authority.slice_id,
     run_id: authority.run_id, slice_id: authority.slice_id, attempt: authority.attempt, claim_nonce: nonce,
     plan_ref: authority.plan_ref, plan_hash: authority.plan_hash, head_sha: authority.head_sha,
-    verification_artifact_id: authority.verification_artifact_id, probe: authority.probe,
+    verification_artifact_id: authority.verification_artifact_id, probe: authority.probe, timeout_ms: authority.timeout_ms,
     started_at: "2026-07-19T12:00:00.000Z", completed_at: "2026-07-19T12:00:00.001Z", duration_ms: 1,
     status: "pass", review_ready: true,
     commands: [{ index: 0, program: "node", args: ["--version"], outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 1, stdout: stream, stderr: stream }],
