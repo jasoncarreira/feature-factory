@@ -5,9 +5,44 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { resumeFactory, startFactory } from "../src/factory.js";
-import { FEATURE_FACTORY_AGENT_FILES, SANCTIONED_GLOBAL_FEATURE_SKILL, inspectGlobalDefinitions } from "../src/global-definitions.js";
+import { inspectGlobalDefinitions } from "../src/global-definitions.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const FEATURE_FACTORY_AGENT_FILES = Object.freeze([
+  "backend-builder.md",
+  "codebase-researcher.md",
+  "design-interpreter.md",
+  "frontend-builder.md",
+  "implementation-validator.md",
+  "security-reviewer.md",
+  "spec-writer.md",
+  "story-reader.md",
+  "story-writer.md",
+  "test-verifier.md",
+  "work-decomposer.md",
+  "work-reviewer.md",
+]);
+
+// Issue #103 sanctions only this exact global delegation bootstrap alongside the packaged skill.
+const SANCTIONED_GLOBAL_FEATURE_SKILL = `---
+name: feature
+description: Use when the user invokes /feature or asks to take a feature, Jira ticket, work item, or product idea end-to-end with the opencode feature-factory workflow. Delegates to the repo-seeded current workflow under .opencode/skills/feature.
+---
+
+# Feature Factory Delegator
+
+This global skill is intentionally a small bootstrapper. The current feature-factory workflow is seeded into the target repository before \`feature-factory factory start\` launches \`opencode run\`.
+
+Before creating, resuming, validating, or mutating any factory run state:
+
+1. Read the target repository file \`.opencode/skills/feature/SKILL.md\`.
+2. Read \`.opencode/skills/feature/SCHEMA.md\` if the workflow references schema or state shape details.
+3. Follow those repo-local files as the authoritative instructions for this run.
+
+If \`.opencode/skills/feature/SKILL.md\` is missing, stop and report that the feature-factory skill was not seeded into the target repository. Do not fall back to inventing a run-state shape.
+
+Do not use older global instructions, old \`version\` manifests, \`status: intake\`, or object-shaped \`steps\`. Use only the repo-local workflow and schema.
+`;
 
 describe("global feature-factory definition inspection", () => {
   it("treats absent definitions as healthy", () => {
@@ -16,6 +51,33 @@ describe("global feature-factory definition inspection", () => {
       assert.equal(result.ok, true);
       assert.equal(result.status, "healthy");
       assert.equal(result.definitions.every((item) => item.status === "absent"), true);
+    });
+  });
+
+  it("inspects the exact closed-world global definition inventory", () => {
+    withHome((home) => {
+      const expected = [
+        ["skill", ".config", "opencode", "skills", "feature", "SKILL.md"],
+        ["skill", ".config", "opencode", "skill", "feature", "SKILL.md"],
+        ["skill", ".claude", "skills", "feature", "SKILL.md"],
+        ["skill", ".agents", "skills", "feature", "SKILL.md"],
+        ...["agent", "agents"].flatMap((directory) => FEATURE_FACTORY_AGENT_FILES.map((name) => [
+          "agent",
+          ".config",
+          "opencode",
+          directory,
+          name,
+        ])),
+        ["agent", ".config", "opencode", "agent", "feature-factory.md"],
+        ["agent", ".config", "opencode", "agents", "feature-factory.md"],
+      ].map(([kind, ...segments]) => ({ kind, path: join(home, ...segments) }));
+
+      const result = inspectGlobalDefinitions({ home });
+      assert.deepEqual(
+        result.definitions.map(({ kind, path }) => ({ kind, path })),
+        expected,
+      );
+      assert.equal(new Set(result.definitions.map(({ path }) => path)).size, 30);
     });
   });
 
@@ -33,6 +95,19 @@ describe("global feature-factory definition inspection", () => {
     }
   });
 
+  it("rejects a one-byte mutation of the sanctioned feature skill", () => {
+    withHome((home) => {
+      const path = join(home, ".config", "opencode", "skills", "feature", "SKILL.md");
+      const contents = Buffer.from(SANCTIONED_GLOBAL_FEATURE_SKILL);
+      contents[contents.length - 1] ^= 1;
+      write(path, contents);
+
+      const result = inspectGlobalDefinitions({ home });
+      assert.equal(result.ok, false);
+      assert.deepEqual(result.findings, [{ kind: "skill", path, status: "mismatch" }]);
+    });
+  });
+
   it("rejects a stale feature skill", () => {
     withHome((home) => {
       const path = join(home, ".agents", "skills", "feature", "SKILL.md");
@@ -43,18 +118,30 @@ describe("global feature-factory definition inspection", () => {
     });
   });
 
-  it("accepts exact agents and rejects stale recognized agent files in either global directory", () => {
+  it("accepts exact and rejects stale bytes for every asset agent", () => {
     withHome((home) => {
-      const exactName = FEATURE_FACTORY_AGENT_FILES[0];
-      const staleName = FEATURE_FACTORY_AGENT_FILES.at(-1);
-      const exact = join(home, ".config", "opencode", "agent", exactName);
-      const stale = join(home, ".config", "opencode", "agents", staleName);
-      write(exact, readFileSync(join(ROOT, "assets", "agent", exactName)));
-      write(stale, "old agent prompt\n");
+      const exactPaths = FEATURE_FACTORY_AGENT_FILES.map((name) => {
+        const path = join(home, ".config", "opencode", "agent", name);
+        write(path, readFileSync(join(ROOT, "assets", "agent", name)));
+        return path;
+      });
+      const stalePaths = FEATURE_FACTORY_AGENT_FILES.map((name) => {
+        const path = join(home, ".config", "opencode", "agents", name);
+        const contents = readFileSync(join(ROOT, "assets", "agent", name));
+        contents[contents.length - 1] ^= 1;
+        write(path, contents);
+        return path;
+      });
 
       const result = inspectGlobalDefinitions({ home });
-      assert.equal(result.definitions.find((item) => item.path === exact)?.status, "exact");
-      assert.deepEqual(result.findings, [{ kind: "agent", path: stale, status: "mismatch" }]);
+      assert.deepEqual(
+        result.definitions.filter((item) => exactPaths.includes(item.path)).map(({ path, status }) => ({ path, status })),
+        exactPaths.map((path) => ({ path, status: "exact" })),
+      );
+      assert.deepEqual(
+        result.definitions.filter((item) => stalePaths.includes(item.path)).map(({ path, status }) => ({ path, status })),
+        stalePaths.map((path) => ({ path, status: "mismatch" })),
+      );
     });
   });
 
