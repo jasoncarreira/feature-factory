@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   collectTelemetryReadiness,
@@ -170,6 +170,31 @@ describe("doctor output projection", () => {
       cleanup(fixture.dir);
     }
   });
+
+  for (const definition of [
+    ["skill", "skills", "feature", "SKILL.md"],
+    ["agent", "agents", "backend-builder.md"],
+  ]) {
+    it(`diagnoses a stale XDG ${definition[0]} without publishing raw paths`, () => {
+      const fixture = doctorFixture();
+      const xdg = join(fixture.dir, "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "xdg");
+      const stale = join(xdg, "opencode", ...definition.slice(1));
+      try {
+        mkdirSync(dirname(stale), { recursive: true });
+        writeFileSync(stale, `stale ${definition[0]}\n`, "utf8");
+        const proc = runDoctorFixture(fixture, ["--json"], { XDG_CONFIG_HOME: xdg });
+        const payload = JSON.parse(proc.stdout);
+        const check = payload.checks.find((item) => item.label === "global feature-factory definitions");
+        assert.equal(proc.status, 1);
+        assert.equal(check.level, "missing");
+        assert.match(check.detail, /stale global feature-factory definitions detected/u);
+        assert.doesNotMatch(proc.stdout, /QWxhZGRpb/u);
+        assert.doesNotMatch(proc.stdout, new RegExp(escapeRegExp(stale), "u"));
+      } finally {
+        cleanup(fixture.dir);
+      }
+    });
+  }
 
   it("diagnoses unsupported inline config overrides without crashing or exposing content", () => {
     const fixture = doctorFixture();

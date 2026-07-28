@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { FACTORY_LAUNCH_CLAIM_ENV, consumeSteering, factoryLaunchEnv, persistFactoryRunResumeEnv, resumeFactory as resumeFactoryImpl, startFactory as startFactoryImpl, transitionGateDecisionAndHandoff as transitionGateDecisionAndHandoffImpl, writeSteering } from "../src/factory.js";
 import { acquireLaunchClaim, recordDetachedProcessEvidence, transitionLaunchClaimPhase, writeProcessEvidence } from "../src/process-evidence.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
@@ -107,6 +107,31 @@ describe("factory resume", () => {
       cleanup(fixture.repo);
     }
   });
+
+  for (const definition of [
+    ["skill", "skills", "feature", "SKILL.md"],
+    ["agent", "agents", "backend-builder.md"],
+  ]) {
+    it(`blocks accepted-gate handoff for a stale XDG ${definition[0]} before detached launch`, async () => {
+      const fixture = await createApprovedHandoffFixture(`handoff-stale-xdg-${definition[0]}`);
+      const xdg = join(fixture.repo, "xdg");
+      let launches = 0;
+      try {
+        writeFile(join(xdg, "opencode", ...definition.slice(1)), `stale ${definition[0]}\n`);
+        await assert.rejects(
+          transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, {
+            cwd: fixture.repo,
+            env: { ...process.env, XDG_CONFIG_HOME: xdg },
+            detachedLaunchFn: async () => { launches += 1; },
+          }),
+          (error) => error?.code === "ERR_STALE_GLOBAL_DEFINITIONS" && !error.message.includes(xdg),
+        );
+        assert.equal(launches, 0);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+  }
 
   const ownershipRows = [
     { name: "interactive foreground resume", durableMode: "interactive", driverMode: "interactive", invoke: (f, o) => resumeFactory(f.runId, o), payloadKind: "resume" },
@@ -848,6 +873,11 @@ function readJson(file) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function writeFile(file, contents) {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, contents, "utf8");
 }
 
 function cleanup(repo) {

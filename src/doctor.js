@@ -43,7 +43,7 @@ export async function runDoctor(options = {}) {
   const env = await collectEnv({ cwd: options.cwd, pluginSpec, pluginOptions });
   const providers = providerAuthState();
   const checks = [];
-  const globalDefinitions = inspectGlobalDefinitions();
+  const globalDefinitions = inspectGlobalDefinitions({ env: process.env, cwd: options.cwd || process.cwd() });
 
   add(checks, "HOME", Boolean(process.env.HOME), process.env.HOME || "unset");
   add(checks, "opencode config", existsSync(configPath), configPath);

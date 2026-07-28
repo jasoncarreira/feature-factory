@@ -151,7 +151,7 @@ function install(args) {
   console.log(`updated: ${renderCliPath(configPath)}`);
   console.log(renderCliIdentity(resolveRuntimeIdentity().cli));
   console.log("restart opencode for plugin changes to take effect");
-  const definitions = inspectGlobalDefinitions({ home });
+  const definitions = inspectGlobalDefinitions({ home, env: process.env, cwd: process.cwd() });
   warnGlobalFeatureSkillConflicts(definitions.findings.filter((item) => item.kind === "skill").map((item) => item.path));
   warnGlobalAgentConflicts(definitions.findings.filter((item) => item.kind === "agent").map((item) => item.path));
   warnUnsupportedOpenCodeConfigOverrides(definitions.findings.filter((item) => item.kind === "override").map((item) => item.source));

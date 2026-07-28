@@ -175,8 +175,8 @@ export async function startFactory(args, opts = {}) {
 
 async function startFactoryImplementation(args, opts = {}, telemetry) {
   if (!args.length) throw new Error("factory start requires a feature prompt");
-  assertLaunchDefinitionsCurrent(opts);
   const repo = repoRoot(opts.cwd || process.cwd());
+  assertLaunchDefinitionsCurrent({ ...opts, cwd: repo });
   telemetry.repo = repo;
   const resumeRunId = resumePromptRunId(args, opts);
   if (resumeRunId) assertPostPrCliOptions(opts, { command: "factory start resume", resume: true });
@@ -241,8 +241,8 @@ async function startFactoryImplementation(args, opts = {}, telemetry) {
 }
 
 export async function startFactoryCheckpoint(parentRunId, checkpointId, opts = {}) {
-  assertLaunchDefinitionsCurrent(opts);
   const repo = repoRoot(opts.cwd || process.cwd());
+  assertLaunchDefinitionsCurrent({ ...opts, cwd: repo });
   const childRunId = normalizeRequestedStartRunId(opts.runId);
   if (!childRunId) throw new Error("factory checkpoint-start requires --run-id <child-run-id>");
   if (!stringValue(parentRunId) || !stringValue(checkpointId)) throw new Error("factory checkpoint-start requires parent run and checkpoint ids");
@@ -1661,8 +1661,8 @@ export function continueFactory(parentRunId, opts = {}) {
 }
 
 function continueFactoryImplementation(parentRunId, opts = {}, telemetry) {
-  assertLaunchDefinitionsCurrent(opts);
   const repo = repoRoot(opts.cwd || process.cwd());
+  assertLaunchDefinitionsCurrent({ ...opts, cwd: repo });
   telemetry.repo = repo;
   const allocationReplay = !opts.dryRun;
   const { continuation, carryForwardConfig } = buildContinuationCandidate(parentRunId, { ...opts, cwd: repo, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
@@ -1718,9 +1718,9 @@ export async function resumeFactory(runId, opts = {}) {
 }
 
 async function resumeFactoryImplementation(runId, opts = {}, telemetry) {
-  assertLaunchDefinitionsCurrent(opts);
   assertPostPrCliOptions(opts, { command: "factory resume", resume: true });
   const repo = repoRoot(opts.cwd || process.cwd());
+  assertLaunchDefinitionsCurrent({ ...opts, cwd: repo });
   telemetry.repo = repo;
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
   const beforeRecovery = readRunFile(join(runDir, "run.json"));
@@ -2047,7 +2047,7 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
   let eligibility;
   try { eligibility = resumeEligibility(runDir, run, { ...opts, repoRoot: opts.repo || factoryRepoFromRunDir(runDir), ignoreLaunchOwnership: true }); } catch { return handoffEnvelope(runId, gateName, "resume-ineligible"); }
   if (!eligibility.eligible) return handoffEnvelope(runId, gateName, "resume-ineligible");
-  assertLaunchDefinitionsCurrent(opts);
+  assertLaunchDefinitionsCurrent({ ...opts, cwd: opts.repo || factoryRepoFromRunDir(runDir) });
 
   const claimFunctions = launchClaimFunctions(opts);
   let claim;

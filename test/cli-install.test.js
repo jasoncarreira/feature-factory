@@ -159,6 +159,26 @@ describe("feature-factory install", () => {
     }
   });
 
+  for (const definition of [
+    { name: "skill", segments: ["skills", "feature", "SKILL.md"], warning: /existing global feature skill/u },
+    { name: "agent", segments: ["agents", "codebase-researcher.md"], warning: /existing global feature-factory agent definitions/u },
+  ]) {
+    it(`warns for a stale ${definition.name} under XDG_CONFIG_HOME`, () => {
+      const home = tempHome();
+      const xdg = join(home, "xdg");
+      const stale = join(xdg, "opencode", ...definition.segments);
+      try {
+        writeFile(stale, `stale ${definition.name}\n`);
+        const proc = runInstall(home, { XDG_CONFIG_HOME: xdg });
+        assert.equal(proc.status, 0, proc.stderr);
+        assert.match(proc.stderr, definition.warning);
+        assert.match(proc.stderr, new RegExp(escapeRegExp(stale), "u"));
+      } finally {
+        cleanup(home);
+      }
+    });
+  }
+
   it("diagnoses unsupported OpenCode config overrides without exposing their values", () => {
     const home = tempHome();
     const secret = "github_pat_123456789012345678901234567890";

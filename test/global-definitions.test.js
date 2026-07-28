@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
-import { resumeFactory, startFactory } from "../src/factory.js";
+import { continueFactory, resumeFactory, startFactory, startFactoryCheckpoint } from "../src/factory.js";
 import { assertGlobalDefinitionsCurrent, inspectGlobalDefinitions } from "../src/global-definitions.js";
 import { spawnSync } from "./helpers/git-fixture.js";
 
@@ -86,9 +86,27 @@ describe("global feature-factory definition inspection", () => {
 
   it("deduplicates HOME and effective config-dir definitions while preserving the 30-path oracle", () => {
     withHome((home) => {
-      const result = inspect(home, { OPENCODE_CONFIG_DIR: join(home, ".config", "opencode") });
+      const result = inspect(home, {
+        XDG_CONFIG_HOME: join(home, ".config"),
+        OPENCODE_CONFIG_DIR: join(home, ".config", "opencode"),
+      });
       assert.equal(result.definitions.length, 30);
       assert.equal(new Set(result.definitions.map(({ path }) => path)).size, 30);
+    });
+  });
+
+  it("inspects stale skill and agent definitions under the effective XDG root", () => {
+    withHome((home) => {
+      const xdg = join(home, "xdg");
+      const skill = join(xdg, "opencode", "skills", "feature", "SKILL.md");
+      const agent = join(xdg, "opencode", "agents", FEATURE_FACTORY_AGENT_FILES[0]);
+      write(skill, "stale skill\n");
+      write(agent, "stale agent\n");
+
+      const result = inspect(home, { XDG_CONFIG_HOME: xdg });
+      assert.equal(result.definitions.length, 58);
+      assert.equal(result.findings.some((item) => item.path === skill && item.status === "mismatch"), true);
+      assert.equal(result.findings.some((item) => item.path === agent && item.status === "mismatch"), true);
     });
   });
 
@@ -274,6 +292,70 @@ describe("global feature-factory definition inspection", () => {
     }
   });
 
+  for (const definition of [
+    { name: "skill", segments: ["skills", "feature", "SKILL.md"] },
+    { name: "agent", segments: ["agents", FEATURE_FACTORY_AGENT_FILES[0]] },
+  ]) {
+    it(`blocks stale XDG ${definition.name} across every factory launch route`, async () => {
+      const home = mkdtempSync(join(tmpdir(), "feature-factory-xdg-launch-home-"));
+      const repo = mkdtempSync(join(tmpdir(), "feature-factory-xdg-launch-repo-"));
+      const xdg = join(home, "effective-xdg");
+      let launches = 0;
+      try {
+        write(join(xdg, "opencode", ...definition.segments), "stale\n");
+        const base = {
+          cwd: repo,
+          env: cleanEnv(home, { XDG_CONFIG_HOME: xdg }),
+          foregroundLaunchFn: async () => { launches += 1; },
+          detachedLaunchFn: async () => { launches += 1; },
+        };
+        const routes = [
+          ["start foreground", () => startFactory(["build feature"], base)],
+          ["start detached", () => startFactory(["build feature"], { ...base, detached: true, headless: true, runId: "xdg-start" })],
+          ["resume foreground", () => resumeFactory("missing-run", base)],
+          ["resume detached", () => resumeFactory("missing-run", { ...base, detached: true, headless: true })],
+          ["continue foreground", () => continueFactory("missing-parent", base)],
+          ["continue detached", () => continueFactory("missing-parent", { ...base, detached: true, headless: true })],
+          ["checkpoint foreground", () => startFactoryCheckpoint("missing-parent", "checkpoint-001", { ...base, runId: "xdg-checkpoint" })],
+          ["checkpoint detached", () => startFactoryCheckpoint("missing-parent", "checkpoint-001", { ...base, runId: "xdg-checkpoint", detached: true, headless: true })],
+        ];
+        for (const [name, invoke] of routes) {
+          await assert.rejects(
+            async () => invoke(),
+            (error) => error?.code === "ERR_STALE_GLOBAL_DEFINITIONS" && !error.message.includes(xdg),
+            name,
+          );
+        }
+        assert.equal(launches, 0);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+        rmSync(repo, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("resolves relative OPENCODE_CONFIG_DIR from the child repository root", async () => {
+    const home = mkdtempSync(join(tmpdir(), "feature-factory-relative-config-home-"));
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-relative-config-repo-"));
+    const nested = join(repo, "nested", "caller");
+    let launches = 0;
+    try {
+      mkdirSync(nested, { recursive: true });
+      const initialized = spawnSync("git", ["init"], { cwd: repo, encoding: "utf8" });
+      assert.equal(initialized.status, 0, initialized.stderr);
+      write(join(repo, "relative-config", "agent", FEATURE_FACTORY_AGENT_FILES[0]), "stale\n");
+      await assert.rejects(startFactory(["build feature"], {
+        cwd: nested,
+        env: cleanEnv(home, { OPENCODE_CONFIG_DIR: "relative-config" }),
+        foregroundLaunchFn: async () => { launches += 1; },
+      }), (error) => error?.code === "ERR_STALE_GLOBAL_DEFINITIONS");
+      assert.equal(launches, 0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("passes the same inspected OpenCode environment to a healthy child launch", async () => {
     const home = mkdtempSync(join(tmpdir(), "feature-factory-launch-env-home-"));
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-launch-env-repo-"));
@@ -313,6 +395,36 @@ describe("global feature-factory definition inspection", () => {
       assert.notEqual(proc.status, 0);
       assert.match(proc.stderr, /stale global feature-factory definitions detected/u);
       assert.doesNotMatch(proc.stderr, new RegExp(escapeRegExp(stale), "u"));
+    });
+  });
+
+  for (const definition of [
+    { name: "skill", segments: ["skills", "feature", "SKILL.md"] },
+    { name: "agent", segments: ["agent", FEATURE_FACTORY_AGENT_FILES[0]] },
+  ]) {
+    it(`rejects direct plugin registration under a stale XDG ${definition.name}`, () => {
+      withHome((home) => {
+        const xdg = join(home, "xdg");
+        write(join(xdg, "opencode", ...definition.segments), "stale\n");
+        const proc = runPlugin(home, { XDG_CONFIG_HOME: xdg });
+        assert.notEqual(proc.status, 0);
+        assert.match(proc.stderr, /stale global feature-factory definitions detected/u);
+        assert.doesNotMatch(proc.stderr, new RegExp(escapeRegExp(xdg), "u"));
+      });
+    });
+  }
+
+  it("resolves direct plugin relative OPENCODE_CONFIG_DIR from pluginInput.directory", () => {
+    withHome((home) => {
+      const repo = join(home, "repo");
+      const caller = join(home, "caller");
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(caller, { recursive: true });
+      write(join(repo, "relative-config", "agents", FEATURE_FACTORY_AGENT_FILES[0]), "stale\n");
+      const proc = runPlugin(home, { OPENCODE_CONFIG_DIR: "relative-config" }, {}, { directory: repo }, caller);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /stale global feature-factory definitions detected/u);
+      assert.doesNotMatch(proc.stderr, new RegExp(escapeRegExp(repo), "u"));
     });
   });
 
@@ -393,21 +505,22 @@ function inspect(home, extraEnv = {}) {
 
 function cleanEnv(home, extra = {}) {
   const env = { ...process.env, HOME: home, ...extra };
-  for (const name of ["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR"]) {
+  for (const name of ["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME"]) {
     if (!Object.hasOwn(extra, name)) delete env[name];
   }
   return env;
 }
 
-function runPlugin(home, extraEnv = {}, options = {}) {
+function runPlugin(home, extraEnv = {}, options = {}, pluginInput = {}, cwd) {
   const script = `
     import plugin from ${JSON.stringify(PLUGIN_URL)};
-    const hooks = await plugin({}, ${JSON.stringify(options)});
+    const hooks = await plugin(${JSON.stringify(pluginInput)}, ${JSON.stringify(options)});
     const cfg = {};
     hooks.config(cfg);
     console.log(JSON.stringify({ command: Boolean(cfg.command?.feature), primary: Boolean(cfg.agent?.["feature-factory"]), subagents: Object.keys(cfg.agent || {}).length - 1 }));
   `;
   return spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd,
     encoding: "utf8",
     env: cleanEnv(home, extraEnv),
   });

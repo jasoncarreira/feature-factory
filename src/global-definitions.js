@@ -83,8 +83,31 @@ export function inspectGlobalDefinitions(options = {}) {
       expected: [],
     }))),
   ];
+  const xdgConfigHome = stringValue(env?.XDG_CONFIG_HOME)
+    ? resolve(cwd, env.XDG_CONFIG_HOME)
+    : join(home, ".config");
+  const xdgCandidates = openCodeConfigCandidates(join(xdgConfigHome, "opencode"), packagedSkill, sanctionedSkill, packagedAgents);
   const configDir = stringValue(env?.OPENCODE_CONFIG_DIR) ? resolve(cwd, env.OPENCODE_CONFIG_DIR) : null;
-  const configCandidates = configDir ? [
+  const configCandidates = configDir ? openCodeConfigCandidates(configDir, packagedSkill, sanctionedSkill, packagedAgents) : [];
+  const definitions = deduplicateCandidates([...homeCandidates, ...xdgCandidates, ...configCandidates])
+    .map((candidate) => inspectCandidate(candidate.root, candidate));
+  const overrideFindings = UNSUPPORTED_CONFIG_OVERRIDES
+    .filter((source) => stringValue(env?.[source]))
+    .map((source) => ({ kind: "override", source, path: env[source], status: "unsupported" }));
+  const findings = deduplicateFindings([
+    ...definitions.filter((item) => !["absent", "exact"].includes(item.status)),
+    ...overrideFindings,
+  ]);
+  return {
+    ok: findings.length === 0,
+    status: findings.length === 0 ? "healthy" : "stale",
+    definitions,
+    findings,
+  };
+}
+
+function openCodeConfigCandidates(configDir, packagedSkill, sanctionedSkill, packagedAgents) {
+  return [
     ...[["skills", "feature", "SKILL.md"], ["skill", "feature", "SKILL.md"]].map((segments) => ({
       kind: "skill",
       root: dirname(configDir),
@@ -103,22 +126,7 @@ export function inspectGlobalDefinitions(options = {}) {
       path: join(configDir, ...segments, name),
       expected: [],
     }))),
-  ] : [];
-  const definitions = deduplicateCandidates([...homeCandidates, ...configCandidates])
-    .map((candidate) => inspectCandidate(candidate.root, candidate));
-  const overrideFindings = UNSUPPORTED_CONFIG_OVERRIDES
-    .filter((source) => stringValue(env?.[source]))
-    .map((source) => ({ kind: "override", source, path: env[source], status: "unsupported" }));
-  const findings = deduplicateFindings([
-    ...definitions.filter((item) => !["absent", "exact"].includes(item.status)),
-    ...overrideFindings,
-  ]);
-  return {
-    ok: findings.length === 0,
-    status: findings.length === 0 ? "healthy" : "stale",
-    definitions,
-    findings,
-  };
+  ];
 }
 
 export function assertGlobalDefinitionsCurrent(options = {}) {
