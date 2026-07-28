@@ -50,7 +50,7 @@ After every child row is merged, only `factory test-execute <run-id> --json` may
 
 ## V2 eligibility and integration proof
 
-V2 carry-forward is eligible only for a valid parent whose status is exactly `blocked` before PR creation. The parent has no PR URL or PR-created tuple and no active post-PR observation, remediation, revalidation, push, or continuation state. It must also have `planning_reuse.eligible === true` from durably accepted unchanged planning and no `draft_spec_reuse`. A parent with a PR, active post-PR state, a non-`blocked` status, no nonmerged slice, draft/unaccepted planning, or ambiguous state is ineligible and rejects before effects.
+V2 carry-forward is eligible only for a valid parent whose status is exactly `blocked` before PR creation. The parent has no PR URL or PR-created tuple and no active post-PR observation, remediation, revalidation, push, or continuation state. It must also have `planning_reuse.eligible === true` from durably accepted unchanged planning. A parent with a PR, active post-PR state, a non-`blocked` status, no nonmerged slice, draft/unaccepted planning, or ambiguous state is ineligible and rejects before effects.
 
 Each accepted row must match the same-ID parent slice with positive `attempts`, status exactly `merged`, the complete B0MR successor tuple, and unchanged exact evidence/review bytes. Actual integration merge order may differ from PLAN and dependency-execution order. The Git first-parent range from `target.base_commit` exclusive through `start_commit` inclusive must contain exactly once the set of `accepted_slices[].merge_commit` values and no extra commit; its chain length equals `accepted_slices.length`. Every first-parent commit is associated by its `merge_commit` value with exactly one accepted entry and is revalidated with that entry's B0MR proof: exactly two ordered parents `P1, reviewed_commit`, a unique full `git merge-base --all`, equal NUL-delimited rename-disabled changed-path sets, and per-path absence or mode/type/object identity. `start_commit` is the parent branch HEAD and the last actual merge in that first-parent range, or equals `target.base_commit` when `accepted_slices` is empty. This does not require `accepted_slices` order to equal first-parent chain order: for PLAN-ordered `accepted_slices: [A, C]`, an actual first-parent chain `[C, A]` is valid when both mapped merges pass B0MR. Missing, duplicate, squash, linear, manual, or unrecorded commits fail closed.
 
@@ -576,7 +576,7 @@ retained only in the immutable claim/closure binding. Each row has a concrete ta
 record-specific nonempty exclusion for all twelve families: missing key, unknown key,
 wrong schema, kind, time, type, ref, hash, bytes, descriptor key-shape drift, stale
 identity, and cross-bound identity. All 48 generic rows are current, bringing the
-complete durable catalog to exactly 188 variants and 187 production-covered variants while retaining
+complete durable catalog to exactly 185 variants and 184 production-covered variants while retaining
 `final-plan-descriptor` as the sole future-only row.
 
 ### Canonical machine-readable integration-amendment contract

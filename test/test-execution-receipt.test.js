@@ -35,21 +35,17 @@ const LATER = "2026-07-17T12:00:01.000Z";
 const CLI_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 
 describe("checked test execution receipt", () => {
-  it("evaluates every DMC1 dimension across all 26 real route-and-sink enforcement seams", () => {
+  it("evaluates every current route and route-and-sink enforcement seam", () => {
     const routeState = { continuation: "absent", checkpoint_source: "absent", checkpoint_progress: "absent", conflict: "absent", slice_projection: "all-merged" };
     const routeCases = [
-      ["ordinary", {}, "ordinary-fresh-v1", "SINK04"],
-      ["schema-v1 continuation", { continuation: "v1" }, "legacy-unselected", "SINK05"],
+      ["ordinary", {}, "ordinary-fresh", "SINK04"],
       ["schema-v2 continuation", { continuation: "v2" }, "schema-v2", "SINK01"],
-      ["checkpoint source", { checkpoint_source: "present" }, "legacy-unselected", "SINK06"],
-      ["checkpoint progress", { checkpoint_progress: "present" }, "legacy-unselected", "SINK07"],
+      ["schema-v2 checkpoint child", { continuation: "v2", checkpoint_source: "present" }, "schema-v2", "SINK01"],
       ["delegated conflict", { conflict: "present" }, "delegated-conflict", "SINK02"],
       ["combined", { continuation: "v2", conflict: "present" }, "schema-v2+delegated-conflict", "SINK03"],
-      ["empty projection", { slice_projection: "empty" }, "legacy-unselected", "SINK08"],
-      ["incomplete projection", { slice_projection: "incomplete" }, "legacy-unselected", "SINK08"],
     ];
     for (const [label, overrides, route, selectedSink] of routeCases) {
-      for (let index = 1; index <= 8; index += 1) {
+      for (let index = 1; index <= 4; index += 1) {
         const sink = `SINK${String(index).padStart(2, "0")}`;
         const selected = sink === selectedSink;
         assert.deepEqual(
@@ -58,6 +54,16 @@ describe("checked test execution receipt", () => {
           `${label} ${sink}`,
         );
       }
+    }
+    for (const [label, overrides, match] of [
+      ["old continuation", { continuation: "v1" }, /continuation state is invalid/u],
+      ["checkpoint source misuse", { checkpoint_source: "present" }, /checkpoint child authority requires/u],
+      ["checkpoint router misuse", { checkpoint_progress: "present" }, /checkpoint router authority/u],
+      ["empty projection", { slice_projection: "empty" }, /complete merged slice projection/u],
+      ["incomplete projection", { slice_projection: "incomplete" }, /complete merged slice projection/u],
+    ]) assert.throws(() => evaluateWholeStoryRouteSink({ ...routeState, ...overrides, sink: "SINK04" }), match, label);
+    for (const sink of ["SINK05", "SINK06", "SINK07", "SINK08"]) {
+      assert.throws(() => evaluateWholeStoryRouteSink({ ...routeState, sink }), /whole-story sink is invalid/u, sink);
     }
 
     const passing = { ...routeState, claim: "absent", evidence: "absent", base: "equal", head: "equal", review: "fresh", pr_mode: "ready" };
@@ -83,32 +89,32 @@ describe("checked test execution receipt", () => {
     ];
     assert.equal(sinkRows.length, 18);
     for (const [sink, overrides, allowed, reason] of sinkRows) {
-      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, ...overrides, sink }), { route: "ordinary-fresh-v1", sink, allowed, reason }, sink);
+      assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, ...overrides, sink }), { route: "ordinary-fresh", sink, allowed, reason }, sink);
     }
 
     for (const claim of ["absent", "active", "unknown", "completed-pass", "completed-fail"]) {
       assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK12", claim }), {
-        route: "ordinary-fresh-v1", sink: "SINK12", allowed: claim === "active", reason: claim === "active" ? "allowed" : "active-claim-required",
+        route: "ordinary-fresh", sink: "SINK12", allowed: claim === "active", reason: claim === "active" ? "allowed" : "active-claim-required",
       }, `claim ${claim}`);
     }
     for (const evidence of ["absent", "exact-pass", "exact-fail", "legacy", "stale"]) {
       assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK14", claim: "completed-pass", evidence }), {
-        route: "ordinary-fresh-v1", sink: "SINK14", allowed: evidence === "exact-pass", reason: evidence === "exact-pass" ? "allowed" : "checked-evidence-required",
+        route: "ordinary-fresh", sink: "SINK14", allowed: evidence === "exact-pass", reason: evidence === "exact-pass" ? "allowed" : "checked-evidence-required",
       }, `evidence ${evidence}`);
     }
     for (const base of ["equal", "ancestor", "non-ancestor", "unavailable", "moving", "cleanup-failed"]) {
       assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK18", base }), {
-        route: "ordinary-fresh-v1", sink: "SINK18", allowed: ["equal", "ancestor"].includes(base), reason: ["equal", "ancestor"].includes(base) ? "allowed" : `base-${base}`,
+        route: "ordinary-fresh", sink: "SINK18", allowed: ["equal", "ancestor"].includes(base), reason: ["equal", "ancestor"].includes(base) ? "allowed" : `base-${base}`,
       }, `base ${base}`);
     }
     for (const head of ["equal", "dirty", "mismatch", "missing"]) {
       assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK09", head }), {
-        route: "ordinary-fresh-v1", sink: "SINK09", allowed: head === "equal", reason: head === "equal" ? "allowed" : `head-${head}`,
+        route: "ordinary-fresh", sink: "SINK09", allowed: head === "equal", reason: head === "equal" ? "allowed" : `head-${head}`,
       }, `head ${head}`);
     }
     for (const review of ["fresh", "stale", "absent"]) {
       assert.deepEqual(evaluateWholeStoryRouteSink({ ...passing, sink: "SINK22", review }), {
-        route: "ordinary-fresh-v1", sink: "SINK22", allowed: review === "fresh", reason: review === "fresh" ? "allowed" : `review-${review}`,
+        route: "ordinary-fresh", sink: "SINK22", allowed: review === "fresh", reason: review === "fresh" ? "allowed" : `review-${review}`,
       }, `review ${review}`);
     }
   });
@@ -117,28 +123,30 @@ describe("checked test execution receipt", () => {
     const fixture = createExecutionFixture("checked-ordinary-fresh", undefined, { ordinary: true, testStatus: "blocked", testAttempts: 0 });
     try {
       const initial = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, initial), "ordinary-fresh-v1");
-      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, continuation: { schema_version: 1 } }), "legacy-unselected");
-      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, checkpoint_source: {} }), "legacy-unselected");
-      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, checkpoint_progress: {} }), "legacy-unselected");
-      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, { ...initial, slices: initial.slices.map((slice) => ({ ...slice, status: "review" })) }), "legacy-unselected");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, initial), "ordinary-fresh");
+      assert.throws(() => classifyWholeStoryTestRoute(fixture.runDir, { ...initial, continuation: { schema_version: 1 } }), /current schema-v2 continuation authority/u);
+      assert.throws(() => classifyWholeStoryTestRoute(fixture.runDir, { ...initial, checkpoint_source: {} }), /checkpoint child authority requires/u);
+      assert.throws(() => classifyWholeStoryTestRoute(fixture.runDir, { ...initial, checkpoint_progress: {} }), /checkpoint router authority/u);
+      assert.throws(() => classifyWholeStoryTestRoute(fixture.runDir, { ...initial, slices: initial.slices.map((slice) => ({ ...slice, status: "review" })) }), /complete merged slice projection/u);
       assert.throws(
         () => classifyWholeStoryTestRoute(fixture.runDir, { ...initial, run_id: "different-run" }),
         /canonical factory run directory/u,
       );
-      assert.equal(
-        classifyWholeStoryTestRoute(fixture.runDir, { ...initial, steps: initial.steps.filter((step) => step.agent !== "work-decomposer") }),
-        "legacy-unselected",
+      assert.throws(
+        () => classifyWholeStoryTestRoute(fixture.runDir, { ...initial, steps: initial.steps.filter((step) => step.agent !== "work-decomposer") }),
+        /exact accepted work-decomposer authority/u,
       );
       writeJson(join(fixture.runDir, "run.json"), { ...initial, slices: [] });
+      const beforeIncomplete = readFileSync(join(fixture.runDir, "run.json"));
       await assert.rejects(transitionPanelVerdicts(fixture.runDir, {
         validator: { verdict: "GO", report: "artifacts/missing.md", review_ref: "reviews/implementation-validator.json" },
         security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
-      }), /all child slices merged before panel publication: <unseeded>/u);
+      }), /complete merged slice projection/u);
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), beforeIncomplete);
       writeJson(join(fixture.runDir, "run.json"), initial);
       const started = await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }, { mustExist: true });
       assert.equal(started.step.status, "running");
-      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, started.run), "ordinary-fresh-v1");
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, started.run), "ordinary-fresh");
 
       for (const status of ["rejected", "blocked", "running"]) {
         await assert.rejects(

@@ -16,7 +16,7 @@ const EXPECTED_MODEL = Object.freeze({
     [CODES.runInvalid]: ["malformed"],
   }),
   continuation_checkpoint: rules(["absent"], {
-    [CODES.ineligible]: ["continuation-v1", "continuation-v2", "checkpoint-child", "checkpoint-parent"],
+    [CODES.ineligible]: ["continuation-v2", "checkpoint-child", "checkpoint-parent"],
     [CODES.runInvalid]: ["contradictory", "malformed"],
   }),
   steering_queue: rules(["empty"], { [CODES.ineligible]: ["pending", "uncheckpointed"], [CODES.runInvalid]: ["malformed"] }),

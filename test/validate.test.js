@@ -662,12 +662,6 @@ describe("run schema and consistency", () => {
       /inherited_acceptance.*allowed only for the spec-writer step/u,
     );
 
-    const ineligible = structuredClone(valid);
-    ineligible.continuation.planning_reuse = { eligible: false, reason: "parent planning was not accepted" };
-    assert.throws(
-      () => validateRun(ineligible),
-      /inherited_acceptance.*requires reuse-eligible continuation metadata/u,
-    );
   });
 
   it("closes persisted gate, snapshot, receipt, step, acceptance, and continuation nested shapes", () => {

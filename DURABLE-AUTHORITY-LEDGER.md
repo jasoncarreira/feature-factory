@@ -40,7 +40,7 @@ boundary; they are not cryptographic authentication.
 | 4 | Steps and acceptance inheritance | Authority class 4 |
 | 5 | Slices and review/evidence bindings | Authority class 5 |
 | 6 | Validator, security, and PR-created result | Authority class 6 |
-| 7 | Continuation and planning/draft reuse | Authority class 7 |
+| 7 | Schema-v2 full-plan continuation | Authority class 7 |
 | 8 | Post-PR nested records | Authority class 8 |
 | 9 | Generic integration amendment | Authority class 9 |
 
@@ -190,7 +190,7 @@ closed-unconsumed observations fence semantic work; only exact review consumptio
 converts closed-unconsumed to immutable consumed provenance. Orphan/cross-bound
 observations reject, and callback replay verifies existing bytes without overwrite.
 All 48 rows are active production catalog entries. Together with the remaining
-catalog they produce exactly 188 total variants and 187 production-covered
+catalog they produce exactly 185 total variants and 184 production-covered
 variants; `final-plan-descriptor` remains the sole future-only row.
 
 The existing durable slice variants now include optional immutable

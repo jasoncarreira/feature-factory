@@ -1,7 +1,7 @@
 import { basename, resolve } from "node:path";
 import { validateRun } from "./validate.js";
 import { normalizePostPrCiDriverOverride } from "./config.js";
-import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, assertPublishedCarryForwardRunById, inspectContinuationRouteSchema } from "./run-state.js";
+import { assertContinuationReservationAuthority, assertOrdinaryResumeRunById, assertPublishedCarryForwardRun, assertPublishedCarryForwardRunById } from "./run-state.js";
 
 const PREFIX = "ffpayload-v1:";
 const DRIVER_MODES = new Set(["interactive", "headless", "autonomous"]);
@@ -9,7 +9,7 @@ const DRIVER_KEYS = new Set(["mode", "ready", "pr_mode", "reviewer", "github_acc
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "configuration", "carry_forward", "checkpoint_source_hash", "configuration_hash"]);
-const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
+const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
 const CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "plan_ref", "plan_hash", "review_ref", "review_hash"]);
 const CONTINUATION_CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
@@ -106,14 +106,6 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
   if (hasResume && hasContinuation) return { ok: false, reason: "ambiguous-route" };
   if (driver.run_id !== undefined && driver.run_id !== null && (hasResume || hasContinuation)) return { ok: false, reason: "invalid-driver-run-id-route" };
   if (hasContinuation && payload.continuation?.schema_version !== 2) return { ok: false, reason: "invalid-continuation-schema" };
-  if (hasContinuation && plainObject(payload.continuation?.target) && safeRunId(payload.continuation.target.run_id) && Number.isInteger(payload.continuation.schema_version)) {
-    const mismatch = inspectRouteSchema(options.repo, payload.continuation.target.run_id, payload.continuation.schema_version, { route: "continuation" });
-    if (mismatch) return mismatch;
-  }
-  if (hasResume && plainObject(payload.resume) && safeRunId(payload.resume.run_id) && Number.isInteger(payload.resume.schema_version)) {
-    const mismatch = inspectRouteSchema(options.repo, payload.resume.run_id, payload.resume.schema_version, { route: "resume", ordinaryResumeSchema: 1, postPrPolicy: payload.resume.post_pr_policy });
-    if (mismatch) return mismatch;
-  }
   if (hasResume && payload.resume?.schema_version !== 2 && postPrCi !== null) return { ok: false, reason: "resume-post-pr-policy-override" };
 
   let continuation = null;
@@ -175,19 +167,15 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
     } catch {
       return { ok: false, reason: "unpublished-or-mismatched-carry-forward-resume" };
     }
+  } else if (normalized.resume) {
+    try {
+      assertOrdinaryResumeRunById(options.repo, normalized.resume.run_id);
+    } catch (error) {
+      return { ok: false, reason: error?.code === "integration-amendment-continuation-unsupported" ? error.code : "resume-schema-route-mismatch" };
+    }
   }
 
   return { ok: true, payload: normalized };
-}
-
-function inspectRouteSchema(repo, runId, schemaVersion, options) {
-  try {
-    inspectContinuationRouteSchema(repo, runId, schemaVersion, options);
-    return null;
-  } catch (error) {
-    if (["continuation-schema-route-mismatch", "resume-schema-route-mismatch", "resume-policy-route-mismatch"].includes(error?.code)) return { ok: false, reason: error.code };
-    return { ok: false, reason: options.route === "resume" ? "resume-schema-route-mismatch" : "continuation-schema-route-mismatch" };
-  }
 }
 
 export function safePayloadValue(value) {
@@ -260,7 +248,7 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
   if (planningReuse !== undefined) {
     const checkpointVariant = Object.hasOwn(continuation, "checkpoint_source_hash") && planningReuse?.eligible === true;
     const allowedPlanningKeys = checkpointVariant ? CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS : CONTINUATION_PLANNING_REUSE_KEYS;
-    if (!plainObject(planningReuse) || !hasOnlyKeys(planningReuse, allowedPlanningKeys) || typeof planningReuse.eligible !== "boolean") {
+    if (!plainObject(planningReuse) || !hasOnlyKeys(planningReuse, allowedPlanningKeys) || planningReuse.eligible !== true) {
       return { ok: false, reason: "invalid-continuation-planning-reuse" };
     }
     if (checkpointVariant
@@ -468,9 +456,6 @@ function validAcceptedAttemptHistory(row) {
 }
 
 function normalizedPlanningReuse(planningReuse) {
-  if (!planningReuse.eligible) {
-    return { eligible: false, ...(nonEmptyString(planningReuse.reason) ? { reason: planningReuse.reason } : {}) };
-  }
   if (Object.hasOwn(planningReuse, "plan_ref")) {
     return {
       eligible: true,

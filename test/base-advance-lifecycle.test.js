@@ -119,35 +119,23 @@ describe("active-run base advancement lifecycle compatibility", () => {
       assert.equal(launches, 1);
       assert.deepEqual(fixture.readRun().post_pr, postPr);
 
-      mkdirSync(join(fixture.runDir, "artifacts"), { recursive: true });
-      mkdirSync(join(fixture.runDir, "gates"), { recursive: true });
-      writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "premature review\n");
-      writeFileSync(join(fixture.runDir, "gates", "pre_pr.question.md"), "approve prematurely?\n");
-      await transitionGateDecision(fixture.runDir, "pre_pr", {
-        status: "pending", artifact: "artifacts/validation-report.md", question_ref: "gates/pre_pr.question.md",
-      });
-      const earlyBoundary = await transitionSteeringBoundaryOpened(fixture.runDir, "gate");
-      await transitionGateDecision(fixture.runDir, "pre_pr", {
-        status: "approved", artifact: "artifacts/validation-report.md", question_ref: "gates/pre_pr.question.md", answer: "approve",
-      }, { boundaryToken: earlyBoundary.boundary.token });
-
       const candidate = installApprovedLifecycleSlice(fixture);
       await assert.rejects(
         publishIndependentPanels(fixture, candidate.integrationHead),
-        /ordinary fresh downstream authority requires all child slices merged before panel publication/u,
+        /complete merged slice projection/u,
       );
       const merged = await transitionSliceMerged(fixture.runDir, candidate.sliceId, { merge_commit: candidate.integrationHead }, { repoRoot: fixture.repo });
       assert.equal(merged.slice.status, "merged");
       assert.equal(merged.slice.merge_commit, candidate.integrationHead);
-      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, merged.run), "ordinary-fresh-v1");
-      await assert.rejects(transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }), /test-verifier|panel|validator|security/u);
+      assert.equal(classifyWholeStoryTestRoute(fixture.runDir, merged.run), "ordinary-fresh");
+      await assert.rejects(transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }), /pre_pr gate|test-verifier|panel|validator|security/u);
 
       const checked = await completeFinalCheckedTest(fixture, candidate.integrationHead);
       assert.equal(checked.completed.status, "pass");
       assert.equal(checked.claimed.authority.head_sha, candidate.integrationHead);
       assert.deepEqual(checked.receipt.commands.map(({ program, args }) => [program, args]), [["npm", ["run", "check"]]]);
       assert.equal(checked.accepted.run.steps.find((step) => step.agent === "test-verifier").status, "accepted");
-      await assert.rejects(transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }), /panel|validator|security/u);
+      await assert.rejects(transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }), /pre_pr gate|panel|validator|security/u);
 
       const panels = await publishIndependentPanels(fixture, candidate.integrationHead);
       assert.deepEqual(
@@ -156,7 +144,7 @@ describe("active-run base advancement lifecycle compatibility", () => {
       );
       await assert.rejects(
         transitionPrePrFenceEstablished(fixture.runDir, { repoRoot: fixture.repo }),
-        /checked pre-PR gate authority is not bound to current tests and panels/u,
+        /pr-created requires approved pre_pr gate/u,
       );
       await publishPrePrApproval(fixture);
       const driftedMain = fixture.advance("post-review canonical main drift\n");
@@ -247,7 +235,7 @@ describe("active-run base advancement lifecycle compatibility", () => {
     }
   });
 
-  it("rejects draft mode when the selected route is ordinary-fresh-v1", async () => {
+  it("rejects draft mode when the selected route is ordinary-fresh", async () => {
     const fixture = createBaseAdvanceTransitionFixture("lifecycle-ordinary-draft");
     try {
       fixture.advance();

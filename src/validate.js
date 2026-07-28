@@ -163,16 +163,15 @@ const STEERING_FENCE_KEYS = new Set([...STEERING_FENCE_CONTROL_KEYS, ...PR_OPERA
 const POST_PR_OPERATION_KEYS = new Set(["operation_id", "repository", "created_at", "head_ref", "head_sha", "base_ref", "base_sha", "draft", "pr_url", "pr_number", "pr_node_id"]);
 const STEERING_ACTION_CLAIM_KEYS = new Set(["kind", "token", "generation", "claimed_at"]);
 const STEERING_LAST_ACTION_KEYS = new Set(["kind", "token", "generation", "outcome", "claimed_at", "resolved_at"]);
-const CONTINUATION_KEYS = new Set(["schema_version", "kind", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "configuration", "carry_forward", "checkpoint_source_hash", "configuration_hash"]);
+const CONTINUATION_KEYS = new Set(["schema_version", "kind", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "configuration", "carry_forward", "checkpoint_source_hash", "configuration_hash"]);
 const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_hash", "branch", "commit", "worktree"]);
 const CONTINUATION_REVIEW_KEYS = new Set(["kind", "ref", "hash", "subject", "verdict", "summary", "required_fixes", "source"]);
 const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice", "post_pr"]);
 const CONTINUATION_TARGET_KEYS = new Set(["run_id", "branch", "worktree", "base_ref", "base_commit"]);
 const CONTINUATION_REF_HASH_KEYS = new Set(["kind", "ref", "hash"]);
 const CONTINUATION_ARTIFACT_KINDS = new Set(["artifact", "story", "research_map", "design_brief", "technical_brief", "test_report", "validation_report", "pr_body"]);
-const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
+const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
 const CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "plan_ref", "plan_hash", "review_ref", "review_hash"]);
-const CONTINUATION_DRAFT_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 const CONTINUATION_CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
 const CONTINUATION_CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "declared_paths", "effective_paths", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "integration_conflict"]);
 const CONTINUATION_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy", "review_tier"]);
@@ -3387,11 +3386,6 @@ function validateContinuation(errors, run, path) {
   validateContinuationRefHashArray(errors, continuation.parent_reviews, `${path}.parent_reviews`);
   validateContinuationSelectedReview(errors, continuation, path);
   validateContinuationPlanningReuse(errors, continuation, `${path}.planning_reuse`);
-  validateContinuationDraftSpecReuse(errors, run, continuation.draft_spec_reuse, `${path}.draft_spec_reuse`);
-  if (continuation.planning_reuse?.eligible === true && continuation.draft_spec_reuse !== undefined) {
-    errors.push({ path, message: "cannot combine accepted planning reuse with draft spec reuse" });
-  }
-  validateContinuationPostPr(errors, continuation.post_pr, `${path}.post_pr`);
   validateContinuationConfiguration(errors, continuation, `${path}.configuration`);
   validateContinuationCarryForward(errors, run, continuation, `${path}.carry_forward`);
 }
@@ -3430,8 +3424,6 @@ function validateContinuationCarryForward(errors, run, continuation, path) {
   requiredFullGitSha(errors, carry, "start_commit", `${path}.start_commit`);
   if (carry.start_commit !== continuation.parent?.commit) errors.push({ path: `${path}.start_commit`, message: "must equal continuation.parent.commit" });
   if (continuation.planning_reuse?.eligible !== true) errors.push({ path: `${path}`, message: "requires planning_reuse.eligible true" });
-  if (continuation.draft_spec_reuse !== undefined) errors.push({ path: `${path}`, message: "forbids draft_spec_reuse" });
-  if (continuation.post_pr !== undefined) errors.push({ path: `${path}`, message: "forbids continuation post_pr" });
   const acceptedIds = new Set();
   if (!Array.isArray(carry.accepted_slices)) errors.push({ path: `${path}.accepted_slices`, message: "must be an array" });
   else for (const [index, accepted] of carry.accepted_slices.entries()) {
@@ -3521,9 +3513,9 @@ function validateContinuationPlanningReuse(errors, continuation, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
-  const checkpointVariant = Object.hasOwn(continuation, "checkpoint_source_hash") && reuse.eligible === true;
+  const checkpointVariant = Object.hasOwn(continuation, "checkpoint_source_hash");
   allowedKeys(errors, reuse, checkpointVariant ? CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS : CONTINUATION_PLANNING_REUSE_KEYS, path);
-  if (typeof reuse.eligible !== "boolean") errors.push({ path: `${path}.eligible`, message: "must be a boolean" });
+  if (reuse.eligible !== true) errors.push({ path: `${path}.eligible`, message: "must equal true" });
   if (checkpointVariant) {
     requiredString(errors, reuse, "plan_ref", `${path}.plan_ref`);
     requiredHash(errors, reuse, "plan_hash", `${path}.plan_hash`);
@@ -3534,7 +3526,7 @@ function validateContinuationPlanningReuse(errors, continuation, path) {
     validateDurableRef(errors, reuse.plan_ref, "plan", `${path}.plan_ref`);
     validateDurableRef(errors, reuse.review_ref, "reviews", `${path}.review_ref`);
     if (reuse.plan_hash !== continuation.carry_forward?.plan_hash) errors.push({ path: `${path}.plan_hash`, message: "must equal carry_forward.plan_hash" });
-  } else if (reuse.eligible === true) {
+  } else {
     requiredString(errors, reuse, "spec_review_ref", `${path}.spec_review_ref`);
     requiredHash(errors, reuse, "spec_review_hash", `${path}.spec_review_hash`);
     requiredString(errors, reuse, "spec_artifact_ref", `${path}.spec_artifact_ref`);
@@ -3543,58 +3535,6 @@ function validateContinuationPlanningReuse(errors, continuation, path) {
     validateDurableRef(errors, reuse.spec_review_ref, "reviews", `${path}.spec_review_ref`);
     validateDurableRef(errors, reuse.spec_artifact_ref, "artifacts", `${path}.spec_artifact_ref`);
     if (reuse.child_spec_review_ref !== undefined) validateDurableRef(errors, reuse.child_spec_review_ref, "reviews", `${path}.child_spec_review_ref`);
-  } else {
-    optionalString(errors, reuse, "reason", `${path}.reason`);
-    for (const key of ["spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]) {
-      if (reuse[key] !== undefined) errors.push({ path: `${path}.${key}`, message: "is allowed only when eligible is true" });
-    }
-  }
-}
-
-function validateContinuationDraftSpecReuse(errors, run, draft, path) {
-  if (draft === undefined || draft === null) return;
-  if (!isRecord(draft)) {
-    errors.push({ path, message: "must be an object" });
-    return;
-  }
-  allowedKeys(errors, draft, CONTINUATION_DRAFT_REUSE_KEYS, path);
-  requiredString(errors, draft, "artifact_ref", `${path}.artifact_ref`);
-  if (draft.artifact_ref !== "artifacts/technical-brief.md") errors.push({ path: `${path}.artifact_ref`, message: "must equal artifacts/technical-brief.md" });
-  requiredHash(errors, draft, "artifact_hash", `${path}.artifact_hash`);
-  validateDurableRef(errors, draft.artifact_ref, "artifacts", `${path}.artifact_ref`);
-  requiredEnum(errors, draft, "parent_step_status", new Set(["rejected", "blocked"]), `${path}.parent_step_status`);
-  boundedInteger(errors, draft, "parent_step_attempts", 0, Number.MAX_SAFE_INTEGER, `${path}.parent_step_attempts`);
-  boundedInteger(errors, draft, "max_retries", 1, Number.MAX_SAFE_INTEGER, `${path}.max_retries`);
-  boundedInteger(errors, draft, "remaining_attempts", 1, Number.MAX_SAFE_INTEGER, `${path}.remaining_attempts`);
-  if (Number.isInteger(draft.max_retries) && Number.isInteger(draft.parent_step_attempts)
-    && draft.remaining_attempts !== draft.max_retries - draft.parent_step_attempts) {
-    errors.push({ path: `${path}.remaining_attempts`, message: "must equal max_retries - parent_step_attempts" });
-  }
-  if (run.max_retries !== draft.max_retries) errors.push({ path: "run.max_retries", message: "must inherit continuation draft_spec_reuse.max_retries" });
-}
-
-function validateContinuationPostPr(errors, value, path) {
-  if (value === undefined || value === null) return;
-  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, value, new Set(["pr_url", "repository", "pr_number", "head_sha", "disposition", "policy", "post_pr_hash", "evidence_ref", "evidence_hash", "continuation_review_ref", "continuation_review_hash"]), path);
-  requiredString(errors, value, "pr_url", `${path}.pr_url`);
-  requiredString(errors, value, "repository", `${path}.repository`);
-  boundedInteger(errors, value, "pr_number", 1, Number.MAX_SAFE_INTEGER, `${path}.pr_number`);
-  requiredFullGitSha(errors, value, "head_sha", `${path}.head_sha`);
-  requiredEnum(errors, value, "disposition", new Set(["leave-unchanged"]), `${path}.disposition`);
-  validatePostPrPolicy(errors, value.policy, `${path}.policy`);
-  for (const key of ["post_pr_hash", "evidence_hash", "continuation_review_hash"]) requiredHash(errors, value, key, `${path}.${key}`);
-  for (const key of ["evidence_ref", "continuation_review_ref"]) requiredString(errors, value, key, `${path}.${key}`);
-  validateDurableRef(errors, value.evidence_ref, "evidence", `${path}.evidence_ref`);
-  validateDurableRef(errors, value.continuation_review_ref, "reviews", `${path}.continuation_review_ref`);
-  if (stringValue(value.pr_url)) {
-    try {
-      const parts = githubPrUrlParts(value.pr_url);
-      if (stringValue(value.repository) && value.repository !== parts.repository) errors.push({ path: `${path}.repository`, message: "must match pr_url repository" });
-      if (Number.isInteger(value.pr_number) && value.pr_number !== parts.number) errors.push({ path: `${path}.pr_number`, message: "must match pr_url number" });
-    } catch (error) {
-      errors.push({ path: `${path}.pr_url`, message: error.message });
-    }
   }
 }
 

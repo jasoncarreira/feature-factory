@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { assertContinuationBindingsCurrent, buildContinuation, continueFactory, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory, startFactory } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
-import { assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionContinuationAdoption, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
+import { assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
 import { ISSUE128_BASELINE_ROUTE_INVENTORY, ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG, emitIssue128FinishAndDiscloseMutations } from "./helpers/durable-record-mutations.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
@@ -123,10 +123,9 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
         ["v1", (value) => { value.schema_version = 1; }, "invalid-continuation-schema"],
         ["missing carry-forward", (value) => { delete value.carry_forward; }, "invalid-continuation-carry-forward"],
         ["missing configuration", (value) => { delete value.configuration; }, "invalid-continuation-schema"],
-        ["retired draft", (value) => { value.draft_spec_reuse = {}; }, "invalid-continuation"],
         ["retired post-PR", (value) => { value.post_pr = {}; }, "invalid-continuation"],
       ];
-      assert.equal(cases.length, 5);
+      assert.equal(cases.length, 4);
       for (const [label, mutate, reason] of cases) {
         const value = structuredClone(continuation);
         mutate(value);
@@ -732,7 +731,7 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
       const fixture = createV2Fixture(`planning-${label}`, { accepted: ["A"], mergeOrder: ["A"] });
       try {
         mutate(fixture);
-        assert.throws(() => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${fixture.runId}-next`, carryForward: true }), /accepted unchanged planning|planning_reuse/u, label);
+        assert.throws(() => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${fixture.runId}-next`, carryForward: true }), /accepted unchanged planning|accepted spec-writer step|changed since acceptance|planning_reuse/u, label);
         assert.equal(gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "", label);
       } finally { cleanup(fixture.repo); }
     }
@@ -1570,14 +1569,14 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
     } finally { cleanup(fixture.repo); }
   });
 
-  it("reproduces the missing public test-verifier placeholder on a published v2 child", async () => {
+  it("rejects test-verifier progress until the published v2 child projection is complete", async () => {
     const fixture = createV2Fixture("carry-public-test-verifier", { accepted: ["A", "C"], mergeOrder: ["C", "A"] });
     const childRunId = "carry-public-test-verifier-next";
     try {
       await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
       const beforeMerged = runCli(fixture.repo, ["factory", "step", childRunId, "test-verifier", "running", "--attempts", "1", "--json"]);
       assert.notEqual(beforeMerged.status, 0);
-      assert.match(beforeMerged.stderr, /test-verifier integration gate requires all slices merged: B/u);
+      assert.match(beforeMerged.stderr, /whole-story route requires a complete merged slice projection/u);
 
       const childFile = join(fixture.repo, ".opencode", "factory", childRunId, "run.json");
       const child = JSON.parse(readFileSync(childFile, "utf8"));
@@ -1632,7 +1631,7 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
     } finally { cleanup(fixture.repo); }
   });
 
-  it("reproduces schema downgrade and resume-policy override ingress", async () => {
+  it("rejects schema downgrade and resume-policy override ingress", async () => {
     const fixture = createV2Fixture("carry-schema-ingress", { accepted: ["A"], mergeOrder: ["A"] });
     const childRunId = "carry-schema-ingress-next";
     try {
@@ -1653,7 +1652,7 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
       const policyOverride = structuredClone(resumed.payload);
       policyOverride.resume.post_pr_policy.enabled = true;
       const decodedPolicy = decodeFeatureCommandPayload(`ffpayload-v1:${Buffer.from(JSON.stringify(policyOverride)).toString("base64url")}`, { repo: fixture.repo });
-      assert.deepEqual(decodedPolicy, { ok: false, reason: "resume-policy-route-mismatch" });
+      assert.deepEqual(decodedPolicy, { ok: false, reason: "unpublished-or-mismatched-carry-forward-resume" });
     } finally { cleanup(fixture.repo); }
   });
 
@@ -1819,18 +1818,6 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
     } finally {
       cleanup(fixture.repo);
     }
-  });
-
-  it("reproduces internal schema-v2 adoption acceptance", async () => {
-    const fixture = createV2Fixture("carry-internal-adoption", { accepted: ["A"], mergeOrder: ["A"] });
-    const childRunId = "carry-internal-adoption-next";
-    try {
-      await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
-      const childDir = join(fixture.repo, ".opencode", "factory", childRunId);
-      const before = readFileSync(join(childDir, "run.json"));
-      await assert.rejects(transitionContinuationAdoption(childDir, { repoRoot: gitStdout(fixture.repo, ["rev-parse", "--show-toplevel"]) }), /schema-v2 carry-forward spec adoption is already canonical and immutable/u);
-      assert.deepEqual(readFileSync(join(childDir, "run.json")), before);
-    } finally { cleanup(fixture.repo); }
   });
 
   it("keeps every copied planning byte immutable across v2 mutation, downstream, resume, and launch entry points", async () => {

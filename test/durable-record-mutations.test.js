@@ -72,7 +72,7 @@ const AUTHORITY_CLASS_IDS = Object.freeze([
   "steps-acceptance-inheritance",
   "slices-review-evidence-bindings",
   "validator-security-pr-result",
-  "continuation-planning-draft-reuse",
+  "continuation-v2-carry-forward",
   "post-pr-nested-records",
   "pr79-merged-slice-repair",
 ]);
@@ -772,8 +772,8 @@ describe("finite durable-authority catalog", () => {
     duplicateDisposition.push(B0M4_EXACT_CASES[0]);
     assert.throws(() => exactB0m4DispositionMap(duplicateDisposition), /duplicate exact B0M\.4 case/u);
     assert.throws(() => exactB0m4DispositionMap([{ ...B0M4_EXACT_CASES[0], consumer: "" }]), /literal consumer|concrete consumer and rejector/u);
-    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 187);
-    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 188);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 184);
+    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 185);
     for (const id of [
       "verification-artifact-claim-active", "verification-artifact-claim-completed-pass", "verification-artifact-claim-completed-fail",
       "verification-artifact-claim-unknown-process", "verification-artifact-claim-unknown-receipt", "verification-artifact-execution-receipt-pass",
@@ -875,7 +875,7 @@ describe("finite durable-authority catalog", () => {
         }
       }
     }
-    assert.equal(recordCount, 188);
+    assert.equal(recordCount, 185);
   });
 
   it("executes every amendment reviewer claim and closure mutation through production validators", () => {
@@ -1320,10 +1320,10 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("uses an independent closed descriptor oracle for all 188 exact target/exclusion definitions", () => {
+  it("uses an independent closed descriptor oracle for all 185 exact target/exclusion definitions", () => {
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
     assert.deepEqual(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), requiredIds);
-    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 188);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 185);
     assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*descriptor/u, "descriptor expectations must not be produced from catalog records");
@@ -1667,7 +1667,7 @@ describe("finite durable-authority catalog", () => {
   it("binds every catalog row's source identity, placement, facts, and external bytes with an independent manifest", () => {
     const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
-    assert.equal(canonicalIds.length, 188);
+    assert.equal(canonicalIds.length, 185);
     assert.deepEqual(canonicalIds, requiredIds);
     assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
@@ -1716,24 +1716,12 @@ describe("finite durable-authority catalog", () => {
       "final-plan-descriptor",
       "run-envelope-running",
       "run-envelope-terminal",
-      "terminal-result-completed",
       "terminal-result-blocked",
       "terminal-result-partial",
       "terminal-result-needs-human",
       "pr-created-result",
-      "continuation-envelope",
-      "continuation-parent-binding",
-      "continuation-selected-review",
-      "continuation-target-binding",
-      "continuation-parent-artifact-sidecar",
-      "continuation-parent-evidence-sidecar",
-      "continuation-parent-review-sidecar",
-      "continuation-planning-reuse-ineligible",
-      "continuation-planning-reuse-eligible",
-      "continuation-draft-reuse",
-      "continuation-post-pr-binding",
     ];
-    assert.equal(previouslyUncovered.length, 20);
+    assert.equal(previouslyUncovered.length, 8);
     for (const id of previouslyUncovered) {
       const deleted = structuredClone(DURABLE_AUTHORITY_CATALOG);
       const deletedRecord = findRecord(deleted, id);
@@ -1832,15 +1820,11 @@ describe("finite durable-authority catalog", () => {
         assert.match(sidecar.kind, /^checked-special-builder-dispatch-(?:claim|closure)$/u);
       } else {
         assert.match(baseline.consumer, /^validateRun(?:\/checkRunConsistency)?$/u);
-        if (baseline.run.continuation?.schema_version === 1) {
-          assert.throws(() => validateRun(baseline.run), /run\.continuation\.schema_version: must equal 2/u, `${id} retired continuation shape`);
-        } else {
-          assert.equal(validateRun(baseline.run), baseline.run, `${id} must use an actual validateRun-compatible persisted shape`);
-        }
+        assert.equal(validateRun(baseline.run), baseline.run, `${id} must use an actual validateRun-compatible persisted shape`);
       }
     }
-    assert.equal(observedConsumers.size, 188);
-    assert.deepEqual([...observedConsumers.keys()].slice(0, 187), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
+    assert.equal(observedConsumers.size, 185);
+    assert.deepEqual([...observedConsumers.keys()].slice(0, 184), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
     assert.equal(observedConsumers.get("final-plan-descriptor"), "final-plan-descriptor-contract", "future-only final.plan is a descriptor contract, not claimed as current validateRun input");
   });
 
@@ -1933,7 +1917,6 @@ describe("finite durable-authority catalog", () => {
       "plan-slices-json",
       "run-envelope-running",
       "run-envelope-terminal",
-      "terminal-result-completed",
       "terminal-result-blocked",
       "terminal-result-partial",
       "terminal-result-needs-human",
@@ -1958,9 +1941,8 @@ describe("finite durable-authority catalog", () => {
       "steering-action-claim",
       "steering-last-action",
       "steering-pr-fence",
-      "pr-created-result",
     ];
-    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "plan-delivery-envelope-v1", "review-invariant-family-ledger-v1", "checkpoint-routing-artifact-v1", "checkpoint-reviewed-plan-v1", "checkpoint-admission-probe-valid", "checkpoint-child-disposition-v1", "checkpoint-child-publication-v1", "checkpoint-source-v1", "checkpoint-progress-reserved", "checkpoint-progress-child-published", "checkpoint-progress-launched", "checkpoint-progress-merged", "checkpoint-progress-closed", "checkpoint-merged-completion-v1", "checkpoint-final-closure-v1", "terminal-result-blocked-checkpoint-routing", "step-work-decomposer-accepted-plan", "terminal-result-blocked-nonconvergence", "slice-blocked-ordinary"].includes(id) && !id.startsWith("test-execution-") && !id.startsWith("verification-artifact-") && !id.startsWith("continuation-")).slice(0, 29), expectedIds);
+    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "plan-delivery-envelope-v1", "review-invariant-family-ledger-v1", "checkpoint-routing-artifact-v1", "checkpoint-reviewed-plan-v1", "checkpoint-admission-probe-valid", "checkpoint-child-disposition-v1", "checkpoint-child-publication-v1", "checkpoint-source-v1", "checkpoint-progress-reserved", "checkpoint-progress-child-published", "checkpoint-progress-launched", "checkpoint-progress-merged", "checkpoint-progress-closed", "checkpoint-merged-completion-v1", "checkpoint-final-closure-v1", "terminal-result-blocked-checkpoint-routing", "step-work-decomposer-accepted-plan", "terminal-result-blocked-nonconvergence", "slice-blocked-ordinary", "terminal-result-completed", "pr-created-result"].includes(id) && !id.startsWith("test-execution-") && !id.startsWith("verification-artifact-") && !id.startsWith("continuation-")).slice(0, 27), expectedIds);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
     const results = {};
     const root = mkdtempSync(join(tmpdir(), "b0m-production-consumers-"));
@@ -2009,7 +1991,7 @@ describe("finite durable-authority catalog", () => {
           }
           if (id.startsWith("step-") && ["stale-identity", "cross-bound-identity"].includes(mutationCase.family)) {
             writeJson(join(runDir, "run.json"), fixture.run);
-            await assert.rejects(transitionRunStep(runDir, "spec-writer", mutationCase.record), /attempts cannot regress|agent identity is immutable|inherited_acceptance can only be created/u, mutationCase.name);
+            await assert.rejects(transitionRunStep(runDir, "spec-writer", mutationCase.record), /attempts cannot regress|agent identity is immutable|inherited_acceptance can only be created|published carry-forward plan bytes/u, mutationCase.name);
             results[id].consumers.add("transitionRunStep");
             continue;
           }
@@ -2041,7 +2023,6 @@ describe("finite durable-authority catalog", () => {
       "steering-boundary": "transitionSteeringBoundaryCrossed",
       "steering-action-claim": "transitionSteeringActionStarted",
       "steering-last-action": "transitionSteeringActionClosed",
-      "pr-created-result": "transitionPrCreated",
     };
     for (const [id, consumer] of Object.entries(expectedB0M3Consumers)) {
       assert.equal(results[id].consumers.has(consumer), true, `${id} must reach ${consumer}`);
@@ -3255,12 +3236,51 @@ function createPrOperationTransitionFixture(root, family, safeName) {
   fixtureGit(repo, ["remote", "add", "origin", "https://github.com/acme/repo.git"]);
   fixtureGit(repo, ["config", `url.file://${repo}/.insteadOf`, "https://github.com/acme/repo.git"]);
   const head = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
-  for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
+  for (const dir of ["artifacts", "evidence", "reviews", "plan", "gates"]) mkdirSync(join(runDir, dir), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n");
   writeJson(join(runDir, "evidence", "backend.json"), { subject: "backend", attempt: 1, status: "pass", review_ready: true, head_sha: head });
   writeJson(join(runDir, "reviews", "backend.json"), { subject: "backend", attempt: 1, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: head });
   writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "main", attempt: 1, verdict: "GO", reviewed_head_sha: head });
   writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "main", attempt: 1, verdict: "PASS", reviewed_head_sha: head });
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+  const plan = withDeliveryEnvelope({
+    slices: [{ id: "backend", stack: "backend", paths: ["src/backend/**"], depends_on: [], acceptance: ["backend works"], test_plan: ["test backend"] }],
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+  });
+  const planPath = join(runDir, "plan", "slices.json");
+  writeJson(planPath, plan);
+  const receiptRef = "evidence/test-verifier.attempt-1.json";
+  const testReviewRef = "reviews/test-verifier.attempt-1.json";
+  const testArtifactRef = "artifacts/test-report.md";
+  const nonce = "123e4567-e89b-42d3-a456-426614174128";
+  const emptyStream = { captured_bytes: 0, sha256: claimHash(""), truncated: false };
+  const receipt = {
+    schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: "catalog-run", attempt: 1,
+    claim_nonce: nonce, plan_ref: "plan/slices.json", plan_hash: hashFileBytes(planPath), head_sha: head, timeout_ms: plan.integration_gate.timeout_ms,
+    started_at: CLAIM_NOW, completed_at: CLAIM_NOW, duration_ms: 0, status: "pass", review_ready: true,
+    commands: plan.integration_gate.required_commands.map((command, index) => ({ index, ...command, outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 0, stdout: emptyStream, stderr: emptyStream })),
+  };
+  writeJson(join(runDir, receiptRef), receipt);
+  const claim = {
+    schema_version: 1, kind: "checked-test-execution-claim", state: "completed", nonce, run_id: "catalog-run", attempt: 1,
+    plan_ref: "plan/slices.json", plan_hash: hashFileBytes(planPath), head_sha: head, timeout_ms: plan.integration_gate.timeout_ms, receipt_ref: receiptRef,
+    claimed_at: CLAIM_NOW, completed_at: CLAIM_NOW, status: "pass", receipt_hash: hashFileBytes(join(runDir, receiptRef)),
+  };
+  writeFileSync(join(runDir, testArtifactRef), "checked integration passed\n");
+  writeJson(join(runDir, testReviewRef), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] });
+  const validator = { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFileBytes(join(runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFileBytes(join(runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head };
+  const securityReview = { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFileBytes(join(runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head };
+  const testAcceptance = {
+    artifact_ref: testArtifactRef, artifact_hash: hashFileBytes(join(runDir, testArtifactRef)), evidence_ref: receiptRef,
+    evidence_hash: hashFileBytes(join(runDir, receiptRef)), review_ref: testReviewRef, review_hash: hashFileBytes(join(runDir, testReviewRef)), reviewed_head_sha: head,
+  };
+  const questionRef = "gates/pre-pr.md";
+  writeFileSync(join(runDir, questionRef), "approve pre-PR?\n");
+  const checkedAuthorityHash = hashValue({
+    test_execution_claim_hash: hashValue(claim), test_acceptance: testAcceptance,
+    validator: { report_hash: validator.report_hash, review_hash: validator.review_hash, reviewed_head_sha: head },
+    security_review: { review_hash: securityReview.review_hash, reviewed_head_sha: head },
+  });
   writeJson(runFile, createRunRecord({
     run_id: "catalog-run",
     branch: "main",
@@ -3269,10 +3289,23 @@ function createPrOperationTransitionFixture(root, family, safeName) {
     base_commit: head,
     github_account: "acme",
     pr_mode: "ready",
-    gates: { pre_pr: { status: "approved", artifact: "artifacts/validation-report.md", question_ref: "gates/pre-pr.md", answer: "approve", answered_at: "2026-07-16T12:00:00.000Z" } },
+    gates: { pre_pr: {
+      status: "approved", artifact: "artifacts/validation-report.md", question_ref: questionRef, answer: "approve", answered_at: CLAIM_NOW,
+      pending_snapshot: {
+        question_ref: questionRef, question_hash: hashFileBytes(join(runDir, questionRef)), artifact_ref: "artifacts/validation-report.md",
+        artifact_hash: validator.report_hash, created_at: CLAIM_NOW, checked_authority_hash: checkedAuthorityHash,
+      },
+    } },
     slices: [modernMergedSlice(runDir, "backend", head)],
-    validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFileBytes(join(runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFileBytes(join(runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head },
-    security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFileBytes(join(runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head },
+    steps: [{
+      agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+      acceptance: { artifact_ref: "plan/slices.json", artifact_hash: hashFileBytes(planPath), review_ref: "reviews/work-decomposer.json", review_hash: hashFileBytes(join(runDir, "reviews", "work-decomposer.json")) },
+    }, {
+      agent: "test-verifier", status: "accepted", attempts: 1, artifact_ref: testArtifactRef, evidence_ref: receiptRef, review_ref: testReviewRef,
+      execution_claim: claim, execution_claim_hash: hashValue(claim), acceptance: testAcceptance,
+    }],
+    validator,
+    security_review: securityReview,
   }));
   return { repo, runDir, runFile, head };
 }
@@ -3501,7 +3534,7 @@ function modernMergedSlice(runDir, id, reviewedCommit) {
   const evidenceHash = hashFileBytes(join(runDir, evidenceRef));
   const reviewHash = hashFileBytes(join(runDir, reviewRef));
   return {
-    id, declared_paths: [id === "slice" ? "README.md" : `src/${id}/**`], effective_paths: [id === "slice" ? "README.md" : `src/${id}/**`], status: "merged", attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+    id, stack: "backend", depends_on: [], declared_paths: [id === "slice" ? "README.md" : `src/${id}/**`], effective_paths: [id === "slice" ? "README.md" : `src/${id}/**`], status: "merged", attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
     reviewed_commit: reviewedCommit, merge_commit: reviewedCommit,
     attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 }],
   };

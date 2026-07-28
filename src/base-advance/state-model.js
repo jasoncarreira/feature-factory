@@ -46,7 +46,6 @@ export const BASE_ADVANCE_STATE_MODEL = Object.freeze({
   }),
   continuation_checkpoint: dimension({
     absent: ALLOW,
-    "continuation-v1": INELIGIBLE,
     "continuation-v2": INELIGIBLE,
     "checkpoint-child": INELIGIBLE,
     "checkpoint-parent": INELIGIBLE,

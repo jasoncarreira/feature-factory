@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
-import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, parseSlicesPlanBytes, pendingProtectedGate, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -4295,7 +4295,6 @@ function buildContinuationCandidate(parentRunId, opts = {}) {
 
   const targetRunId = normalizeContinuationTargetRunId(opts.runId, parentRun.run_id);
   const reservedTarget = observeContinuationTargetReservation(repo, targetRunId);
-  if (reservedTarget && reservedTarget.route_schema !== 2) throw new Error(`continuation target '${targetRunId}' is already reserved by a conflicting schema or authority`);
   const publishedReplay = opts[CARRY_FORWARD_ALLOCATION_REPLAY] && continuationPublishedCreatedAt(repo, targetRunId);
   if (opts[CARRY_FORWARD_ALLOCATION_REPLAY] && !publishedReplay) assertContinuationSemanticTargetAbsent(repo, targetRunId);
   else if (!publishedReplay) assertContinuationTargetAvailable(repo, targetRunId);
@@ -4341,9 +4340,6 @@ function buildContinuationCandidate(parentRunId, opts = {}) {
     parent_reviews: collectContinuationParentReviews(parentRunDir, parentRun),
     planning_reuse: continuationPlanningReuse(parentRun, parentRunDir),
   };
-  if (continuation.planning_reuse?.eligible !== true) {
-    throw new Error("v2 carry-forward requires durably accepted unchanged planning and no draft_spec_reuse");
-  }
   continuation.configuration = checkpointConfiguration ?? carryForwardConfigurationBinding(carryForwardConfig);
   if (checkpointConfiguration) {
     continuation.checkpoint_source_hash = hashValue(parentRun.checkpoint_source);
@@ -5086,7 +5082,6 @@ function validateCarryForwardCandidate(run) {
   if (!continuation || continuation.schema_version !== 2 || continuation.kind !== "blocked-run-continuation") {
     throw new Error("carry-forward candidate must be a schema-version 2 blocked-run-continuation");
   }
-  if (continuation.post_pr !== undefined) throw new Error("carry-forward candidate cannot contain post_pr authority");
   if (isCheckpointPlanningReuse(continuation)) {
     assertExactCandidateKeys(continuation.planning_reuse, CHECKPOINT_PLANNING_REUSE_KEYS, "continuation.planning_reuse");
     if (continuation.planning_reuse.eligible !== true || continuation.planning_reuse.plan_ref !== "plan/slices.json"
@@ -5188,7 +5183,7 @@ function normalizeContinuationTargetRunId(runId, parentRunId) {
 function assertContinuationTargetAvailable(repo, targetRunId) {
   const targetRunFile = join(factoryRoot(repo), targetRunId, "run.json");
   if (existsSync(targetRunFile)) throw new Error(`target run already exists: ${targetRunId}`);
-  inspectContinuationRouteSchema(repo, targetRunId, 1, { route: "continuation" });
+  if (observePermanentContinuationClaims(repo, targetRunId).length > 0) throw new Error(`continuation target '${targetRunId}' already has permanent authority`);
   if (branchExists(repo, targetRunId)) throw new Error(`target branch already exists: ${targetRunId}`);
   const targetWorktree = resolve(repo, ".opencode", "worktrees", targetRunId);
   if (existsSync(targetWorktree)) throw new Error(`target worktree already exists: ${targetWorktree}`);
@@ -5374,16 +5369,11 @@ const SHA256_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
 // approving — is amendment input only and is never adopted as approved.
 function continuationPlanningReuse(parentRun, parentRunDir) {
   if (parentRun.checkpoint_source?.kind === "delivery-checkpoint-source") {
-    let authority;
-    try {
-      authority = observeAcceptedDecompositionAuthority(parentRunDir, parentRun, { requireIntegrationGate: true, requireApprovingReview: true });
-    } catch (error) {
-      return { eligible: false, reason: `checkpoint child work-decomposer authority is not reusable: ${error.message}` };
-    }
+    const authority = observeAcceptedDecompositionAuthority(parentRunDir, parentRun, { requireIntegrationGate: true, requireApprovingReview: true });
     const source = parentRun.checkpoint_source;
     if (authority.plan_ref !== "plan/slices.json" || authority.plan_hash !== source.child_plan_hash
       || authority.review_ref !== "reviews/work-decomposer.json" || authority.review_hash !== source.child_disposition_hash) {
-      return { eligible: false, reason: "checkpoint child work-decomposer authority does not match immutable checkpoint_source" };
+      throw new Error("checkpoint child work-decomposer authority does not match immutable checkpoint_source");
     }
     return {
       eligible: true,
@@ -5395,54 +5385,47 @@ function continuationPlanningReuse(parentRun, parentRunDir) {
   }
   const steps = Array.isArray(parentRun.steps) ? parentRun.steps : [];
   const step = steps.find((entry) => stringValue(entry?.agent) && String(entry.agent).trim() === "spec-writer");
-  if (!step) return { eligible: false, reason: "parent has no spec-writer step; brief is amendment input only" };
+  if (!step) throw new Error("v2 carry-forward requires an accepted spec-writer step");
   const status = String(step.status || "").trim();
-  if (status !== "accepted") {
-    return { eligible: false, reason: `parent spec-writer step is '${status || "unset"}', not accepted; brief is amendment input only` };
-  }
+  if (status !== "accepted") throw new Error(`v2 carry-forward requires an accepted spec-writer step, found '${status || "unset"}'`);
   // Require a durable acceptance binding recorded at the accept transition, not an
-  // inference from the parent's current (mutable) files. A legacy accepted step
-  // that predates the binding fails closed and needs explicit re-acceptance.
+  // inference from the parent's current mutable files.
   const acceptance = step.acceptance;
-  if (!acceptance || typeof acceptance !== "object") {
-    return { eligible: false, reason: "accepted spec-writer step has no durable acceptance binding (legacy/unbound); requires explicit re-acceptance" };
-  }
+  if (!acceptance || typeof acceptance !== "object") throw new Error("v2 carry-forward requires a durable spec-writer acceptance binding");
   if (String(acceptance.artifact_ref || "").trim() !== "artifacts/technical-brief.md") {
-    return { eligible: false, reason: "acceptance binding does not reference artifacts/technical-brief.md" };
+    throw new Error("spec-writer acceptance binding does not reference artifacts/technical-brief.md");
   }
   if (!SHA256_HASH_PATTERN.test(String(acceptance.artifact_hash || "")) || !stringValue(acceptance.review_ref) || !SHA256_HASH_PATTERN.test(String(acceptance.review_hash || ""))) {
-    return { eligible: false, reason: "acceptance binding is missing artifact/review hashes; requires explicit re-acceptance" };
+    throw new Error("v2 carry-forward requires exact spec-writer artifact and review hashes");
   }
   const parentRoot = resolve(parentRunDir);
   // The bound artifact bytes must still be present and unchanged since acceptance.
   const artifactPath = resolve(parentRoot, "artifacts/technical-brief.md");
   const artifactEntry = lstatOptionalNoSymlinks(parentRoot, artifactPath, "spec-writer artifact 'artifacts/technical-brief.md'", "spec-writer artifact must not contain symlinks");
-  if (!artifactEntry || !artifactEntry.isFile()) return { eligible: false, reason: "bound technical-brief.md is missing from the parent run" };
+  if (!artifactEntry || !artifactEntry.isFile()) throw new Error("bound technical-brief.md is missing from the parent run");
   if (sha256File(artifactPath) !== acceptance.artifact_hash) {
-    return { eligible: false, reason: "technical-brief.md changed since acceptance (does not match acceptance binding); requires explicit re-acceptance" };
+    throw new Error("technical-brief.md changed since acceptance");
   }
   const reviewRef = normalizeParentRef(acceptance.review_ref, "reviews");
   const reviewPath = resolve(parentRoot, reviewRef);
   if (!isLogicalContainedPath(join(parentRoot, "reviews"), reviewPath, { allowEqual: false })) {
-    return { eligible: false, reason: `spec-writer review_ref '${reviewRef}' escapes reviews/` };
+    throw new Error(`spec-writer review_ref '${reviewRef}' escapes reviews/`);
   }
   const entry = lstatOptionalNoSymlinks(parentRoot, reviewPath, `spec-writer review '${reviewRef}'`, `spec-writer review '${reviewRef}' must not contain symlinks`);
-  if (!entry || !entry.isFile()) return { eligible: false, reason: `spec-writer review_ref '${reviewRef}' does not resolve to a file` };
+  if (!entry || !entry.isFile()) throw new Error(`spec-writer review_ref '${reviewRef}' does not resolve to a file`);
   if (sha256File(reviewPath) !== acceptance.review_hash) {
-    return { eligible: false, reason: "spec-writer review changed since acceptance (does not match acceptance binding); requires explicit re-acceptance" };
+    throw new Error("spec-writer review changed since acceptance");
   }
   let review;
   try {
     review = readReviewJson(reviewPath);
   } catch {
-    return { eligible: false, reason: `spec-writer review '${reviewRef}' is not a valid JSON object` };
+    throw new Error(`spec-writer review '${reviewRef}' is not a valid JSON object`);
   }
   const subject = String(review?.subject || "").trim();
-  if (subject !== "spec-writer") return { eligible: false, reason: `spec-writer review subject '${subject || "(none)"}' is not spec-writer` };
+  if (subject !== "spec-writer") throw new Error(`spec-writer review subject '${subject || "(none)"}' is not spec-writer`);
   const verdict = String(review?.verdict || "").trim().toUpperCase();
-  if (!APPROVING_REVIEW_VERDICTS.has(verdict)) {
-    return { eligible: false, reason: `spec-writer review verdict '${verdict || "(none)"}' is not approving; brief is amendment input only` };
-  }
+  if (!APPROVING_REVIEW_VERDICTS.has(verdict)) throw new Error(`spec-writer review verdict '${verdict || "(none)"}' is not approving`);
   return {
     eligible: true,
     spec_review_ref: reviewRef,
@@ -6118,12 +6101,7 @@ function buildResumePayload(run, opts) {
 async function assertRunClaimRoute(repo, run, opts = {}) {
   const runDir = resolveRunDir(run.run_id, { ...opts, cwd: repo });
   assertFactoryAmendmentOrdinaryAuthority(runDir, run, "resume or launch");
-  const schema = run.continuation?.schema_version === 2 ? 2 : 1;
-  inspectContinuationRouteSchema(repo, run.run_id, schema, {
-    route: "resume",
-    ordinaryResumeSchema: 1,
-    postPrPolicy: run.post_pr?.policy,
-  });
+  if (run.continuation?.schema_version === 2) assertPublishedCarryForwardRun(repo, run.continuation, { postPrPolicy: run.post_pr?.policy });
   return run;
 }
 

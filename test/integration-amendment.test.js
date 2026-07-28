@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hashFile } from "../src/refs.js";
-import { completeIntegrationAmendmentReviewTaskDispatch, completeSpecialBuilderTaskDispatch, heartbeatOnce, inspectContinuationRouteSchema, prepareIntegrationAmendmentReviewTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionContinuationAdoption, transitionGateDecision, transitionIntegrationAmendment, transitionRunJson, transitionRunSlice, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
+import { completeIntegrationAmendmentReviewTaskDispatch, completeSpecialBuilderTaskDispatch, heartbeatOnce, prepareIntegrationAmendmentReviewTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionRunJson, transitionRunSlice, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
 import { checkRunConsistency, inspectIntegrationAmendmentInventory } from "../src/validate.js";
 import { buildContinuation, cleanupRun, collectCleanupTargets, continueFactory, executeIntegrationAmendment, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startHeartbeat, stopHeartbeat } from "../src/factory.js";
 import plugin from "../src/plugin.js";
@@ -384,7 +384,7 @@ describe("generic integration amendment", () => {
     } finally { cleanup(fixture); }
   });
 
-  it("fences continuation construction, reservation/allocation/publication ingress, adoption, route replay, local resume, and provenance", async () => {
+  it("fences continuation construction, reservation/allocation/publication ingress, local resume, and provenance", async () => {
     const fixture = createFixture();
     try {
       await transitionIntegrationAmendment(fixture.runDir, reportRequest(), { repoRoot: fixture.repo, now: NOW });
@@ -392,9 +392,6 @@ describe("generic integration amendment", () => {
       for (const operation of [
         () => buildContinuation(RUN_ID, { cwd: fixture.repo, runId: "amendment-child", review: "reviews/owner.json" }),
         () => continueFactory(RUN_ID, { cwd: fixture.repo, runId: "amendment-child", review: "reviews/owner.json", carryForward: true }),
-        () => inspectContinuationRouteSchema(fixture.repo, RUN_ID, 1, { route: "continuation" }),
-        () => inspectContinuationRouteSchema(fixture.repo, RUN_ID, 1, { route: "resume", ordinaryResumeSchema: 1 }),
-        () => transitionContinuationAdoption(fixture.runDir, { repoRoot: fixture.repo }),
         () => resumeFactory(RUN_ID, { cwd: fixture.repo, dryRun: true }),
         () => recordReviewDispatchProvenance(RUN_ID, { agent: "work-reviewer", subject: "amendment-review", attempt: 1, promptHash: sha("prompt"), promptBytes: 6 }, { cwd: fixture.repo }),
       ]) await assert.rejects(Promise.resolve().then(operation), /integration-amendment-continuation-unsupported|integration amendment (?:is|authority is) reported|run\.json writer rejected/u);

@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
 import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
+import { advanceFactoryRunBase } from "../src/factory.js";
+import { createBaseAdvanceTransitionFixture } from "./helpers/base-advance-transition/fixture.js";
+import { completeFinalCheckedTest, configureReadyPostPrReview, installApprovedLifecycleSlice, publishIndependentPanels, publishPrePrApproval, recordOpenReadyPr } from "./helpers/base-advance-lifecycle/fixture.js";
 import { resolvePostPrCiPolicy } from "../src/config.js";
 import { hashFile, hashValue } from "../src/refs.js";
 import { computePrOperationId } from "../src/github.js";
@@ -19,8 +22,8 @@ import {
   transitionPostPrState,
   transitionPostPrTerminal,
   transitionPrePrFenceEstablished,
-  transitionPrCreated,
   transitionRunJson,
+  transitionSliceMerged,
   transitionSteeringActionClosed,
   transitionSteeringActionStarted,
   transitionSteeringBoundaryCrossed,
@@ -79,32 +82,34 @@ describe("post-PR schema-v1 state", () => {
 });
 
 describe("checked post-PR transitions", () => {
-  it("preserves legacy immediate completion but initializes enabled observation", async () => {
-    for (const enabled of [false, true]) {
-      const fixture = createPrFixture(`pr-${enabled}`, enabled);
-      try {
-        const options = prOperationOptions(fixture, { now: NOW });
-        const fence = await transitionPrePrFenceEstablished(fixture.runDir, { ...options, token: "fence-token-123" });
-        const result = await transitionPrCreated(fixture.runDir, {}, { ...options, fenceToken: fence.fence.token });
-        if (enabled) {
-          assert.equal(result.run.status, "running");
-          assert.equal(result.run.post_pr.phase, "observing");
-          assert.equal(result.run.post_pr.observation.epoch, 1);
-          assert.equal(result.run.post_pr.observation.deadline_at, "2026-07-12T13:00:00.000Z");
-          assert.equal(result.run.post_pr.observation.expected_head_sha, fixture.head);
-        } else assert.equal(result.run.status, "completed");
-      } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
-    }
+  it("records an enabled post-PR observation through the accepted current panel and fence union", async () => {
+    const fixture = createBaseAdvanceTransitionFixture("post-pr-current-union");
+    try {
+      configureReadyPostPrReview(fixture);
+      fixture.advance();
+      await advanceFactoryRunBase(fixture.runId, { cwd: fixture.repo });
+      const candidate = installApprovedLifecycleSlice(fixture);
+      await transitionSliceMerged(fixture.runDir, candidate.sliceId, { merge_commit: candidate.integrationHead }, { repoRoot: fixture.repo });
+      await completeFinalCheckedTest(fixture, candidate.integrationHead);
+      await publishIndependentPanels(fixture, candidate.integrationHead);
+      await publishPrePrApproval(fixture);
+      const result = await recordOpenReadyPr(fixture, fixture.advance("post-review main\n"), candidate.integrationHead);
+      assert.equal(result.recorded.status, "running");
+      const run = fixture.readRun();
+      assert.equal(run.post_pr.phase, "observing");
+      assert.equal(run.post_pr.observation.epoch, 1);
+      assert.equal(run.post_pr.observation.expected_head_sha, candidate.integrationHead);
+    } finally { fixture.cleanup(); }
   });
 
-  it("requires a full head SHA for enabled pr-created without weakening the fence", async () => {
-    const fixture = createPrFixture("head-required", true);
+  it("rejects incomplete panel-only authority without upgrade or read-only fallback", async () => {
+    const fixture = createPrFixture("incomplete-panel-authority", true);
     try {
       const options = prOperationOptions(fixture, { now: NOW });
-      const fence = await transitionPrePrFenceEstablished(fixture.runDir, { ...options, token: "fence-token-123" });
-      const malformed = { ...options, observePrOperation: () => ({ disposition: "open", pull_request: { ...operationPull(fence.fence), head_sha: "short" } }) };
-      await assert.rejects(transitionPrCreated(fixture.runDir, {}, { ...malformed, fenceToken: fence.fence.token }), /head_sha does not match the fenced operation/u);
-      assert.equal(readJson(join(fixture.runDir, "run.json")).pr_url, null);
+      const before = readFileSync(join(fixture.runDir, "run.json"));
+      await assert.rejects(transitionPrePrFenceEstablished(fixture.runDir, { ...options, token: "fence-token-123" }), /exact accepted work-decomposer authority/u);
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), before);
+      assert.equal(readJson(join(fixture.runDir, "run.json")).steering.pr_fence, null);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
@@ -157,26 +162,10 @@ describe("checked post-PR transitions", () => {
       green.post_pr.observation.last_verdict = "green";
       green.post_pr.observation.last_check_verdict = "pass";
       writeJson(join(fixture.runDir, "run.json"), green);
-      const done = await transitionPostPrTerminal(fixture.runDir, { status: "completed", reason: "post-pr-ci-green" }, { now: NOW, ...(await freshTerminalOptions(fixture)) });
-      assert.equal(done.run.post_pr.phase, "succeeded");
-      assert.deepEqual(done.run.terminal_result, {
-        status: "completed",
-        run_id: "guards",
-        pr_url: "https://github.com/acme/repo/pull/7",
-        pr_number: 7,
-        pr_node_id: "PR_post_pr_state",
-        repository: "acme/repo",
-        operation_id: operationRecord("guards", fixture.head).operation_id,
-        head_ref: "feature",
-        head_sha: fixture.head,
-        base_ref: "main",
-        base_sha: fixture.head,
-        draft: false,
-        reason: "post-pr-ci-green",
-        summary: "post-pr-ci-green",
-        artifacts: {},
-      });
-      await assert.rejects(transitionPostPrState(fixture.runDir, done.run.post_pr), /terminal run/u);
+      const options = await freshTerminalOptions(fixture);
+      const before = readFileSync(join(fixture.runDir, "run.json"));
+      await assert.rejects(transitionPostPrTerminal(fixture.runDir, { status: "completed", reason: "post-pr-ci-green" }, { now: NOW, ...options }), /complete merged slice projection/u);
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), before);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
