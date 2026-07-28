@@ -142,6 +142,19 @@ describe("slice remediation task context", () => {
     assert.throws(() => validateSliceReviewResult(incomplete), /classify every required fix exactly once/u);
   });
 
+  it("absorbs a miscounted remaining_fix_count and reports the derived count", () => {
+    // remaining_fix_count is required_fixes.length restated, and nothing outside
+    // the validator reads it, so a reviewer that miscounts it agrees about every
+    // fix and must not fail closed. The reported count comes from the fixes.
+    const miscounted = classifiedReview(["narrow-correction", "narrow-correction"]);
+    miscounted.remaining_fix_count = 7;
+    assert.equal(validateSliceReviewResult(miscounted).remaining_fix_count, 2);
+
+    const absent = classifiedReview(["narrow-correction"]);
+    delete absent.remaining_fix_count;
+    assert.equal(validateSliceReviewResult(absent).remaining_fix_count, 1);
+  });
+
   it("no longer cross-checks the doubly encoded nonconvergence", () => {
     // `review.convergence` is the routed field; the per-fix `nonconvergent`
     // classification restated it, and the two had to agree exactly. Either

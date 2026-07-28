@@ -226,8 +226,13 @@ export function validateSliceReviewResult(review, { sliceId = "slice", priorRevi
   requiredEnum(errors, review, "verdict", SLICE_REVIEW_VERDICTS, `${path}.verdict`);
   requiredEnum(errors, review, "convergence", SLICE_REVIEW_CONVERGENCE, `${path}.convergence`);
   appendSliceReviewStrikePolicyErrors(errors, review, path, priorReviews);
-  boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${path}.remaining_fix_count`);
-  if (review.remaining_fix_count !== fixes.length) errors.push({ path: `${path}.remaining_fix_count`, message: "must equal required_fixes length" });
+  // remaining_fix_count is required_fixes.length restated. Nothing outside this
+  // validator reads it, so it fails the routed-fields test: a reviewer that
+  // miscounts it agrees about every fix and still fails closed. Accepted when
+  // present so current prompt output keeps validating, but no longer compared.
+  if (review.remaining_fix_count !== undefined) {
+    boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${path}.remaining_fix_count`);
+  }
   if (review.verdict === "APPROVE" && fixes.length !== 0) errors.push({ path: `${path}.required_fixes`, message: "APPROVE review requires zero remaining fixes" });
   if (review.verdict === "REJECT" && fixes.length < 1) errors.push({ path: `${path}.required_fixes`, message: "REJECT review requires at least one remaining fix" });
   const ratification = review.ownership_ratification;
@@ -294,7 +299,7 @@ export function validateSliceReviewResult(review, { sliceId = "slice", priorRevi
     verdict: review.verdict,
     convergence: review.convergence,
     late_discovery_strike: review.late_discovery_strike,
-    remaining_fix_count: review.remaining_fix_count,
+    remaining_fix_count: fixes.length,
     ownership_schema_version: ratification.schema_version,
     ratified_paths: ratification.schema_version === 1 && Array.isArray(ratification.paths) ? [...ratification.paths] : [],
     task_context: classifications.length > 0 && classifications.every((classification) => classification === "narrow-correction") ? "reuse" : "fresh",
