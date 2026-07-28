@@ -1969,7 +1969,18 @@ async function reconcileCheckpointLaunchAfterOwnership(repo, runDir, run, opts) 
   if (entry.state === "merged") throw new Error("merged checkpoint progress cannot launch");
   if (source.root_child_run_id !== checked.run_id) throw new Error("checkpoint continuation cannot establish root child launch ownership");
   if (ordinaryCheckpoint) assertOrdinaryResumeRunById(repo, checked.run_id);
-  const launched = await recordCheckpointLaunched(parentRunDir, entry, opts);
+  const callerHooks = opts.checkpointProgressHooks;
+  const progressOptions = ordinaryCheckpoint ? {
+    ...opts,
+    checkpointProgressHooks: {
+      ...callerHooks,
+      beforeReplace: async (state) => {
+        await callerHooks?.beforeReplace?.(state);
+        assertOrdinaryResumeRunById(repo, checked.run_id);
+      },
+    },
+  } : opts;
+  const launched = await recordCheckpointLaunched(parentRunDir, entry, progressOptions);
   if (launched.state === "merged") throw new Error("merged checkpoint progress cannot launch");
   return launched;
 }

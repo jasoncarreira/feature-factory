@@ -1732,7 +1732,18 @@ export async function transitionTerminalResult(runDir, terminalResult, options =
     const next = { ...cloneJson(nextTerminalResult), run_id: draft.run_id, status: nextTerminalResult.status };
     draft.status = next.status;
     draft.terminal_result = next;
-  }, options, { terminal: true }), options);
+  }, options, {
+    terminal: true,
+    beforeReplace: nextTerminalResult.reason === "carry-forward-required" ? (_next, current) => {
+      if (current.checkpoint_source && current.continuation?.schema_version !== 2) {
+        assertCurrentCheckpointChildPublication({
+          repository: resolve(runDir, "../../.."),
+          childRunDir: resolve(runDir),
+          run: current,
+        }, options);
+      }
+    } : undefined,
+  }), options);
   return { ...result, terminal_result: result.run.terminal_result };
 }
 

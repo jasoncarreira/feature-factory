@@ -459,6 +459,39 @@ describe("B4.3 normal checkpoint child start", () => {
     assert.equal(asserted, cases.length, "all checkpoint terminal binding rows asserted");
   });
 
+  it("re-observes checkpoint authority at the final parent progress publication boundary", async () => {
+    const fixture = createFixture("progress-publication-race");
+    const childRunId = "progress-publication-race-child";
+    try {
+      await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: childRunId, dryRun: true,
+      });
+      const childRunPath = join(fixture.repo, ".opencode", "factory", childRunId, "run.json");
+      const parentBefore = readFileSync(join(fixture.parentRunDir, "run.json"));
+      let launches = 0;
+      await assert.rejects(
+        resumeFactory(childRunId, {
+          cwd: fixture.repo,
+          checkpointProgressHooks: {
+            beforeReplace: () => {
+              const child = readJson(childRunPath);
+              child.checkpoint_source.admission_probe_hash = hashBytes("raced admission probe");
+              writeJson(childRunPath, child);
+            },
+          },
+          foregroundLaunchFn: async () => { launches += 1; },
+        }),
+        (error) => errorChainMatches(error, /resume-schema-route-mismatch/u),
+      );
+      assert.equal(launches, 0);
+      assert.deepEqual(readFileSync(join(fixture.parentRunDir, "run.json")), parentBefore, "parent progress must not publish");
+      assert.equal(readJson(join(fixture.parentRunDir, "run.json")).checkpoint_progress.entries[0].state, "child-published");
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId, "process-launch.lock")), false, "launch claim must be cleaned after publication rejection");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("returns merged progress without invoking any launch path", async () => {
     const fixture = createFixture("merged-replay");
     const options = {
