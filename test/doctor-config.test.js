@@ -14,9 +14,10 @@ import {
   evaluatePackageInstrumentationLoadability,
   formatTelemetryEndpointDetail,
   hasTuiExport,
+  permissionFailures,
   readOpencodeConfig,
 } from "../src/doctor.js";
-import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
+import { REDACTED_ENV_VALUE, resolvePluginConfig } from "../src/env-snapshot.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const LOCAL_PLUGIN_SPEC = pathToFileURL(fileURLToPath(new URL("..", import.meta.url))).href;
@@ -95,6 +96,35 @@ describe("doctor opencode config parsing", () => {
 });
 
 describe("doctor output projection", () => {
+  it("accepts task deny for subagents while requiring task allow for the primary agent", async () => {
+    const registered = await resolvePluginConfig();
+
+    assert.deepEqual(permissionFailures(registered.agent), []);
+
+    const primaryDenied = structuredClone(registered.agent);
+    primaryDenied["feature-factory"].permission.task = "deny";
+    assert.deepEqual(permissionFailures(primaryDenied), ["feature-factory.task=deny"]);
+
+    const subagentAllowed = structuredClone(registered.agent);
+    subagentAllowed["backend-builder"].permission.task = "allow";
+    assert.deepEqual(permissionFailures(subagentAllowed), ["backend-builder.task=allow"]);
+  });
+
+  it("reports the supported bounded-delegation policy as healthy", () => {
+    const fixture = doctorFixture();
+    try {
+      const proc = runDoctorFixture(fixture, ["--json"]);
+      const payload = JSON.parse(proc.stdout);
+      const permissions = payload.checks.find((check) => check.label === "factory permissions non-interactive");
+
+      assert.equal(proc.status, 0);
+      assert.equal(permissions.level, "ok");
+      assert.equal(permissions.detail, "factory agent permissions");
+    } finally {
+      cleanup(fixture.dir);
+    }
+  });
+
   it("projects the whole JSON payload and human profile rows", () => {
     const fixture = doctorFixture({
       profiles: {

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { isCarryForwardRequiredTerminal, isSettledBlockedAmendment, assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertOrdinaryResumeRunById, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, parseSlicesPlanBytes, pendingProtectedGate, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
@@ -4739,9 +4739,13 @@ async function publishCarryForwardChild(repo, parentRunDir, continuation, config
 
 function moveDirectoryNoReplace(stagingRoot, targetRunDir, options = {}) {
   if (basename(stagingRoot) !== basename(targetRunDir)) throw new Error("carry-forward publication source and target identities differ");
-  const move = typeof options.publicationMoveSpawnSync === "function" ? options.publicationMoveSpawnSync : defaultSpawnSync;
-  const result = move("mv", ["-n", "--", stagingRoot, dirname(targetRunDir)], { encoding: "utf8" });
-  if (result?.error || result?.status !== 0) throw new Error("carry-forward atomic no-overwrite directory move failed");
+  if (pathExistsNoFollow(targetRunDir)) throw new Error(`carry-forward publication target already exists and will not be overwritten: ${targetRunDir}`);
+  const rename = typeof options.publicationRenameSync === "function" ? options.publicationRenameSync : renameSync;
+  try {
+    rename(stagingRoot, targetRunDir);
+  } catch {
+    throw new Error("carry-forward atomic no-overwrite directory move failed");
+  }
   if (pathExistsNoFollow(stagingRoot)) throw new Error(`carry-forward publication target already exists and will not be overwritten: ${targetRunDir}`);
   if (!pathExistsNoFollow(targetRunDir)) throw new Error("carry-forward atomic no-overwrite directory move did not publish the child");
 }

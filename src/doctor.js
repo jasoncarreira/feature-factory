@@ -33,7 +33,7 @@ const SUBAGENTS = [
   "work-reviewer",
 ];
 const EDIT_AGENTS = new Set(["feature-factory", "backend-builder", "frontend-builder", "test-verifier"]);
-const NON_INTERACTIVE_ALLOW = ["read", "glob", "grep", "list", "bash", "webfetch", "task", "todowrite"];
+const NON_INTERACTIVE_ALLOW = ["read", "glob", "grep", "list", "bash", "webfetch", "todowrite"];
 const FACTORY_DENY = ["external_directory"];
 const FEATURE_FACTORY_PLUGIN_SPECS = new Set(["opencode-feature-factory"]);
 const COMPANION_TELEMETRY_PLUGIN_SPECS = new Set([
@@ -476,7 +476,7 @@ function staleProfileKeys(options = {}) {
   return ["model", "models", "variant", "variants"].filter((key) => Object.prototype.hasOwnProperty.call(options, key));
 }
 
-function permissionFailures(agents = {}) {
+export function permissionFailures(agents = {}) {
   const failures = [];
   for (const name of ["feature-factory", ...SUBAGENTS]) {
     const permission = agents[name]?.permission || {};
@@ -486,6 +486,8 @@ function permissionFailures(agents = {}) {
     for (const key of FACTORY_DENY) {
       if (permission[key] !== "deny") failures.push(`${name}.${key}=${permission[key] || "unset"}`);
     }
+    const expectedTask = name === "feature-factory" ? "allow" : "deny";
+    if (permission.task !== expectedTask) failures.push(`${name}.task=${permission.task || "unset"}`);
     const expectedEdit = EDIT_AGENTS.has(name) ? "allow" : "deny";
     if (permission.edit !== expectedEdit) failures.push(`${name}.edit=${permission.edit || "unset"}`);
   }

@@ -240,4 +240,32 @@ describe("environment snapshot redaction", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("detects opencode run flags across combined help stdout and stderr on failure", () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-opencode-help-"));
+    const executable = join(dir, "opencode");
+    const savedPath = process.env.PATH;
+    try {
+      writeFileSync(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' 'opencode-test'
+  exit 0
+fi
+printf '%s\\n' 'Usage: opencode run --command value'
+printf '%s\\n' 'Options: --dir path' >&2
+exit 2
+`, "utf8");
+      chmodSync(executable, 0o755);
+      process.env.PATH = `${dir}:${savedPath ?? ""}`;
+
+      const capabilities = detectCapabilities(dir);
+      assert.equal(capabilities.opencode, true);
+      assert.equal(capabilities.opencode_run_command, true);
+      assert.equal(capabilities.opencode_run_dir, true);
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

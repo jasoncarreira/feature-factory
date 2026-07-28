@@ -202,6 +202,7 @@ async function doctor(args) {
 
 async function factory(args, dependencies = {}) {
   const [sub, ...rest] = args;
+  if (sub === "--help" || sub === "-h") return usage();
   if (sub === "base-advance") return baseAdvance(rest);
   if (sub === "answer") return answer(rest);
   if (sub === "test-execute") return testExecute(rest, dependencies);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -13,6 +13,7 @@ describe("B4.3 normal checkpoint child publication", () => {
   it("creates the no-replace claim and ordinary branch transaction, then publishes a complete normal child", async () => {
     const fixture = createFixture("normal-child", { prMode: "draft", reviewTier: "strict", postPrEnabled: true });
     let observedStaging = false;
+    let observedRename = false;
     try {
       const result = await publish(fixture, {
         beforeChildPublish({ stagingRoot, targetRunDir }) {
@@ -20,9 +21,15 @@ describe("B4.3 normal checkpoint child publication", () => {
           assert.equal(existsSync(targetRunDir), false, "an incomplete child must remain invisible");
           assert.equal(validateRunDir(stagingRoot).ok, true);
         },
+        publicationRenameSync(source, target) {
+          observedRename = true;
+          assert.equal(target, fixture.childRunDir);
+          renameSync(source, target);
+        },
       });
 
       assert.equal(observedStaging, true);
+      assert.equal(observedRename, true);
       assert.equal(result.published, true);
       assert.equal(result.replayed, false);
       assert.equal(result.created_refs, true);
@@ -183,6 +190,22 @@ describe("B4.3 normal checkpoint child publication", () => {
       await assert.rejects(publish(fixture), /partial or contains mismatched files/u);
       assert.deepEqual(readFileSync(join(fixture.childRunDir, "run.json")), before);
       assert.equal(existsSync(join(fixture.childRunDir, "plan", "slices.json")), false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("fails closed when the native directory publication operation fails", async () => {
+    const fixture = createFixture("rename-failure");
+    try {
+      await assert.rejects(publish(fixture, {
+        publicationRenameSync() {
+          const error = new Error("host path detail must not escape");
+          error.code = "EIO";
+          throw error;
+        },
+      }), /serialized no-overwrite directory publication failed/u);
+      assert.equal(existsSync(fixture.childRunDir), false);
     } finally {
       fixture.cleanup();
     }
