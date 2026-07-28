@@ -557,7 +557,13 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
       symlinkSync(outside, join(fixture.runDir, PROCESS_EVIDENCE_FILE));
       const before = readFileSync(outside);
 
-      assert.equal(inspectProcessEvidenceForCleanup(fixture.runDir, { runId: fixture.runId }).state, "invalid");
+      const normal = readProcessEvidence(fixture.runDir, { runId: fixture.runId });
+      const cleanupProjection = inspectProcessEvidenceForCleanup(fixture.runDir, { runId: fixture.runId });
+      assert.equal(normal.ok, false);
+      assert.equal(normal.missing, false);
+      assert.match(normal.reason, /invalid process evidence/u);
+      assert.equal(cleanupProjection.state, "invalid");
+      assert.equal(cleanupProjection.hash, null);
       assert.deepEqual(readFileSync(outside), before);
     } finally {
       cleanup(fixture.root);
@@ -593,19 +599,18 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
     }
   });
 
-  it("never signals for malformed or throwing legacy processAliveFn results", async () => {
+  it("never signals for malformed or throwing canonical livenessProbe results", async () => {
     const callbacks = [
       () => "false",
       () => new Boolean(false),
-      () => ({ status: "absent" }),
       () => [],
       () => 0,
       () => null,
       () => undefined,
       () => { throw new Error("probe failed"); },
     ];
-    for (const [index, processAliveFn] of callbacks.entries()) {
-      const fixture = createFixture(`legacy-liveness-${index}`);
+    for (const [index, livenessProbe] of callbacks.entries()) {
+      const fixture = createFixture(`canonical-liveness-${index}`);
       const signals = [];
       try {
         writeProcessEvidence(fixture.runDir, evidence(fixture));
@@ -613,7 +618,7 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
           runId: fixture.runId,
           cancelWaitMs: 0,
           platform: "linux",
-          processAliveFn,
+          livenessProbe,
           procReadFile: (path) => path.endsWith("/stat") ? linuxStat(PID, "111") : "/usr/local/bin/opencode\n",
           procReadlink: () => fixture.runDir,
           signalFn: (pid, signal) => signals.push({ pid, signal }),
@@ -628,7 +633,7 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
     }
   });
 
-  it("fails closed when legacy Darwin commandRunnerFn observes a changed final start marker", async () => {
+  it("fails closed when canonical Darwin inspection observes a changed final start marker", async () => {
     const fixture = createFixture("darwin-final-marker-change");
     const signals = [];
     const starts = ["Fri Jul 10 10:00:00 2026", "Fri Jul 10 10:00:01 2026"];
@@ -646,8 +651,8 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
         runId: fixture.runId,
         cancelWaitMs: 0,
         platform: "darwin",
-        processAliveFn: () => true,
-        commandRunnerFn: (command, args) => {
+        livenessProbe: () => ({ status: "live" }),
+        commandRunner: (command, args) => {
           if (command === "ps" && args.at(-1) === "lstart=") return `${starts[startProbe++]}\n`;
           if (command === "ps" && args.at(-1) === "comm=") return "/usr/local/bin/opencode\n";
           if (command === "lsof") return `p${PID}\nfcwd\nn${fixture.runDir}\n`;
@@ -704,27 +709,20 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
     }
   });
 
-  it("preserves processInspectorFn and processSignalFn compatibility without broad signaling", async () => {
-    const fixture = createFixture("legacy-aliases");
+  it("preserves processSignalFn without an identity callback adapter", async () => {
+    const fixture = createFixture("canonical-signal");
     const signals = [];
     let signaled = false;
     try {
       writeProcessEvidence(fixture.runDir, evidence(fixture, {
-        identity: { inspector: "legacy-inspector", start_marker: "legacy-start", command_name: "opencode" },
+        identity: { inspector: "node-process", start_marker: "linux-procfs:111", command_name: "opencode" },
       }));
       const result = await cancelProcessFromEvidence(fixture.runDir, {
         runId: fixture.runId,
         cancelWaitMs: 0,
-        processInspectorFn: (pid) => signaled
-          ? { ok: false, inspector: "legacy-inspector", code: "ESRCH", reason: "ESRCH" }
-          : {
-              ok: true,
-              inspector: "legacy-inspector",
-              pid,
-              start_marker: "legacy-start",
-              command_name: "opencode",
-              cwd: fixture.runDir,
-            },
+        ...processOptions(fixture.runDir, {
+          livenessProbe: () => ({ status: signaled ? "absent" : "live" }),
+        }),
         processSignalFn: (pid, signal) => {
           signals.push({ pid, signal });
           signaled = true;
@@ -736,6 +734,52 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
     } finally {
       cleanup(fixture.root);
     }
+  });
+
+  it("contains one hardened reader and no retired process option adapters", () => {
+    const evidenceSource = readFileSync(new URL("../src/process-evidence.js", import.meta.url), "utf8");
+    const verificationSource = readFileSync(new URL("../src/hardening/process-verification.js", import.meta.url), "utf8");
+    const supervisorSource = readFileSync(new URL("../src/detached-log-supervisor.js", import.meta.url), "utf8");
+    const combinedSource = [evidenceSource, verificationSource, supervisorSource].join("\n");
+    const retainedOptionSeams = [
+      "livenessProbe",
+      "platform",
+      "hostname",
+      "procReadFile",
+      "procReadlink",
+      "commandRunner",
+      "commandTimeoutMs",
+      "commandMaxBuffer",
+      "clock",
+      "sleep",
+      "signalFn",
+      "processSignalFn",
+    ];
+    const retiredOptionSeams = [
+      "processAliveFn",
+      "inspectorFn",
+      "processInspectorFn",
+      "livenessProbeFn",
+      "processLivenessProbe",
+      "platformFn",
+      "hostnameFn",
+      "hostnameProvider",
+      "procReadFileFn",
+      "readProcFileFn",
+      "procReadlinkFn",
+      "readProcLinkFn",
+      "commandRunnerFn",
+      "clockFn",
+      "sleepFn",
+    ];
+    assert.equal(retainedOptionSeams.length, 12);
+    assert.equal(retiredOptionSeams.length, 15);
+    for (const retained of retainedOptionSeams) assert.equal(combinedSource.includes(retained), true, retained);
+    for (const retired of retiredOptionSeams) assert.equal(combinedSource.includes(retired), false, retired);
+    for (const fabricated of ["legacyVerificationContext", "syntheticLinuxStat", "readProcessEvidenceForCleanup"]) {
+      assert.equal(evidenceSource.includes(fabricated), false, fabricated);
+    }
+    assert.equal((evidenceSource.match(/function readProcessEvidenceSnapshot\(/gu) || []).length, 1);
   });
 });
 

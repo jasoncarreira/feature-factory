@@ -7,6 +7,9 @@ const DESIGN = read("../CONTINUATION-SCOPE-DESIGN.md");
 const LEDGER = read("../DURABLE-AUTHORITY-LEDGER.md");
 const SPEC = read("../SPEC.md");
 const SCHEMA = read("../assets/skills/feature/SCHEMA.md");
+const RUN_STATE_SOURCE = read("../src/run-state.js");
+const FACTORY_SOURCE = read("../src/factory.js");
+const CLI_SOURCE = read("../src/cli.js");
 const CONTRACT = extractContract(DESIGN);
 
 const MANIFEST_VARIANTS = [
@@ -181,7 +184,7 @@ describe("B5.1 integration amendment contract", () => {
     assert.deepEqual(CONTRACT.review_dispatch_observations, ["absent", "active-claim-only", "review-published-without-closure", "closed-unconsumed", "consumed", "orphan-or-cross-bound"]);
     assert.deepEqual(CONTRACT.review_dispatch_compatibility, {
       run_schema_bump: false,
-      "pre-dispatch_legacy": "absent-compatible",
+      "pre-dispatch": "absent",
       reviewed_attempt: "claim-and-closure-required",
       publication: "create-only-exact-replay-no-overwrite",
       unresolved: "semantic-fence-and-operator-reconciliation-no-redispatch",
@@ -195,25 +198,41 @@ describe("B5.1 integration amendment contract", () => {
     assert.deepEqual(CONTRACT.verification_outcomes.map(({ outcome, decision }) => `${outcome}:${decision}`), ["pass:verified", "nonzero-exit:blocked-from-integrated", "signal:blocked-from-integrated", "launch-error:blocked-from-integrated", "timeout:blocked-from-integrated", "output-limit:blocked-from-integrated", "indeterminate:remain-integrated-and-fence"]);
     assert.deepEqual(CONTRACT.report_claim_observations, ["all-absent", "active-claim-only", "unknown-claim-optional-bound-receipt", "completed-pass-receipt-no-manifest", "completed-diagnostic-receipt-no-manifest", "completed-nonzero-receipt-no-manifest", "completed-nonzero-receipt-matching-manifest", "receipt-without-claim", "cross-bound-or-orphan-sidecar"]);
     assert.deepEqual(CONTRACT.publication_cases, ["ref-and-clean-worktree-at-baseline", "ref-and-clean-worktree-at-integration", "ref-at-integration-worktree-at-exact-clean-pre-cas-baseline"]);
-    assert.deepEqual(CONTRACT.writer_fences, ["amendment-transitions", "generic-run-writers", "slice-writers", "step-writers", "gate-writers", "panel-writers", "pre-pr-and-pr-writers", "post-pr-writers", "heartbeat-writers", "resume-and-recovery", "terminalization", "cleanup", "continuation", "legacy-report-admission", "validateRun", "checkRunConsistency"]);
+    assert.deepEqual(CONTRACT.writer_fences, ["amendment-transitions", "generic-run-writers", "slice-writers", "step-writers", "gate-writers", "panel-writers", "pre-pr-and-pr-writers", "post-pr-writers", "heartbeat-writers", "resume-and-recovery", "terminalization", "cleanup", "continuation", "validateRun", "checkRunConsistency"]);
   });
 
-  it("pins continuation, migration, and all 28 legacy parity decisions", () => {
+  it("pins v2 carry-forward rejection and all 28 amendment parity decisions", () => {
     assert.deepEqual(CONTRACT.continuation_boundaries, ["construction", "target-reservation", "allocation", "publication", "adoption", "payload-replay", "local-authority-check", "resume"]);
-    assert.deepEqual(CONTRACT.migration, ["persisted-legacy-progresses-unchanged", "generic-and-legacy-never-coexist", "generic-tombstone-forbids-legacy-fallback", "generic-retires-legacy-only-for-pristine-pending-baseline-substrate", "blocked-previously-attempted-and-branch-only-remain-narrowed-legacy-recovery", "all-28-adversarial-guarantees-port-before-cutover"]);
+    assert.deepEqual(CONTRACT.current_shape, ["generic-amendment-is-sole-in-place-repair", "continuation-checkpoint-and-non-pristine-require-fresh-v2-carry-forward", "old-shapes-reject-fail-closed", "all-28-adversarial-guarantees-retained"]);
     assert.deepEqual(CONTRACT.parity, PARITY);
   });
 
-  it("keeps every public summary aligned with design-only class-9 authority", () => {
-    assert.equal(CONTRACT.runtime_authority, false);
+  it("keeps every public summary aligned with current class-9 authority", () => {
+    assert.equal(CONTRACT.runtime_authority, true);
     assert.match(LEDGER, /fixed per-run report claim is the pre-manifest singleton tombstone/u);
-    assert.match(LEDGER, /exactly 48 planned rows/u);
+    assert.match(LEDGER, /exactly 48 current rows/u);
     assert.match(SPEC, /pristine pending direct consumer/u);
-    assert.match(SPEC, /B5\.1 is design-only; these bullets grant no runtime authority/u);
-    assert.match(SCHEMA, /planned B5 successor within class 9/u);
-    assert.match(SCHEMA, /exactly 48 planned rows/u);
-    for (const summary of [LEDGER, SPEC, SCHEMA]) {
-      assert.match(summary, /blocked, previously attempted, and branch-only/iu);
+    assert.match(SPEC, /sole in-place repair authority/u);
+    assert.match(SCHEMA, /current generic integration amendment within class 9/u);
+    assert.match(SCHEMA, /exactly 48 current rows/u);
+  });
+
+  it("rejects every named retired source residual across run-state, factory, and CLI", () => {
+    const sources = {
+      "src/run-state.js": RUN_STATE_SOURCE,
+      "src/factory.js": FACTORY_SOURCE,
+      "src/cli.js": CLI_SOURCE,
+    };
+    const residuals = [
+      "transitionLegacyPrFenceNeedsHuman",
+      'request.route === "merged-slice-repair"',
+      "transitionMergedSliceRepair",
+      "mergedSliceRepairFence",
+    ];
+    assert.equal(Object.keys(sources).length, 3);
+    assert.equal(residuals.length, 4);
+    for (const [path, source] of Object.entries(sources)) {
+      for (const residual of residuals) assert.equal(source.includes(residual), false, `${path} retains ${residual}`);
     }
   });
 });

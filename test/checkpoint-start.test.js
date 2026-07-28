@@ -6,10 +6,10 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { attachCheckpointCompletionRecovery, cleanupRun, closeFactoryCheckpointRoute, continueFactory, recordFactoryCheckpointMerged, resumeFactory, startFactoryCheckpoint } from "../src/factory.js";
+import { attachCheckpointCompletionRecovery, cleanupRun, closeFactoryCheckpointRoute, continueFactory, recordFactoryCheckpointMerged, resumeFactory, startFactory, startFactoryCheckpoint } from "../src/factory.js";
 import { runCliCommand } from "../src/cli.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
-import { transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged } from "../src/run-state.js";
+import { transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
 import { validateRunDir } from "../src/validate.js";
 import { execFileSync } from "./helpers/git-fixture.js";
 
@@ -152,15 +152,40 @@ describe("B4.3 normal checkpoint child start", () => {
       const sourceDisposition = readFileSync(join(sourceRunDir, "reviews", "work-decomposer.json"));
       const sourceDecompositionStep = structuredClone(published.steps.find((step) => step.agent === "work-decomposer"));
       const continuationReviewRef = "reviews/continuation.json";
+      const securityReviewRef = "reviews/security-reviewer.json";
+      const validationReportRef = "artifacts/validation-report.md";
       writeJson(join(sourceRunDir, continuationReviewRef), {
         subject: sourceRunId,
         attempt: 1,
+        verdict: "NO-GO",
+        reviewed_head_sha: published.base_commit,
         summary: "Continue the blocked checkpoint child.",
         required_fixes: ["Complete the remaining checkpoint slice"],
       });
+      writeJson(join(sourceRunDir, securityReviewRef), {
+        subject: sourceRunId,
+        attempt: 1,
+        verdict: "PASS",
+        reviewed_head_sha: published.base_commit,
+      });
+      mkdirSync(join(sourceRunDir, "artifacts"));
+      writeFileSync(join(sourceRunDir, validationReportRef), "Continuation required.\n");
       published.status = "blocked";
       published.updated_at = "2026-07-19T12:02:00.000Z";
-      published.validator = { verdict: "NO-GO", review_ref: continuationReviewRef };
+      published.validator = {
+        verdict: "NO-GO",
+        report: validationReportRef,
+        report_hash: hashBytes(readFileSync(join(sourceRunDir, validationReportRef))),
+        review_ref: continuationReviewRef,
+        review_hash: hashBytes(readFileSync(join(sourceRunDir, continuationReviewRef))),
+        reviewed_head_sha: published.base_commit,
+      };
+      published.security_review = {
+        verdict: "PASS",
+        review_ref: securityReviewRef,
+        review_hash: hashBytes(readFileSync(join(sourceRunDir, securityReviewRef))),
+        reviewed_head_sha: published.base_commit,
+      };
       published.terminal_result = {
         status: "blocked",
         run_id: sourceRunId,
@@ -333,6 +358,135 @@ describe("B4.3 normal checkpoint child start", () => {
       });
       assert.equal(launches, 1);
       assert.equal(readJson(join(fixture.parentRunDir, "run.json")).checkpoint_progress.entries[0].state, "launched");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("re-observes every checkpoint source and configuration binding before any resume effect", async () => {
+    const cases = [
+      ["source plan", (run) => { run.checkpoint_source.source_plan_hash = hashBytes("other source plan"); }],
+      ["source review", (run) => { run.checkpoint_source.source_review_hash = hashBytes("other source review"); }],
+      ["parent review", (run) => { run.checkpoint_source.parent_review_identity_hash = hashBytes("other parent review"); }],
+      ["admission probe", (run) => { run.checkpoint_source.admission_probe_hash = hashBytes("other admission probe"); }],
+      ["acceptance mapping", (run) => { run.checkpoint_source.acceptance_mapping_hash = hashBytes("other acceptance mapping"); }],
+      ["configuration", (run) => { run.mode = "headless"; }],
+    ];
+    const routes = [
+      ["resume", (runId, options) => resumeFactory(runId, options)],
+      ["start-resume", (runId, options) => startFactory([`resume ${runId}`], options)],
+    ];
+    assert.equal(cases.length, 6, "exact immutable checkpoint binding classes");
+    assert.equal(routes.length, 2, "exact direct resume entry points");
+    let asserted = 0;
+    for (const [binding, mutate] of cases) {
+      for (const [route, invoke] of routes) {
+        const fixture = createFixture(`resume-tamper-${binding.replaceAll(" ", "-")}-${route}`);
+        const childRunId = `tamper-${binding.replaceAll(" ", "-")}-${route}`;
+        try {
+          await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+            cwd: fixture.repo, runId: childRunId, dryRun: true,
+          });
+          const childRunPath = join(fixture.repo, ".opencode", "factory", childRunId, "run.json");
+          const child = readJson(childRunPath);
+          mutate(child);
+          writeJson(childRunPath, child);
+          const before = checkpointResumeEffects(fixture, childRunId);
+          let launches = 0;
+
+          await assert.rejects(
+            invoke(childRunId, {
+              cwd: fixture.repo,
+              foregroundLaunchFn: async () => { launches += 1; throw new Error("unexpected foreground launch"); },
+              detachedLaunchFn: async () => { launches += 1; throw new Error("unexpected detached launch"); },
+            }),
+            (error) => error?.code === "resume-schema-route-mismatch",
+            `${binding} ${route}`,
+          );
+          assert.equal(launches, 0, `${binding} ${route}: process launch`);
+          assert.deepEqual(checkpointResumeEffects(fixture, childRunId), before, `${binding} ${route}: complete effect boundary`);
+          asserted += 1;
+        } finally {
+          fixture.cleanup();
+        }
+      }
+    }
+    assert.equal(asserted, cases.length * routes.length, "all checkpoint binding/route rows asserted");
+  });
+
+  it("re-observes every checkpoint source and configuration binding before terminalization", async () => {
+    const cases = [
+      ["source plan", (run) => { run.checkpoint_source.source_plan_hash = hashBytes("terminal source plan"); }],
+      ["source review", (run) => { run.checkpoint_source.source_review_hash = hashBytes("terminal source review"); }],
+      ["parent review", (run) => { run.checkpoint_source.parent_review_identity_hash = hashBytes("terminal parent review"); }],
+      ["admission probe", (run) => { run.checkpoint_source.admission_probe_hash = hashBytes("terminal admission probe"); }],
+      ["acceptance mapping", (run) => { run.checkpoint_source.acceptance_mapping_hash = hashBytes("terminal acceptance mapping"); }],
+      ["configuration", (run) => { run.max_retries = 4; }],
+    ];
+    assert.equal(cases.length, 6, "exact terminal checkpoint binding classes");
+    let asserted = 0;
+    for (const [binding, mutate] of cases) {
+      const fixture = createFixture(`terminal-tamper-${binding.replaceAll(" ", "-")}`);
+      const childRunId = `terminal-tamper-${binding.replaceAll(" ", "-")}`;
+      try {
+        await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo, runId: childRunId, dryRun: true,
+        });
+        const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+        const childRunPath = join(childRunDir, "run.json");
+        const child = readJson(childRunPath);
+        mutate(child);
+        writeJson(childRunPath, child);
+        const boundary = await transitionSteeringBoundaryOpened(childRunDir, "terminal", { now: "2026-07-19T12:02:00.000Z" });
+        const before = checkpointResumeEffects(fixture, childRunId);
+
+        await assert.rejects(
+          transitionTerminalResult(childRunDir, {
+            status: "blocked",
+            reason: "carry-forward-required",
+            summary: "Integration amendment is unsupported for this run state; continue remaining work in a fresh schema-v2 carry-forward child.",
+            artifacts: {},
+          }, { boundaryToken: boundary.boundary.token, now: "2026-07-19T12:03:00.000Z" }),
+          /checkpoint child|publication authority|routing manifest|source|configuration|initial publication hash/u,
+          binding,
+        );
+        assert.deepEqual(checkpointResumeEffects(fixture, childRunId), before, `${binding}: terminal effect boundary`);
+        asserted += 1;
+      } finally {
+        fixture.cleanup();
+      }
+    }
+    assert.equal(asserted, cases.length, "all checkpoint terminal binding rows asserted");
+  });
+
+  it("re-observes checkpoint authority at the final parent progress publication boundary", async () => {
+    const fixture = createFixture("progress-publication-race");
+    const childRunId = "progress-publication-race-child";
+    try {
+      await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: childRunId, dryRun: true,
+      });
+      const childRunPath = join(fixture.repo, ".opencode", "factory", childRunId, "run.json");
+      const parentBefore = readFileSync(join(fixture.parentRunDir, "run.json"));
+      let launches = 0;
+      await assert.rejects(
+        resumeFactory(childRunId, {
+          cwd: fixture.repo,
+          checkpointProgressHooks: {
+            beforeReplace: () => {
+              const child = readJson(childRunPath);
+              child.checkpoint_source.admission_probe_hash = hashBytes("raced admission probe");
+              writeJson(childRunPath, child);
+            },
+          },
+          foregroundLaunchFn: async () => { launches += 1; },
+        }),
+        (error) => errorChainMatches(error, /resume-schema-route-mismatch/u),
+      );
+      assert.equal(launches, 0);
+      assert.deepEqual(readFileSync(join(fixture.parentRunDir, "run.json")), parentBefore, "parent progress must not publish");
+      assert.equal(readJson(join(fixture.parentRunDir, "run.json")).checkpoint_progress.entries[0].state, "child-published");
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId, "process-launch.lock")), false, "launch claim must be cleaned after publication rejection");
     } finally {
       fixture.cleanup();
     }
@@ -988,6 +1142,20 @@ function removeCheckpointTargets(fixture, runId) {
   try { git(fixture.repo, "branch", "-D", runId); } catch { /* already absent */ }
 }
 
+function checkpointResumeEffects(fixture, childRunId) {
+  const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+  return {
+    parent_run: readFileSync(join(fixture.parentRunDir, "run.json")),
+    child_run: readFileSync(join(childRunDir, "run.json")),
+    refs: git(fixture.repo, "for-each-ref", "--format=%(refname) %(objectname)"),
+    worktrees: git(fixture.repo, "worktree", "list", "--porcelain"),
+    child_status: git(join(fixture.repo, ".opencode", "worktrees", childRunId), "status", "--porcelain=v1", "--untracked-files=all"),
+    launch_claim: existsSync(join(childRunDir, "process-launch.lock")),
+    process_evidence: existsSync(join(childRunDir, "process.json")),
+    seeded_skill: existsSync(join(fixture.repo, ".opencode", "skills", "feature", "SKILL.md")),
+  };
+}
+
 function createFixture(name, { reviewTier = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), `checkpoint-start-${name}-`));
   const repo = join(root, "repo");
@@ -1154,7 +1322,7 @@ function routingFixture() {
 function parentPlan() {
   const testPlan = Array.from({ length: 6 }, (_, index) => `test api ${index + 1}`);
   return {
-    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }], timeout_ms: 600_000 },
     slices: [{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["AC1", "AC2"], test_plan: testPlan }],
     delivery_envelope: {
       schema_version: 1,
@@ -1168,7 +1336,7 @@ function parentPlan() {
           invariant_family_id: `api-family-${(index % 2) + 1}`,
           verification_artifact_id: `api-artifact-${index + 1}`,
         })),
-        verification_artifacts: testPlan.map((entry, index) => ({ id: `api-artifact-${index + 1}`, test_plan_index: index, test_plan_entry: entry })),
+        verification_artifacts: testPlan.map((entry, index) => ({ id: `api-artifact-${index + 1}`, test_plan_index: index, test_plan_entry: entry, timeout_ms: 600_000 })),
       }],
     },
   };

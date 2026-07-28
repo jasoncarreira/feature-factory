@@ -76,7 +76,7 @@ const POST_PR_PHASE_SET = new Set(POST_PR_PHASES);
 const POST_PR_ACTIVE_PHASES = new Set(POST_PR_PHASES.filter((phase) => !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase)));
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "integration_amendment", "special_builder_dispatch", "continuation", "checkpoint_source", "checkpoint_progress", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
+const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "integration_amendment", "special_builder_dispatch", "continuation", "checkpoint_source", "checkpoint_progress", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
 const PLAN_KEYS = new Set(["slices", "integration_gate", "delivery_envelope"]);
 const PLANNED_SLICE_KEYS = new Set(["id", "stack", "paths", "depends_on", "acceptance", "test_plan"]);
 const INTEGRATION_GATE_KEYS = new Set(["required_commands", "timeout_ms"]);
@@ -163,16 +163,15 @@ const STEERING_FENCE_KEYS = new Set([...STEERING_FENCE_CONTROL_KEYS, ...PR_OPERA
 const POST_PR_OPERATION_KEYS = new Set(["operation_id", "repository", "created_at", "head_ref", "head_sha", "base_ref", "base_sha", "draft", "pr_url", "pr_number", "pr_node_id"]);
 const STEERING_ACTION_CLAIM_KEYS = new Set(["kind", "token", "generation", "claimed_at"]);
 const STEERING_LAST_ACTION_KEYS = new Set(["kind", "token", "generation", "outcome", "claimed_at", "resolved_at"]);
-const CONTINUATION_KEYS = new Set(["schema_version", "kind", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "configuration", "carry_forward", "checkpoint_source_hash", "configuration_hash"]);
+const CONTINUATION_KEYS = new Set(["schema_version", "kind", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "configuration", "carry_forward", "checkpoint_source_hash", "configuration_hash"]);
 const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_hash", "branch", "commit", "worktree"]);
 const CONTINUATION_REVIEW_KEYS = new Set(["kind", "ref", "hash", "subject", "verdict", "summary", "required_fixes", "source"]);
 const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice", "post_pr"]);
 const CONTINUATION_TARGET_KEYS = new Set(["run_id", "branch", "worktree", "base_ref", "base_commit"]);
 const CONTINUATION_REF_HASH_KEYS = new Set(["kind", "ref", "hash"]);
 const CONTINUATION_ARTIFACT_KINDS = new Set(["artifact", "story", "research_map", "design_brief", "technical_brief", "test_report", "validation_report", "pr_body"]);
-const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
+const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
 const CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "plan_ref", "plan_hash", "review_ref", "review_hash"]);
-const CONTINUATION_DRAFT_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 const CONTINUATION_CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
 const CONTINUATION_CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "declared_paths", "effective_paths", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "integration_conflict"]);
 const CONTINUATION_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy", "review_tier"]);
@@ -447,9 +446,7 @@ export function validateRun(run) {
   optionalNonEmptyString(errors, run, "review_tier", "run.review_tier");
   validateDebugSnapshot(errors, run.debug_snapshot, "run.debug_snapshot");
   validateProvenance(errors, run.provenance, "run.provenance");
-  validateMergedSliceRepair(errors, run, "run.merged_slice_repair");
   validateIntegrationAmendmentRecord(errors, run, "run.integration_amendment");
-  if (run.merged_slice_repair != null && run.integration_amendment != null) errors.push({ path: "run", message: "merged_slice_repair and integration_amendment are mutually exclusive" });
   validateSpecialBuilderDispatch(errors, run.special_builder_dispatch, "run.special_builder_dispatch");
   validateContinuation(errors, run, "run.continuation");
   validateCheckpointSourceRecord(errors, run.checkpoint_source, "run.checkpoint_source");
@@ -783,22 +780,25 @@ export function validateCostAttributionEntries(entries, runId) {
   return entries;
 }
 
-export function validateSlicesPlan(plan, { enforceDependencyDepth = true, requireIntegrationGate = false, allowLegacyExecutionTimeouts = false } = {}) {
+export function validateSlicesPlan(plan, { enforceDependencyDepth = true } = {}) {
   const errors = [];
   if (!isRecord(plan)) return fail([{ path: "plan", message: "must be an object" }]);
   allowedKeys(errors, plan, PLAN_KEYS, "plan");
   if (!Array.isArray(plan.slices)) errors.push({ path: "plan.slices", message: "must be an array" });
   else validatePlannedSlices(errors, plan.slices, "plan.slices", { enforceDependencyDepth });
-  const requireExecutionTimeouts = requireIntegrationGate && !allowLegacyExecutionTimeouts;
-  validateIntegrationGate(errors, plan.integration_gate, "plan.integration_gate", { required: requireIntegrationGate, requireExecutionTimeouts });
-  if (plan.delivery_envelope !== undefined) {
-    appendDeliveryContractErrors(errors, () => validateDeliveryEnvelope(plan.delivery_envelope, plan.slices, { plan, requireExecutionTimeouts }));
+  validateIntegrationGate(errors, plan.integration_gate, "plan.integration_gate", { required: true, requireExecutionTimeouts: true });
+  if (plan.delivery_envelope === undefined) {
+    errors.push({ path: "plan.delivery_envelope", message: "is required" });
+  } else {
+    appendDeliveryContractErrors(errors, () => validateDeliveryEnvelope(plan.delivery_envelope, plan.slices, { plan, requireExecutionTimeouts: true }));
   }
   if (plan.delivery_envelope?.checkpoint_plan !== undefined) {
     try { validateReviewedCheckpointPlan(plan); }
     catch (error) { errors.push({ path: "plan.delivery_envelope.checkpoint_plan", message: error.message }); }
   }
-  appendDeliveryContractErrors(errors, () => validateAdmissionExtensionResult(evaluateDeliveryEnvelopeAdmission({ plan })));
+  if (plan.integration_gate !== undefined && plan.delivery_envelope !== undefined) {
+    appendDeliveryContractErrors(errors, () => validateAdmissionExtensionResult(evaluateDeliveryEnvelopeAdmission({ plan })));
+  }
   if (errors.length) fail(errors);
   return plan;
 }
@@ -1024,7 +1024,7 @@ function requireNullableProperty(errors, value, key, path, predicate, message) {
 
 function validateIntegrationGate(errors, gate, path = "plan.integration_gate", { required = true, requireExecutionTimeouts = false } = {}) {
   if (gate === undefined) {
-    if (required) errors.push({ path, message: "is required for newly produced and schema-v2 plans" });
+    if (required) errors.push({ path, message: "is required" });
     return;
   }
   if (!isRecord(gate)) {
@@ -1032,7 +1032,7 @@ function validateIntegrationGate(errors, gate, path = "plan.integration_gate", {
     return;
   }
   allowedKeys(errors, gate, INTEGRATION_GATE_KEYS, path);
-  if (requireExecutionTimeouts && gate.timeout_ms === undefined) errors.push({ path: `${path}.timeout_ms`, message: "is required for newly produced and schema-v2 plans" });
+  if (requireExecutionTimeouts && gate.timeout_ms === undefined) errors.push({ path: `${path}.timeout_ms`, message: "is required" });
   else optionalCheckedExecutionTimeout(errors, gate, `${path}.timeout_ms`);
   const commands = gate.required_commands;
   if (!Array.isArray(commands)) {
@@ -1151,7 +1151,7 @@ export function claimsCheckpointRoutingParent(runDir, run) {
   });
 }
 
-function assertExactCheckpointRoutingParent(runDir, run, plan) {
+export function assertExactCheckpointRoutingParent(runDir, run, plan) {
   const terminal = run?.terminal_result;
   const artifacts = terminal?.artifacts;
   const artifactKeys = isRecord(artifacts) ? Object.keys(artifacts) : [];
@@ -1349,11 +1349,6 @@ export function checkRunConsistency(runDir, run) {
       checks.push(refHashCheck(`run.steps[${index}].acceptance.artifact`, runDir, { ref: step.acceptance.artifact_ref, hash: step.acceptance.artifact_hash }, acceptanceArtifactResolver));
       if (stringValue(step.acceptance.review_ref)) checks.push(refHashCheck(`run.steps[${index}].acceptance.review`, runDir, { ref: step.acceptance.review_ref, hash: step.acceptance.review_hash }, resolveReviewRef));
     }
-    if (isRecord(step?.inherited_acceptance)) {
-      if (validRun.continuation?.schema_version !== 2) {
-        checks.push(refHashCheck(`run.steps[${index}].inherited_acceptance.review`, runDir, { ref: step.inherited_acceptance.parent_spec_review_ref, hash: step.inherited_acceptance.review_hash }, resolveReviewRef));
-      }
-    }
     if (step?.execution_claim?.state === "completed") checks.push(runCheck(`run.steps[${index}].execution_claim.receipt`, () => {
       const receipt = resolveEvidenceRef(runDir, step.execution_claim.receipt_ref);
       const value = validateTestExecutionReceipt(JSON.parse(readFileSync(receipt.path, "utf8")));
@@ -1365,40 +1360,6 @@ export function checkRunConsistency(runDir, run) {
     }));
   }
 
-  const repair = validRun.merged_slice_repair;
-  if (repair && typeof repair === "object" && !Array.isArray(repair)) {
-    checks.push(runCheck("run.merged_slice_repair.plan", () => {
-      const planPath = join(runDir, "plan", "slices.json");
-      if (hashFile(planPath) !== repair.plan_hash) fail([{ path: "run.merged_slice_repair.plan_hash", message: "must match plan/slices.json bytes bound at report" }]);
-      return { ref: "plan/slices.json" };
-    }));
-    checks.push(runCheck("run.merged_slice_repair.evidence_ref", () => {
-      const resolved = resolveEvidenceRef(runDir, repair.evidence_ref);
-      if (hashFile(resolved.path) !== repair.evidence_hash) fail([{ path: "run.merged_slice_repair.evidence_hash", message: "must match evidence_ref bytes" }]);
-      return { ref: repair.evidence_ref };
-    }));
-    if (stringValue(repair.review_ref)) {
-      checks.push(runCheck("run.merged_slice_repair.review_ref", () => {
-        const resolved = resolveReviewRef(runDir, repair.review_ref);
-        if (hashFile(resolved.path) !== repair.review_hash) fail([{ path: "run.merged_slice_repair.review_hash", message: "must match review_ref bytes" }]);
-        return { ref: repair.review_ref };
-      }));
-    }
-    if (stringValue(repair.repair_evidence_ref)) {
-      checks.push(runCheck("run.merged_slice_repair.repair_evidence_ref", () => {
-        const resolved = resolveEvidenceRef(runDir, repair.repair_evidence_ref);
-        if (hashFile(resolved.path) !== repair.repair_evidence_hash) fail([{ path: "run.merged_slice_repair.repair_evidence_hash", message: "must match repair_evidence_ref bytes" }]);
-        return { ref: repair.repair_evidence_ref };
-      }));
-    }
-    if (stringValue(repair.verification_ref)) {
-      checks.push(runCheck("run.merged_slice_repair.verification_ref", () => {
-        const resolved = resolveEvidenceRef(runDir, repair.verification_ref);
-        if (hashFile(resolved.path) !== repair.verification_hash) fail([{ path: "run.merged_slice_repair.verification_hash", message: "must match verification_ref bytes" }]);
-        return { ref: repair.verification_ref };
-      }));
-    }
-  }
   checks.push(runCheck("run.integration_amendment.inventory", () => inspectIntegrationAmendmentInventory(runDir, validRun)));
   if (isRecord(validRun.integration_amendment)) checks.push(runCheck("run.integration_amendment.authority", () => {
     assertIntegrationAmendmentConsistency(runDir, validRun);
@@ -1761,7 +1722,7 @@ export function assertIntegrationAmendmentConsistency(runDir, run, options = {})
 
 function assertIntegrationAmendmentAcceptedAuthority(runDir, run, amendment, options = {}) {
   const planPath = join(runDir, PLAN_SLICES_REF);
-  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: PLAN_SLICES_REF, enforceDependencyDepth: false, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
+  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: PLAN_SLICES_REF, enforceDependencyDepth: false });
   const steps = (run.steps || []).filter((entry) => entry?.agent === "work-decomposer");
   const step = steps[0];
   if (steps.length !== 1 || step.status !== "accepted" || step.artifact_ref !== PLAN_SLICES_REF || step.acceptance?.artifact_ref !== PLAN_SLICES_REF
@@ -1876,8 +1837,6 @@ export function observePersistedSliceAttemptOwnership(runDir, run, slice, entry,
   const plan = parseSlicesPlanBytes(readFileSync(planPath), {
     label: PLAN_SLICES_REF,
     enforceDependencyDepth: false,
-    requireIntegrationGate: false,
-    allowLegacyExecutionTimeouts: true,
   });
   const planned = plan.slices.find((candidate) => candidate.id === slice.id);
   if (!planned || JSON.stringify(planned.paths) !== JSON.stringify(slice.declared_paths)) {
@@ -2030,7 +1989,7 @@ function assertConsistencySafeModification(runDir, sliceId, path, baseline, revi
 }
 
 function requiresCarryForwardOwnershipSource(run) {
-  return run.continuation?.schema_version === 2 && (run.slices || []).some((slice) =>
+  return isRecord(run.continuation) && (run.slices || []).some((slice) =>
     (slice.attempt_reviews || []).some((entry) =>
       (entry.modified_extensions || []).some((extension) => extension?.authority === "non-conflicting-sibling")));
 }
@@ -2222,7 +2181,12 @@ function observeConsistencySliceDispatch(runDir, run, slice, entry) {
   const claim = readInventoryJson(claimPath, `slice '${slice.id}' attempt ${entry.attempt} dispatch claim`);
   const closure = readInventoryJson(closurePath, `slice '${slice.id}' attempt ${entry.attempt} dispatch closure`);
   const claimKeys = ["schema_version", "kind", "run_id", "slice_id", "attempt", "agent", "branch", "worktree", "head", "context_hash", "completion_token_hash", "claimed_at", "closure_ref"];
-  const closureKeys = ["schema_version", "kind", "claim_ref", "claim_hash", "run_id", "slice_id", "attempt", "agent", "branch", "worktree", "head", "completion_head", "context_hash", "completion_token", "returned_at"];
+  const commonClosureKeys = ["schema_version", "kind", "claim_ref", "claim_hash", "run_id", "slice_id", "attempt", "agent", "branch", "worktree", "head", "completion_head", "context_hash"];
+  const callback = closure.kind === "checked-slice-builder-dispatch-closure";
+  const adoption = closure.kind === "checked-slice-builder-dispatch-adoption";
+  const closureKeys = callback
+    ? [...commonClosureKeys, "completion_token", "returned_at"]
+    : [...commonClosureKeys, "adopted_at"];
   const expectedHead = entry.attempt === 1 ? slice.attempt_reviews[0].diff_base_commit : slice.attempt_reviews[entry.attempt - 2]?.reviewed_commit;
   if (Object.keys(claim).sort().join("\0") !== [...claimKeys].sort().join("\0") || entry.dispatch_claim_ref !== expectedClaimRef
     || hashFile(claimPath) !== entry.dispatch_claim_hash || claim.schema_version !== 1 || claim.kind !== "checked-slice-builder-dispatch-claim"
@@ -2232,13 +2196,14 @@ function observeConsistencySliceDispatch(runDir, run, slice, entry) {
     || !Number.isFinite(Date.parse(claim.claimed_at || "")) || claim.closure_ref !== expectedClosureRef) {
     throw new Error(`slice '${slice.id}' attempt ${entry.attempt} dispatch claim authority is stale or cross-bound`);
   }
-  if (Object.keys(closure).sort().join("\0") !== [...closureKeys].sort().join("\0") || entry.dispatch_closure_ref !== expectedClosureRef
-    || hashFile(closurePath) !== entry.dispatch_closure_hash || closure.schema_version !== 1 || closure.kind !== "checked-slice-builder-dispatch-closure"
+  if ((!callback && !adoption) || Object.keys(closure).sort().join("\0") !== closureKeys.sort().join("\0") || entry.dispatch_closure_ref !== expectedClosureRef
+    || hashFile(closurePath) !== entry.dispatch_closure_hash || closure.schema_version !== 1
     || closure.claim_ref !== entry.dispatch_claim_ref || closure.claim_hash !== entry.dispatch_claim_hash || closure.run_id !== claim.run_id
     || closure.slice_id !== claim.slice_id || closure.attempt !== claim.attempt || closure.agent !== claim.agent || closure.branch !== claim.branch
     || resolve(closure.worktree) !== resolve(claim.worktree) || closure.head !== claim.head || closure.completion_head !== entry.reviewed_commit
-    || !Number.isFinite(Date.parse(closure.returned_at || "")) || closure.context_hash !== claim.context_hash
-    || sha256ValidationBytes(closure.completion_token) !== claim.completion_token_hash) {
+    || closure.context_hash !== claim.context_hash
+    || callback && (!Number.isFinite(Date.parse(closure.returned_at || "")) || sha256ValidationBytes(closure.completion_token) !== claim.completion_token_hash)
+    || adoption && !Number.isFinite(Date.parse(closure.adopted_at || ""))) {
     throw new Error(`slice '${slice.id}' attempt ${entry.attempt} dispatch closure authority is stale or cross-bound`);
   }
   return Object.fromEntries(keys.map((key) => [key, entry[key]]));
@@ -2822,8 +2787,8 @@ export function validateFile(file, validator) {
 function validateSlicesPlanFile(file, run) {
   try {
     const bytes = readFileSync(file);
-    const compatibilityPlan = parseSlicesPlanBytes(bytes, { label: PLAN_SLICES_REF, enforceDependencyDepth: false });
-    validateRunSlicesPlanAuthority(dirname(dirname(file)), run, compatibilityPlan);
+    const plan = parseSlicesPlanBytes(bytes, { label: PLAN_SLICES_REF, enforceDependencyDepth: false });
+    validateRunSlicesPlanAuthority(dirname(dirname(file)), run, plan);
     return { path: file, ok: true, errors: [] };
   } catch (error) {
     return { path: file, ok: false, errors: error instanceof ValidationError ? error.errors : [{ path: file, message: error.message }] };
@@ -2908,11 +2873,6 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
   }
   validateRedactedEnv(errors, payload, `${path}.env`);
 }
-
-const MERGED_SLICE_REPAIR_KEYS = new Set(["schema_version", "plan_hash", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "branch", "worktree", "baseline_commit", "reviewed_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "verification_ref", "verification_hash", "merge_commit", "reason", "created_at", "updated_at"]);
-const MERGED_SLICE_REPAIR_STATUS_SET = new Set(["reported", "repairing", "review", "merged", "blocked"]);
-
-const MERGED_SLICE_REPAIR_BASELINE_PATTERN = /^[0-9a-f]{40}$/u;
 
 export function validateIntegrationAmendment(value, { run = null } = {}) {
   const errors = [];
@@ -3222,84 +3182,6 @@ export function validateIntegrationAmendmentExecutionReceipt(receipt) {
   return receipt;
 }
 
-function validateMergedSliceRepair(errors, run, path) {
-  const repair = run.merged_slice_repair;
-  if (repair === undefined || repair === null) return;
-  if (!isRecord(repair)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, repair, MERGED_SLICE_REPAIR_KEYS, path);
-  requiredInteger(errors, repair, "schema_version", `${path}.schema_version`);
-  if (repair.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
-  requiredHash(errors, repair, "plan_hash", `${path}.plan_hash`);
-  requiredString(errors, repair, "owner_slice_id", `${path}.owner_slice_id`);
-  requiredString(errors, repair, "consumer_slice_id", `${path}.consumer_slice_id`);
-  requiredString(errors, repair, "defect_path", `${path}.defect_path`);
-  requiredString(errors, repair, "evidence_ref", `${path}.evidence_ref`);
-  requiredHash(errors, repair, "evidence_hash", `${path}.evidence_hash`);
-  requiredEnum(errors, repair, "status", MERGED_SLICE_REPAIR_STATUS_SET, `${path}.status`);
-  boundedInteger(errors, repair, "attempts", 0, 2, `${path}.attempts`);
-  requiredInteger(errors, repair, "max_attempts", `${path}.max_attempts`);
-  if (repair.max_attempts !== 2) errors.push({ path: `${path}.max_attempts`, message: "must equal 2" });
-  requiredTimestamp(errors, repair, "created_at", `${path}.created_at`);
-  requiredTimestamp(errors, repair, "updated_at", `${path}.updated_at`);
-  optionalNonEmptyString(errors, repair, "branch", `${path}.branch`);
-  optionalNonEmptyString(errors, repair, "worktree", `${path}.worktree`);
-  optionalNonEmptyString(errors, repair, "reason", `${path}.reason`);
-  if (repair.review_ref !== undefined || ["review", "merged"].includes(repair.status)) {
-    requiredString(errors, repair, "review_ref", `${path}.review_ref`);
-    requiredHash(errors, repair, "review_hash", `${path}.review_hash`);
-  }
-  if (repair.repair_evidence_ref !== undefined || ["review", "merged"].includes(repair.status)) {
-    requiredString(errors, repair, "repair_evidence_ref", `${path}.repair_evidence_ref`);
-    requiredHash(errors, repair, "repair_evidence_hash", `${path}.repair_evidence_hash`);
-  }
-  if (repair.status === "merged") {
-    requiredString(errors, repair, "verification_ref", `${path}.verification_ref`);
-    requiredHash(errors, repair, "verification_hash", `${path}.verification_hash`);
-  } else if (repair.verification_ref !== undefined || repair.verification_hash !== undefined) {
-    errors.push({ path: `${path}.verification_ref`, message: "is allowed only when the repair is merged" });
-  }
-  if (["repairing", "review", "merged"].includes(repair.status) && (!Number.isInteger(repair.attempts) || repair.attempts < 1)) {
-    errors.push({ path: `${path}.attempts`, message: "must be at least 1 once an attempt starts" });
-  }
-  if (["repairing", "review", "merged"].includes(repair.status) && !MERGED_SLICE_REPAIR_BASELINE_PATTERN.test(String(repair.baseline_commit ?? ""))) {
-    errors.push({ path: `${path}.baseline_commit`, message: "must be the observed 40-hex feature head once an attempt starts" });
-  }
-  if (repair.status === "reported" && repair.baseline_commit !== undefined) {
-    errors.push({ path: `${path}.baseline_commit`, message: "is allowed only once an attempt starts" });
-  }
-  if (repair.status === "blocked" && repair.baseline_commit !== undefined && !MERGED_SLICE_REPAIR_BASELINE_PATTERN.test(String(repair.baseline_commit))) {
-    errors.push({ path: `${path}.baseline_commit`, message: "must be the observed 40-hex feature head when present" });
-  }
-  if (["review", "merged"].includes(repair.status) && !MERGED_SLICE_REPAIR_BASELINE_PATTERN.test(String(repair.reviewed_commit ?? ""))) {
-    errors.push({ path: `${path}.reviewed_commit`, message: "must bind the reviewed 40-hex repair commit" });
-  }
-  if (["reported", "repairing"].includes(repair.status) && repair.reviewed_commit !== undefined) {
-    errors.push({ path: `${path}.reviewed_commit`, message: "is allowed only once a review binds" });
-  }
-  if (repair.status === "blocked" && repair.reviewed_commit !== undefined && !MERGED_SLICE_REPAIR_BASELINE_PATTERN.test(String(repair.reviewed_commit))) {
-    errors.push({ path: `${path}.reviewed_commit`, message: "must bind the reviewed 40-hex repair commit when present" });
-  }
-  if (repair.status === "merged" && !stringValue(repair.merge_commit)) {
-    errors.push({ path: `${path}.merge_commit`, message: "merged repair requires merge_commit" });
-  }
-  if (repair.status !== "merged" && repair.merge_commit !== undefined) {
-    errors.push({ path: `${path}.merge_commit`, message: "is allowed only when the repair is merged" });
-  }
-  if (repair.status === "blocked" && !stringValue(repair.reason)) {
-    errors.push({ path: `${path}.reason`, message: "blocked repair requires a reason" });
-  }
-  if (stringValue(repair.owner_slice_id) && stringValue(repair.consumer_slice_id) && repair.owner_slice_id === repair.consumer_slice_id) {
-    errors.push({ path: `${path}.consumer_slice_id`, message: "must differ from owner_slice_id" });
-  }
-  const slices = Array.isArray(run.slices) ? run.slices : [];
-  if (stringValue(repair.owner_slice_id) && slices.length > 0 && !slices.some((slice) => slice?.id === repair.owner_slice_id)) {
-    errors.push({ path: `${path}.owner_slice_id`, message: "must reference a known slice" });
-  }
-  if (stringValue(repair.consumer_slice_id) && slices.length > 0 && !slices.some((slice) => slice?.id === repair.consumer_slice_id)) {
-    errors.push({ path: `${path}.consumer_slice_id`, message: "must reference a known slice" });
-  }
-}
-
 function validateSpecialBuilderDispatch(errors, dispatch, path) {
   if (dispatch === undefined || dispatch === null) return;
   if (!isRecord(dispatch)) { errors.push({ path, message: "must be an object" }); return; }
@@ -3307,7 +3189,7 @@ function validateSpecialBuilderDispatch(errors, dispatch, path) {
   allowedKeys(errors, dispatch, keys, path);
   requiredInteger(errors, dispatch, "schema_version", `${path}.schema_version`);
   if (dispatch.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
-  requiredEnum(errors, dispatch, "route", new Set(["merged-slice-repair", "integration-amendment", "panel-remediation", "post-pr-remediation", "integration-conflict"]), `${path}.route`);
+  requiredEnum(errors, dispatch, "route", new Set(["integration-amendment", "panel-remediation", "post-pr-remediation", "integration-conflict"]), `${path}.route`);
   requiredString(errors, dispatch, "instance", `${path}.instance`);
   requiredEnum(errors, dispatch, "agent", new Set(["backend-builder", "frontend-builder"]), `${path}.agent`);
   requiredString(errors, dispatch, "claim_ref", `${path}.claim_ref`);
@@ -3492,7 +3374,7 @@ function validateContinuation(errors, run, path) {
 
   allowedKeys(errors, continuation, CONTINUATION_KEYS, path);
   requiredInteger(errors, continuation, "schema_version", `${path}.schema_version`);
-  if (Number.isInteger(continuation.schema_version) && ![1, 2].includes(continuation.schema_version)) errors.push({ path: `${path}.schema_version`, message: "must equal 1 or 2" });
+  if (continuation.schema_version !== 2) errors.push({ path: `${path}.schema_version`, message: "must equal 2" });
   requiredEnum(errors, continuation, "kind", CONTINUATION_KINDS, `${path}.kind`);
   requiredTimestamp(errors, continuation, "created_at", `${path}.created_at`);
   requiredString(errors, continuation, "operator_summary", `${path}.operator_summary`);
@@ -3504,24 +3386,12 @@ function validateContinuation(errors, run, path) {
   validateContinuationRefHashArray(errors, continuation.parent_reviews, `${path}.parent_reviews`);
   validateContinuationSelectedReview(errors, continuation, path);
   validateContinuationPlanningReuse(errors, continuation, `${path}.planning_reuse`);
-  validateContinuationDraftSpecReuse(errors, run, continuation.draft_spec_reuse, `${path}.draft_spec_reuse`);
-  if (continuation.planning_reuse?.eligible === true && continuation.draft_spec_reuse !== undefined) {
-    errors.push({ path, message: "cannot combine accepted planning reuse with draft spec reuse" });
-  }
-  validateContinuationPostPr(errors, continuation.post_pr, `${path}.post_pr`);
   validateContinuationConfiguration(errors, continuation, `${path}.configuration`);
   validateContinuationCarryForward(errors, run, continuation, `${path}.carry_forward`);
 }
 
 function validateContinuationConfiguration(errors, continuation, path) {
   const configuration = continuation.configuration;
-  if (continuation.schema_version === 1) {
-    if (configuration !== undefined) errors.push({ path, message: "is not allowed for schema_version 1" });
-    for (const key of ["checkpoint_source_hash", "configuration_hash"]) {
-      if (continuation[key] !== undefined) errors.push({ path: `${path.slice(0, -".configuration".length)}.${key}`, message: "is not allowed for schema_version 1" });
-    }
-    return;
-  }
   if (!isRecord(configuration)) { errors.push({ path, message: "is required for schema_version 2" }); return; }
   allowedKeys(errors, configuration, CONTINUATION_CONFIGURATION_KEYS, path);
   requiredEnum(errors, configuration, "mode", new Set(["interactive", "headless", "autonomous"]), `${path}.mode`);
@@ -3545,10 +3415,6 @@ function validateContinuationConfiguration(errors, continuation, path) {
 
 function validateContinuationCarryForward(errors, run, continuation, path) {
   const carry = continuation.carry_forward;
-  if (continuation.schema_version === 1) {
-    if (carry !== undefined) errors.push({ path, message: "is not allowed for schema_version 1" });
-    return;
-  }
   if (!isRecord(carry)) { errors.push({ path, message: "is required for schema_version 2" }); return; }
   allowedKeys(errors, carry, CONTINUATION_CARRY_FORWARD_KEYS, path);
   requiredEnum(errors, carry, "scope", new Set(["full-remaining-plan"]), `${path}.scope`);
@@ -3558,8 +3424,6 @@ function validateContinuationCarryForward(errors, run, continuation, path) {
   requiredFullGitSha(errors, carry, "start_commit", `${path}.start_commit`);
   if (carry.start_commit !== continuation.parent?.commit) errors.push({ path: `${path}.start_commit`, message: "must equal continuation.parent.commit" });
   if (continuation.planning_reuse?.eligible !== true) errors.push({ path: `${path}`, message: "requires planning_reuse.eligible true" });
-  if (continuation.draft_spec_reuse !== undefined) errors.push({ path: `${path}`, message: "forbids draft_spec_reuse" });
-  if (continuation.post_pr !== undefined) errors.push({ path: `${path}`, message: "forbids continuation post_pr" });
   const acceptedIds = new Set();
   if (!Array.isArray(carry.accepted_slices)) errors.push({ path: `${path}.accepted_slices`, message: "must be an array" });
   else for (const [index, accepted] of carry.accepted_slices.entries()) {
@@ -3649,9 +3513,9 @@ function validateContinuationPlanningReuse(errors, continuation, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
-  const checkpointVariant = Object.hasOwn(continuation, "checkpoint_source_hash") && reuse.eligible === true;
+  const checkpointVariant = Object.hasOwn(continuation, "checkpoint_source_hash");
   allowedKeys(errors, reuse, checkpointVariant ? CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS : CONTINUATION_PLANNING_REUSE_KEYS, path);
-  if (typeof reuse.eligible !== "boolean") errors.push({ path: `${path}.eligible`, message: "must be a boolean" });
+  if (reuse.eligible !== true) errors.push({ path: `${path}.eligible`, message: "must equal true" });
   if (checkpointVariant) {
     requiredString(errors, reuse, "plan_ref", `${path}.plan_ref`);
     requiredHash(errors, reuse, "plan_hash", `${path}.plan_hash`);
@@ -3662,7 +3526,7 @@ function validateContinuationPlanningReuse(errors, continuation, path) {
     validateDurableRef(errors, reuse.plan_ref, "plan", `${path}.plan_ref`);
     validateDurableRef(errors, reuse.review_ref, "reviews", `${path}.review_ref`);
     if (reuse.plan_hash !== continuation.carry_forward?.plan_hash) errors.push({ path: `${path}.plan_hash`, message: "must equal carry_forward.plan_hash" });
-  } else if (reuse.eligible === true) {
+  } else {
     requiredString(errors, reuse, "spec_review_ref", `${path}.spec_review_ref`);
     requiredHash(errors, reuse, "spec_review_hash", `${path}.spec_review_hash`);
     requiredString(errors, reuse, "spec_artifact_ref", `${path}.spec_artifact_ref`);
@@ -3671,58 +3535,6 @@ function validateContinuationPlanningReuse(errors, continuation, path) {
     validateDurableRef(errors, reuse.spec_review_ref, "reviews", `${path}.spec_review_ref`);
     validateDurableRef(errors, reuse.spec_artifact_ref, "artifacts", `${path}.spec_artifact_ref`);
     if (reuse.child_spec_review_ref !== undefined) validateDurableRef(errors, reuse.child_spec_review_ref, "reviews", `${path}.child_spec_review_ref`);
-  } else {
-    optionalString(errors, reuse, "reason", `${path}.reason`);
-    for (const key of ["spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]) {
-      if (reuse[key] !== undefined) errors.push({ path: `${path}.${key}`, message: "is allowed only when eligible is true" });
-    }
-  }
-}
-
-function validateContinuationDraftSpecReuse(errors, run, draft, path) {
-  if (draft === undefined || draft === null) return;
-  if (!isRecord(draft)) {
-    errors.push({ path, message: "must be an object" });
-    return;
-  }
-  allowedKeys(errors, draft, CONTINUATION_DRAFT_REUSE_KEYS, path);
-  requiredString(errors, draft, "artifact_ref", `${path}.artifact_ref`);
-  if (draft.artifact_ref !== "artifacts/technical-brief.md") errors.push({ path: `${path}.artifact_ref`, message: "must equal artifacts/technical-brief.md" });
-  requiredHash(errors, draft, "artifact_hash", `${path}.artifact_hash`);
-  validateDurableRef(errors, draft.artifact_ref, "artifacts", `${path}.artifact_ref`);
-  requiredEnum(errors, draft, "parent_step_status", new Set(["rejected", "blocked"]), `${path}.parent_step_status`);
-  boundedInteger(errors, draft, "parent_step_attempts", 0, Number.MAX_SAFE_INTEGER, `${path}.parent_step_attempts`);
-  boundedInteger(errors, draft, "max_retries", 1, Number.MAX_SAFE_INTEGER, `${path}.max_retries`);
-  boundedInteger(errors, draft, "remaining_attempts", 1, Number.MAX_SAFE_INTEGER, `${path}.remaining_attempts`);
-  if (Number.isInteger(draft.max_retries) && Number.isInteger(draft.parent_step_attempts)
-    && draft.remaining_attempts !== draft.max_retries - draft.parent_step_attempts) {
-    errors.push({ path: `${path}.remaining_attempts`, message: "must equal max_retries - parent_step_attempts" });
-  }
-  if (run.max_retries !== draft.max_retries) errors.push({ path: "run.max_retries", message: "must inherit continuation draft_spec_reuse.max_retries" });
-}
-
-function validateContinuationPostPr(errors, value, path) {
-  if (value === undefined || value === null) return;
-  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, value, new Set(["pr_url", "repository", "pr_number", "head_sha", "disposition", "policy", "post_pr_hash", "evidence_ref", "evidence_hash", "continuation_review_ref", "continuation_review_hash"]), path);
-  requiredString(errors, value, "pr_url", `${path}.pr_url`);
-  requiredString(errors, value, "repository", `${path}.repository`);
-  boundedInteger(errors, value, "pr_number", 1, Number.MAX_SAFE_INTEGER, `${path}.pr_number`);
-  requiredFullGitSha(errors, value, "head_sha", `${path}.head_sha`);
-  requiredEnum(errors, value, "disposition", new Set(["leave-unchanged"]), `${path}.disposition`);
-  validatePostPrPolicy(errors, value.policy, `${path}.policy`);
-  for (const key of ["post_pr_hash", "evidence_hash", "continuation_review_hash"]) requiredHash(errors, value, key, `${path}.${key}`);
-  for (const key of ["evidence_ref", "continuation_review_ref"]) requiredString(errors, value, key, `${path}.${key}`);
-  validateDurableRef(errors, value.evidence_ref, "evidence", `${path}.evidence_ref`);
-  validateDurableRef(errors, value.continuation_review_ref, "reviews", `${path}.continuation_review_ref`);
-  if (stringValue(value.pr_url)) {
-    try {
-      const parts = githubPrUrlParts(value.pr_url);
-      if (stringValue(value.repository) && value.repository !== parts.repository) errors.push({ path: `${path}.repository`, message: "must match pr_url repository" });
-      if (Number.isInteger(value.pr_number) && value.pr_number !== parts.number) errors.push({ path: `${path}.pr_number`, message: "must match pr_url number" });
-    } catch (error) {
-      errors.push({ path: `${path}.pr_url`, message: error.message });
-    }
   }
 }
 
@@ -4284,8 +4096,8 @@ function validateSteeringBoundary(errors, boundary, path, options = {}) {
   requiredTimestamp(errors, boundary, "created_at", `${path}.created_at`);
   if (options.fence) {
     const identityOwnCount = PR_OPERATION_IDENTITY_KEYS.filter((key) => Object.hasOwn(boundary, key)).length;
-    if (identityOwnCount !== 0 && identityOwnCount !== PR_OPERATION_IDENTITY_KEYS.length) errors.push({ path, message: `${PR_OPERATION_IDENTITY_KEYS.join(", ")} must be all present or all absent` });
-    if (identityOwnCount !== 0) requiredPrOperationIdentity(errors, boundary, path);
+    if (identityOwnCount !== PR_OPERATION_IDENTITY_KEYS.length) errors.push({ path, message: `${PR_OPERATION_IDENTITY_KEYS.join(", ")} must all be present` });
+    if (identityOwnCount === PR_OPERATION_IDENTITY_KEYS.length) requiredPrOperationIdentity(errors, boundary, path);
   }
 }
 
@@ -4965,8 +4777,8 @@ function validateStepRelationships(errors, run, step, path) {
     if (stringValue(step.review_ref) && stringValue(acceptance.review_ref) && step.review_ref !== acceptance.review_ref) errors.push({ path: `${path}.acceptance.review_ref`, message: "must match step review_ref" });
     if (!stringValue(step.artifact_ref)) errors.push({ path: `${path}.artifact_ref`, message: "is required when acceptance is present" });
   }
-  if (run.continuation?.schema_version === 2 && step.agent === "test-verifier") {
-    const route = "schema-v2";
+  if (isRecord(run.continuation) && step.agent === "test-verifier") {
+    const route = "current continuation";
     if (!isRecord(acceptance)) errors.push({ path: `${path}.acceptance`, message: `is required for accepted ${route} test-verifier` });
     else for (const key of ["artifact_ref", "artifact_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_head_sha"]) {
       if (acceptance[key] === undefined || acceptance[key] === null) errors.push({ path: `${path}.acceptance.${key}`, message: `is required for accepted ${route} test-verifier` });
@@ -5014,7 +4826,7 @@ function validateVerdict(errors, value, path, allowed) {
   const bindingKeys = path.endsWith(".validator") ? VALIDATOR_BINDING_KEYS : SECURITY_BINDING_KEYS;
   if (bindingKeys === SECURITY_BINDING_KEYS && value.report_hash !== undefined) errors.push({ path: `${path}.report_hash`, message: "is not allowed for security_review" });
   const bindingCount = presentBindingCount(value, bindingKeys);
-  if (bindingCount !== 0 && bindingCount !== bindingKeys.length) errors.push({ path, message: `${bindingKeys.join(", ")} must be all present or all absent` });
+  if (bindingCount !== bindingKeys.length) errors.push({ path, message: `${bindingKeys.join(", ")} must all be present` });
   if (bindingCount === bindingKeys.length) {
     if (!stringValue(value.review_ref)) errors.push({ path: `${path}.review_ref`, message: "is required by the successor verdict binding" });
     if (bindingKeys === VALIDATOR_BINDING_KEYS && !stringValue(value.report)) errors.push({ path: `${path}.report`, message: "is required by the successor verdict binding" });
@@ -5025,7 +4837,9 @@ function validatePanelBindingGeneration(errors, run) {
   const validatorSuccessor = hasCompleteBinding(run.validator, VALIDATOR_BINDING_KEYS);
   const securitySuccessor = hasCompleteBinding(run.security_review, SECURITY_BINDING_KEYS);
   if (validatorSuccessor !== securitySuccessor) {
-    errors.push({ path: "run", message: "validator and security_review must both use successor reviewed-head bindings or both use legacy bindings" });
+    errors.push({ path: "run", message: "validator and security_review must both use complete current reviewed-head bindings" });
+  } else if (validatorSuccessor && run.validator.reviewed_head_sha !== run.security_review.reviewed_head_sha) {
+    errors.push({ path: "run", message: "validator and security_review reviewed_head_sha values must match" });
   }
 }
 

@@ -72,7 +72,6 @@ const VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS", "NO-GO"]);
 const SECURITY_VERDICTS = new Set(["PASS", "BLOCK"]);
 const PANEL_AGENTS = new Set(["implementation-validator", "security-reviewer"]);
 const BUILD_SPECIAL_LABELS = Object.freeze({
-  "merged-slice-repair": ["merged-slice repair running", "merged-slice repair awaiting integration"],
   "integration-amendment": ["integration amendment running", "integration amendment awaiting integration"],
   "integration-conflict": ["integration conflict repair running", "integration conflict repair awaiting integration"],
 });
@@ -80,6 +79,8 @@ const SPECIAL_DISPATCH_ROUTES = new Set([...Object.keys(BUILD_SPECIAL_LABELS), "
 const PR_OPERATION_KEYS = Object.freeze(["operation_id", "repository", "created_at", "head_ref", "head_sha", "base_ref", "base_sha", "draft", "pr_url", "pr_number", "pr_node_id"]);
 const PR_FENCE_CONTROL_KEYS = Object.freeze(["token", "generation", "state_hash", "created_at"]);
 const PR_FENCE_IDENTITY_KEYS = Object.freeze(["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]);
+const VALIDATOR_PANEL_KEYS = Object.freeze(["report", "report_hash", "review_ref", "review_hash", "reviewed_head_sha"]);
+const SECURITY_PANEL_KEYS = Object.freeze(["review_ref", "review_hash", "reviewed_head_sha"]);
 const TEST_EXECUTION_CLAIM_KEYS = Object.freeze(["schema_version", "kind", "state", "nonce", "run_id", "attempt", "plan_ref", "plan_hash", "head_sha", "receipt_ref", "claimed_at"]);
 
 export function factoryRoots(api, options = {}) {
@@ -572,15 +573,11 @@ function projectPrFence(run) {
   const fence = run?.steering?.pr_fence;
   if (fence === undefined || fence === null) return undefined;
   if (!isRecord(fence) || !PR_FENCE_CONTROL_KEYS.every((key) => Object.hasOwn(fence, key))
+    || !PR_FENCE_IDENTITY_KEYS.every((key) => Object.hasOwn(fence, key))
     || typeof fence.token !== "string" || fence.token.length === 0 || !isNonNegativeInteger(fence.generation)
     || typeof fence.state_hash !== "string" || fence.state_hash.length === 0 || typeof fence.created_at !== "string" || fence.created_at.length === 0) return UNKNOWN_WORKFLOW;
-  const identityCount = PR_FENCE_IDENTITY_KEYS.filter((key) => Object.hasOwn(fence, key)).length;
-  if (identityCount !== 0 && identityCount !== PR_FENCE_IDENTITY_KEYS.length) return UNKNOWN_WORKFLOW;
-  if (identityCount === 0) return "PR creation needs reconciliation";
-  if (identityCount === PR_FENCE_IDENTITY_KEYS.length) {
-    const stringKeys = PR_FENCE_IDENTITY_KEYS.filter((key) => key !== "draft");
-    if (!stringKeys.every((key) => typeof fence[key] === "string" && fence[key].length > 0) || typeof fence.draft !== "boolean") return UNKNOWN_WORKFLOW;
-  }
+  const stringKeys = PR_FENCE_IDENTITY_KEYS.filter((key) => key !== "draft");
+  if (!stringKeys.every((key) => typeof fence[key] === "string" && fence[key].length > 0) || typeof fence.draft !== "boolean") return UNKNOWN_WORKFLOW;
   return "PR creation running";
 }
 
@@ -594,29 +591,30 @@ function projectPrePrGate(run) {
 function projectPanelAuthority(run) {
   const rawDispatch = run?.special_builder_dispatch;
   if (rawDispatch !== undefined && rawDispatch !== null && (!isRecord(rawDispatch) || !SPECIAL_DISPATCH_ROUTES.has(rawDispatch.route))) return UNKNOWN_WORKFLOW;
+  const validator = projectPanelVerdict(run?.validator, VALIDATOR_VERDICTS, VALIDATOR_PANEL_KEYS);
+  const security = projectPanelVerdict(run?.security_review, SECURITY_VERDICTS, SECURITY_PANEL_KEYS);
+  if (validator === UNKNOWN_WORKFLOW || security === UNKNOWN_WORKFLOW) return UNKNOWN_WORKFLOW;
+  if (validator !== undefined || security !== undefined) {
+    if (validator === undefined || security === undefined || validator.reviewedHead !== security.reviewedHead) return UNKNOWN_WORKFLOW;
+  }
   if (rawDispatch?.route === "panel-remediation") {
     const dispatch = projectSpecialDispatch(run);
     if (dispatch === UNKNOWN_WORKFLOW) return UNKNOWN_WORKFLOW;
     return dispatch.closed ? "panel remediation awaiting panel publication" : "panel remediation running";
   }
-
-  const validator = projectPanelVerdict(run?.validator, VALIDATOR_VERDICTS);
-  const security = projectPanelVerdict(run?.security_review, SECURITY_VERDICTS);
-  if (validator === UNKNOWN_WORKFLOW || security === UNKNOWN_WORKFLOW) return UNKNOWN_WORKFLOW;
-  if (validator !== undefined && security !== undefined) {
-    return validator !== "NO-GO" && security === "PASS" ? "panels passed" : "panel remediation pending";
+  if (validator !== undefined) {
+    return validator.verdict !== "NO-GO" && security.verdict === "PASS" ? "panels passed" : "panel remediation pending";
   }
-  if (validator !== undefined) return "security-reviewer pending";
-  if (security !== undefined) return "implementation-validator pending";
 
   const step = Array.isArray(run?.steps) ? run.steps.find((candidate) => candidate?.status === "running" && PANEL_AGENTS.has(candidate?.agent)) : null;
   return step ? summarizeWorkItem(step.agent, step.status, step.attempts) : undefined;
 }
 
-function projectPanelVerdict(value, allowed) {
+function projectPanelVerdict(value, allowed, requiredKeys) {
   if (value === undefined || value === null) return undefined;
-  if (!isRecord(value) || !allowed.has(value.verdict)) return UNKNOWN_WORKFLOW;
-  return value.verdict;
+  if (!isRecord(value) || !allowed.has(value.verdict)
+    || !requiredKeys.every((key) => typeof value[key] === "string" && value[key].length > 0)) return UNKNOWN_WORKFLOW;
+  return { verdict: value.verdict, reviewedHead: value.reviewed_head_sha };
 }
 
 function projectCheckedTestExecution(run) {

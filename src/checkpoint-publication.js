@@ -14,6 +14,7 @@ import { createTwoRefsAtomicallyNoReplace, git } from "./git.js";
 import { withRunJsonLock } from "./run-state.js";
 import {
   parseSlicesPlanBytes,
+  assertExactCheckpointRoutingParent,
   validateCheckpointChildPublication,
   validateCheckpointConfiguration,
   validateCheckpointSource,
@@ -40,7 +41,7 @@ export async function reconcileCheckpointPublication(input, options = {}) {
 
   const planBytes = canonicalJsonBytes(context.manifestCheckpoint.child_plan);
   const dispositionBytes = canonicalJsonBytes(context.manifestCheckpoint.child_disposition);
-  const plan = parseSlicesPlanBytes(planBytes, { label: PLAN_REF, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
+  const plan = parseSlicesPlanBytes(planBytes, { label: PLAN_REF });
   assertReviewedBytes(context, planBytes, dispositionBytes);
   const checkpointSource = buildCheckpointSource(context, claim, dispositionBytes);
   const childRun = buildChildRun(context, checkpointSource, plan, planBytes, dispositionBytes);
@@ -132,6 +133,77 @@ export async function reconcileCheckpointPublication(input, options = {}) {
     replayed: replayedDuringPublish,
     worktreeRecovered: worktree.recovered,
   });
+}
+
+/** Re-observe every immutable publication and routing binding for a current checkpoint child. */
+export function assertCurrentCheckpointChildPublication(input, options = {}) {
+  if (!isRecord(input)) throw new Error("checkpoint child publication observation requires an object");
+  const repository = requireAbsolute(input.repository, "repository");
+  const childRunDir = requireAbsolute(input.childRunDir, "childRunDir");
+  const factoryRoot = resolve(repository, ".opencode", "factory");
+  if (dirname(childRunDir) !== factoryRoot) throw new Error("checkpoint child run must be a direct factory child");
+  const childRun = validateRun(input.run === undefined
+    ? parseJsonBytes(readRegularFile(resolve(childRunDir, "run.json"), "checkpoint child run.json"), "checkpoint child run.json")
+    : clone(input.run));
+  const source = validateCheckpointSource(childRun.checkpoint_source);
+  if (source.root_child_run_id !== childRun.run_id || basename(childRunDir) !== childRun.run_id) {
+    throw new Error("checkpoint child source is cross-bound to another run");
+  }
+
+  const parentRunDir = resolve(factoryRoot, source.parent_run_id);
+  if (dirname(parentRunDir) !== factoryRoot || parentRunDir === childRunDir) throw new Error("checkpoint child parent identity is invalid");
+  const parentRun = validateRun(parseJsonBytes(readRegularFile(resolve(parentRunDir, "run.json"), "checkpoint parent run.json"), "checkpoint parent run.json"));
+  const parentPlanBytes = readRegularFile(containedPath(parentRunDir, "plan/slices.json", "checkpoint parent plan"), "checkpoint parent plan");
+  const parentPlan = parseSlicesPlanBytes(parentPlanBytes, { label: "checkpoint parent plan", enforceDependencyDepth: false });
+  assertExactCheckpointRoutingParent(parentRunDir, parentRun, parentPlan);
+
+  const manifestBytes = readRegularFile(containedPath(parentRunDir, source.manifest_ref, "checkpoint routing manifest"), "checkpoint routing manifest");
+  const manifest = parseJsonBytes(manifestBytes, "checkpoint routing manifest");
+  const checkpoint = manifest.checkpoints?.[source.checkpoint_ordinal - 1];
+  const matches = parentRun.checkpoint_progress.entries.filter((entry) => entry.checkpoint_id === source.checkpoint_id
+    && entry.ordinal === source.checkpoint_ordinal && entry.root_child_run_id === childRun.run_id);
+  if (matches.length !== 1 || !["child-published", "launched"].includes(matches[0].state)
+    || checkpoint?.id !== source.checkpoint_id || checkpoint.ordinal !== source.checkpoint_ordinal) {
+    throw new Error("checkpoint child is not the exact current published progress entry");
+  }
+  const entry = matches[0];
+  const context = normalizeContext({
+    repository,
+    parentRunDir,
+    childRunDir,
+    reservedEntry: { ...clone(entry), state: "reserved" },
+    manifest,
+    manifestCheckpoint: checkpoint,
+  });
+  const claim = readAndValidateClaim(repository, entry.publication_claim_oid, options);
+  assertPublicationBindings(context, claim);
+  assertExactPublicationRefs(repository, entry, claim, options);
+
+  const planBytes = canonicalJsonBytes(checkpoint.child_plan);
+  const dispositionBytes = canonicalJsonBytes(checkpoint.child_disposition);
+  assertReviewedBytes(context, planBytes, dispositionBytes);
+  const expectedSource = buildCheckpointSource(context, claim, dispositionBytes);
+  if (!sameJson(source, expectedSource)) throw new Error("checkpoint child source does not match the current publication authority");
+  if (!readRegularFile(containedPath(childRunDir, PLAN_REF, "checkpoint child plan"), "checkpoint child plan").equals(planBytes)
+    || !readRegularFile(containedPath(childRunDir, REVIEW_REF, "checkpoint child review"), "checkpoint child review").equals(dispositionBytes)) {
+    throw new Error("checkpoint child reviewed plan or disposition bytes are stale");
+  }
+
+  const initialRun = buildChildRun(context, expectedSource, parseSlicesPlanBytes(planBytes, { label: PLAN_REF }), planBytes, dispositionBytes);
+  if (entry.child_run_hash !== hashBytes(canonicalJsonBytes(initialRun))) throw new Error("checkpoint child initial publication hash is stale");
+  const configuration = entry.configuration;
+  const reviewTierMatches = configuration.review_tier === null
+    ? !Object.hasOwn(childRun, "review_tier")
+    : childRun.review_tier === configuration.review_tier;
+  if (childRun.base_ref !== entry.base_ref || childRun.base_commit !== entry.base_commit
+    || childRun.branch !== entry.branch || resolve(childRun.worktree) !== resolve(entry.worktree)
+    || childRun.mode !== configuration.mode || (childRun.github_account ?? null) !== configuration.github_account
+    || childRun.pr_mode !== configuration.pr_mode || childRun.max_parallel_slices !== configuration.max_parallel_slices
+    || childRun.max_retries !== configuration.max_retries || !sameJson(childRun.post_pr?.policy, configuration.post_pr_policy)
+    || !reviewTierMatches) {
+    throw new Error("checkpoint child configuration does not match the current publication authority");
+  }
+  return childRun;
 }
 
 function normalizeContext(input) {

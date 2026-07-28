@@ -6,7 +6,6 @@ import {
   BASE_ADVANCE_STATE_MODEL,
   evaluateBaseAdvanceState,
 } from "../src/base-advance/state-model.js";
-import { eligibleBaseAdvanceState } from "./helpers/base-advance-state-model/state-fixture.js";
 
 const CODES = BASE_ADVANCE_ERROR_CODES;
 const ALLOW = Object.freeze({ disposition: "allow", code: null });
@@ -17,7 +16,7 @@ const EXPECTED_MODEL = Object.freeze({
     [CODES.runInvalid]: ["malformed"],
   }),
   continuation_checkpoint: rules(["absent"], {
-    [CODES.ineligible]: ["continuation-v1", "continuation-v2", "checkpoint-child", "checkpoint-parent"],
+    [CODES.ineligible]: ["continuation-v2", "checkpoint-child", "checkpoint-parent"],
     [CODES.runInvalid]: ["contradictory", "malformed"],
   }),
   steering_queue: rules(["empty"], { [CODES.ineligible]: ["pending", "uncheckpointed"], [CODES.runInvalid]: ["malformed"] }),
@@ -49,10 +48,6 @@ const EXPECTED_MODEL = Object.freeze({
   }),
   amendment: rules(["absent", "settled-no-manifest", "fully-merged-resolved"], {
     [CODES.ineligible]: ["active", "unknown", "unconsumed", "unresolved", "blocked"],
-    [CODES.runInvalid]: ["malformed", "cross-bound"],
-  }),
-  repair: rules(["absent", "fully-merged-resolved"], {
-    [CODES.ineligible]: ["reported", "repairing", "review", "blocked"],
     [CODES.runInvalid]: ["malformed", "cross-bound"],
   }),
   panels: rules(["absent"], { [CODES.ineligible]: ["validator", "security", "both"], [CODES.runInvalid]: ["malformed"] }),
@@ -99,6 +94,10 @@ const EXPECTED_MODEL = Object.freeze({
 });
 
 describe("active-run base-advance eligibility state model", () => {
+  it("contains no retired repair eligibility dimension", () => {
+    assert.equal(Object.hasOwn(BASE_ADVANCE_STATE_MODEL, "repair"), false);
+  });
+
   it("pins every stable public error code to its documented literal", () => {
     assert.deepEqual(BASE_ADVANCE_ERROR_CODES, {
       usage: "BASE_ADVANCE_USAGE",
@@ -202,6 +201,36 @@ describe("active-run base-advance eligibility state model", () => {
     })), rejectedResult("run_status", "blocked", CODES.ineligible));
   });
 });
+
+function eligibleBaseAdvanceState(overrides = {}) {
+  return {
+    run_kind: "ordinary",
+    run_status: "running-no-terminal",
+    continuation_checkpoint: "absent",
+    steering_queue: "empty",
+    steering_boundary: "absent",
+    steering_action: "absent",
+    steering_fence: "absent",
+    pr_authority: "absent",
+    post_pr: "disabled",
+    slices: "empty",
+    ordinary_dispatch: "absent",
+    test_execution: "absent",
+    special_dispatch: "absent",
+    amendment: "absent",
+    panels: "absent",
+    heartbeat: "missing",
+    process: "missing",
+    launch_claim: "absent",
+    run_lock: "acquired",
+    launch_fence: "acquired-base-advance",
+    git_identity: "registered-clean-attached",
+    origin: "exact-stable",
+    ancestry: "ancestor",
+    crash_point: "old-eligible",
+    ...overrides,
+  };
+}
 
 function compatibleOverrides(dimensionName, variant) {
   if (dimensionName === "ancestry" && variant === "equal") {

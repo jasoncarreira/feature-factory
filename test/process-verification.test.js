@@ -7,37 +7,13 @@ import {
   PROCESS_SIGNAL_RACE_LIMITATION,
   PROCESS_VERIFICATION_CODES,
   inspectProcessIdentity,
-  normalizeLegacyBooleanLiveness,
-  probeLegacyBooleanLiveness,
   probeProcessLiveness,
-  publicLivenessBoolean,
   signalVerifiedProcess,
   verifyProcessIdentity,
 } from "../src/hardening/process-verification.js";
 
 const PID = 4242;
 const CWD = resolve("/tmp/process-verification-repo");
-
-describe("legacy boolean liveness", () => {
-  it("normalizes only primitive booleans and maps indeterminate publicly to null", () => {
-    assert.equal(normalizeLegacyBooleanLiveness(true), "live");
-    assert.equal(normalizeLegacyBooleanLiveness(false), "absent");
-    for (const value of ["true", "false", new Boolean(true), {}, [], 1, 0, null, undefined]) {
-      assert.equal(normalizeLegacyBooleanLiveness(value), "indeterminate");
-    }
-    assert.equal(publicLivenessBoolean("live"), true);
-    assert.equal(publicLivenessBoolean("absent"), false);
-    assert.equal(publicLivenessBoolean("indeterminate"), null);
-    assert.equal(publicLivenessBoolean("malformed"), null);
-  });
-
-  it("treats malformed callback results and throws as indeterminate", () => {
-    assert.equal(probeLegacyBooleanLiveness(() => true), "live");
-    assert.equal(probeLegacyBooleanLiveness(() => false), "absent");
-    assert.equal(probeLegacyBooleanLiveness(() => ({ status: "absent" })), "indeterminate");
-    assert.equal(probeLegacyBooleanLiveness(() => { throw new Error("probe failed"); }), "indeterminate");
-  });
-});
 
 function codedError(code, message = "sensitive operating system detail") {
   const error = new Error(message);
@@ -55,7 +31,7 @@ function linuxOptions(overrides = {}) {
   const starts = overrides.starts || ["987654", "987654"];
   return {
     platform: "linux",
-    hostnameFn: () => "test-host",
+    hostname: "test-host",
     livenessProbe: () => ({ status: "live" }),
     procReadFile(path) {
       if (path === `/proc/${PID}/stat`) {
@@ -212,8 +188,10 @@ describe("platform process identity inspection", () => {
     assert.equal(JSON.stringify(inspected).includes("do not leak"), false);
   });
 
-  it("uses targeted Darwin tools with bounded options and a final start recheck", () => {
+  it("passes retained Darwin command bounds to targeted tools and performs a final start recheck", () => {
     const calls = [];
+    const commandTimeoutMs = 321;
+    const commandMaxBuffer = 4096;
     const output = (command, args) => {
       if (command === "ps" && args.at(-1) === "lstart=") return "Thu Jul  9 15:00:00 2026\n";
       if (command === "ps" && args.at(-1) === "comm=") return "/opt/homebrew/bin/opencode\n";
@@ -224,6 +202,8 @@ describe("platform process identity inspection", () => {
       platform: "darwin",
       hostname: "darwin-host",
       livenessProbe: () => ({ status: "live" }),
+      commandTimeoutMs,
+      commandMaxBuffer,
       commandRunner(command, args, options) {
         calls.push({ command, args, options });
         return output(command, args);
@@ -246,8 +226,8 @@ describe("platform process identity inspection", () => {
       ["ps", "-p", String(PID), "-o", "lstart="],
     ]);
     for (const call of calls) {
-      assert.equal(call.options.timeout, 5_000);
-      assert.equal(call.options.maxBuffer, 1024 * 1024);
+      assert.equal(call.options.timeout, commandTimeoutMs);
+      assert.equal(call.options.maxBuffer, commandMaxBuffer);
       assert.equal(Object.hasOwn(call.options, "shell"), false);
     }
   });
@@ -352,7 +332,7 @@ describe("platform process identity inspection", () => {
 
   it("classifies unsupported platforms as indeterminate", () => {
     const inspected = inspectProcessIdentity(PID, {
-      platformFn: () => "unsupported-test-platform",
+      platform: "unsupported-test-platform",
       livenessProbe: () => ({ status: "live" }),
     });
     assert.equal(inspected.status, "indeterminate");

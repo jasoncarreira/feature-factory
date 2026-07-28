@@ -5,13 +5,13 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, advanceFactoryRunBase, assertHeartbeatStartable, attachCheckpointCompletionRecovery, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, executeIntegrationAmendment, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordFactoryCheckpointMerged, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, advanceFactoryRunBase, assertHeartbeatStartable, attachCheckpointCompletionRecovery, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, executeIntegrationAmendment, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordFactoryCheckpointMerged, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
-import { adoptSliceBuilderTaskDispatchCandidate, retrySliceAfterFailedVerification, transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { adoptSliceBuilderTaskDispatchCandidate, retrySliceAfterFailedVerification, transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { validateRun } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
@@ -27,7 +27,7 @@ const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
-const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear", "--post-pr-ci", "--no-post-pr-ci", "--new-pr", "--carry-forward"]);
+const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear", "--post-pr-ci", "--no-post-pr-ci", "--carry-forward"]);
 const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--commit", "--owner-slice", "--consumer-slice", "--defect-path", "--verification-ref", "--pr-url", "--pr-number", "--repository", "--head-sha", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--subject", "--prompt-bytes", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate", "--post-pr-wait-minutes", "--post-pr-poll-seconds", "--post-pr-max-poll-seconds", "--post-pr-check-start-grace-seconds", "--post-pr-max-transient-errors", "--remediation-evidence-ref", "--failure-evidence-ref", "--test-evidence-ref", "--validator-report-ref", "--validator-review-ref", "--security-review-ref"]);
 const COST_REPORT_BOOLEAN_FLAGS = new Set(["--json", "--telemetry"]);
 const COST_REPORT_VALUE_FLAGS = new Set(["--repo"]);
@@ -61,7 +61,7 @@ Commands:
   factory checkpoint-close <parent-run-id> [--json]  Close the final checkpoint route after its canonical PR merge
   factory base-advance <run-id> --json  Advance an eligible active pre-PR run to fresh origin/main
   factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
-  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--carry-forward|--new-pr] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
+  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> --carry-forward [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory cancel <run-id> [--json]
   factory steer <run-id> --message TEXT [--json]
   factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> [--json]
@@ -98,7 +98,6 @@ Commands:
   factory slice-status <run-id> <slice-id> <running|review|blocked> [--branch REF] [--worktree PATH] [--attempts N] [--evidence-ref REF] [--review-ref REF] [--reason TEXT]
   factory slice-verification-retry <run-id> <slice-id> --evidence-ref REF --review-ref REF --json
   factory slice-dispatch-adopt <run-id> <slice-id> <attempt> --json
-  factory repair <run-id> <reported|repairing|review|merged|blocked> [retained legacy: blocked, previously-attempted, or branch-only consumer]
   factory step <run-id> <agent> <running|accepted|rejected|blocked> [--artifact-ref REF] [--evidence-ref REF] [--review-ref REF] [--attempts N]
   factory verdicts <run-id> --validator GO|GO-WITH-NITS|NO-GO --report artifacts/validation-report.md --security PASS|BLOCK --review-ref reviews/security-reviewer.json
   factory terminal <run-id> <blocked|partial|needs-human> --reason TEXT --boundary-token TOKEN
@@ -245,10 +244,6 @@ async function factory(args, dependencies = {}) {
     if (positional.length !== 1) throw new Error("factory continue requires exactly one <blocked-run-id>");
     return print(await continueFactory(positional[0], opts), opts);
   }
-  if (sub === "adopt-continuation") {
-    if (positional.length !== 1) throw new Error("factory adopt-continuation requires exactly one <child-run-id>");
-    return print(await adoptContinuation(positional[0], opts), opts);
-  }
   if (sub === "cancel") return cancel(rest);
   if (sub === "steer") return steer(rest);
   if (sub === "steer-consume") return steerConsume(rest);
@@ -279,7 +274,6 @@ async function factory(args, dependencies = {}) {
   if (sub === "slices-seed") return slicesSeed(rest);
   if (sub === "slice-status") return sliceStatus(rest);
   if (sub === "slice-verification-retry") return sliceVerificationRetry(rest);
-  if (sub === "repair") return repairStatus(rest);
   if (sub === "step") return step(rest);
   if (sub === "verdicts") return verdicts(rest);
   if (sub === "terminal") return terminal(rest);
@@ -686,7 +680,6 @@ function options(args) {
     clear: args.includes("--clear"),
     postPrCi: args.includes("--post-pr-ci"),
     noPostPrCi: args.includes("--no-post-pr-ci"),
-    newPr: args.includes("--new-pr"),
     carryForward: args.includes("--carry-forward"),
     modeFlags: ["--interactive", "--headless", "--autonomous", "--detached"].filter((flag) => args.includes(flag)),
     ghAccountOccurrences: args.filter((argument) => argument === "--gh-account").length,
@@ -973,38 +966,6 @@ async function sliceVerificationRetry(args) {
     evidence_ref: requiredOption(opts.evidenceRef, "--evidence-ref", "factory slice-verification-retry"),
     review_ref: requiredOption(opts.reviewRef, "--review-ref", "factory slice-verification-retry"),
   }, opts), opts);
-}
-
-async function repairStatus(args) {
-  const opts = options(args);
-  const positional = positionals(args);
-  const [runId, statusValue] = positional;
-  if (!stringValue(runId) || !stringValue(statusValue) || positional.length !== 2) {
-    throw new Error("factory repair requires <run-id> <reported|repairing|review|merged|blocked>");
-  }
-  const input = { status: String(statusValue).trim() };
-  if (input.status === "reported") {
-    input.owner_slice_id = requiredOption(opts.ownerSlice, "--owner-slice", "factory repair reported");
-    input.consumer_slice_id = requiredOption(opts.consumerSlice, "--consumer-slice", "factory repair reported");
-    input.defect_path = requiredOption(opts.defectPath, "--defect-path", "factory repair reported");
-    input.evidence_ref = requiredOption(opts.evidenceRef, "--evidence-ref", "factory repair reported");
-  }
-  if (input.status === "repairing") {
-    input.attempts = normalizeNonNegativeInteger(requiredOption(opts.attempts, "--attempts", "factory repair repairing"), "--attempts");
-    if (stringValue(opts.branch)) input.branch = opts.branch;
-    if (stringValue(opts.worktree)) input.worktree = opts.worktree;
-  }
-  if (input.status === "review") {
-    input.review_ref = requiredOption(opts.reviewRef, "--review-ref", "factory repair review");
-    input.repair_evidence_ref = requiredOption(opts.evidenceRef, "--evidence-ref", "factory repair review");
-    input.reviewed_commit = requiredOption(opts.commit, "--commit", "factory repair review");
-  }
-  if (input.status === "merged") {
-    input.merge_commit = requiredOption(opts.mergeCommit, "--merge-commit", "factory repair merged");
-    input.verification_ref = requiredOption(opts.verificationRef, "--verification-ref", "factory repair merged");
-  }
-  if (input.status === "blocked") input.reason = requiredOption(opts.reason, "--reason", "factory repair blocked");
-  return print(await transitionMergedSliceRepair(resolveRunDir(runId, opts), input, opts), opts);
 }
 
 async function step(args) {

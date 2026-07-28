@@ -1,17 +1,16 @@
 import { basename, resolve } from "node:path";
 import { validateRun } from "./validate.js";
 import { normalizePostPrCiDriverOverride } from "./config.js";
-import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, assertPublishedCarryForwardRunById, inspectContinuationRouteSchema } from "./run-state.js";
+import { assertContinuationReservationAuthority, assertOrdinaryResumeRunById, assertPublishedCarryForwardRun, assertPublishedCarryForwardRunById } from "./run-state.js";
 
 const PREFIX = "ffpayload-v1:";
 const DRIVER_MODES = new Set(["interactive", "headless", "autonomous"]);
 const DRIVER_KEYS = new Set(["mode", "ready", "pr_mode", "reviewer", "github_account", "run_id", "post_pr_ci"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "configuration", "carry_forward", "checkpoint_source_hash", "configuration_hash"]);
-const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
+const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "configuration", "carry_forward", "checkpoint_source_hash", "configuration_hash"]);
+const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
 const CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "plan_ref", "plan_hash", "review_ref", "review_hash"]);
-const CONTINUATION_DRAFT_SPEC_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 const CONTINUATION_CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
 const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_hash", "branch", "commit", "worktree"]);
@@ -22,7 +21,7 @@ const STEERING_KEYS = new Set(["schema_version", "kind", "run_id", "pending", "u
 const STEERING_PENDING_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at"]);
 const STEERING_UNCHECKPOINTED_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at", "consumed_at"]);
 const STEERING_CONSUME_KEYS = new Set(["command", "args"]);
-const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice", "post_pr"]);
+const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice"]);
 const CONTINUATION_ARTIFACT_KINDS = new Map([
   ["artifacts/story.md", "story"],
   ["artifacts/research-map.md", "research_map"],
@@ -106,14 +105,7 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
   if (hasResume !== hasSteering) return { ok: false, reason: "incomplete-resume-route" };
   if (hasResume && hasContinuation) return { ok: false, reason: "ambiguous-route" };
   if (driver.run_id !== undefined && driver.run_id !== null && (hasResume || hasContinuation)) return { ok: false, reason: "invalid-driver-run-id-route" };
-  if (hasContinuation && plainObject(payload.continuation?.target) && safeRunId(payload.continuation.target.run_id) && Number.isInteger(payload.continuation.schema_version)) {
-    const mismatch = inspectRouteSchema(options.repo, payload.continuation.target.run_id, payload.continuation.schema_version, { route: "continuation" });
-    if (mismatch) return mismatch;
-  }
-  if (hasResume && plainObject(payload.resume) && safeRunId(payload.resume.run_id) && Number.isInteger(payload.resume.schema_version)) {
-    const mismatch = inspectRouteSchema(options.repo, payload.resume.run_id, payload.resume.schema_version, { route: "resume", ordinaryResumeSchema: 1, postPrPolicy: payload.resume.post_pr_policy });
-    if (mismatch) return mismatch;
-  }
+  if (hasContinuation && payload.continuation?.schema_version !== 2) return { ok: false, reason: "invalid-continuation-schema" };
   if (hasResume && payload.resume?.schema_version !== 2 && postPrCi !== null) return { ok: false, reason: "resume-post-pr-policy-override" };
 
   let continuation = null;
@@ -131,7 +123,7 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
       pr_mode: driver.pr_mode ?? null,
       reviewer: stringOrNull(driver.reviewer),
       github_account: stringOrNull(driver.github_account),
-      ...(continuation?.schema_version === 2 || payload.resume?.schema_version === 2 ? {} : { run_id: stringOrNull(driver.run_id) }),
+      ...(continuation || payload.resume?.schema_version === 2 ? {} : { run_id: stringOrNull(driver.run_id) }),
       post_pr_ci: postPrCi,
     },
     resume: null,
@@ -162,7 +154,7 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
     normalized.steering = steering.value;
   }
 
-  if (normalized.continuation?.schema_version === 2) {
+  if (normalized.continuation) {
     try {
       assertPublishedCarryForwardRun(options.repo, normalized.continuation, { driver: normalized.driver });
     } catch {
@@ -175,19 +167,15 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
     } catch {
       return { ok: false, reason: "unpublished-or-mismatched-carry-forward-resume" };
     }
+  } else if (normalized.resume) {
+    try {
+      assertOrdinaryResumeRunById(options.repo, normalized.resume.run_id);
+    } catch (error) {
+      return { ok: false, reason: error?.code === "integration-amendment-continuation-unsupported" ? error.code : "resume-schema-route-mismatch" };
+    }
   }
 
   return { ok: true, payload: normalized };
-}
-
-function inspectRouteSchema(repo, runId, schemaVersion, options) {
-  try {
-    inspectContinuationRouteSchema(repo, runId, schemaVersion, options);
-    return null;
-  } catch (error) {
-    if (["continuation-schema-route-mismatch", "resume-schema-route-mismatch", "resume-policy-route-mismatch"].includes(error?.code)) return { ok: false, reason: error.code };
-    return { ok: false, reason: options.route === "resume" ? "resume-schema-route-mismatch" : "continuation-schema-route-mismatch" };
-  }
 }
 
 export function safePayloadValue(value) {
@@ -245,7 +233,7 @@ function normalizeSteering(steering, runId) {
 }
 
 function normalizeContinuation(continuation, operatorRequest, repo, driver) {
-  if (!plainObject(continuation) || !hasOnlyKeys(continuation, CONTINUATION_KEYS)) return { ok: false, reason: "invalid-continuation" };
+  if (!plainObject(continuation) || continuation.schema_version !== 2 || !hasOnlyKeys(continuation, CONTINUATION_KEYS)) return { ok: false, reason: "invalid-continuation" };
   const { parent, review, target } = continuation;
   if (!plainObject(parent) || !hasOnlyKeys(parent, CONTINUATION_PARENT_KEYS)
     || !plainObject(review) || !hasOnlyKeys(review, CONTINUATION_REVIEW_KEYS)
@@ -260,7 +248,7 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
   if (planningReuse !== undefined) {
     const checkpointVariant = Object.hasOwn(continuation, "checkpoint_source_hash") && planningReuse?.eligible === true;
     const allowedPlanningKeys = checkpointVariant ? CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS : CONTINUATION_PLANNING_REUSE_KEYS;
-    if (!plainObject(planningReuse) || !hasOnlyKeys(planningReuse, allowedPlanningKeys) || typeof planningReuse.eligible !== "boolean") {
+    if (!plainObject(planningReuse) || !hasOnlyKeys(planningReuse, allowedPlanningKeys) || planningReuse.eligible !== true) {
       return { ok: false, reason: "invalid-continuation-planning-reuse" };
     }
     if (checkpointVariant
@@ -280,45 +268,20 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
       return { ok: false, reason: "invalid-continuation-planning-reuse" };
     }
   }
-  const draftSpecReuse = continuation.draft_spec_reuse;
-  if (draftSpecReuse !== undefined) {
-    if (!plainObject(draftSpecReuse)
-      || !hasOnlyKeys(draftSpecReuse, CONTINUATION_DRAFT_SPEC_REUSE_KEYS)
-      || draftSpecReuse.artifact_ref !== "artifacts/technical-brief.md"
-      || !SHA256_PATTERN.test(draftSpecReuse.artifact_hash || "")
-      || !["rejected", "blocked"].includes(draftSpecReuse.parent_step_status)
-      || !Number.isInteger(draftSpecReuse.parent_step_attempts)
-      || draftSpecReuse.parent_step_attempts < 0
-      || !Number.isInteger(draftSpecReuse.max_retries)
-      || draftSpecReuse.max_retries < 1
-      || !Number.isInteger(draftSpecReuse.remaining_attempts)
-      || draftSpecReuse.remaining_attempts !== draftSpecReuse.max_retries - draftSpecReuse.parent_step_attempts
-      || draftSpecReuse.remaining_attempts < 1
-      || planningReuse?.eligible === true) {
-      return { ok: false, reason: "invalid-continuation-draft-spec-reuse" };
-    }
-  }
   const carryForward = normalizeCarryForward(continuation);
   if (!carryForward.ok) return carryForward;
 
   try {
-    const v2 = continuation.schema_version === 2;
-    if (review.source === "run.terminal_result.nonconvergence.source_review.review_ref" && !v2) {
-      return { ok: false, reason: "invalid-continuation-carry-forward-route" };
-    }
-    const policy = v2 ? { ...driver.post_pr_ci, review: driver.reviewer ? { required: true, reviewer_login: driver.reviewer, source: "driver" } : { required: false, reviewer_login: null, source: "none" } } : null;
+    const policy = { ...driver.post_pr_ci, review: driver.reviewer ? { required: true, reviewer_login: driver.reviewer, source: "driver" } : { required: false, reviewer_login: null, source: "none" } };
     validateRun({
       schema_version: 1,
       run_id: target.run_id,
       branch: target.branch,
       worktree: target.worktree,
       status: "running",
-      ...(v2 ? {
-        mode: driver.mode, github_account: driver.github_account ?? null, pr_mode: driver.pr_mode, max_parallel_slices: 3, max_retries: 3,
-        ...(continuation.configuration?.review_tier === null || continuation.configuration?.review_tier === undefined ? {} : { review_tier: continuation.configuration.review_tier }),
-        post_pr: { schema_version: 1, policy, phase: policy.enabled ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
-      } : {}),
-      ...(draftSpecReuse === undefined ? {} : { max_retries: draftSpecReuse.max_retries }),
+      mode: driver.mode, github_account: driver.github_account ?? null, pr_mode: driver.pr_mode, max_parallel_slices: 3, max_retries: 3,
+      ...(continuation.configuration?.review_tier === null || continuation.configuration?.review_tier === undefined ? {} : { review_tier: continuation.configuration.review_tier }),
+      post_pr: { schema_version: 1, policy, phase: policy.enabled ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
       gates: {},
       continuation,
     });
@@ -340,17 +303,6 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
     || continuation.parent_reviews.some((item) => item.kind !== "review" || !canonicalJsonRef(item.ref, "reviews/"))) {
     return { ok: false, reason: "invalid-continuation-refs" };
   }
-  if (review.kind === "post_pr") {
-    const postPr = continuation.post_pr;
-    const evidence = continuation.parent_evidence.find((item) => item.ref === postPr?.evidence_ref);
-    if (!plainObject(postPr)
-      || review.source !== "run.post_pr.continuation_review.ref"
-      || review.ref !== postPr.continuation_review_ref
-      || review.hash !== postPr.continuation_review_hash
-      || !evidence
-      || evidence.hash !== postPr.evidence_hash
-      || postPr.disposition !== "leave-unchanged") return { ok: false, reason: "invalid-continuation-post-pr-binding" };
-  } else if (continuation.post_pr !== undefined) return { ok: false, reason: "invalid-continuation-post-pr-binding" };
   const expectedRequest = `Continue blocked feature-factory run '${parent.run_id}' as '${target.run_id}' using review '${review.ref}'.`;
   if (operatorRequest !== expectedRequest || continuation.operator_summary !== `Continue blocked run '${parent.run_id}' from ${review.ref}.`) {
     return { ok: false, reason: "continuation-request-mismatch" };
@@ -397,24 +349,21 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
       parent_evidence: continuation.parent_evidence.map(normalizedRefHash),
       parent_reviews: continuation.parent_reviews.map(normalizedRefHash),
       ...(planningReuse === undefined ? {} : { planning_reuse: normalizedPlanningReuse(planningReuse) }),
-      ...(draftSpecReuse === undefined ? {} : { draft_spec_reuse: cloneJson(draftSpecReuse) }),
-      ...(continuation.post_pr === undefined ? {} : { post_pr: cloneJson(continuation.post_pr) }),
-      ...(continuation.configuration === undefined ? {} : { configuration: cloneJson(continuation.configuration) }),
+      configuration: cloneJson(continuation.configuration),
       ...(continuation.checkpoint_source_hash === undefined ? {} : { checkpoint_source_hash: continuation.checkpoint_source_hash }),
       ...(continuation.configuration_hash === undefined ? {} : { configuration_hash: continuation.configuration_hash }),
-      ...(carryForward.value === null ? {} : { carry_forward: carryForward.value }),
+      carry_forward: carryForward.value,
     },
   };
 }
 
 function normalizeCarryForward(continuation) {
   const value = continuation.carry_forward;
-  if (continuation.schema_version === 1) return value === undefined ? { ok: true, value: null } : { ok: false, reason: "invalid-continuation-carry-forward" };
-  if (continuation.schema_version !== 2 || !plainObject(value) || !hasOnlyKeys(value, CARRY_FORWARD_KEYS)
+  if (!plainObject(value) || !hasOnlyKeys(value, CARRY_FORWARD_KEYS)
     || value.scope !== "full-remaining-plan" || value.plan_ref !== "plan/slices.json" || !SHA256_PATTERN.test(value.plan_hash || "")
     || !COMMIT_PATTERN.test(value.start_commit || "") || value.start_commit !== continuation.parent?.commit
     || !Array.isArray(value.accepted_slices) || !Array.isArray(value.remaining_slice_ids) || value.remaining_slice_ids.length === 0
-    || continuation.planning_reuse?.eligible !== true || continuation.draft_spec_reuse !== undefined || continuation.post_pr !== undefined) {
+    || continuation.planning_reuse?.eligible !== true) {
     return { ok: false, reason: "invalid-continuation-carry-forward" };
   }
   const accepted = new Set();
@@ -507,9 +456,6 @@ function validAcceptedAttemptHistory(row) {
 }
 
 function normalizedPlanningReuse(planningReuse) {
-  if (!planningReuse.eligible) {
-    return { eligible: false, ...(nonEmptyString(planningReuse.reason) ? { reason: planningReuse.reason } : {}) };
-  }
   if (Object.hasOwn(planningReuse, "plan_ref")) {
     return {
       eligible: true,
@@ -575,7 +521,6 @@ function validContinuationReviewSource(kind, source) {
   if (kind === "step") return source.startsWith("run.steps.") && source.endsWith(".review_ref") && source.length > "run.steps..review_ref".length;
   if (kind === "slice") return source === "run.terminal_result.nonconvergence.source_review.review_ref"
     || source.startsWith("run.slices.") && source.endsWith(".review_ref") && source.length > "run.slices..review_ref".length;
-  if (kind === "post_pr") return source === "run.post_pr.continuation_review.ref";
   return false;
 }
 

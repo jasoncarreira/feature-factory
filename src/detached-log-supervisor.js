@@ -2,7 +2,8 @@ import { appendFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { renderErrorForTerminal } from "./hardening/output-policy.js";
-import { inspectProcessIdentity, readProcessEvidence, recordDetachedProcessEvidence, writeProcessEvidence } from "./process-evidence.js";
+import { inspectProcessIdentity } from "./hardening/process-verification.js";
+import { readProcessEvidence, recordDetachedProcessEvidence, writeProcessEvidence } from "./process-evidence.js";
 import { FACTORY_LAUNCH_CLAIM_ENV, stopHeartbeatInRunDir } from "./factory.js";
 import { timestamp } from "./utils.js";
 
@@ -79,7 +80,8 @@ export async function superviseDetachedLaunch(init, options = {}) {
         commandName: "opencode",
         logRef: init.logRef,
         now: init.now,
-        inspectorFn: () => stableIdentity,
+        expectedIdentity: stableIdentity.identity,
+        ...processInspectionOptions(options),
       });
     }
 
@@ -102,16 +104,16 @@ export async function superviseDetachedLaunch(init, options = {}) {
 }
 
 async function waitForStableProcessIdentity(pid, options = {}) {
-  const inspect = typeof options.inspectorFn === "function" ? options.inspectorFn : inspectProcessIdentity;
-  const sleep = typeof options.sleepFn === "function" ? options.sleepFn : (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const sleep = typeof options.sleep === "function" ? options.sleep : (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const clock = typeof options.clock === "function" ? options.clock : Date.now;
   const deadline = clock() + IDENTITY_SETTLE_TIMEOUT_MS;
   let previous = null;
   while (clock() <= deadline) {
-    const observed = inspect(pid);
-    const commandName = typeof observed?.command_name === "string" ? observed.command_name.trim() : "";
-    if (observed?.ok === true && commandName && commandName.toLowerCase() !== "env") {
-      const fingerprint = JSON.stringify([observed.inspector, observed.pid, observed.start_marker, commandName, observed.cwd]);
+    const observed = inspectProcessIdentity(pid, processInspectionOptions(options));
+    const identity = observed.status === "live" ? observed.identity : null;
+    const commandName = typeof identity?.command_name === "string" ? identity.command_name.trim() : "";
+    if (identity && commandName && commandName.toLowerCase() !== "env") {
+      const fingerprint = JSON.stringify([identity.inspector, identity.pid, identity.start_marker, commandName, identity.cwd]);
       if (fingerprint === previous) return observed;
       previous = fingerprint;
     } else {
@@ -120,6 +122,20 @@ async function waitForStableProcessIdentity(pid, options = {}) {
     await sleep(IDENTITY_SETTLE_INTERVAL_MS);
   }
   throw new Error("detached child identity did not stabilize before readiness");
+}
+
+function processInspectionOptions(options) {
+  const keys = [
+    "platform",
+    "hostname",
+    "livenessProbe",
+    "procReadFile",
+    "procReadlink",
+    "commandRunner",
+    "commandTimeoutMs",
+    "commandMaxBuffer",
+  ];
+  return Object.fromEntries(keys.filter((key) => options[key] !== undefined).map((key) => [key, options[key]]));
 }
 
 function validateInit(init) {

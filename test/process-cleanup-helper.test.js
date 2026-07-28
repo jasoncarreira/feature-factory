@@ -118,6 +118,7 @@ describe("tracked process cleanup", () => {
       assert.equal(source.includes(prohibited), false, prohibited);
     }
     assert.doesNotMatch(source, /\.kill\(\s*-\s*\w/gu);
+    assert.equal((source.match(/record\.signal\("SIGTERM"\)/gu) || []).length, 1);
   });
 
   it("handles spawn failures, false and thrown signals, exit races, and diagnostic failures", async () => {

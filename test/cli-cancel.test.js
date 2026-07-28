@@ -27,12 +27,7 @@ describe("cli factory cancel", () => {
         const result = await cancelProcessFromEvidence(fixture.runDir, {
           runId: fixture.runId,
           cancelWaitMs: 0,
-          inspectorFn: (pid) => {
-            const state = signaled ? item.after : item.initial;
-            return state === "absent"
-              ? { ok: false, inspector: "test-inspector", code: "ESRCH", reason: "ESRCH" }
-              : { ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo };
-          },
+          ...processOptions(fixture, () => signaled ? item.after : item.initial),
           signalFn: (pid, signal) => { signals.push({ pid, signal }); signaled = true; },
         });
         assert.equal(result.status, item.status);
@@ -82,7 +77,7 @@ describe("cli factory cancel", () => {
       const second = await cancelProcessFromEvidence(fixture.runDir, {
         runId: fixture.runId,
         cancelWaitMs: 0,
-        inspectorFn: (pid) => signaled ? { ok: false, code: "ESRCH", reason: "ESRCH" } : { ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo },
+        ...processOptions(fixture, () => signaled ? "absent" : "live"),
         signalFn: (pid, signal) => { signals.push({ pid, signal }); signaled = true; },
       });
       assert.equal(second.status, "cancelled");
@@ -103,7 +98,7 @@ describe("cli factory cancel", () => {
       const result = await cancelProcessFromEvidence(fixture.runDir, {
         runId: fixture.runId,
         cancelWaitMs: 0,
-        inspectorFn: (pid) => signaled ? { ok: false, code: "ESRCH", reason: "ESRCH" } : { ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo },
+        ...processOptions(fixture, () => signaled ? "absent" : "live"),
         signalFn: (pid, signal) => {
           signals.push({ pid, signal });
           rmSync(join(fixture.runDir, "process-launch.lock"), { recursive: true, force: true });
@@ -196,10 +191,22 @@ function seedRunningProcess(fixture, state = "running") {
   writeProcessEvidence(fixture.runDir, {
     schema_version: 1, kind: "opencode-process", run_id: fixture.runId, execution_id: "cancel-execution", pid: 7654,
     started_at: now, updated_at: now, state, cwd: fixture.repo,
-    identity: { inspector: "test-inspector", start_marker: "test-start", command_name: "opencode" },
+    identity: { inspector: "node-process", start_marker: "linux-procfs:111", command_name: "opencode" },
     log_ref: "processes/cancel.log",
     cancel: state === "cancelled" ? { requested_at: now, signal: "SIGTERM", confirmed_at: now, result: "cancelled", reason: null } : null,
   });
+}
+
+function processOptions(fixture, status) {
+  return {
+    platform: "linux",
+    hostname: "test-host",
+    livenessProbe: () => ({ status: status() }),
+    procReadFile: (path) => path.endsWith("/stat")
+      ? `7654 (opencode) S ${Array(18).fill("0").join(" ")} 111\n`
+      : "opencode\n",
+    procReadlink: () => fixture.repo,
+  };
 }
 
 function cleanup(repo) {

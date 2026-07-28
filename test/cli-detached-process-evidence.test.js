@@ -127,7 +127,6 @@ function runDeterministicCli(repo, args) {
     const lifecyclePath = ${JSON.stringify(lifecyclePath)};
     const events = [];
     const persist = () => writeFileSync(lifecyclePath, JSON.stringify(events));
-    const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: repo });
     class DeterministicSupervisor extends EventEmitter {
       constructor() { super(); this.pid = process.pid; events.push("supervisor-created"); persist(); }
       send(init) {
@@ -136,7 +135,7 @@ function runDeterministicCli(repo, args) {
           if (init.recordEvidence) {
             mkdirSync(init.runDir + "/processes", { recursive: true });
             writeFileSync(init.log, "");
-            recordDetachedProcessEvidence(init.runDir, { runId: init.runId, executionId: init.executionId, pid: process.pid, cwd: repo, logRef: init.logRef, inspectorFn });
+            recordDetachedProcessEvidence(init.runDir, { runId: init.runId, executionId: init.executionId, pid: process.pid, cwd: repo, logRef: init.logRef });
             events.push("evidence-published"); persist();
           }
           events.push("spawned"); persist();
@@ -148,7 +147,7 @@ function runDeterministicCli(repo, args) {
       unref() { events.push("unref"); persist(); }
       disconnect() { events.push("disconnect"); persist(); }
     }
-    await runCliCommand(${JSON.stringify(args)}, { factoryOptions: { inspectorFn, supervisorSpawnFn: () => new DeterministicSupervisor() } });
+    await runCliCommand(${JSON.stringify(args)}, { factoryOptions: { supervisorSpawnFn: () => new DeterministicSupervisor() } });
     process.exit(process.exitCode || 0);
   `;
   const proc = spawnSync(process.execPath, ["--input-type=module", "--eval", source], {

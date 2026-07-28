@@ -428,12 +428,13 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
-  it("projects authoritative panel state without inferring activity from accepted tests", () => {
+  it("projects complete current panel state and fails closed for incomplete panels", () => {
     const repo = tempDir();
     writeRun(repo, "panel-run", {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
       gates: {},
+      ...panelAuthority(),
       steps: [{ agent: "test-verifier", status: "accepted", attempts: 3 }],
       slices: [{ id: "backend", declared_paths: ["backend.txt"], effective_paths: ["backend.txt"], status: "merged", attempts: 1,
         evidence_ref: "evidence/backend.json", evidence_hash: `sha256:${"1".repeat(64)}`,
@@ -445,15 +446,20 @@ describe("TUI factory scanner", () => {
       updated_at: "2026-07-04T00:00:00Z",
       gates: {},
       steps: [{ agent: "test-verifier", status: "accepted", attempts: 1 }],
-      validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
+      validator: { verdict: "GO" },
     });
     writeRun(repo, "remediation-run", {
       status: "running",
       updated_at: "2026-07-03T00:00:00Z",
       gates: {},
       steps: [{ agent: "test-verifier", status: "accepted", attempts: 1 }],
-      validator: { verdict: "NO-GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
-      security_review: { verdict: "BLOCK", review_ref: "reviews/security-reviewer.json" },
+      validator: {
+        verdict: "NO-GO", report: "artifacts/validation-report.md", report_hash: `sha256:${"5".repeat(64)}`,
+        review_ref: "reviews/implementation-validator.json", review_hash: `sha256:${"6".repeat(64)}`, reviewed_head_sha: "7".repeat(40),
+      },
+      security_review: {
+        verdict: "BLOCK", review_ref: "reviews/security-reviewer.json", review_hash: `sha256:${"8".repeat(64)}`, reviewed_head_sha: "7".repeat(40),
+      },
     });
 
     const runs = readRuns(findFactoryRoots(repo));
@@ -461,8 +467,9 @@ describe("TUI factory scanner", () => {
     const securityRun = runs.find((run) => run.run_id === "security-run");
     const remediationRun = runs.find((run) => run.run_id === "remediation-run");
 
-    assert.equal(panelRun.current, null);
-    assert.equal(securityRun.current, "security-reviewer pending");
+    assert.equal(panelRun.current, "panels passed");
+    assert.equal(securityRun.current, null);
+    assert.equal(securityRun.diagnostic_classification, "invalid");
     assert.equal(remediationRun.current, "panel remediation pending");
     cleanup(repo);
   });
@@ -497,7 +504,6 @@ describe("TUI factory scanner", () => {
 
   it("TUI-P3 maps every open and closed build-oriented special dispatch", () => {
     const labels = {
-      "merged-slice-repair": ["merged-slice repair running", "merged-slice repair awaiting integration"],
       "integration-amendment": ["integration amendment running", "integration amendment awaiting integration"],
       "integration-conflict": ["integration conflict repair running", "integration conflict repair awaiting integration"],
     };
@@ -572,21 +578,33 @@ describe("TUI factory scanner", () => {
     }
   });
 
-  it("TUI-P7 covers the complete validator/security verdict partition and legacy partial rows", () => {
+  it("TUI-P7 covers complete current panel authority and rejects incomplete or cross-head rows", () => {
     const validators = ["GO", "GO-WITH-NITS", "NO-GO"];
     const securities = ["PASS", "BLOCK"];
     for (const validator of validators) {
       for (const security of securities) {
         const expected = validator !== "NO-GO" && security === "PASS" ? "panels passed" : "panel remediation pending";
         assert.equal(projectedCurrent({
-          validator: { verdict: validator },
-          security_review: { verdict: security },
+          ...panelAuthority(validator, security),
           steps: [{ agent: "implementation-validator", status: "running", attempts: 4 }],
         }, `tui-p7-${validator.toLowerCase()}-${security.toLowerCase()}`), expected);
       }
     }
-    assert.equal(projectedCurrent({ validator: { verdict: "GO" } }, "tui-p7-validator-only"), "security-reviewer pending");
-    assert.equal(projectedCurrent({ security_review: { verdict: "PASS" } }, "tui-p7-security-only"), "implementation-validator pending");
+
+    const partialValidator = panelAuthority().validator;
+    delete partialValidator.report_hash;
+    const crossHead = panelAuthority();
+    crossHead.security_review.reviewed_head_sha = "8".repeat(40);
+    const variants = [
+      ["verdict-only pair", { validator: { verdict: "GO" }, security_review: { verdict: "PASS" } }],
+      ["complete validator only", { validator: panelAuthority().validator }],
+      ["complete security only", { security_review: panelAuthority().security_review }],
+      ["partial validator binding", { validator: partialValidator, security_review: panelAuthority().security_review }],
+      ["cross-head bindings", crossHead],
+    ];
+    for (const [name, input] of variants) {
+      assert.equal(projectedCurrent(input, `tui-p7-${name.replaceAll(" ", "-")}`), "workflow state unknown", name);
+    }
   });
 
   it("TUI-P8 distinguishes open and closed panel remediation authority", () => {
@@ -596,10 +614,16 @@ describe("TUI factory scanner", () => {
     ]) {
       assert.equal(projectedCurrent({
         special_builder_dispatch: specialDispatch("panel-remediation", { closed }),
-        validator: { verdict: "NO-GO" },
-        security_review: { verdict: "BLOCK" },
+        ...panelAuthority("NO-GO", "BLOCK"),
       }, `tui-p8-${closed ? "closed" : "open"}`), expected);
     }
+
+    const incompletePanels = panelAuthority("NO-GO", "BLOCK");
+    delete incompletePanels.validator.review_hash;
+    assert.equal(projectedCurrent({
+      special_builder_dispatch: specialDispatch("panel-remediation"),
+      ...incompletePanels,
+    }, "tui-p8-incomplete-panels"), "workflow state unknown");
   });
 
   it("TUI-P9 maps every pre-PR gate status ahead of retained panels and steps", () => {
@@ -612,22 +636,21 @@ describe("TUI factory scanner", () => {
     for (const [status, expected] of Object.entries(variants)) {
       assert.equal(projectedCurrent({
         gates: { pre_pr: { status } },
-        validator: { verdict: "GO" },
-        security_review: { verdict: "PASS" },
+        ...panelAuthority(),
         steps: [{ agent: "story-reader", status: "running", attempts: 1 }],
       }, `tui-p9-${status}`), expected);
     }
   });
 
-  it("TUI-P10 distinguishes active PR creation from a legacy fence that needs reconciliation", () => {
+  it("TUI-P10 projects a complete PR fence and fails closed for an identity-less fence", () => {
     assert.equal(projectedCurrent({
       gates: { pre_pr: { status: "approved" } },
       steering: { pr_fence: prFence() },
     }, "tui-p10-pr-fence"), "PR creation running");
     assert.equal(projectedCurrent({
       gates: { pre_pr: { status: "approved" } },
-      steering: { pr_fence: legacyPrFence() },
-    }, "tui-p10-legacy-pr-fence"), "PR creation needs reconciliation");
+      steering: { pr_fence: identitylessPrFence() },
+    }, "tui-p10-identityless-pr-fence"), "workflow state unknown");
   });
 
   it("TUI-P11 projects legacy, disabled-policy, and awaiting-start PR authority", () => {
@@ -684,9 +707,9 @@ describe("TUI factory scanner", () => {
       { name: "pr-created", input: { pr_url: "https://github.com/example/repo/pull/1" }, expected: "PR created" },
       { name: "pr-fence", input: { steering: { pr_fence: prFence() } }, expected: "PR creation running" },
       { name: "pre-pr", input: { gates: { pre_pr: { status: "approved" } } }, expected: "pre-PR approved" },
-      { name: "panel", input: { validator: { verdict: "GO" }, security_review: { verdict: "PASS" } }, expected: "panels passed" },
+      { name: "panel", input: panelAuthority(), expected: "panels passed" },
       { name: "checked-tests", input: { steps: [checkedExecutionStep(runId, { state: "completed", status: "pass", attempt: 1 })] }, expected: "whole-story tests passed a1" },
-      { name: "build-special", input: { special_builder_dispatch: specialDispatch("merged-slice-repair") }, expected: "merged-slice repair running" },
+      { name: "build-special", input: { special_builder_dispatch: specialDispatch("integration-amendment") }, expected: "integration amendment running" },
       { name: "active-slice", input: { slices: [{ id: "active-slice", status: "running", attempts: 1 }] }, expected: "active-slice running a1" },
       { name: "running-step", input: { steps: [{ agent: "story-reader", status: "running", attempts: 1 }] }, expected: "story-reader running a1" },
       { name: "blocked-slice", input: { slices: [{ id: "blocked-slice", status: "blocked", attempts: 1 }] }, expected: "blocked-slice blocked a1" },
@@ -706,11 +729,10 @@ describe("TUI factory scanner", () => {
     assert.equal(projectedCurrent({ status: "blocked", post_pr: postPrFixture("blocked", 0), pr_url: "https://github.com/example/repo/pull/1" }, "tui-p14-terminal-exclusive"), "post-PR blocked");
     assert.equal(projectedCurrent(tiers[0].input, "tui-p14-active-exclusive"), "post-PR checks running a1");
 
-    const malformedLowerDispatch = specialDispatch("merged-slice-repair", { closed: true });
+    const malformedLowerDispatch = specialDispatch("integration-amendment", { closed: true });
     delete malformedLowerDispatch.closure_hash;
     assert.equal(projectedCurrent({
-      validator: { verdict: "GO" },
-      security_review: { verdict: "PASS" },
+      ...panelAuthority(),
       special_builder_dispatch: malformedLowerDispatch,
     }, "tui-p14-higher-masks-malformed-lower"), "panels passed");
   });
@@ -735,7 +757,7 @@ describe("TUI factory scanner", () => {
     nonRunningClaim.status = "accepted";
     const mismatchedCompleted = checkedExecutionStep(runId, { state: "completed", status: "pass", attempt: 1 });
     mismatchedCompleted.status = "rejected";
-    const partialDispatch = specialDispatch("merged-slice-repair", { closed: true });
+    const partialDispatch = specialDispatch("integration-amendment", { closed: true });
     delete partialDispatch.closure_hash;
     const partialFence = prFence();
     delete partialFence.repository;
@@ -749,10 +771,14 @@ describe("TUI factory scanner", () => {
       ["completed claim status mismatch", { steps: [mismatchedCompleted] }],
       ["unknown validator verdict", { validator: { verdict: "MAYBE" } }],
       ["unknown security verdict", { security_review: { verdict: "WARN" } }],
+      ["verdict-only panels", { validator: { verdict: "GO" }, security_review: { verdict: "PASS" } }],
+      ["retired special dispatch route", { special_builder_dispatch: specialDispatch("merged-slice-repair") }],
+      ["unknown special dispatch route", { special_builder_dispatch: specialDispatch("future-special-route") }],
       ["partial special dispatch", { special_builder_dispatch: partialDispatch }],
       ["partial slice dispatch", { slices: [{ id: "slice", status: "running", attempts: 1, dispatch_required: true, dispatch_claim_ref: "dispatch/claim.json" }] }],
       ["partial PR operation", { post_pr: postPrFixture("disabled", 0, { pr_operation: { operation_id: "partial" } }) }],
       ["partial successor PR fence", { steering: { pr_fence: partialFence } }],
+      ["identity-less PR fence", { steering: { pr_fence: identitylessPrFence() } }],
     ];
     for (const [name, input] of variants) {
       let current;
@@ -1450,10 +1476,29 @@ function prFence() {
   };
 }
 
-function legacyPrFence() {
+function identitylessPrFence() {
   const fence = prFence();
   for (const key of ["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]) delete fence[key];
   return fence;
+}
+
+function panelAuthority(validatorVerdict = "GO", securityVerdict = "PASS", head = "7".repeat(40)) {
+  return {
+    validator: {
+      verdict: validatorVerdict,
+      report: "artifacts/validation-report.md",
+      report_hash: `sha256:${"5".repeat(64)}`,
+      review_ref: "reviews/implementation-validator.json",
+      review_hash: `sha256:${"6".repeat(64)}`,
+      reviewed_head_sha: head,
+    },
+    security_review: {
+      verdict: securityVerdict,
+      review_ref: "reviews/security-reviewer.json",
+      review_hash: `sha256:${"8".repeat(64)}`,
+      reviewed_head_sha: head,
+    },
+  };
 }
 
 function combineProjectionInputs(...inputs) {

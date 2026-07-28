@@ -51,7 +51,7 @@ import {
 } from "../src/run-state.js";
 import { MAX_COST_ATTRIBUTION_ENTRIES, recomputeCostAttribution } from "../src/cost-attribution.js";
 import { assertIntegrationAmendmentConsistency, checkRunConsistency, integrationAmendmentId } from "../src/validate.js";
-import { hashFile } from "../src/refs.js";
+import { hashFile, hashValue } from "../src/refs.js";
 import { git } from "../src/git.js";
 import { deliveryEnvelopeForSlices, passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
@@ -174,7 +174,7 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("gates the test-verifier integration step on merged slices and bounded advancing attempts", async () => {
+  it("rejects an incomplete test-verifier projection before creating an attempt", async () => {
     const fixture = createFixture("test-verifier-gate");
     try {
       writeJson(join(fixture.runDir, "run.json"), {
@@ -188,41 +188,10 @@ describe("simplified run-state transitions", () => {
 
       await assert.rejects(
         transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }),
-        /test-verifier integration gate requires all slices merged: ui/u,
+        /complete merged slice projection/u,
         "an unmerged slice must block the integration gate",
       );
 
-      const allMerged = readJson(join(fixture.runDir, "run.json"));
-      allMerged.slices[1] = writeModernReviewedSlice(fixture.runDir, "ui", { status: "merged", mergeCommit: "def456" });
-      writeJson(join(fixture.runDir, "run.json"), allMerged);
-      await assert.rejects(
-        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 0 }),
-        /requires a positive attempt number/u,
-      );
-      await assert.rejects(
-        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 2 }),
-        /must advance from attempt 0 to 1/u,
-        "the first attempt must be exactly 1",
-      );
-
-      const started = await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 });
-      assert.equal(started.step.status, "running");
-      await transitionRunStep(fixture.runDir, "test-verifier", { status: "rejected", attempts: 1 }, { mustExist: true });
-      await assert.rejects(
-        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 3 }, { mustExist: true }),
-        /must advance from attempt 1 to 2/u,
-        "attempts advance one at a time",
-      );
-
-      await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 2 }, { mustExist: true });
-      await transitionRunStep(fixture.runDir, "test-verifier", { status: "rejected", attempts: 2 }, { mustExist: true });
-      await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 3 }, { mustExist: true });
-      await transitionRunStep(fixture.runDir, "test-verifier", { status: "rejected", attempts: 3 }, { mustExist: true });
-      await assert.rejects(
-        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 4 }, { mustExist: true }),
-        /integration gate attempt 4 exceeds max_retries 3/u,
-        "the bounded retry ceiling must hold",
-      );
     } finally {
       cleanup(fixture.repo);
     }
@@ -638,7 +607,7 @@ describe("simplified run-state transitions", () => {
           artifact_ref: "artifacts/story.md",
           inherited_acceptance: { from_run_id: "parent", parent_spec_review_ref: "reviews/spec.json", artifact_hash: HASH, review_hash: HASH },
         }),
-        /only be created by checked continuation adoption/u,
+        /inherited_acceptance is immutable/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
     } finally {
@@ -1342,37 +1311,6 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("records PR creation from transition-time preconditions only", async () => {
-    const fixture = createFixture("pr-created");
-    try {
-      writeReadyPrRun(fixture);
-
-      const result = await createPrTransition(fixture.runDir, {
-        pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/99",
-        pr_number: 99,
-        repository: "jasoncarreira/opencode-feature-factory",
-      });
-
-      assert.equal(result.run.status, "completed");
-      assert.equal(result.run.pr_url, "https://github.com/jasoncarreira/opencode-feature-factory/pull/99");
-      assert.equal(result.run.terminal_result.draft, false);
-      assert.equal(result.run.terminal_result.summary, "PR created.");
-      assert.deepEqual(Object.keys(result.run.terminal_result), ["status", "run_id", "pr_url", "pr_number", "pr_node_id", "repository", "operation_id", "head_ref", "head_sha", "base_ref", "base_sha", "draft", "reason", "summary", "artifacts"]);
-      assert.deepEqual(
-        { pr_url: result.run.terminal_result.pr_url, repository: result.run.terminal_result.repository, pr_number: result.run.terminal_result.pr_number },
-        { pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/99", repository: "jasoncarreira/opencode-feature-factory", pr_number: 99 },
-      );
-      await assert.rejects(
-        transitionRunJson(fixture.runDir, (run) => {
-          run.updated_at = NOW;
-        }),
-        /terminal run 'completed' cannot be mutated/u,
-      );
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
-
   it("generic run.json writers reject incomplete schema-v2 continuation injection without mutation", async () => {
     const fixture = createFixture("generic-writer-v2-continuation");
     try {
@@ -1393,54 +1331,24 @@ describe("simplified run-state transitions", () => {
     } finally { cleanup(fixture.repo); }
   });
 
-  it("allows default ready PR creation for blocked-run continuations", async () => {
-    const fixture = createFixture("pr-continuation-default-ready");
+  it("rejects legacy continuation state before PR fence or PR effects", async () => {
+    const fixture = createFixture("pr-legacy-continuation-rejected");
     try {
       writeReadyPrRun(fixture, {
         continuation: continuationMetadata(fixture.runId),
       });
-
-      const result = await createPrTransition(fixture.runDir, {
-        pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/103",
-        pr_number: 103,
-        repository: "jasoncarreira/opencode-feature-factory",
-      });
-
-      assert.equal(result.run.status, "completed");
-      assert.equal(result.run.terminal_result.draft, false);
+      const before = readFileSync(join(fixture.runDir, "run.json"));
+      await assert.rejects(
+        createPrTransition(fixture.runDir, {
+          pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/103",
+          pr_number: 103,
+          repository: "jasoncarreira/opencode-feature-factory",
+        }),
+        /run\.continuation\.schema_version: must equal 2/u,
+      );
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), before);
     } finally {
       cleanup(fixture.repo);
-    }
-  });
-
-  it("canonicalizes origin-tracking base refs for PR authority", async () => {
-    for (const [index, baseRef] of ["refs/remotes/origin/main", "origin/main", "main"].entries()) {
-      const fixture = createFixture(`pr-origin-tracking-base-${index}`);
-      try {
-        writeReadyPrRun(fixture);
-        const runPath = join(fixture.runDir, "run.json");
-        const run = readJson(runPath);
-        run.base_ref = baseRef;
-        writeJson(runPath, run);
-        const probes = [];
-        const options = preparePrTestOptions(fixture.runDir);
-        const gitFn = options.gitFn;
-        options.gitFn = (cwd, args) => {
-          if (args[0] === "ls-remote") probes.push(args.at(-1));
-          return gitFn(cwd, args);
-        };
-
-        const fenced = await transitionPrePrFenceEstablished(fixture.runDir, options);
-
-        assert.equal(fenced.fence.base_ref, "main", baseRef);
-        assert.equal(fenced.fence.base_sha, run.base_commit, baseRef);
-        assert.deepEqual(probes, [
-          "refs/heads/main", "refs/heads/feature-branch", "refs/heads/main",
-          "refs/heads/main", "refs/heads/feature-branch", "refs/heads/main",
-        ], baseRef);
-      } finally {
-        cleanup(fixture.repo);
-      }
     }
   });
 
@@ -1539,7 +1447,7 @@ describe("simplified run-state transitions", () => {
       await assert.rejects(transitionPanelVerdicts(panel.runDir, {
         validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
         security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
-      }, { repoRoot: panel.repo }), /schema-v2 downstream authority requires all child slices merged.*slice/u);
+      }, { repoRoot: panel.repo }), /complete merged slice projection/u);
       assert.equal(readFileSync(join(panel.runDir, "run.json"), "utf8"), before);
     } finally { cleanup(panel.repo); }
 
@@ -1549,23 +1457,9 @@ describe("simplified run-state transitions", () => {
       writeJson(join(pending.runDir, "run.json"), makeSyntheticV2Run(pending.runDir, baseRun(pending.runId), { remaining: ["slice"] }));
       writeFileSync(join(pending.runDir, "gates", "pre_pr.question.md"), "approve?\n");
       const before = readFileSync(join(pending.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionGateDecision(pending.runDir, "pre_pr", { status: "pending", artifact: "artifacts/story.md", question_ref: "gates/pre_pr.question.md" }), /schema-v2 downstream authority requires all child slices merged.*slice/u);
+      await assert.rejects(transitionGateDecision(pending.runDir, "pre_pr", { status: "pending", artifact: "artifacts/story.md", question_ref: "gates/pre_pr.question.md" }), /complete merged slice projection/u);
       assert.equal(readFileSync(join(pending.runDir, "run.json"), "utf8"), before);
     } finally { cleanup(pending.repo); }
-
-    const approval = createFixture("v2-pre-pr-approve-bypass");
-    try {
-      initGitRepo(approval.repo, ["approval-feature"]);
-      runGit(approval.repo, ["checkout", "approval-feature"]);
-      writeFileSync(join(approval.runDir, "gates", "pre_pr.question.md"), "approve?\n");
-      await transitionGateDecision(approval.runDir, "pre_pr", { status: "pending", artifact: "artifacts/story.md", question_ref: "gates/pre_pr.question.md" });
-      const run = makeSyntheticV2Run(approval.runDir, { ...readJson(join(approval.runDir, "run.json")), branch: "approval-feature", worktree: approval.repo }, { remaining: ["slice"] });
-      writeJson(join(approval.runDir, "run.json"), run);
-      const opened = await transitionSteeringBoundaryOpened(approval.runDir, "gate");
-      const before = readFileSync(join(approval.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionGateDecision(approval.runDir, "pre_pr", { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/pre_pr.question.md", answer: "approve" }, { boundaryToken: opened.boundary.token }), /schema-v2 downstream authority requires all child slices merged.*slice/u);
-      assert.equal(readFileSync(join(approval.runDir, "run.json"), "utf8"), before);
-    } finally { cleanup(approval.repo); }
 
     const fence = createFixture("v2-fence-bypass");
     try {
@@ -1574,21 +1468,10 @@ describe("simplified run-state transitions", () => {
       writeJson(join(fence.runDir, "run.json"), run);
       const prepared = preparePrTestOptions(fence.runDir, {});
       const before = readFileSync(join(fence.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionPrePrFenceEstablished(fence.runDir, prepared), /schema-v2 downstream authority requires all child slices merged.*slice/u);
+      await assert.rejects(transitionPrePrFenceEstablished(fence.runDir, prepared), /complete merged slice projection/u);
       assert.equal(readFileSync(join(fence.runDir, "run.json"), "utf8"), before);
     } finally { cleanup(fence.repo); }
 
-    const pr = createFixture("v2-pr-bypass");
-    try {
-      writeReadyPrRun(pr);
-      const prepared = preparePrTestOptions(pr.runDir, {});
-      const fenced = await transitionPrePrFenceEstablished(pr.runDir, prepared);
-      const run = makeSyntheticV2Run(pr.runDir, readJson(join(pr.runDir, "run.json")), { remaining: ["slice"] });
-      writeJson(join(pr.runDir, "run.json"), run);
-      const before = readFileSync(join(pr.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionPrCreated(pr.runDir, {}, { ...prepared, fenceToken: fenced.fence.token }), /schema-v2 downstream authority requires fresh accepted test-verifier authority/u);
-      assert.equal(readFileSync(join(pr.runDir, "run.json"), "utf8"), before);
-    } finally { cleanup(pr.repo); }
   });
 
   it("admits v2 panels, pre-PR approval, fence, and PR only through fresh child test authority", async () => {
@@ -1599,7 +1482,9 @@ describe("simplified run-state transitions", () => {
       run.gates = {};
       run.validator = null;
       run.security_review = null;
+      run.steps = run.steps.filter((step) => step.agent !== "test-verifier");
       run.steps.push({ agent: "test-verifier", status: "blocked", attempts: 0 });
+      rmSync(join(fixture.runDir, "evidence", "test-verifier.attempt-1.json"));
       writeJson(join(fixture.runDir, "run.json"), run);
       const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
       writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "all tests pass\n");
@@ -1669,7 +1554,7 @@ describe("simplified run-state transitions", () => {
       writeJson(join(fixture.runDir, "run.json"), incompleteAfterAcceptance);
       await assert.rejects(
         transitionRunJson(fixture.runDir, (draft) => { draft.review_tier = "strict"; }),
-        (error) => error?.message === "schema-v2 downstream authority requires all child slices merged before checked v2 mutation: slice",
+        /complete merged slice projection/u,
       );
       writeFileSync(join(fixture.runDir, "run.json"), acceptedV2RunBytes);
 
@@ -1717,175 +1602,6 @@ describe("simplified run-state transitions", () => {
       assert.equal(created.status, "completed");
       assert.equal(created.pr_url, "https://github.com/jasoncarreira/opencode-feature-factory/pull/99");
     } finally { cleanup(fixture.repo); }
-  });
-
-  it("allows explicit draft PR creation for blocked-run continuations", async () => {
-    const fixture = createFixture("pr-continuation-draft");
-    try {
-      writeReadyPrRun(fixture, {
-        continuation: continuationMetadata(fixture.runId),
-      });
-
-      const result = await createPrTransition(fixture.runDir, {
-        pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
-        pr_number: 104,
-        repository: "jasoncarreira/opencode-feature-factory",
-        draft: true,
-      });
-
-      assert.equal(result.run.status, "completed");
-      assert.equal(result.run.terminal_result.draft, true);
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
-
-  it("allows explicit draft PR recording for ordinary runs with the draft summary", async () => {
-    const fixture = createFixture("pr-ordinary-draft");
-    try {
-      writeReadyPrRun(fixture);
-
-      const result = await createPrTransition(fixture.runDir, {
-        pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/105",
-        pr_number: 105,
-        repository: "jasoncarreira/opencode-feature-factory",
-        draft: true,
-      });
-
-      assert.equal(result.run.status, "completed");
-      assert.equal(result.run.terminal_result.draft, true);
-      assert.equal(result.run.terminal_result.summary, "Draft PR created.");
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
-
-  it("rejects PR creation without an approved pre_pr gate and mutates nothing", async () => {
-    const fixture = createFixture("pr-gate-missing");
-    try {
-      writeReadyPrRun(fixture, { gates: {} });
-      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-
-      await assert.rejects(
-        createPrTransition(fixture.runDir, {
-          pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/106",
-          pr_number: 106,
-          repository: "jasoncarreira/opencode-feature-factory",
-        }),
-        /pr-created requires approved pre_pr gate/u,
-      );
-      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, "a rejected pr-created must not mutate run state");
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
-
-  it("rejects PR creation when repository disagrees with the PR URL", async () => {
-    const fixture = createFixture("pr-repository-mismatch");
-    try {
-      writeReadyPrRun(fixture);
-
-      await assert.rejects(
-        establishFenceAndExpectFailure(fixture.runDir, {
-          pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
-          pr_number: 104,
-          repository: "other-owner/other-repo",
-        }),
-        /repository does not match the fenced operation/u,
-      );
-      const run = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(run.status, "running");
-      assert.equal(run.pr_url, undefined);
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
-
-  it("rejects PR creation while slices are still in flight", async () => {
-    const fixture = createFixture("pr-slice-review");
-    try {
-      writeReadyPrRun(fixture, { slices: [{ id: "slice", status: "review", attempts: 1 }] });
-
-      await assert.rejects(
-        establishFenceAndExpectFailure(fixture.runDir, {
-          pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/100",
-          pr_number: 100,
-          repository: "jasoncarreira/opencode-feature-factory",
-        }),
-        /all slices to be merged or blocked/u,
-      );
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
-
-  it("rejects PR creation when a passing validator report is missing", async () => {
-    const fixture = createFixture("pr-missing-report");
-    try {
-      writeReadyPrRun(fixture, { validator: { verdict: "GO", report: "artifacts/missing.md" } });
-
-      await assert.rejects(
-        establishFenceAndExpectFailure(fixture.runDir, {
-          pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/101",
-          pr_number: 101,
-          repository: "jasoncarreira/opencode-feature-factory",
-        }),
-        /missing artifacts ref/u,
-      );
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
-
-  it("keeps validator NO-GO and security BLOCK runs out of PR-created state", async () => {
-    const cases = [
-      {
-        runId: "pr-validator-no-go",
-        overrides: { validator: { verdict: "NO-GO", report: "artifacts/story.md", review_ref: "reviews/implementation-validator.json" } },
-        review: createReviewRecord({ subject: "feature-branch", verdict: "NO-GO", required_fixes: [] }),
-        message: /validator verdict GO or GO-WITH-NITS/u,
-      },
-      {
-        runId: "pr-security-block",
-        overrides: { security_review: { verdict: "BLOCK", review_ref: "reviews/security-reviewer.json" } },
-        review: createReviewRecord({ subject: "feature-branch", verdict: "BLOCK", required_fixes: [] }),
-        message: /security_review verdict PASS/u,
-      },
-    ];
-
-    for (const item of cases) {
-      const fixture = createFixture(item.runId);
-      try {
-        writeReadyPrRun(fixture, {
-          branch: "continuation-branch",
-          worktree: "/tmp/continuation-worktree",
-          continuation: continuationMetadata(fixture.runId),
-          ...item.overrides,
-        });
-        if (item.runId === "pr-validator-no-go") writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), item.review);
-        else writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), item.review);
-
-        await assert.rejects(
-          establishFenceAndExpectFailure(fixture.runDir, {
-            pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/105",
-            pr_number: 105,
-            repository: "jasoncarreira/opencode-feature-factory",
-          }),
-          item.message,
-        );
-        let run = readJson(join(fixture.runDir, "run.json"));
-        assert.equal(run.status, "running");
-        assert.equal(run.pr_url, undefined);
-
-        const blocked = await terminalTransition(fixture.runDir, { status: "blocked", reason: "review gate did not pass", artifacts: {} });
-        assert.equal(blocked.run.status, "blocked");
-        assert.equal(blocked.run.pr_url, undefined);
-        run = readJson(join(fixture.runDir, "run.json"));
-        assert.equal(run.terminal_result.pr_url, undefined);
-      } finally {
-        cleanup(fixture.repo);
-      }
-    }
   });
 
   it("persists cost usage through a locked run.json transition", async () => {
@@ -1959,7 +1675,7 @@ describe("simplified run-state transitions", () => {
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
 
       await assert.rejects(
-        transitionCostUsage(fixture.runDir, { agent: "backend-builder", input_tokens: 1 }, { now: NOW, id: "active-cost", processAliveFn: (pid) => pid === process.pid }),
+        transitionCostUsage(fixture.runDir, { agent: "backend-builder", input_tokens: 1 }, { now: NOW, id: "active-cost", livenessProbe: (pid) => ({ status: pid === process.pid ? "live" : "absent" }) }),
         /cost-record requires inactive heartbeat: active-heartbeat/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
@@ -2579,36 +2295,6 @@ describe("simplified run-state transitions", () => {
       cleanup(slice.repo);
     }
 
-    const panel = createFixture("panel-byte-drift");
-    try {
-      initGitRepo(panel.repo, ["feature"]);
-      runGit(panel.repo, ["checkout", "feature"]);
-      const panelHead = gitOutput(panel.repo, ["rev-parse", "HEAD"]);
-      writeJson(join(panel.runDir, "run.json"), { ...baseRun(panel.runId), branch: "feature", worktree: panel.repo });
-      mkdirSync(join(panel.runDir, "reviews"), { recursive: true });
-      writeFileSync(join(panel.runDir, "artifacts", "validation-report.md"), "GO\n");
-      writeJson(join(panel.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: panelHead, verdict: "GO" }));
-      writeJson(join(panel.runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: panelHead, verdict: "PASS" }));
-      const before = readFileSync(join(panel.runDir, "run.json"), "utf8");
-      const validator = createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: panelHead, verdict: "GO" });
-      const security = createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: panelHead, verdict: "PASS" });
-      for (const [name, mutate] of [
-        ["report", () => writeFileSync(join(panel.runDir, "artifacts", "validation-report.md"), "GO changed\n")],
-        ["validator", () => writeFileSync(join(panel.runDir, "reviews", "implementation-validator.json"), `${JSON.stringify(validator)}\n`)],
-        ["security", () => writeFileSync(join(panel.runDir, "reviews", "security-reviewer.json"), `${JSON.stringify(security)}\n`)],
-      ]) {
-        writeFileSync(join(panel.runDir, "artifacts", "validation-report.md"), "GO\n");
-        writeJson(join(panel.runDir, "reviews", "implementation-validator.json"), validator);
-        writeJson(join(panel.runDir, "reviews", "security-reviewer.json"), security);
-        await assert.rejects(transitionPanelVerdicts(panel.runDir, {
-          validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
-          security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
-        }, { atomicWriteHooks: { beforeCommit: mutate } }), /authority bytes changed|commit failed/u, name);
-        assert.equal(readFileSync(join(panel.runDir, "run.json"), "utf8"), before, name);
-      }
-    } finally {
-      cleanup(panel.repo);
-    }
   });
 
   it("enforces slice lifecycle identity, attempts, rejected retries, blocking, and current sidecars", async () => {
@@ -3869,7 +3555,7 @@ describe("simplified run-state transitions", () => {
       const planPath = join(fixture.runDir, "plan", "slices.json");
       const originalPlan = readFileSync(planPath, "utf8");
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-      writeJson(planPath, { ...readJson(planPath), integration_gate: { required_commands: [{ program: "node", args: ["--test"] }, { program: "npm", args: ["run", "check"] }] } });
+      writeJson(planPath, withDeliveryEnvelope({ ...readJson(planPath), integration_gate: { required_commands: [{ program: "node", args: ["--test"] }, { program: "npm", args: ["run", "check"] }] } }));
       await assert.rejects(
         transitionSliceMerged(fixture.runDir, "slice", { merge_commit: integrationHead }),
         /plan ref\/hash does not match exact plan bytes/u,
@@ -3902,10 +3588,12 @@ describe("simplified run-state transitions", () => {
       security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
     };
     try {
-      initGitRepo(fixture.repo, ["feature"]);
-      runGit(fixture.repo, ["checkout", "feature"]);
+      writeReadyPrRun(fixture, { branch: "feature", validator: { verdict: "GO-WITH-NITS" } });
       const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
-      writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), branch: "feature", worktree: fixture.repo });
+      const run = readJson(join(fixture.runDir, "run.json"));
+      delete run.validator;
+      delete run.security_review;
+      writeJson(join(fixture.runDir, "run.json"), run);
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
       writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO-WITH-NITS\n");
       writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 2, reviewedHeadSha: head, verdict: "GO-WITH-NITS" }));
@@ -3932,172 +3620,32 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("upgrades legacy panels together and rejects stale, different, dirty, or moved panel heads", async () => {
-    const legacy = createFixture("legacy-panel-upgrade");
-    const input = {
-      validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
-      security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
-    };
-    try {
-      initGitRepo(legacy.repo, ["feature"]);
-      runGit(legacy.repo, ["checkout", "feature"]);
-      const head = gitOutput(legacy.repo, ["rev-parse", "HEAD"]);
-      mkdirSync(join(legacy.runDir, "reviews"), { recursive: true });
-      writeFileSync(join(legacy.runDir, "artifacts", "validation-report.md"), "GO\n");
-      writeJson(join(legacy.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "GO" }));
-      writeJson(join(legacy.runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "PASS" }));
-      writeJson(join(legacy.runDir, "run.json"), { ...baseRun(legacy.runId), branch: "feature", worktree: legacy.repo, validator: input.validator, security_review: input.security_review });
-      const upgraded = await transitionPanelVerdicts(legacy.runDir, input);
-      assert.equal(upgraded.run.validator.reviewed_head_sha, head);
-      assert.equal(upgraded.run.security_review.reviewed_head_sha, head);
-      assert.match(upgraded.run.validator.report_hash, /^sha256:[0-9a-f]{64}$/u);
-
-      const exactBytes = readFileSync(join(legacy.runDir, "run.json"), "utf8");
-      const replay = await transitionPanelVerdicts(legacy.runDir, input);
-      assert.equal(replay.updated, false);
-      assert.equal(readFileSync(join(legacy.runDir, "run.json"), "utf8"), exactBytes);
-
-      writeFileSync(join(legacy.repo, "dirty.txt"), "dirty\n");
-      await assert.rejects(transitionPanelVerdicts(legacy.runDir, input), /clean integration worktree/u);
-      rmSync(join(legacy.repo, "dirty.txt"));
-
-      writeFileSync(join(legacy.repo, "moved.txt"), "moved\n");
-      runGit(legacy.repo, ["add", "moved.txt"]);
-      runGit(legacy.repo, ["commit", "-m", "move integration head"]);
-      await assert.rejects(transitionPanelVerdicts(legacy.runDir, input), /reviewed_head_sha values must equal the current integration head/u);
-      assert.equal(readFileSync(join(legacy.runDir, "run.json"), "utf8"), exactBytes);
-    } finally {
-      cleanup(legacy.repo);
-    }
-
-    const different = createFixture("different-panel-heads");
-    try {
-      initGitRepo(different.repo, ["feature"]);
-      runGit(different.repo, ["checkout", "feature"]);
-      const head = gitOutput(different.repo, ["rev-parse", "HEAD"]);
-      mkdirSync(join(different.runDir, "reviews"), { recursive: true });
-      writeFileSync(join(different.runDir, "artifacts", "validation-report.md"), "GO\n");
-      writeJson(join(different.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "GO" }));
-      writeJson(join(different.runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: "0".repeat(40), verdict: "PASS" }));
-      writeJson(join(different.runDir, "run.json"), { ...baseRun(different.runId), branch: "feature", worktree: different.repo });
-      await assert.rejects(transitionPanelVerdicts(different.runDir, input), /reviewed_head_sha values must equal the current integration head/u);
-      assert.equal(readJson(join(different.runDir, "run.json")).validator, undefined);
-      assert.equal(readJson(join(different.runDir, "run.json")).security_review, undefined);
-    } finally {
-      cleanup(different.repo);
-    }
-  });
-
-  it("rejects migration when only one legacy panel row exists", async () => {
-    for (const [existingPanel, counterpart] of [["validator", undefined], ["validator", null], ["security_review", undefined], ["security_review", null]]) {
-      const fixture = createFixture(`single-legacy-panel-${existingPanel}-${counterpart === null ? "null" : "absent"}`);
+  it("rejects incomplete panel rows without mutation, upgrade, or read-only authority", async () => {
+    for (const shape of ["both", "validator-only", "security-only", "terminal-both"]) {
+      const fixture = createFixture(`incomplete-panel-${shape}`);
       try {
         const { input, legacyValidator, legacySecurity } = prepareLegacyPanelState(fixture);
         const run = readJson(join(fixture.runDir, "run.json"));
-        run.validator = existingPanel === "validator" ? legacyValidator : counterpart;
-        run.security_review = existingPanel === "security_review" ? legacySecurity : counterpart;
+        if (shape === "validator-only") delete run.security_review;
+        if (shape === "security-only") delete run.validator;
+        if (shape === "terminal-both") {
+          run.status = "completed";
+          run.pr_url = "https://github.com/acme/repo/pull/1";
+          run.terminal_result = { status: "completed", run_id: run.run_id, pr_url: run.pr_url, pr_number: 1, repository: "acme/repo", draft: false };
+        }
+        if (shape === "validator-only") run.validator = legacyValidator;
+        if (shape === "security-only") run.security_review = legacySecurity;
         writeJson(join(fixture.runDir, "run.json"), run);
         const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-        const label = `${existingPanel}/${counterpart === null ? "null" : "absent"}`;
-        await assert.rejects(transitionPanelVerdicts(fixture.runDir, input), /legacy panel upgrade requires both existing rows and an exact replay/u, label);
-        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, label);
-      } finally {
-        cleanup(fixture.repo);
-      }
-    }
-  });
-
-  it("requires an exact base-field replay before upgrading legacy panel rows", async () => {
-    const variations = [
-      ["validator verdict", (input) => { input.validator.verdict = "GO-WITH-NITS"; }],
-      ["validator report", (input) => { input.validator.report = "artifacts/alternate-validation-report.md"; }],
-      ["validator review_ref", (input) => { input.validator.review_ref = "reviews/alternate-implementation-validator.json"; }],
-      ["security verdict", (input) => { input.security_review.verdict = "BLOCK"; }],
-      ["security review_ref", (input) => { input.security_review.review_ref = "reviews/alternate-security-reviewer.json"; }],
-    ];
-    for (const [name, change] of variations) {
-      const fixture = createFixture(`legacy-panel-field-${name.replaceAll(" ", "-")}`);
-      try {
-        const { input, head } = prepareLegacyPanelState(fixture);
-        writeFileSync(join(fixture.runDir, "artifacts", "alternate-validation-report.md"), "GO alternate\n");
-        writeJson(join(fixture.runDir, "reviews", "alternate-implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "GO" }));
-        writeJson(join(fixture.runDir, "reviews", "alternate-security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "PASS" }));
-        const changed = structuredClone(input);
-        change(changed);
-        if (name === "validator verdict") writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "GO-WITH-NITS" }));
-        if (name === "security verdict") writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "BLOCK" }));
-        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-        await assert.rejects(transitionPanelVerdicts(fixture.runDir, changed), /legacy panel upgrade requires both existing rows and an exact replay|validator review_ref must be reviews\/implementation-validator\.json/u, name);
-        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
-      } finally {
-        cleanup(fixture.repo);
-      }
-    }
-  });
-
-  it("keeps completed legacy panel rows read-only before observing sidecars", async () => {
-    for (const [name, mutateSidecars] of [
-      ["intact", () => {}],
-      ["missing", (fixture) => rmSync(join(fixture.runDir, "reviews", "security-reviewer.json"))],
-      ["changed", (fixture) => writeFileSync(join(fixture.runDir, "reviews", "implementation-validator.json"), "changed legacy review bytes\n")],
-    ]) {
-      const fixture = createFixture(`terminal-legacy-panel-${name}`);
-      try {
-        const { input } = prepareLegacyPanelState(fixture);
-        const run = readJson(join(fixture.runDir, "run.json"));
-        run.status = "completed";
-        run.pr_url = "https://github.com/acme/repo/pull/1";
-        run.terminal_result = {
-          status: "completed",
-          run_id: run.run_id,
-          pr_url: run.pr_url,
-          pr_number: 1,
-          repository: "acme/repo",
-          draft: false,
-        };
-        writeJson(join(fixture.runDir, "run.json"), run);
-        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-        mutateSidecars(fixture);
         await assert.rejects(
           transitionPanelVerdicts(fixture.runDir, input),
-          (error) => error.message === "legacy completed run is read-only",
-          name,
+          /report_hash, review_hash, reviewed_head_sha must all be present|review_hash, reviewed_head_sha must all be present/u,
+          shape,
         );
-        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, shape);
       } finally {
         cleanup(fixture.repo);
       }
-    }
-  });
-
-  it("re-observes successor panel bytes before a completed exact no-op", async () => {
-    const fixture = createFixture("terminal-successor-panel-replay");
-    try {
-      const { input } = prepareLegacyPanelState(fixture);
-      await transitionPanelVerdicts(fixture.runDir, input);
-      const run = readJson(join(fixture.runDir, "run.json"));
-      run.status = "completed";
-      run.pr_url = "https://github.com/acme/repo/pull/1";
-      run.terminal_result = {
-        status: "completed",
-        run_id: run.run_id,
-        pr_url: run.pr_url,
-        pr_number: 1,
-        repository: "acme/repo",
-        draft: false,
-      };
-      writeJson(join(fixture.runDir, "run.json"), run);
-
-      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-      const replay = await transitionPanelVerdicts(fixture.runDir, input);
-      assert.equal(replay.updated, false);
-      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
-
-      writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "changed successor report bytes\n");
-      await assert.rejects(transitionPanelVerdicts(fixture.runDir, input), /persisted panel successor binding is stale/u);
-      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
-    } finally {
-      cleanup(fixture.repo);
     }
   });
 
@@ -4109,7 +3657,7 @@ describe("simplified run-state transitions", () => {
       writeFileSync(join(fixture.repo, "moved-before-fence.txt"), "moved\n");
       runGit(fixture.repo, ["add", "moved-before-fence.txt"]);
       runGit(fixture.repo, ["commit", "-m", "move before fence"]);
-      await assert.rejects(transitionPrePrFenceEstablished(fixture.runDir, preparePrTestOptions(fixture.runDir)), /reviewed_head_sha values must equal the current integration head/u);
+      await assert.rejects(transitionPrePrFenceEstablished(fixture.runDir, preparePrTestOptions(fixture.runDir)), /completed checked execution claim no longer matches current authority|reviewed_head_sha values must equal the current integration head/u);
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
     } finally {
       cleanup(fixture.repo);
@@ -4409,7 +3957,7 @@ describe("simplified run-state transitions", () => {
       let observedOwner = null;
       await withRunJsonLock(fixture.runDir, ({ owner }) => {
         observedOwner = owner;
-      }, { timeoutMs: 5, retryDelayMs: 1, processAliveFn: () => false });
+      }, { timeoutMs: 5, retryDelayMs: 1, livenessProbe: () => ({ status: "absent" }) });
 
       assert.equal(observedOwner.stolen_from.pid, 999999);
       assert.equal(observedOwner.stolen_from.hostname, hostname());
@@ -4433,7 +3981,7 @@ describe("simplified run-state transitions", () => {
         withRunJsonLock(fixture.runDir, () => { calls.push("callback"); }, {
           reclaimMode: "never",
           timeoutMs: 60000,
-          processAliveFn: () => { calls.push("inspect-owner"); return false; },
+          livenessProbe: () => { calls.push("inspect-owner"); return { status: "absent" }; },
           lockHooks: {
             onContended: () => calls.push("contended"),
             onBeforeReclaimClaim: () => calls.push("before-reclaim"),
@@ -4488,9 +4036,9 @@ describe("simplified run-state transitions", () => {
         withRunJsonLock(fixture.runDir, () => { callbackEntered = true; }, {
           timeoutMs: 5000,
           retryDelayMs: 1,
-          processAliveFn: () => {
+          livenessProbe: () => {
             livenessChecks += 1;
-            return livenessChecks < 3 ? false : true;
+            return { status: livenessChecks < 3 ? "absent" : "live" };
           },
           lockHooks: {
             onReclaimRenamed: ({ quarantine: path }) => { quarantine = path; },
@@ -4518,7 +4066,7 @@ describe("simplified run-state transitions", () => {
       writeJson(join(lockDir, "owner.json"), { pid: process.pid, hostname: hostname(), acquired_at: "2000-01-01T00:00:00.000Z", nonce: "22222222-2222-4222-8222-222222222222" });
 
       await assert.rejects(
-        withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 1, processAliveFn: () => true }),
+        withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 1, livenessProbe: () => ({ status: "live" }) }),
         /timed out waiting for run\.json lock/u,
       );
       assert.equal(readJson(join(lockDir, "owner.json")).nonce, "22222222-2222-4222-8222-222222222222");
@@ -4611,7 +4159,7 @@ describe("simplified run-state transitions", () => {
         mkdirSync(lockDir);
         if (owner) writeJson(join(lockDir, "owner.json"), owner);
         await assert.rejects(
-          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, missingOwnerStealMs, processAliveFn: () => false }),
+          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, missingOwnerStealMs, livenessProbe: () => ({ status: "absent" }) }),
           /timed out waiting for run\.json lock/u,
         );
         assert.equal(existsSync(lockDir), true);
@@ -4678,7 +4226,7 @@ describe("simplified run-state transitions", () => {
       const first = withRunJsonLock(fixture.runDir, () => callback(firstEntered), {
         timeoutMs: 5000,
         retryDelayMs: 1,
-        processAliveFn: () => false,
+        livenessProbe: () => ({ status: "absent" }),
         lockHooks: {
           onReclaimClaimed: async () => { firstClaimed.resolve(); await releaseFirstClaim.promise; },
           onReclaimRenamed: async () => { firstRenamed.resolve(); await releaseFirstRename.promise; },
@@ -4688,7 +4236,7 @@ describe("simplified run-state transitions", () => {
       const second = withRunJsonLock(fixture.runDir, () => callback(secondEntered, releaseSecondCallback), {
         timeoutMs: 5000,
         retryDelayMs: 1,
-        processAliveFn: () => false,
+        livenessProbe: () => ({ status: "absent" }),
         lockHooks: {
           onContended: () => secondContended.resolve(),
           onLockCreated: async () => { secondCreated.resolve(); await releaseSecondPublication.promise; },
@@ -4742,7 +4290,7 @@ describe("simplified run-state transitions", () => {
       const delayed = withRunJsonLock(fixture.runDir, () => { delayedCallbackEntered = true; }, {
         timeoutMs: 5000,
         retryDelayMs: 1,
-        processAliveFn: () => false,
+        livenessProbe: () => ({ status: "absent" }),
         lockHooks: {
           onBeforeReclaimClaim: async () => { delayedObserved.resolve(); await releaseDelayedClaim.promise; },
           onReclaimAbandoned: () => delayedAbandoned.resolve(),
@@ -4752,7 +4300,7 @@ describe("simplified run-state transitions", () => {
       const winner = withRunJsonLock(fixture.runDir, () => { winnerCallbackEntered = true; }, {
         timeoutMs: 5000,
         retryDelayMs: 1,
-        processAliveFn: () => false,
+        livenessProbe: () => ({ status: "absent" }),
         lockHooks: { onReclaimRemoved: async () => { winnerRemoved.resolve(); await releaseWinnerRemoved.promise; } },
       });
       await winnerRemoved.promise;
@@ -4785,7 +4333,7 @@ describe("simplified run-state transitions", () => {
 
   it("fails closed for remote and indeterminate owner liveness", async () => {
     const cases = [
-      ["remote", "remote-host.invalid", () => false],
+      ["remote", "remote-host.invalid", () => ({ status: "absent" })],
       ["undefined", hostname(), () => undefined],
       ["true-string", hostname(), () => "true"],
       ["false-string", hostname(), () => "false"],
@@ -4798,7 +4346,7 @@ describe("simplified run-state transitions", () => {
       ["eperm", hostname(), () => { throw Object.assign(new Error("not permitted"), { code: "EPERM" }); }],
       ["probe-error", hostname(), () => { throw new Error("probe failed"); }],
     ];
-    for (const [name, ownerHostname, processAliveFn] of cases) {
+    for (const [name, ownerHostname, livenessProbe] of cases) {
       const fixture = createFixture(`indeterminate-${name}`);
       const lockDir = join(fixture.runDir, "run-json.lock");
       try {
@@ -4810,7 +4358,7 @@ describe("simplified run-state transitions", () => {
           nonce: "66666666-6666-4666-8666-666666666666",
         });
         await assert.rejects(
-          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, processAliveFn }),
+          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, livenessProbe }),
           /timed out waiting for run\.json lock/u,
         );
         assert.equal(readJson(join(lockDir, "owner.json")).nonce, "66666666-6666-4666-8666-666666666666");
@@ -4820,10 +4368,10 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("clears heartbeat evidence only for literal-false legacy liveness", async () => {
+  it("clears heartbeat evidence only for canonical absent liveness", async () => {
     const cases = [
-      ["live", () => true, false, /fresh-heartbeat/u],
-      ["absent", () => false, true, null],
+      ["live", () => ({ status: "live" }), false, /fresh-heartbeat/u],
+      ["absent", () => ({ status: "absent" }), true, null],
       ["string", () => "false", false, /indeterminate-heartbeat-process/u],
       ["boxed", () => new Boolean(false), false, /indeterminate-heartbeat-process/u],
       ["object", () => ({ status: "dead" }), false, /indeterminate-heartbeat-process/u],
@@ -4833,18 +4381,18 @@ describe("simplified run-state transitions", () => {
       ["undefined", () => undefined, false, /indeterminate-heartbeat-process/u],
       ["throw", () => { throw new Error("probe failed"); }, false, /indeterminate-heartbeat-process/u],
     ];
-    for (const [name, processAliveFn, recoverable, rejection] of cases) {
+    for (const [name, livenessProbe, recoverable, rejection] of cases) {
       const fixture = createFixture(`heartbeat-liveness-${name}`);
       try {
         writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
         if (recoverable) {
-          const result = await transitionRecoverOrphan(fixture.runDir, "confirmed absent", { now: NOW, processAliveFn });
+          const result = await transitionRecoverOrphan(fixture.runDir, "confirmed absent", { now: NOW, livenessProbe });
           assert.equal(result.recovery.reason, "dead-heartbeat-process");
           assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, null);
           assert.equal(readJson(join(fixture.runDir, "run.json")).status, "needs-human");
         } else {
           await assert.rejects(
-            transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, processAliveFn }),
+            transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, livenessProbe }),
             rejection,
           );
           assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, process.pid);
@@ -4864,7 +4412,7 @@ describe("simplified run-state transitions", () => {
         last_tick_at: "2026-07-08T11:00:00.000Z",
       });
       await assert.rejects(
-        transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, processAliveFn: () => true }),
+        transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, livenessProbe: () => ({ status: "live" }) }),
         /stale-heartbeat/u,
       );
       assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, process.pid);
@@ -5922,7 +5470,7 @@ function writeReadyPrRun(fixture, overrides = {}) {
     ...(overrides.security_review || {}),
   };
   const slice = {
-    id: "slice", declared_paths: ["src/**"], effective_paths: ["src/**"], status: "merged", attempts: 1, branch: "slice-branch", worktree: fixture.repo,
+    id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "merged", attempts: 1, branch: "slice-branch", worktree: fixture.repo,
     evidence_ref: "evidence/slice.json", evidence_hash: hashFile(join(fixture.runDir, "evidence", "slice.json")),
     review_ref: "reviews/slice.json", review_hash: hashFile(join(fixture.runDir, "reviews", "slice.json")), reviewed_commit: head,
     merge_commit: head, updated_at: NOW,
@@ -5963,7 +5511,8 @@ function writeReadyPrRun(fixture, overrides = {}) {
     })
     : [slice];
   mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
-  writeJson(join(fixture.runDir, "plan", "slices.json"), {
+  const planPath = join(fixture.runDir, "plan", "slices.json");
+  const plan = withDeliveryEnvelope({
     slices: slices.map((candidate) => ({
       id: candidate.id,
       stack: candidate.stack || "backend",
@@ -5972,6 +5521,48 @@ function writeReadyPrRun(fixture, overrides = {}) {
       acceptance: [`${candidate.id} works`],
       test_plan: [`test ${candidate.id}`],
     })),
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+  });
+  writeJson(planPath, plan);
+  const decompositionReviewRef = "reviews/work-decomposer.json";
+  writeJson(join(fixture.runDir, decompositionReviewRef), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+  const receiptRef = "evidence/test-verifier.attempt-1.json";
+  const testReviewRef = "reviews/test-verifier.attempt-1.json";
+  const testArtifactRef = "artifacts/test-report.md";
+  const nonce = "123e4567-e89b-42d3-a456-426614174127";
+  const emptyStream = { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false };
+  const receipt = {
+    schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: fixture.runId, attempt: 1,
+    claim_nonce: nonce, plan_ref: "plan/slices.json", plan_hash: hashFile(planPath), head_sha: head, timeout_ms: plan.integration_gate.timeout_ms,
+    started_at: NOW, completed_at: NOW, duration_ms: 0, status: "pass", review_ready: true,
+    commands: plan.integration_gate.required_commands.map((command, index) => ({ index, ...command, outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 0, stdout: emptyStream, stderr: emptyStream })),
+  };
+  writeJson(join(fixture.runDir, receiptRef), receipt);
+  const claim = {
+    schema_version: 1, kind: "checked-test-execution-claim", state: "completed", nonce, run_id: fixture.runId, attempt: 1,
+    plan_ref: "plan/slices.json", plan_hash: hashFile(planPath), head_sha: head, timeout_ms: plan.integration_gate.timeout_ms, receipt_ref: receiptRef,
+    claimed_at: NOW, completed_at: NOW, status: "pass", receipt_hash: hashFile(join(fixture.runDir, receiptRef)),
+  };
+  writeFileSync(join(fixture.runDir, testArtifactRef), "checked integration passed\n");
+  writeJson(join(fixture.runDir, testReviewRef), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] });
+  const steps = [{
+    agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: decompositionReviewRef,
+    acceptance: { artifact_ref: "plan/slices.json", artifact_hash: hashFile(planPath), review_ref: decompositionReviewRef, review_hash: hashFile(join(fixture.runDir, decompositionReviewRef)) },
+  }, {
+    agent: "test-verifier", status: "accepted", attempts: 1, artifact_ref: testArtifactRef, evidence_ref: receiptRef, review_ref: testReviewRef,
+    execution_claim: claim, execution_claim_hash: hashValue(claim),
+    acceptance: {
+      artifact_ref: testArtifactRef, artifact_hash: hashFile(join(fixture.runDir, testArtifactRef)), evidence_ref: receiptRef,
+      evidence_hash: hashFile(join(fixture.runDir, receiptRef)), review_ref: testReviewRef, review_hash: hashFile(join(fixture.runDir, testReviewRef)), reviewed_head_sha: head,
+    },
+  }];
+  const questionRef = "gates/story.question.md";
+  writeFileSync(join(fixture.runDir, questionRef), "approve story?\n");
+  const checkedAuthorityHash = hashValue({
+    test_execution_claim_hash: hashValue(claim),
+    test_acceptance: steps[1].acceptance,
+    validator: { report_hash: validator.report_hash, review_hash: validator.review_hash, reviewed_head_sha: validator.reviewed_head_sha },
+    security_review: { review_hash: securityReview.review_hash, reviewed_head_sha: securityReview.reviewed_head_sha },
   });
   writeJson(join(fixture.runDir, "run.json"), {
     ...baseRun(fixture.runId),
@@ -5980,8 +5571,16 @@ function writeReadyPrRun(fixture, overrides = {}) {
     base_commit: gitOutput(fixture.repo, ["rev-parse", "refs/heads/main"]),
     worktree: fixture.repo,
     pr_mode: "ready",
-    gates: { pre_pr: { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer: "approve", answered_at: NOW } },
+    gates: { pre_pr: {
+      status: "approved", artifact: "artifacts/story.md", question_ref: questionRef, answer: "approve", answered_at: NOW,
+      pending_snapshot: {
+        question_ref: questionRef, question_hash: hashFile(join(fixture.runDir, questionRef)),
+        artifact_ref: "artifacts/story.md", artifact_hash: hashFile(join(fixture.runDir, "artifacts", "story.md")),
+        created_at: NOW, checked_authority_hash: checkedAuthorityHash,
+      },
+    } },
     slices,
+    steps,
     validator,
     security_review: securityReview,
     ...sanitizedOverrides,

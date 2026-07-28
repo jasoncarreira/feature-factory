@@ -3,14 +3,201 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionRunJson, transitionRunSlice, transitionSliceMerged, transitionSteeringBoundaryOpened } from "../src/run-state.js";
-import { checkRunConsistency } from "../src/validate.js";
-import { executeIntegrationAmendment } from "../src/factory.js";
-import { FEATURE_BRANCH, NOW, RUN_ID, addAcceptedTechnicalBrief, advanceMergedAmendmentConsumer, bindAmendmentDispatch, blocked, cleanup, cleanupFixtures, commitCandidate, createFixture, executionOptions, git, publishAmendmentReview, publishConsumerReview, reachIntegrated, reachMerged, readJson, readRun, reportRequest, snapshotRuntimeFiles, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
+import { completeSliceBuilderTaskDispatch, observeIntegrationAmendmentExecutionAuthority, prepareSliceBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionRunJson, transitionRunSlice, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
+import { checkRunConsistency, validateRun } from "../src/validate.js";
+import { continueFactory, executeIntegrationAmendment } from "../src/factory.js";
+import { CARRY_FORWARD_REQUIRED_SUMMARY, FEATURE_BRANCH, NOW, RUN_ID, addAcceptedTechnicalBrief, advanceMergedAmendmentConsumer, blockRuntimeAmendment, bindAmendmentDispatch, blocked, carryForwardTerminalResult, cleanup, cleanupFixtures, commitCandidate, createFixture, executionOptions, git, publishAmendmentReview, publishConsumerReview, reachIntegrated, reachMerged, readJson, readRun, reportRequest, sha, snapshotRuntimeFiles, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
 
 after(cleanupFixtures);
 
 describe("generic integration amendment lifecycle and execution", () => {
+  it("rejects every non-pristine consumer class with one exact effect-free reason", async () => {
+    const cases = [
+      ["blocked", (consumer) => Object.assign(consumer, { status: "blocked", attempts: 0, blocked_reason: "prior terminal stop" })],
+      ["previously-attempted", (consumer) => Object.assign(consumer, { status: "blocked", attempts: 1, blocked_reason: "attempted before repair" })],
+      ["branch-only", (consumer) => Object.assign(consumer, { branch: "consumer-build", worktree: "/tmp/consumer-build" })],
+      ["active", (consumer) => Object.assign(consumer, { status: "running", attempts: 1 })],
+    ];
+    for (const [name, mutate] of cases) {
+      const fixture = createFixture({ publishReport: false });
+      try {
+        const run = readRun(fixture);
+        mutate(run.slices.find((slice) => slice.id === "consumer"));
+        validateRun(run);
+        writeJson(join(fixture.runDir, "run.json"), run);
+        const beforeFiles = snapshotRuntimeFiles(fixture.runDir);
+        const beforeRefs = git(fixture.repo, ["for-each-ref", "--format=%(refname) %(objectname)"]);
+        const beforeWorktrees = git(fixture.repo, ["worktree", "list", "--porcelain"]);
+
+        assert.throws(
+          () => observeIntegrationAmendmentExecutionAuthority(fixture.runDir, run, "report", reportRequest(), { repoRoot: fixture.repo }),
+          (error) => error?.message === "integration-amendment-consumer-not-pristine-pending",
+          name,
+        );
+        await assert.rejects(
+          executeIntegrationAmendment(fixture.runDir, reportRequest(), { spawnFn() { throw new Error("unexpected spawn"); } }),
+          (error) => error?.message === "integration-amendment-consumer-not-pristine-pending",
+          name,
+        );
+        assert.deepEqual(snapshotRuntimeFiles(fixture.runDir), beforeFiles, `${name}: durable files`);
+        assert.equal(git(fixture.repo, ["for-each-ref", "--format=%(refname) %(objectname)"]), beforeRefs, `${name}: refs`);
+        assert.equal(git(fixture.repo, ["worktree", "list", "--porcelain"]), beforeWorktrees, `${name}: worktrees`);
+        assert.equal(readRun(fixture).terminal_result, undefined, `${name}: terminal result`);
+        assert.equal(readRun(fixture).integration_amendment, undefined, `${name}: manifest`);
+
+        const transitionFixture = createFixture();
+        try {
+          const transitionRun = readRun(transitionFixture);
+          mutate(transitionRun.slices.find((slice) => slice.id === "consumer"));
+          validateRun(transitionRun);
+          writeJson(join(transitionFixture.runDir, "run.json"), transitionRun);
+          const beforeTransition = snapshotRuntimeFiles(transitionFixture.runDir);
+          await assert.rejects(
+            transitionIntegrationAmendment(transitionFixture.runDir, reportRequest(), { repoRoot: transitionFixture.repo }),
+            (error) => error?.message === "integration-amendment-consumer-not-pristine-pending",
+            name,
+          );
+          assert.deepEqual(snapshotRuntimeFiles(transitionFixture.runDir), beforeTransition, `${name}: transition files`);
+        } finally { cleanup(transitionFixture); }
+      } finally { cleanup(fixture); }
+    }
+  });
+
+  it("executes the AC3 parent class x terminal precondition x review source matrix without effects", async () => {
+    const parentClasses = [
+      ["ordinary", ["running", "terminal"]],
+      ["checkpoint-child", ["running", "terminal"]],
+      ["checkpoint-router", ["terminal"]],
+    ];
+    const reviewSources = ["current", "stale"];
+    const expectedRows = 10;
+    assert.equal(parentClasses.length, 3, "exact AC3 parent classes");
+    assert.equal(reviewSources.length, 2, "exact AC3 review-source classes");
+    assert.equal(parentClasses.reduce((count, [, preconditions]) => count + preconditions.length * reviewSources.length, 0), expectedRows);
+    let assertedRows = 0;
+
+    for (const [parentClass, terminalPreconditions] of parentClasses) {
+      for (const terminalPrecondition of terminalPreconditions) {
+        for (const reviewSource of reviewSources) {
+          const fixture = createFixture({ publishReport: false });
+          try {
+            const run = readRun(fixture);
+            Object.assign(run.slices.find((slice) => slice.id === "consumer"), { status: "blocked", attempts: 0, blocked_reason: "prior terminal stop" });
+            applyAc3ParentClass(run, fixture, parentClass, terminalPrecondition);
+            validateRun(run);
+            writeJson(join(fixture.runDir, "run.json"), run);
+            if (reviewSource === "stale") writeFileSync(join(fixture.runDir, "reviews", "work-decomposer.json"), "{\"subject\":\"work-decomposer\",\"attempt\":1,\"verdict\":\"APPROVE\",\"required_fixes\":[]}\n");
+            const beforeFiles = snapshotRuntimeFiles(fixture.runDir);
+            const beforeRefs = git(fixture.repo, ["for-each-ref", "--format=%(refname) %(objectname)"]);
+            const beforeWorktrees = git(fixture.repo, ["worktree", "list", "--porcelain"]);
+            let spawns = 0;
+            const expected = ac3ExpectedError(parentClass, terminalPrecondition, reviewSource);
+
+            assert.throws(
+              () => observeIntegrationAmendmentExecutionAuthority(fixture.runDir, run, "report", reportRequest(), { repoRoot: fixture.repo }),
+              (error) => error?.message === expected,
+              `${parentClass}/${terminalPrecondition}/${reviewSource}: observer`,
+            );
+            await assert.rejects(
+              executeIntegrationAmendment(fixture.runDir, reportRequest(), { spawnFn() { spawns += 1; throw new Error("unexpected spawn"); } }),
+              (error) => error?.message === expected,
+              `${parentClass}/${terminalPrecondition}/${reviewSource}: executor`,
+            );
+            assert.equal(spawns, 0, `${parentClass}/${terminalPrecondition}/${reviewSource}: spawn count`);
+            assert.deepEqual(snapshotRuntimeFiles(fixture.runDir), beforeFiles, `${parentClass}/${terminalPrecondition}/${reviewSource}: durable files`);
+            assert.equal(git(fixture.repo, ["for-each-ref", "--format=%(refname) %(objectname)"]), beforeRefs, `${parentClass}/${terminalPrecondition}/${reviewSource}: refs`);
+            assert.equal(git(fixture.repo, ["worktree", "list", "--porcelain"]), beforeWorktrees, `${parentClass}/${terminalPrecondition}/${reviewSource}: worktrees`);
+            assertedRows += 1;
+          } finally { cleanup(fixture); }
+        }
+      }
+    }
+    assert.equal(assertedRows, expectedRows, "every AC3 matrix row was executed and asserted");
+  });
+
+  it("terminalizes an ordinary rejected repair only through checked carry-forward authority", async () => {
+    const fixture = createFixture({ publishReport: false });
+    try {
+      const run = readRun(fixture);
+      Object.assign(run.slices.find((slice) => slice.id === "consumer"), { status: "blocked", blocked_reason: "prior terminal stop" });
+      writeJson(join(fixture.runDir, "run.json"), run);
+      await assert.rejects(
+        executeIntegrationAmendment(fixture.runDir, reportRequest(), { spawnFn() { throw new Error("unexpected spawn"); } }),
+        (error) => error?.message === "integration-amendment-consumer-not-pristine-pending",
+      );
+
+      await assert.rejects(
+        transitionTerminalResult(fixture.runDir, carryForwardTerminalResult()),
+        /terminal requires a lock-protected boundary observation/u,
+      );
+      const opened = await transitionSteeringBoundaryOpened(fixture.runDir, "terminal", { now: NOW });
+      const reviewPath = join(fixture.runDir, "reviews", "work-decomposer.json");
+      const reviewBytes = readFileSync(reviewPath);
+      writeFileSync(reviewPath, `${reviewBytes.toString("utf8")} `);
+      await assert.rejects(
+        transitionTerminalResult(fixture.runDir, carryForwardTerminalResult(), { boundaryToken: opened.boundary.token, now: NOW }),
+        /accepted work-decomposer|review_hash|authority/u,
+      );
+      writeFileSync(reviewPath, reviewBytes);
+
+      const terminal = await transitionTerminalResult(fixture.runDir, carryForwardTerminalResult(), { boundaryToken: opened.boundary.token, now: NOW });
+      assert.equal(terminal.run.status, "blocked");
+      assert.equal(terminal.terminal_result.reason, "carry-forward-required");
+      assert.equal(terminal.terminal_result.summary, CARRY_FORWARD_REQUIRED_SUMMARY);
+      assert.deepEqual(terminal.terminal_result.artifacts, {});
+      assert.equal(terminal.run.integration_amendment, undefined);
+    } finally { cleanup(fixture); }
+  });
+
+  it("lets a carry-forward-required parent continue while its settled blocked amendment is retained", async () => {
+    // The terminal summary instructs the operator to continue in a fresh
+    // schema-v2 carry-forward child, and that terminalization deliberately keeps
+    // the blocked amendment authority. Continuation admission previously demanded
+    // an all-absent inventory, so the only documented recovery was unreachable
+    // for exactly the parent that needed it. Verified against the real sidecar
+    // inventory, not a hand-written run.json field: a synthesized
+    // `integration_amendment` alone classifies all-absent and would pass the old
+    // guard vacuously.
+    const fixture = createFixture();
+    const runId = RUN_ID;
+    const continueOpts = { cwd: fixture.repo, review: "reviews/work-decomposer.json", runId: "amendment-carry-child", carryForward: true, dryRun: true, json: true };
+    const amendmentRejection = /integration-amendment-continuation-unsupported/u;
+    try {
+      const head = git(fixture.repo, ["rev-parse", "HEAD"]).trim();
+      const runPath = join(fixture.runDir, "run.json");
+      writeJson(runPath, { ...readRun(fixture), base_ref: "main", base_commit: head });
+      addAcceptedTechnicalBrief(fixture);
+
+      // An amendment that is merely reported is active authority and still rejects.
+      await transitionIntegrationAmendment(fixture.runDir, reportRequest(), { repoRoot: fixture.repo, now: NOW });
+      assert.equal(readRun(fixture).integration_amendment.status, "reported");
+      assert.throws(() => continueFactory(runId, continueOpts), amendmentRejection, "reported amendment must still reject");
+
+      // Blocked but not yet terminalized is also still live authority.
+      const blockedRun = await blockRuntimeAmendment(fixture);
+      assert.equal(blockedRun.integration_amendment.status, "blocked");
+      assert.throws(() => continueFactory(runId, continueOpts), amendmentRejection, "blocked without carry-forward terminalization must still reject");
+
+      // Only the exact terminalized shape is admitted.
+      const terminal = await transitionTerminalResult(fixture.runDir, carryForwardTerminalResult(), { now: NOW, blockedAmendmentTerminal: true });
+      assert.equal(terminal.terminal_result.reason, "carry-forward-required");
+      assert.equal(terminal.run.integration_amendment.status, "blocked", "terminalization retains the blocked amendment");
+
+      // The amendment gate no longer blocks. Continuation now proceeds to the
+      // ordinary carry-forward authority checks; this fixture's git history has
+      // no accepted merge-commit ancestry, so it stops there rather than
+      // publishing. That later stop is the proof the gate was passed.
+      assert.throws(
+        () => continueFactory(runId, continueOpts),
+        (error) => {
+          assert.doesNotMatch(error.message, amendmentRejection, "amendment gate must no longer reject a terminalized parent");
+          assert.match(error.message, /first-parent range must contain all and only accepted merge commits/u);
+          return true;
+        },
+      );
+    } finally { cleanup(fixture); }
+  });
+
   it("drives report, build, review, integrate, verify, and merge with exact replay", async () => {
     const fixture = createFixture();
     try {
@@ -461,3 +648,68 @@ describe("generic integration amendment lifecycle and execution", () => {
   });
 
 });
+
+function applyAc3ParentClass(run, fixture, parentClass, terminalPrecondition) {
+  const manifestHash = sha("current checkpoint routing manifest");
+  const manifestRef = `artifacts/checkpoint-routing-${manifestHash.slice("sha256:".length)}.json`;
+  if (parentClass === "checkpoint-child") {
+    run.base_ref = "refs/remotes/origin/main";
+    run.base_commit = fixture.base;
+    run.checkpoint_source = {
+      schema_version: 1,
+      kind: "delivery-checkpoint-source",
+      parent_run_id: "checkpoint-parent",
+      manifest_ref: manifestRef,
+      manifest_hash: manifestHash,
+      checkpoint_id: "checkpoint-001",
+      checkpoint_ordinal: 1,
+      root_child_run_id: run.run_id,
+      source_plan_ref: "plan/slices.json",
+      source_plan_hash: run.steps[0].acceptance.artifact_hash,
+      source_review_ref: "reviews/work-decomposer.json",
+      source_review_hash: run.steps[0].acceptance.review_hash,
+      source_review_attempt: run.steps[0].attempts,
+      parent_review_identity_hash: sha("current parent review identity"),
+      child_disposition_hash: run.steps[0].acceptance.review_hash,
+      admission_probe_hash: sha("current admission probe"),
+      brief_scope_hash: sha("current brief scope"),
+      child_plan_hash: run.steps[0].acceptance.artifact_hash,
+      acceptance_mapping_hash: sha("current acceptance mapping"),
+      initial_base_ref: "refs/remotes/origin/main",
+      initial_base_commit: fixture.base,
+    };
+  }
+  if (parentClass === "checkpoint-router") {
+    run.checkpoint_progress = {
+      schema_version: 1,
+      kind: "delivery-checkpoint-progress",
+      manifest_ref: manifestRef,
+      manifest_hash: manifestHash,
+      status: "active",
+      entries: [],
+      final_closure: null,
+    };
+    run.status = "blocked";
+    run.pr_url = null;
+    run.terminal_result = {
+      status: "blocked",
+      run_id: run.run_id,
+      pr_url: null,
+      reason: "oversized-plan-checkpoint-routing-required",
+      summary: "Resume checkpoint publication.",
+      artifacts: { checkpoint_routing: manifestRef },
+    };
+    return;
+  }
+  if (terminalPrecondition === "terminal") {
+    run.status = "blocked";
+    run.terminal_result = { status: "blocked", run_id: run.run_id, pr_url: null, reason: "repair rejected", summary: "Continue elsewhere.", artifacts: {} };
+  }
+}
+
+function ac3ExpectedError(parentClass, terminalPrecondition, reviewSource) {
+  if (parentClass !== "ordinary") return "integration-amendment-continuation-unsupported";
+  if (terminalPrecondition === "terminal") return "integration amendment requires a running run";
+  if (reviewSource === "stale") return "accepted work-decomposer review bytes changed after acceptance";
+  return "integration-amendment-consumer-not-pristine-pending";
+}

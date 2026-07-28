@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acknowledgeSteering, consumeSteering, listRuns, recordSteeringConflict, status, writeSteering } from "../src/factory.js";
 import { validateRunDir } from "../src/validate.js";
+import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
@@ -190,7 +191,7 @@ describe("factory steering queue and consume", () => {
         consumeSteering(fixture.runId, { ref: queued.steering.ref, hash: queued.steering.hash }, {
           cwd: fixture.repo,
           now: "2026-07-08T12:01:00.000Z",
-          processAliveFn: (pid) => pid === 4242,
+          livenessProbe: (pid) => ({ status: pid === 4242 ? "live" : "absent" }),
         }),
         /active-heartbeat/u,
       );
@@ -215,7 +216,11 @@ function createFixture(runId, { durable = false } = {}) {
     writeFileSync(join(runDir, "gates", "story.question.md"), "approve?\n", "utf8");
     writeFileSync(join(runDir, "evidence", "slice.json"), "{}\n", "utf8");
     writeFileSync(join(runDir, "reviews", "slice.json"), "{}\n", "utf8");
-    writeFileSync(join(runDir, "plan", "slices.json"), `${JSON.stringify({ slices: [] }, null, 2)}\n`, "utf8");
+    const plan = withDeliveryEnvelope({
+      slices: [{ id: "slice", stack: "backend", paths: ["slice.js"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
+      integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    });
+    writeFileSync(join(runDir, "plan", "slices.json"), `${JSON.stringify(plan, null, 2)}\n`, "utf8");
   }
   writeJson(join(runDir, "run.json"), { schema_version: 1, run_id: runId, status: "running", gates: {}, slices: [] });
   return { repo, runDir, runId };

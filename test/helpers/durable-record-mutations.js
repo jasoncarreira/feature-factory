@@ -75,17 +75,14 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "test-execution-receipt-failed-launch-error",
   "test-execution-receipt-failed-timeout",
   "test-execution-receipt-failed-output-limit",
-  "continuation-envelope",
-  "continuation-parent-binding",
-  "continuation-selected-review",
-  "continuation-target-binding",
-  "continuation-parent-artifact-sidecar",
-  "continuation-parent-evidence-sidecar",
-  "continuation-parent-review-sidecar",
-  "continuation-planning-reuse-ineligible",
-  "continuation-planning-reuse-eligible",
-  "continuation-draft-reuse",
-  "continuation-post-pr-binding",
+  "continuation-v2-envelope",
+  "continuation-v2-parent-binding",
+  "continuation-v2-selected-review",
+  "continuation-v2-target-binding",
+  "continuation-v2-parent-artifact-sidecar",
+  "continuation-v2-parent-evidence-sidecar",
+  "continuation-v2-parent-review-sidecar",
+  "continuation-v2-planning-reuse",
   "slice-pending",
   "slice-running",
   "slice-review",
@@ -167,14 +164,6 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "post-pr-terminal-fact-panel-runner-result-malformed",
   "post-pr-terminal-fact-push-failed",
   "post-pr-terminal-fact-panel-attribution-unsafe",
-  "repair-reported",
-  "repair-repairing",
-  "repair-review-approve",
-  "repair-review-reject",
-  "repair-merged",
-  "repair-blocked-from-reported",
-  "repair-blocked-from-repairing",
-  "repair-blocked-from-review",
   "amendment-reported",
   "amendment-building-attempt-1",
   "amendment-building-attempt-2",
@@ -232,7 +221,7 @@ const AUTHORITY_CLASSES = Object.freeze([
   ["steps-acceptance-inheritance", "Steps and acceptance inheritance"],
   ["slices-review-evidence-bindings", "Slices and review/evidence bindings"],
   ["validator-security-pr-result", "Validator, security, and PR-created result"],
-  ["continuation-planning-draft-reuse", "Continuation and planning/draft reuse"],
+  ["continuation-v2-carry-forward", "Schema-v2 continuation carry-forward"],
   ["post-pr-nested-records", "Post-PR nested records"],
   ["pr79-merged-slice-repair", "PR79 merged slice repair"],
 ]);
@@ -249,7 +238,16 @@ const POST_PR_EXTERNAL = Object.freeze({
   continuation: { ref: "reviews/post-pr-continuation.attempt-1.json", bytes: "{\"kind\":\"post-pr-continuation\",\"verdict\":\"BLOCKED\"}\n" },
 });
 const PLAN_EXTERNAL = Object.freeze({
-  plan: { ref: "plan/slices.json", bytes: "{\"slices\":[{\"id\":\"B0.2\",\"stack\":\"backend\",\"paths\":[\"src/**\"],\"depends_on\":[],\"acceptance\":[\"AC2\"],\"test_plan\":[\"node --test\"]},{\"id\":\"B0.3\",\"stack\":\"backend\",\"paths\":[\"test/**\"],\"depends_on\":[\"B0.2\"],\"acceptance\":[\"AC3\"],\"test_plan\":[\"node --test\"]}]}\n" },
+  plan: {
+    ref: "plan/slices.json",
+    bytes: `${JSON.stringify(withDeliveryEnvelope({
+      slices: [
+        { id: "B0.2", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC2"], test_plan: ["node --test"] },
+        { id: "B0.3", stack: "backend", paths: ["test/**"], depends_on: ["B0.2"], acceptance: ["AC3"], test_plan: ["node --test"] },
+      ],
+      integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    }, { explicitExecutionTimeouts: true }))}\n`,
+  },
 });
 const PLAN_V2 = withDeliveryEnvelope({
   slices: [{ id: "B1C", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/acceptance.test.js"] }],
@@ -548,17 +546,12 @@ const DECOMPOSITION_EXTERNAL = Object.freeze({
 const TEST_EXECUTION_NONCE = "123e4567-e89b-42d3-a456-426614174000";
 const EMPTY_STREAM = Object.freeze({ captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false });
 const TRUNCATED_STREAM = Object.freeze({ captured_bytes: 1048576, sha256: `sha256:${"9".repeat(64)}`, truncated: true });
-const CONTINUATION_EXTERNAL = Object.freeze({
-  parentRun: { ref: ".opencode/factory/parent-run/run.json", bytes: "{\"schema_version\":1,\"run_id\":\"parent-run\",\"status\":\"blocked\",\"gates\":{},\"terminal_result\":{\"status\":\"blocked\",\"run_id\":\"parent-run\",\"reason\":\"review blocked\"}}\n" },
-  selectedReview: { ref: "reviews/remediation-review.json", bytes: "{\"kind\":\"validator\",\"subject\":\"parent\",\"verdict\":\"APPROVE\",\"required_fixes\":[\"fix\"]}\n" },
-  artifact: { ref: "artifacts/story.md", bytes: "Approved parent story.\n" },
+const CONTINUATION_V2_EXTERNAL = Object.freeze({
+  parentRun: { ref: ".opencode/factory/parent-run/run.json", bytes: "{\"schema_version\":1,\"run_id\":\"parent-run\",\"status\":\"blocked\",\"gates\":{}}\n" },
+  selectedReview: { ref: "reviews/remediation-review.json", bytes: "{\"subject\":\"parent\",\"verdict\":\"NO-GO\",\"required_fixes\":[\"fix\"]}\n" },
+  artifact: { ref: "artifacts/technical-brief.md", bytes: "Accepted technical brief.\n" },
   evidence: { ref: "evidence/test-verifier.json", bytes: "{\"subject\":\"test-verifier\",\"status\":\"pass\"}\n" },
-  review: { ref: "reviews/implementation-validator.json", bytes: "{\"subject\":\"implementation\",\"verdict\":\"GO\"}\n" },
-  acceptedReview: { ref: "reviews/spec-writer.json", bytes: "{\"subject\":\"spec-writer\",\"verdict\":\"APPROVE\"}\n" },
-  acceptedArtifact: { ref: "artifacts/technical-brief.md", bytes: "Accepted technical brief.\n" },
-  draft: { ref: "artifacts/technical-brief.md", bytes: "Unaccepted technical brief draft.\n" },
-  postPrEvidence: { ref: "evidence/post-pr.json", bytes: "{\"kind\":\"post-pr-ci\",\"verdict\":\"red\"}\n" },
-  postPrReview: { ref: "reviews/post-pr.json", bytes: "{\"kind\":\"post-pr-continuation\",\"verdict\":\"BLOCKED\"}\n" },
+  review: { ref: "reviews/spec-writer.json", bytes: "{\"subject\":\"spec-writer\",\"verdict\":\"APPROVE\"}\n" },
 });
 const SLICE_EXTERNAL = Object.freeze({
   evidence: { ref: "evidence/backend.json", bytes: `{"subject":"backend","attempt":1,"status":"pass","review_ready":true,"head_sha":"${SHA_B}"}\n` },
@@ -596,20 +589,6 @@ const PANEL_EXTERNAL = Object.freeze({
   report: { ref: "artifacts/validation-report.md", bytes: "GO\n" },
   validator: { ref: "reviews/implementation-validator.json", bytes: `{"subject":"feature--catalog","attempt":1,"verdict":"GO","reviewed_head_sha":"${SHA_B}"}\n` },
   security: { ref: "reviews/security-reviewer.json", bytes: `{"subject":"feature--catalog","attempt":1,"verdict":"PASS","reviewed_head_sha":"${SHA_B}"}\n` },
-});
-const REPAIR_PLAN_BYTES = `${JSON.stringify({
-  slices: [
-    { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["unit"] },
-    { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["AC2"], test_plan: ["unit"] },
-  ],
-}, null, 2)}\n`;
-const REPAIR_EXTERNAL = Object.freeze({
-  plan: { ref: "plan/slices.json", bytes: REPAIR_PLAN_BYTES },
-  originalEvidence: { ref: "evidence/consumer-failure.json", bytes: `{"subject":"consumer","status":"fail","command":"node --test test/consumer.test.js","head":"${SHA_A}"}\n` },
-  repairEvidence: { ref: "evidence/repair-attempt-1.json", bytes: "{\"subject\":\"repair:owner\",\"changed_paths\":[\"src/owner/records.js\"]}\n" },
-  reviewApprove: { ref: "reviews/repair-attempt-1-approve.json", bytes: `{"subject":"repair:owner","verdict":"APPROVE","required_fixes":[],"attempt":1,"commit":"${SHA_B}"}\n` },
-  reviewReject: { ref: "reviews/repair-attempt-1-reject.json", bytes: `{"subject":"repair:owner","verdict":"REJECT","required_fixes":["correct owner record"],"attempt":1,"commit":"${SHA_B}"}\n` },
-  verification: { ref: "evidence/repair-verification.json", bytes: `{"subject":"consumer","status":"pass","command":"node --test test/consumer.test.js","head":"${SHA_C}"}\n` },
 });
 const AMENDMENT_REVIEW_ID = "A".repeat(43);
 const AMENDMENT_REVIEW_CLAIM_REF = `dispatch/${"d".repeat(64)}.amendment-review.json`;
@@ -813,18 +792,15 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "steering-pr-fence",
     "pr-created-result",
   ],
-  "continuation-planning-draft-reuse": [
-    "continuation-envelope",
-    "continuation-parent-binding",
-    "continuation-selected-review",
-    "continuation-target-binding",
-    "continuation-parent-artifact-sidecar",
-    "continuation-parent-evidence-sidecar",
-    "continuation-parent-review-sidecar",
-    "continuation-planning-reuse-ineligible",
-    "continuation-planning-reuse-eligible",
-    "continuation-draft-reuse",
-    "continuation-post-pr-binding",
+  "continuation-v2-carry-forward": [
+    "continuation-v2-envelope",
+    "continuation-v2-parent-binding",
+    "continuation-v2-selected-review",
+    "continuation-v2-target-binding",
+    "continuation-v2-parent-artifact-sidecar",
+    "continuation-v2-parent-evidence-sidecar",
+    "continuation-v2-parent-review-sidecar",
+    "continuation-v2-planning-reuse",
   ],
   "post-pr-nested-records": [
     "post-pr-phase-disabled",
@@ -889,14 +865,6 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "post-pr-terminal-fact-panel-attribution-unsafe",
   ],
   "pr79-merged-slice-repair": [
-    "repair-reported",
-    "repair-repairing",
-    "repair-review-approve",
-    "repair-review-reject",
-    "repair-merged",
-    "repair-blocked-from-reported",
-    "repair-blocked-from-repairing",
-    "repair-blocked-from-review",
     "amendment-reported",
     "amendment-building-attempt-1",
     "amendment-building-attempt-2",
@@ -1022,17 +990,14 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "steering-last-action": "srhb",
   "steering-pr-fence": "skb",
   "pr-created-result": "skthbd",
-  "continuation-envelope": "rhbd",
-  "continuation-parent-binding": "sktd",
-  "continuation-selected-review": "std",
-  "continuation-target-binding": "skthbd",
-  "continuation-parent-artifact-sidecar": "std",
-  "continuation-parent-evidence-sidecar": "std",
-  "continuation-parent-review-sidecar": "std",
-  "continuation-planning-reuse-ineligible": "sktrhbd",
-  "continuation-planning-reuse-eligible": "sktd",
-  "continuation-draft-reuse": "sktd",
-  "continuation-post-pr-binding": "sktd",
+  "continuation-v2-envelope": "rhbd",
+  "continuation-v2-parent-binding": "sktd",
+  "continuation-v2-selected-review": "std",
+  "continuation-v2-target-binding": "skthbd",
+  "continuation-v2-parent-artifact-sidecar": "std",
+  "continuation-v2-parent-evidence-sidecar": "std",
+  "continuation-v2-parent-review-sidecar": "std",
+  "continuation-v2-planning-reuse": "sktd",
   "post-pr-phase-disabled": "ktrhbd",
   "post-pr-phase-awaiting-pr": "ktrhbd",
   "post-pr-phase-observing": "ktrhbd",
@@ -1093,14 +1058,6 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "post-pr-terminal-fact-panel-runner-result-malformed": "rhbd",
   "post-pr-terminal-fact-push-failed": "rhbd",
   "post-pr-terminal-fact-panel-attribution-unsafe": "rhbd",
-  "repair-reported": "k",
-  "repair-repairing": "k",
-  "repair-review-approve": "k",
-  "repair-review-reject": "k",
-  "repair-merged": "k",
-  "repair-blocked-from-reported": "k",
-  "repair-blocked-from-repairing": "k",
-  "repair-blocked-from-review": "k",
   "amendment-reported": "",
   "amendment-building-attempt-1": "",
   "amendment-building-attempt-2": "",
@@ -1154,7 +1111,7 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
 // Hashes are independent, immutable exact-value snapshots over writer, all readers, named tests,
 // authority facts, and complete sidecar descriptors, in that order. They are not derived from RECORDS.
 export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
-  ["plan-slices-json", "989039b0b23d8bef1c9c50b80f4f80da94bb3c982834804154e688ae72e2790a"],
+  ["plan-slices-json", "9df4c015456f1a3e7df8f7c5ab6d646e59b55d718b28514cec41ec082ee433e3"],
   ["plan-v2-integration-gate", "5af20fb944661b40cf225b9ca0ccf1489f64cf62f06efd8c813dafadf9a6b781"],
   ["plan-delivery-envelope-v1", "3f197e85283502ae65c5236a8a68fe4948657dfbd9c2b523d624486587b8cc33"],
   ["checkpoint-reviewed-plan-v1", "c9971fbcc7abc04bb7cf6bba21728347e7e6e949b80f2f9e641ce68d3eeed48a"],
@@ -1170,7 +1127,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["checkpoint-progress-closed", "0720c7e4322f0d13b514abb2af07f7a618381f1193f1da0aef992bcc2ac110fe"],
   ["checkpoint-merged-completion-v1", "0052306d0c53fc9a886370200fd7a9059a0de130d32617a553a3a91c559fca88"],
   ["checkpoint-final-closure-v1", "18d5d61dd734f836e562520166de8e47bad8c4d6ad97cb416d2f5cda51f46cc3"],
-  ["final-plan-descriptor", "28d0d6753da27ed172de3e89d5257c2bac238ed4f93f9a124411e6c1f80d7943"],
+  ["final-plan-descriptor", "f6148197c8baa1f9662a399cd4eca3d3ea713d9bc95f77b30bf608d2c784bac1"],
   ["run-envelope-running", "707c057f31eeb1213ea82cf16229bb1de2097c2961956eee0a6d0c32bccc6b3d"],
   ["run-envelope-terminal", "d0199700f70c4f08427631780dae93cf197fd46ab3e0ed78d001020b7c7ee1f4"],
   ["terminal-result-completed", "624dd6c0050e64037c95aca7904c9841656bd09684c3d8548b05e15601ba094c"],
@@ -1221,19 +1178,16 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["steering-boundary", "efff0777e2943f002136ce1a38aad484c5d7ab7143e07eb5b93e2475c497ca55"],
   ["steering-action-claim", "9a94c1f05fec7cad1d2930995c464530088b99175c8430f336fe4f00a76d7384"],
   ["steering-last-action", "986caa05859db8fa98077f1d3e0b08340be3922854cb5cd33a95415fd5b250b4"],
-  ["steering-pr-fence", "372be755ffb890bc4fdc9ae5913adad802c809e3d35c0e8c4746917c82e59b8a"],
+  ["steering-pr-fence", "e21025a5e584db627db74d3c4b186de64f259bbe3711c22586c6b9a6db87f628"],
   ["pr-created-result", "3b863980fbc4b34d584f7ef02b57e5a16ca37858f2c8dc347addcdb02c8446a3"],
-  ["continuation-envelope", "81191ae4a3a84c496f99bad916dc229a68a107eff211ac9d4739783531208fcb"],
-  ["continuation-parent-binding", "be6e6abe6f58d7194d61d9527c40ce6424cf748cd0c38f2e446ac56066bb1380"],
-  ["continuation-selected-review", "9e9a6c756313a6ab1f7e363bcef864def294b4247df06c6135514f6138ae52f8"],
-  ["continuation-target-binding", "a68b7b138b6877761e903a7bef61fcb150b95d651a1937ea8c20dfc511a3c01a"],
-  ["continuation-parent-artifact-sidecar", "293b04332c448519c7ef645dbc219898296120b849fb9b038fab18fd0aabbb9c"],
-  ["continuation-parent-evidence-sidecar", "823bdb94a43dd3f5b64ac8f9027b1a74a64b12ff474d8927a6bb39bf7e9f5c21"],
-  ["continuation-parent-review-sidecar", "bb9f6cd0a5d12b9e7a1678b177655f80d89f3dd22f776dcf5215eb31579c4f45"],
-  ["continuation-planning-reuse-ineligible", "2652266c8d5c51fe8c0b7e1189d28a37b5780f270eedc5754ab715f092dcdf7f"],
-  ["continuation-planning-reuse-eligible", "e8f1a81bc20a815a8733f56c03825196d96c4d4e546f4462f1e929595f17a7d9"],
-  ["continuation-draft-reuse", "b45f3caea3722f916cf9a12bcb6c5d001178dad255905d7c0e0d78cc8c13834e"],
-  ["continuation-post-pr-binding", "6d2fb331a7bb49440c8b1a9acbd0ed0f4b6f0e1019f0bd1128da41b6738ff26a"],
+  ["continuation-v2-envelope", "5e79487bd2d9c06622c9a90ff9ccff117dec10d6b230a134ecec6e22dd49749e"],
+  ["continuation-v2-parent-binding", "18a11882f7aa24ae43b9e95670109daf944aeb768083f2a7c5705dd5f517bf2c"],
+  ["continuation-v2-selected-review", "b8028d2d4d70760fd558b010f437d07fccf07aed8839146019fa3f973a47e240"],
+  ["continuation-v2-target-binding", "bdec8993e20104c0f36e11e412503d9903c044a2756f29d16942a4641e70ab2f"],
+  ["continuation-v2-parent-artifact-sidecar", "dbeae202afdee1f48a1bb9cbbdfa727d9a0108c762b5c5d34553d6158ad77c86"],
+  ["continuation-v2-parent-evidence-sidecar", "f7ca89d8ef6abb5295c9eee695df721c6268f7fb36b5210e05b2fd5c459d9cf4"],
+  ["continuation-v2-parent-review-sidecar", "3b8e458cfdae3affcdfd5f2be8d6dc02fae1b3d2e58009360467e05860acbeb6"],
+  ["continuation-v2-planning-reuse", "ba241b2710ea3088a54e9743029321a3b261bfbab719398ac84a3719eed34690"],
   ["post-pr-phase-disabled", "3759b74ccea805c737ff3e1ed51e0aac37ed8a41ef91046e98b455f3ef53381c"],
   ["post-pr-phase-awaiting-pr", "940393c6d7cef5b19f8c3d8c8915ab3d42962bec7bb1dc270fb9436d4f9ec139"],
   ["post-pr-phase-observing", "46ad44282906d504922581ea07d169dfbf409f4f5a4043a221480bad8c31a6da"],
@@ -1294,14 +1248,6 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["post-pr-terminal-fact-panel-runner-result-malformed", "1b13f36bec4e54b12aff5730cd564a6911d0a17dc935d38b588380215316ee17"],
   ["post-pr-terminal-fact-push-failed", "ddc110607d329d5398fefba3120102128a3311a51788bfb4e7d8a9af04c2a19d"],
   ["post-pr-terminal-fact-panel-attribution-unsafe", "cf177ac488305d7daccaefa5cd1051cce2cfb7163c233cb1611b14bddcad9b42"],
-  ["repair-reported", "75d46924435748c84f87621dd9fe75a9a5e935d601ae13e58f573b3783610788"],
-  ["repair-repairing", "6bf5572c19410569567cf77691ca05e783159f48ac526b05893945fef5ec168b"],
-  ["repair-review-approve", "ce8747ee55810ba484c922025e130b26d8c7dbde2e9970d70f40b81611b07084"],
-  ["repair-review-reject", "0365bc5638a629fa31a03fd1570bc3a034c93ef938ff439cb714fa1be0029103"],
-  ["repair-merged", "c41a78a4add7261f75669a5cfba1f5dabf2839f9ab0f967ed7891fb89d64c561"],
-  ["repair-blocked-from-reported", "b1e49fae077e3e1bee835e9a5d4ff54e7bd9043709bb21f664743154b31fc64f"],
-  ["repair-blocked-from-repairing", "d48498b89f41b36ea13d860498363524d6a699c6594926e58515d46acd710a87"],
-  ["repair-blocked-from-review", "f6e0a9dc4a891ca6b77cc2ec6d76a4feaa0bae72739a01d84ff608e70ee56c93"],
   ...AMENDMENT_ORACLE_DIGESTS.map(([id, metadata]) => [id, metadata]),
   ["amendment-review-dispatch-claim", "917f82b7c79d76eec77d19e00021a16aaccd6a0990b157eb8c2439e0239a4b64"],
   ["amendment-review-dispatch-closure", "c1fa91187cea6bbb6c8b8d0684f5f81060c55c10b8b59f2480fcdf707f9be915"],
@@ -1381,17 +1327,14 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["steering-last-action", "8d42d520ec811dad436e84cdc48b7ae6d2f13a442fdef2ba6397b13bdea16e67"],
   ["steering-pr-fence", "aae0a3986f100717159038cc2b06cfd835b1313305e22fc7beeea4929db3d662"],
   ["pr-created-result", "6b510aefac2fe46ad7ea3679ab0b023eda0ad0702139fdcfe62176b0404272bc"],
-  ["continuation-envelope", "6bf3fb70f927af981715950d3e2d264bd72902599c95e07f82b01897fc4e05c9"],
-  ["continuation-parent-binding", "8ae2a68c7eb75a5a179f6aee86a9e9cd85dfff2ee660073af2538bc59aaf1396"],
-  ["continuation-selected-review", "c7cf99ee147100b49fab3bb71bf8457ec6eb0453d1e6810f98eb64968e3c4a14"],
-  ["continuation-target-binding", "8a93c4d661ea231228107766a88c0455c78133c01cd302dfe7ee357a4b58cd78"],
-  ["continuation-parent-artifact-sidecar", "49fa4ef22a921d623571722a2474807a5c421b8bca6b54a492ad316edc6548ad"],
-  ["continuation-parent-evidence-sidecar", "c4359206e53fcaa6ce2fdb71a259b683b20c1462022e75c347502c5450dd05d6"],
-  ["continuation-parent-review-sidecar", "a794e98cca26b7265e07f33edef3271de785044f9edd66140d36a00fa30dbc0f"],
-  ["continuation-planning-reuse-ineligible", "299b7ff7f60229ffe0b23917aa491d84f23bbc7e71677a7b88049ebbade3b130"],
-  ["continuation-planning-reuse-eligible", "9d5170a36602547f044d1a2f68d3d711886447c96682da41d3318e0587bc7e08"],
-  ["continuation-draft-reuse", "1608dc8d7b077cb09ce453ec0c1273566bfc21cc5d2aebc18f40a85f240a8a08"],
-  ["continuation-post-pr-binding", "154913668a919fd892d6a12e8355a5aaac9ac7310ee791e3318d503b4c193514"],
+  ["continuation-v2-envelope", "f598a72021464f9139b6de89f662842d549dbb65f4762a89cecb0839eebd9050"],
+  ["continuation-v2-parent-binding", "8d2150f32d7d9b2239214c01af0530f5b2e6a52e5745a894217567c1f7ebca6d"],
+  ["continuation-v2-selected-review", "eb780a0d4d1a434210ed51b242eaa161f57f33008b08b608bfe4f835d6b1d212"],
+  ["continuation-v2-target-binding", "6decadf8c34f411a91d67f783fb7ff2951aee77d93161830bfc3b794f87a4ee9"],
+  ["continuation-v2-parent-artifact-sidecar", "ef0463f78e00df72afb713b47ab16c65bf3f6d5fb4b3b358339328e3206704fb"],
+  ["continuation-v2-parent-evidence-sidecar", "4969be8ad436e902b16853b9d6f3864ea22916efd11783f2349533bc784c842d"],
+  ["continuation-v2-parent-review-sidecar", "de01c8595fbb8e27bb68da4edff8c61168f6c7d7eac0eb4b1007151c0528d983"],
+  ["continuation-v2-planning-reuse", "98eb221b379b4e1ad90e001922d4776d967d9d1b13ccd504b881566d4ba19134"],
   ["post-pr-phase-disabled", "513971086c59d58641e60d94eafbcd2bf14874ba9c6ccfc647232b41b7b07e34"],
   ["post-pr-phase-awaiting-pr", "bf1c21e663f13eb7e6a1be999f3909712e1c40b510ec6116c98d0cd01dc8e130"],
   ["post-pr-phase-observing", "e6a25d74454166eb044c588a5a59a3a711c1232821b9a06d7cdf26e7f098c8ce"],
@@ -1452,14 +1395,6 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["post-pr-terminal-fact-panel-runner-result-malformed", "78c5bc14d1c19f8bd3b449d2ba59160173d05698cbc61a6fab5f2b3e76e1ac2a"],
   ["post-pr-terminal-fact-push-failed", "2d49a423c4c8a2f70c1af4f3d598afdf6f22fad34df57b5cc323d4ac01c49511"],
   ["post-pr-terminal-fact-panel-attribution-unsafe", "7681ab4e932991797750ed39c61569748ed8690a291f27f6f0a4f91a5cd65844"],
-  ["repair-reported", "729c932f001d44a8f896fbafea9b1daa1db6458b061c5111bec748abcdbfc33e"],
-  ["repair-repairing", "944bfd281e98e55853cc0062af34ebd255ec72d272721ee7b371bc23a863107d"],
-  ["repair-review-approve", "34d5bfaf3f1e27307bc05974b2e7ffbf0c0aeadc997c64f79190c5425068ab84"],
-  ["repair-review-reject", "1a220612b19cde72dbd20a39fbea5d53a5a3994de4bf2a13a3facb401a8cc7a7"],
-  ["repair-merged", "902b94618560fc3b8c3ec73af14cbd572205673ec09142ba88ff3ab050fefae1"],
-  ["repair-blocked-from-reported", "05835c182adf9d4372c39f6d0cc82cdac19b21017c928ded54047e7ea9eceea0"],
-  ["repair-blocked-from-repairing", "79ff873a4b30a77b303fc29658b2ec1dc1cd86ad35bed9092f087c6b572e44ee"],
-  ["repair-blocked-from-review", "ffacf779eacdf96ec9e9deaf94f350f386b02946f910a321ee7ce82eccad117b"],
   ...AMENDMENT_ORACLE_DIGESTS.map(([id, , descriptor]) => [id, descriptor]),
   ["amendment-review-dispatch-claim", "b6fb871bb80fe23f8810e53c2a1a3053a1537d3d138f9d0dffb2e1f2875bfb7a"],
   ["amendment-review-dispatch-closure", "3eea5e9b4d020f60782edced5bab1e92c1130f5b5022e77d646f61aa7a8f0cda"],
@@ -1474,7 +1409,7 @@ const CANONICAL_SOURCE_RECORD_ID_SET = new Set(CANONICAL_SOURCE_RECORD_IDS);
 // fact declarations, and separately modeled external source bytes. These digests are
 // literals rather than values derived from RECORDS or DURABLE_AUTHORITY_CATALOG.
 export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
-  ["plan-slices-json", "dd6fabc7def0955d82f37d30a53fc19e4e8cc8fa69fa445badbc3c051d4dd7b9"],
+  ["plan-slices-json", "16896892b7010ddf41ba8d8fbdd72564e1ad5f98724ff60de6d2adb75aa11988"],
   ["plan-v2-integration-gate", "591e877c46d2bceb598775cf19e83f49379c62e3911291f33bf5899c8b595fad"],
   ["plan-delivery-envelope-v1", "1d8ee7be00fedfa973646ad465831a398db446e378bd6f577546a1484348dafc"],
   ["checkpoint-reviewed-plan-v1", "bf3611b6140afc7cf630e77e597bcf492a1841baa5d501742c7dc276fc0b633f"],
@@ -1490,7 +1425,7 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["checkpoint-progress-closed", "50529713d8c192fcd1df1d08967893879e9a176430e70dbb0af58b4a119df321"],
   ["checkpoint-merged-completion-v1", "d53c1705f8e93992d8d16533ee57e80bdbf2a2df730a06550668a92fc2efac7b"],
   ["checkpoint-final-closure-v1", "6a931bdf49c42feab51f0ae1a671ff88b08c1ce21d68012e60f17ada96d46292"],
-  ["final-plan-descriptor", "13b61642b831dd2fba59dd83bf897de443216d567b56ee8a952080d9f81a7568"],
+  ["final-plan-descriptor", "56fbcdaf9dd4e9b243535c46ef7725bbe9ed783dafff96fcdafe03f077f863a5"],
   ["run-envelope-running", "f98a34215fdd5d0b2c4861bab4c6e6be104439e358a8e737095618955f227594"],
   ["run-envelope-terminal", "0e8365b1d3e99b2db1038cf9a2939fc6f4c421f199236307a1e1f4c300260e04"],
   ["terminal-result-completed", "67cc3ac4f4bc522a7e48be30ea4b1cdfcba2016a309ba99224197641cfcb059e"],
@@ -1543,17 +1478,14 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["steering-last-action", "4fc3088a51000b12aed4ca3216c8e60b74c5206d8d9e75e4dea319cb31c62820"],
   ["steering-pr-fence", "16fa47900dbcbd6618a6ebd0eed5cb705910a2ccfc8478bd1f554c7f8ebef406"],
   ["pr-created-result", "619a77468645eec8923dec7f7e3c8b0d1aa11064aac4494e039b7aa282e6f9ea"],
-  ["continuation-envelope", "5e10d284d461eb4758d11241f6b8ba67acb7eef34144eee4655080a8e620e2fe"],
-  ["continuation-parent-binding", "ee8dabc5be43ce00230c86a075b90c23e978e3ee8a3cde8f3cb187676b0f0db5"],
-  ["continuation-selected-review", "e2469d19e003e6f3b357f62d89f112fed91f40602db79a587a925bb1f071d26a"],
-  ["continuation-target-binding", "579b338baade49828c938569cf4b4bc76e1125bda4ca04423865753f0a0a4e87"],
-  ["continuation-parent-artifact-sidecar", "089baa634d9bb1bb2699b047988fefd2cdf95e0dc6eef46ffc072c13e2c8a584"],
-  ["continuation-parent-evidence-sidecar", "f7f70a1daf94d5becccbd59f61df5a61ced521ed31d208b860a7ccc0f8625e79"],
-  ["continuation-parent-review-sidecar", "bf8e04a769d72ccdc6124cb03189d3e6d64109fba295634af5a4749a61b12f22"],
-  ["continuation-planning-reuse-ineligible", "185c450470908bdc215c6e82ed542ed8fc7284fa26a084e096e18b5d303ece08"],
-  ["continuation-planning-reuse-eligible", "38ded4bf546d577abf750b54b8a8363e2c988881e5035e70a22a55d9b5ef65fb"],
-  ["continuation-draft-reuse", "78b465df08ca5d06333f8b7fceeca2b92ff3bda67289f26e41e3ff0eeb83e669"],
-  ["continuation-post-pr-binding", "d060eae5fbb7c63c0adc70bdf71585dd16e2ded8f49ca2bd74eda42b02f2f3f7"],
+  ["continuation-v2-envelope", "99eecc5216b6ed35f44f94f57503f363cfb182805a6e9965aa65b15dc1565e5d"],
+  ["continuation-v2-parent-binding", "de3f7db2b2af1afb9e6bf8ff5a573bfb1c553748461c1aa4f82a04ca0ba49393"],
+  ["continuation-v2-selected-review", "e6f8787a792ce2db73e657e60574eadffcb5629675af1a09622a5d5102542139"],
+  ["continuation-v2-target-binding", "aa90a1ba18fd3f672cd485134887efe2b28e23ec76167af8e41c1cb53debcda2"],
+  ["continuation-v2-parent-artifact-sidecar", "0a1d55178089fc305f9841ed49962ec7c0047d62d9f9f3f655663e3127c8b5d6"],
+  ["continuation-v2-parent-evidence-sidecar", "780e1d52985780f26912602a93657120529e11587d7068c5f4cf172121c387ed"],
+  ["continuation-v2-parent-review-sidecar", "d59e5ba3bb367947afe511e0ad7a4ddb6988e95be324907cdc4e34487ae9a4ff"],
+  ["continuation-v2-planning-reuse", "db49c73b2044271f0c1bf18fb8c36811622258d38d1a559460387dd03e48f798"],
   ["post-pr-phase-disabled", "4898a84d6f95e1a649122eadba90daab5786164dcbe11b6accbbe04b17b91a07"],
   ["post-pr-phase-awaiting-pr", "cf30eab403b52bdaf1e3e54c2ce0ab4bc24e7bd70d6f07ad2372a57647497fed"],
   ["post-pr-phase-observing", "5338e2ad9975937758224fdf86e9abe6ef7c7c5caf12fb2b59871fab4e6fd0b1"],
@@ -1614,14 +1546,6 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["post-pr-terminal-fact-panel-runner-result-malformed", "beed81bad84f5734e6da8fb9044685de9f4939e93fb061f241759305ea5d97df"],
   ["post-pr-terminal-fact-push-failed", "83425c5f79198714cd764be913ac0deb3f93b87510e9aa66599d405eb0456f09"],
   ["post-pr-terminal-fact-panel-attribution-unsafe", "f3a27a8a2f12f532be7a44e0521da95a309b8bda559a850a96dd21f5d9b38c38"],
-  ["repair-reported", "2ed03b55eaf8375148a6b2e0373481b9a7a5880b4d81f6a01b346c709d06635b"],
-  ["repair-repairing", "7242ff535da8057dcbd5b4c64e046f7b4cac02690d9aa05cf492c6c78083f7b4"],
-  ["repair-review-approve", "b0a2473d6870943222c3723ea4a3f487a35d3b7b03ebe50e6140d46bc9f65d53"],
-  ["repair-review-reject", "4d2ec74d7585d8701cd9b2d5b1de36e1b5bfaf097443f6a34f4c41bf545cfda4"],
-  ["repair-merged", "7088b60cbbe1f683f987e365af633b09ba64c528590bfb2b24000967d473c45f"],
-  ["repair-blocked-from-reported", "9f706c75ff6e2cbd90a898406aa9be9c8258ee0e533adaea3c5675e9a9faf6ca"],
-  ["repair-blocked-from-repairing", "fc79c812079bd9acf7b60aacb304ef47e0dd12b4f531e801191dead4ccefe66a"],
-  ["repair-blocked-from-review", "3caeb87996031485b92a1b6a0b0167608ece7fe0f0f62760cbfa7ba055e121a0"],
   ...AMENDMENT_ORACLE_DIGESTS.map(([id, , , source]) => [id, source]),
   ["amendment-review-dispatch-claim", "b51371578cccf189480241170f4628364442be7d76a077c925ffdce322b7516c"],
   ["amendment-review-dispatch-closure", "e687f0960cdffa32397c72b098352e7e8f07d9ee11b87dac75af0e953bdfbb1b"],
@@ -1770,7 +1694,7 @@ const RECORDS = [
   recordEntry({
     authorityClassId: "plan-slices-graph", id: "plan-slices-json", record: "plan/slices.json", variant: "accepted graph",
     writer: "factory slices-seed (checked plan validation and seed transition)",
-    readers: ["validateSlicesPlan", "factory slices-seed", "transitionRunSlice and transitionSliceMerged", "transitionMergedSliceRepair owner-lane checks"],
+    readers: ["validateSlicesPlan", "factory slices-seed", "transitionRunSlice and transitionSliceMerged"],
     canonicalPath: ["plan/slices.json"], source: JSON.parse(PLAN_EXTERNAL.plan.bytes), externalSources: PLAN_EXTERNAL,
     facts: exactFacts(JSON.parse(PLAN_EXTERNAL.plan.bytes)),
     requiredPath: ["slices"], typePath: ["slices"],
@@ -1995,42 +1919,21 @@ const RECORDS = [
     requiredPath: ["operation_id"], typePath: ["pr_number"], targets: [ref(["pr_url"]), stale(["head_sha"], SHA_A), cross(["operation_id"], `ffpr-v1-${"e".repeat(64)}`)],
   }),
 
-  continuationEnvelopeEntry(),
-  continuationParentEntry(),
-  continuationReviewEntry(),
-  continuationTargetEntry(),
-  continuationContextEntry("continuation-parent-artifact-sidecar", "parent_artifacts[]", "artifact", "artifacts/story.md"),
-  continuationContextEntry("continuation-parent-evidence-sidecar", "parent_evidence[]", "evidence", "evidence/test-verifier.json"),
-  continuationContextEntry("continuation-parent-review-sidecar", "parent_reviews[]", "review", "reviews/implementation-validator.json"),
+  continuationV2EnvelopeEntry(),
+  continuationV2ParentEntry(),
+  continuationV2ReviewEntry(),
+  continuationV2TargetEntry(),
+  continuationV2ContextEntry("continuation-v2-parent-artifact-sidecar", "parent_artifacts", "artifact"),
+  continuationV2ContextEntry("continuation-v2-parent-evidence-sidecar", "parent_evidence", "evidence"),
+  continuationV2ContextEntry("continuation-v2-parent-review-sidecar", "parent_reviews", "review"),
   recordEntry({
-    authorityClassId: "continuation-planning-draft-reuse", id: "continuation-planning-reuse-ineligible", record: "continuation.planning_reuse", variant: "eligible false",
-    writer: "factory continue planning reuse assessment",
-    readers: ["validateContinuationPlanningReuse", "feature command payload normalization", "adoptContinuationPlanning refusal path"],
-    ...continuationRecordSource("continuation-planning-reuse-ineligible"), requiredPath: ["eligible"], typePath: ["eligible"], targets: [stale(["eligible"], true), cross(["eligible"], "parent-accepted")],
-  }),
-  recordEntry({
-    authorityClassId: "continuation-planning-draft-reuse", id: "continuation-planning-reuse-eligible", record: "continuation.planning_reuse", variant: "eligible true with accepted bytes",
-    writer: "factory continue planning reuse assessment",
-    readers: ["validateContinuationPlanningReuse", "feature command payload normalization", "adoptContinuationPlanning checked adoption"],
-    ...continuationRecordSource("continuation-planning-reuse-eligible"),
-    requiredPath: ["eligible"], typePath: ["spec_review_hash"], sidecars: [externalSidecar("review", ["spec_review_ref"], ["spec_review_hash"]), externalSidecar("artifact", ["spec_artifact_ref"], ["spec_artifact_hash"])],
+    authorityClassId: "continuation-v2-carry-forward", id: "continuation-v2-planning-reuse", record: "continuation.planning_reuse", variant: "accepted immutable planning bytes",
+    writer: "checked schema-v2 carry-forward publication",
+    readers: ["validateContinuationPlanningReuse", "feature command payload normalization", "published carry-forward authority"],
+    ...continuationV2RecordSource("continuation-v2-planning-reuse"),
+    requiredPath: ["eligible"], typePath: ["spec_review_hash"],
+    sidecars: [externalSidecar("review", ["spec_review_ref"], ["spec_review_hash"]), externalSidecar("artifact", ["spec_artifact_ref"], ["spec_artifact_hash"])],
     targets: [...externalSidecarTargets("review", ["spec_review_ref"], ["spec_review_hash"]), ...externalSidecarTargets("artifact", ["spec_artifact_ref"], ["spec_artifact_hash"]), stale(["eligible"], false), cross(["spec_review_ref"], "reviews/other-run.json")],
-  }),
-  recordEntry({
-    authorityClassId: "continuation-planning-draft-reuse", id: "continuation-draft-reuse", record: "continuation.draft_spec_reuse", variant: "unaccepted draft with remaining retry budget",
-    writer: "factory continue draft reuse admission",
-    readers: ["validateContinuationDraftSpecReuse", "feature command payload normalization", "spec-writer attempt/budget initialization"],
-    ...continuationRecordSource("continuation-draft-reuse"),
-    requiredPath: ["artifact_ref"], typePath: ["remaining_attempts"], sidecars: [externalSidecar("draft", ["artifact_ref"], ["artifact_hash"])],
-    targets: [...externalSidecarTargets("draft", ["artifact_ref"], ["artifact_hash"]), stale(["parent_step_attempts"], 0), cross(["remaining_attempts"], 3)] ,
-  }),
-  recordEntry({
-    authorityClassId: "continuation-planning-draft-reuse", id: "continuation-post-pr-binding", record: "continuation.post_pr", variant: "blocked post-PR continuation context",
-    writer: "factory continue post-PR continuation admission",
-    readers: ["validateContinuationPostPr", "feature command payload normalization", "post-PR continuation workflow routing"],
-    ...continuationRecordSource("continuation-post-pr-binding"),
-    requiredPath: ["pr_url"], typePath: ["pr_number"], sidecars: [externalSidecar("evidence", ["evidence_ref"], ["evidence_hash"]), externalSidecar("review", ["continuation_review_ref"], ["continuation_review_hash"])],
-    targets: [...externalSidecarTargets("evidence", ["evidence_ref"], ["evidence_hash"]), ...externalSidecarTargets("review", ["continuation_review_ref"], ["continuation_review_hash"]), ref(["pr_url"]), hash(["post_pr_hash"]), stale(["head_sha"], SHA_B), cross(["repository"], "other/repo")],
   }),
 
   ...POST_PR_PHASES.map(postPrPhaseEntry),
@@ -2069,46 +1972,6 @@ const RECORDS = [
   postPrTerminalFactEntry("push-failed"),
   postPrTerminalFactEntry("panel-attribution-unsafe"),
 
-  repairEntry("repair-reported", "reported", 0, {
-    facts: [fact(["status"], "reported"), fact(["attempts"], 0), fact(["defect_path"], "src/owner/records.js"), fact(["owner_slice_id"], "owner"), fact(["consumer_slice_id"], "consumer")],
-    observations: [repairObservation("owner-lane", "plan", ["slices", 0, "paths"], ["src/owner/**"], "transitionMergedSliceRepair reported lane admission")],
-    record: {}, sidecars: ["plan", "original-evidence"],
-  }),
-  repairEntry("repair-repairing", "repairing", 1, {
-    facts: [fact(["status"], "repairing"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["branch"], "repair-owner"), fact(["worktree"], "/tmp/repair-owner")],
-    observations: [repairReobservation("quiescence", true, "transitionMergedSliceRepair repairing quiescence check")],
-    record: { baseline_commit: SHA_A, branch: "repair-owner", worktree: "/tmp/repair-owner" }, sidecars: ["plan", "original-evidence"],
-  }),
-  repairEntry("repair-review-approve", "review:APPROVE", 1, {
-    facts: [fact(["status"], "review"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["reviewed_commit"], SHA_B), fact(["review_ref"], REPAIR_EXTERNAL.reviewApprove.ref), fact(["repair_evidence_ref"], REPAIR_EXTERNAL.repairEvidence.ref)],
-    observations: [repairObservation("review-verdict", "review", ["verdict"], "APPROVE", "transitionMergedSliceRepair merged review consumer"), repairReobservation("owner-lane", true, "transitionMergedSliceRepair review Git diff lane check")],
-    record: repairReviewFields(REPAIR_EXTERNAL.reviewApprove), sidecars: ["plan", "original-evidence", "repair-evidence", "review"], reviewExternal: REPAIR_EXTERNAL.reviewApprove,
-  }),
-  repairEntry("repair-review-reject", "review:REJECT", 1, {
-    facts: [fact(["status"], "review"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["reviewed_commit"], SHA_B), fact(["review_ref"], REPAIR_EXTERNAL.reviewReject.ref), fact(["repair_evidence_ref"], REPAIR_EXTERNAL.repairEvidence.ref)],
-    observations: [repairObservation("review-verdict", "review", ["verdict"], "REJECT", "transitionMergedSliceRepair repairing retry consumer"), repairReobservation("owner-lane", true, "transitionMergedSliceRepair review Git diff lane check")],
-    record: repairReviewFields(REPAIR_EXTERNAL.reviewReject), sidecars: ["plan", "original-evidence", "repair-evidence", "review"], reviewExternal: REPAIR_EXTERNAL.reviewReject,
-  }),
-  repairEntry("repair-merged", "merged", 1, {
-    facts: [fact(["status"], "merged"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["reviewed_commit"], SHA_B), fact(["merge_commit"], SHA_C), fact(["verification_ref"], REPAIR_EXTERNAL.verification.ref)],
-    observations: [repairObservation("review-verdict", "review", ["verdict"], "APPROVE", "transitionMergedSliceRepair merged review consumer"), repairReobservation("reviewed-merge-tree-equality", true, "transitionMergedSliceRepair merged Git tree re-observation"), repairReobservation("quiescence", true, "transitionMergedSliceRepair merged quiescence check")],
-    record: { ...repairReviewFields(REPAIR_EXTERNAL.reviewApprove), verification_ref: REPAIR_EXTERNAL.verification.ref, verification_hash: hashBytes(REPAIR_EXTERNAL.verification.bytes), merge_commit: SHA_C }, sidecars: ["plan", "original-evidence", "repair-evidence", "review", "verification"], reviewExternal: REPAIR_EXTERNAL.reviewApprove,
-  }),
-  repairEntry("repair-blocked-from-reported", "blocked-from-reported", 0, {
-    facts: [fact(["status"], "blocked"), fact(["attempts"], 0), fact(["reason"], "repair rejected")],
-    observations: [repairReobservation("blocked-origin", "reported", "transitionMergedSliceRepair blocked retention from reported")],
-    record: { reason: "repair rejected" }, sidecars: ["plan", "original-evidence"],
-  }),
-  repairEntry("repair-blocked-from-repairing", "blocked-from-repairing", 1, {
-    facts: [fact(["status"], "blocked"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["reason"], "repair failed")],
-    observations: [repairReobservation("blocked-origin", "repairing", "transitionMergedSliceRepair blocked retention from repairing")],
-    record: { baseline_commit: SHA_A, branch: "repair-owner", worktree: "/tmp/repair-owner", reason: "repair failed" }, sidecars: ["plan", "original-evidence"],
-  }),
-  repairEntry("repair-blocked-from-review", "blocked-from-review", 1, {
-    facts: [fact(["status"], "blocked"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["reviewed_commit"], SHA_B), fact(["reason"], "review rejected")],
-    observations: [repairObservation("review-verdict", "review", ["verdict"], "REJECT", "transitionMergedSliceRepair blocked retention from review"), repairReobservation("blocked-origin", "review", "transitionMergedSliceRepair blocked retention from review")],
-    record: { ...repairReviewFields(REPAIR_EXTERNAL.reviewReject), reason: "review rejected" }, sidecars: ["plan", "original-evidence", "repair-evidence", "review"], reviewExternal: REPAIR_EXTERNAL.reviewReject,
-  }),
   ...AMENDMENT_MANIFEST_VARIANTS.map(([id, variant]) => amendmentManifestEntry(id, variant)),
   ...AMENDMENT_CLAIM_VARIANTS.map(([id, phase, state, outcome]) => amendmentExecutionClaimEntry(id, phase, state, outcome)),
   ...AMENDMENT_RECEIPT_VARIANTS.map(([id, phase, outcome]) => amendmentExecutionReceiptEntry(id, phase, outcome)),
@@ -2787,194 +2650,123 @@ function prFenceEntry() {
   return recordEntry({
     authorityClassId: "validator-security-pr-result", id: "steering-pr-fence", record: "run.json.steering.pr_fence", variant: "successor PR operation fence",
     writer: "transitionPrePrFenceEstablished from checked local/worktree/origin Git authority",
-    readers: ["validateSteering successor fence validation", "transitionPrCreated and transitionPrePrFenceCleared checked GitHub reconciliation", "resume/recover legacy fence terminalization"],
+    readers: ["validateSteering successor fence validation", "transitionPrCreated and transitionPrePrFenceCleared checked GitHub reconciliation"],
     canonicalPath: ["steering", "pr_fence"], source, facts: exactFacts(source),
     requiredPath: ["operation_id"], typePath: ["draft"],
     targets: [time(["created_at"]), ref(["repository"]), hash(["state_hash"]), drift([], "operation_id", "operation"), stale(["head_sha"], SHA_A), cross(["operation_id"], `ffpr-v1-${"e".repeat(64)}`)],
   });
 }
 
-function continuationEnvelopeEntry() {
-  const fixture = continuationCatalogFixture("continuation-envelope");
+function continuationV2EnvelopeEntry() {
+  const fixture = continuationV2CatalogFixture("continuation-v2-envelope");
   return recordEntry({
-    authorityClassId: "continuation-planning-draft-reuse", id: "continuation-envelope", record: "run.json.continuation", variant: "blocked-run continuation",
-    writer: "factory continue checked child-run admission",
-    readers: ["validateContinuation", "feature command payload normalization", "continuation workflow routing", "adoptContinuationPlanning"],
+    authorityClassId: "continuation-v2-carry-forward", id: "continuation-v2-envelope", record: "run.json.continuation", variant: "schema-v2 carry-forward envelope",
+    writer: "checked schema-v2 carry-forward publication",
+    readers: ["validateContinuation", "feature command payload normalization", "continuation workflow routing"],
     canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
-    requiredPath: ["kind"], typePath: ["operator_summary"], targets: [schema(["schema_version"]), kind(["kind"], "resume"), time(["created_at"]), stale(["kind"], "existing-run-resume"), cross(["operator_summary"], "other run")],
+    requiredPath: ["kind"], typePath: ["operator_summary"],
+    targets: [target("wrong-schema", ["schema_version"], "schema version", { value: 1 }), kind(["kind"], "resume"), time(["created_at"]), stale(["kind"], "existing-run-resume"), cross(["operator_summary"], "other run")],
   });
 }
 
-function continuationParentEntry() {
-  const fixture = continuationCatalogFixture("continuation-parent-binding");
+function continuationV2ParentEntry() {
+  const fixture = continuationV2CatalogFixture("continuation-v2-parent-binding");
   return recordEntry({
-    authorityClassId: "continuation-planning-draft-reuse", id: "continuation-parent-binding", record: "continuation.parent", variant: "blocked parent",
-    writer: "factory continue checked parent admission",
-    readers: ["validateContinuationParent", "factory continue source revalidation", "adoptContinuationPlanning"],
+    authorityClassId: "continuation-v2-carry-forward", id: "continuation-v2-parent-binding", record: "continuation.parent", variant: "blocked parent",
+    writer: "checked schema-v2 parent admission",
+    readers: ["validateContinuationParent", "factory continue source revalidation", "published carry-forward authority"],
     canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
     requiredPath: ["run_id"], typePath: ["status"], sidecars: [externalSidecar("parent-run", ["run_ref"], ["run_hash"])],
     targets: [...externalSidecarTargets("parent-run", ["run_ref"], ["run_hash"]), stale(["commit"], SHA_B), cross(["run_id"], "child-run")],
   });
 }
 
-function continuationReviewEntry() {
-  const fixture = continuationCatalogFixture("continuation-selected-review");
+function continuationV2ReviewEntry() {
+  const fixture = continuationV2CatalogFixture("continuation-v2-selected-review");
   return recordEntry({
-    authorityClassId: "continuation-planning-draft-reuse", id: "continuation-selected-review", record: "continuation.review", variant: "approved blocking review",
-    writer: "factory continue selected-review admission",
+    authorityClassId: "continuation-v2-carry-forward", id: "continuation-v2-selected-review", record: "continuation.review", variant: "selected blocking review",
+    writer: "checked schema-v2 selected-review admission",
     readers: ["validateContinuationReview", "validateContinuationSelectedReview", "continuation remediation decomposition"],
     canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
     requiredPath: ["kind"], typePath: ["required_fixes"], sidecars: [externalSidecar("selected-review", ["ref"], ["hash"])],
-    targets: [kind(["kind"], "unknown-review"), ...externalSidecarTargets("selected-review", ["ref"], ["hash"]), stale(["verdict"], "REJECT"), cross(["subject"], "other-branch")],
+    targets: [kind(["kind"], "unknown-review"), ...externalSidecarTargets("selected-review", ["ref"], ["hash"]), stale(["verdict"], "APPROVE"), cross(["subject"], "other-branch")],
   });
 }
 
-function continuationTargetEntry() {
-  const fixture = continuationCatalogFixture("continuation-target-binding");
+function continuationV2TargetEntry() {
+  const fixture = continuationV2CatalogFixture("continuation-v2-target-binding");
   return recordEntry({
-    authorityClassId: "continuation-planning-draft-reuse", id: "continuation-target-binding", record: "continuation.target", variant: "fresh child target",
-    writer: "factory continue checked child target allocation",
+    authorityClassId: "continuation-v2-carry-forward", id: "continuation-v2-target-binding", record: "continuation.target", variant: "fresh child target",
+    writer: "checked schema-v2 child target allocation",
     readers: ["validateContinuationTarget", "feature command payload normalization", "child bootstrap and Git/worktree creation"],
     canonicalPath: fixture.canonicalPath, source: fixture.source, facts: exactFacts(fixture.source),
-    requiredPath: ["run_id"], typePath: ["base_commit"], targets: [ref(["worktree"]), stale(["base_commit"], SHA_A), cross(["run_id"], "parent-run")],
+    requiredPath: ["run_id"], typePath: ["base_commit"], targets: [ref(["worktree"]), stale(["base_commit"], SHA_B), cross(["run_id"], "parent-run")],
   });
 }
 
-function continuationContextEntry(id, record, kindValue, refValue) {
-  const fixture = continuationCatalogFixture(id);
+function continuationV2ContextEntry(id, field, sourceName) {
+  const fixture = continuationV2CatalogFixture(id);
   return recordEntry({
-    authorityClassId: "continuation-planning-draft-reuse", id, record: `continuation.${record}`, variant: `${kindValue} context binding`,
-    writer: "factory continue parent context inventory",
+    authorityClassId: "continuation-v2-carry-forward", id, record: `continuation.${field}[]`, variant: `${sourceName} context binding`,
+    writer: "checked schema-v2 parent context inventory",
     readers: ["validateContinuationRefHashArray", "feature command payload normalization", "continuation planning/remediation context loader"],
     canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
-    requiredPath: ["kind"], typePath: ["kind"], sidecars: [externalSidecar(kindValue, ["ref"], ["hash"])],
-    targets: [kind(["kind"], "other-kind"), ...externalSidecarTargets(kindValue, ["ref"], ["hash"]), stale(["hash"], HASH_B), cross(["ref"], `reviews/other-${kindValue}.json`)],
+    requiredPath: ["kind"], typePath: ["kind"], sidecars: [externalSidecar(sourceName, ["ref"], ["hash"])],
+    targets: [kind(["kind"], "other-kind"), ...externalSidecarTargets(sourceName, ["ref"], ["hash"]), stale(["hash"], HASH_B), cross(["ref"], `reviews/other-${sourceName}.json`)],
   });
 }
 
-function continuationRecordSource(id) {
-  const fixture = continuationCatalogFixture(id);
-  return {
-    canonicalPath: fixture.canonicalPath,
-    source: fixture.source,
-    externalSources: fixture.externalSources,
-    facts: exactFacts(fixture.source),
-  };
+function continuationV2RecordSource(id) {
+  const fixture = continuationV2CatalogFixture(id);
+  return { canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source) };
 }
 
-function continuationCatalogFixture(id) {
-  const parent = {
-    run_id: "parent-run",
-    status: "blocked",
-    run_ref: CONTINUATION_EXTERNAL.parentRun.ref,
-    run_hash: hashBytes(CONTINUATION_EXTERNAL.parentRun.bytes),
-    branch: "parent",
-    commit: SHA_A,
-    worktree: ".opencode/worktrees/parent",
-  };
-  const review = {
-    kind: "validator",
-    ref: CONTINUATION_EXTERNAL.selectedReview.ref,
-    hash: hashBytes(CONTINUATION_EXTERNAL.selectedReview.bytes),
-    subject: "parent",
-    verdict: "APPROVE",
-    source: "run.validator.review_ref",
-    required_fixes: ["fix"],
-  };
-  const targetBinding = { run_id: "child-run", branch: "child", worktree: ".opencode/worktrees/child", base_ref: "main", base_commit: SHA_B };
-  const artifact = { kind: "artifact", ref: CONTINUATION_EXTERNAL.artifact.ref, hash: hashBytes(CONTINUATION_EXTERNAL.artifact.bytes) };
-  const evidence = { kind: "evidence", ref: CONTINUATION_EXTERNAL.evidence.ref, hash: hashBytes(CONTINUATION_EXTERNAL.evidence.bytes) };
-  const parentReview = { kind: "review", ref: CONTINUATION_EXTERNAL.review.ref, hash: hashBytes(CONTINUATION_EXTERNAL.review.bytes) };
+function continuationV2CatalogFixture(id) {
+  const parent = { run_id: "parent-run", status: "blocked", run_ref: CONTINUATION_V2_EXTERNAL.parentRun.ref, run_hash: hashBytes(CONTINUATION_V2_EXTERNAL.parentRun.bytes), branch: "parent", commit: SHA_A, worktree: "/tmp/parent" };
+  const review = { kind: "validator", ref: CONTINUATION_V2_EXTERNAL.selectedReview.ref, hash: hashBytes(CONTINUATION_V2_EXTERNAL.selectedReview.bytes), subject: "parent", verdict: "NO-GO", summary: "Continue the blocked work.", required_fixes: ["fix"], source: "run.validator.review_ref" };
+  const targetBinding = { run_id: "child-run", branch: "child", worktree: "/tmp/child", base_ref: "main", base_commit: SHA_A };
+  const artifact = { kind: "technical_brief", ref: CONTINUATION_V2_EXTERNAL.artifact.ref, hash: hashBytes(CONTINUATION_V2_EXTERNAL.artifact.bytes) };
+  const evidence = { kind: "evidence", ref: CONTINUATION_V2_EXTERNAL.evidence.ref, hash: hashBytes(CONTINUATION_V2_EXTERNAL.evidence.bytes) };
+  const parentReview = { kind: "review", ref: CONTINUATION_V2_EXTERNAL.review.ref, hash: hashBytes(CONTINUATION_V2_EXTERNAL.review.bytes) };
   const selectedParentReview = { kind: "review", ref: review.ref, hash: review.hash };
+  const policy = postPrPolicy(false);
   const continuation = {
-    schema_version: 1,
-    kind: "blocked-run-continuation",
-    created_at: NOW,
-    operator_summary: "Continue blocked run.",
-    parent,
-    review,
-    target: targetBinding,
-    parent_artifacts: [artifact],
-    parent_evidence: [evidence],
-    parent_reviews: [parentReview, selectedParentReview],
-    planning_reuse: { eligible: false },
+    schema_version: 2, kind: "blocked-run-continuation", created_at: NOW, operator_summary: "Continue blocked run.",
+    parent, review, target: targetBinding,
+    parent_artifacts: [artifact], parent_evidence: [evidence], parent_reviews: [parentReview, selectedParentReview],
+    planning_reuse: { eligible: true, spec_review_ref: parentReview.ref, spec_review_hash: parentReview.hash, spec_artifact_ref: artifact.ref, spec_artifact_hash: artifact.hash },
+    configuration: { mode: "autonomous", github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, post_pr_policy: policy },
+    carry_forward: { scope: "full-remaining-plan", plan_ref: "plan/slices.json", plan_hash: HASH_A, start_commit: SHA_A, accepted_slices: [], remaining_slice_ids: ["slice"] },
   };
-  let canonicalPath;
-  let externalSources = {};
-  if (id === "continuation-envelope") {
-    canonicalPath = ["continuation"];
-    externalSources = {
-      "parent-run": CONTINUATION_EXTERNAL.parentRun,
-      "selected-review": CONTINUATION_EXTERNAL.selectedReview,
-      artifact: CONTINUATION_EXTERNAL.artifact,
-      evidence: CONTINUATION_EXTERNAL.evidence,
-      review: CONTINUATION_EXTERNAL.review,
-    };
-  } else if (id === "continuation-parent-binding") {
-    canonicalPath = ["continuation", "parent"];
-    externalSources = { "parent-run": CONTINUATION_EXTERNAL.parentRun };
-  } else if (id === "continuation-selected-review") {
-    canonicalPath = ["continuation", "review"];
-    externalSources = { "selected-review": CONTINUATION_EXTERNAL.selectedReview };
-  } else if (id === "continuation-target-binding") {
-    canonicalPath = ["continuation", "target"];
-  } else if (id === "continuation-parent-artifact-sidecar") {
-    canonicalPath = ["continuation", "parent_artifacts", 0];
-    externalSources = { artifact: CONTINUATION_EXTERNAL.artifact };
-  } else if (id === "continuation-parent-evidence-sidecar") {
-    canonicalPath = ["continuation", "parent_evidence", 0];
-    externalSources = { evidence: CONTINUATION_EXTERNAL.evidence };
-  } else if (id === "continuation-parent-review-sidecar") {
-    canonicalPath = ["continuation", "parent_reviews", 0];
-    externalSources = { review: CONTINUATION_EXTERNAL.review };
-  } else if (id === "continuation-planning-reuse-ineligible") {
-    canonicalPath = ["continuation", "planning_reuse"];
-  } else if (id === "continuation-planning-reuse-eligible") {
-    continuation.planning_reuse = {
-      eligible: true,
-      spec_review_ref: CONTINUATION_EXTERNAL.acceptedReview.ref,
-      spec_review_hash: hashBytes(CONTINUATION_EXTERNAL.acceptedReview.bytes),
-      spec_artifact_ref: CONTINUATION_EXTERNAL.acceptedArtifact.ref,
-      spec_artifact_hash: hashBytes(CONTINUATION_EXTERNAL.acceptedArtifact.bytes),
-    };
-    canonicalPath = ["continuation", "planning_reuse"];
-    externalSources = { review: CONTINUATION_EXTERNAL.acceptedReview, artifact: CONTINUATION_EXTERNAL.acceptedArtifact };
-  } else if (id === "continuation-draft-reuse") {
-    continuation.draft_spec_reuse = {
-      artifact_ref: CONTINUATION_EXTERNAL.draft.ref,
-      artifact_hash: hashBytes(CONTINUATION_EXTERNAL.draft.bytes),
-      parent_step_status: "rejected",
-      parent_step_attempts: 1,
-      max_retries: 3,
-      remaining_attempts: 2,
-    };
-    canonicalPath = ["continuation", "draft_spec_reuse"];
-    externalSources = { draft: CONTINUATION_EXTERNAL.draft };
-  } else if (id === "continuation-post-pr-binding") {
-    continuation.post_pr = {
-      pr_url: "https://github.com/acme/repo/pull/7",
-      repository: "acme/repo",
-      pr_number: 7,
-      head_sha: SHA_A,
-      disposition: "leave-unchanged",
-      policy: postPrPolicy(true),
-      post_pr_hash: HASH_A,
-      evidence_ref: CONTINUATION_EXTERNAL.postPrEvidence.ref,
-      evidence_hash: hashBytes(CONTINUATION_EXTERNAL.postPrEvidence.bytes),
-      continuation_review_ref: CONTINUATION_EXTERNAL.postPrReview.ref,
-      continuation_review_hash: hashBytes(CONTINUATION_EXTERNAL.postPrReview.bytes),
-    };
-    canonicalPath = ["continuation", "post_pr"];
-    externalSources = { evidence: CONTINUATION_EXTERNAL.postPrEvidence, review: CONTINUATION_EXTERNAL.postPrReview };
-  } else {
-    throw new TypeError(`missing canonical continuation fixture for ${id}`);
-  }
-  return {
-    run: { schema_version: 1, run_id: "child-run", status: "running", branch: "child", worktree: ".opencode/worktrees/child", max_retries: id === "continuation-draft-reuse" ? 3 : 2, gates: {}, continuation },
-    canonicalPath,
-    source: structuredClone(valueAt({ continuation }, canonicalPath, id)),
-    externalSources: structuredClone(externalSources),
+  const paths = {
+    "continuation-v2-envelope": ["continuation"],
+    "continuation-v2-parent-binding": ["continuation", "parent"],
+    "continuation-v2-selected-review": ["continuation", "review"],
+    "continuation-v2-target-binding": ["continuation", "target"],
+    "continuation-v2-parent-artifact-sidecar": ["continuation", "parent_artifacts", 0],
+    "continuation-v2-parent-evidence-sidecar": ["continuation", "parent_evidence", 0],
+    "continuation-v2-parent-review-sidecar": ["continuation", "parent_reviews", 0],
+    "continuation-v2-planning-reuse": ["continuation", "planning_reuse"],
   };
+  const sources = {
+    "continuation-v2-envelope": { "parent-run": CONTINUATION_V2_EXTERNAL.parentRun, "selected-review": CONTINUATION_V2_EXTERNAL.selectedReview, artifact: CONTINUATION_V2_EXTERNAL.artifact, evidence: CONTINUATION_V2_EXTERNAL.evidence, review: CONTINUATION_V2_EXTERNAL.review },
+    "continuation-v2-parent-binding": { "parent-run": CONTINUATION_V2_EXTERNAL.parentRun },
+    "continuation-v2-selected-review": { "selected-review": CONTINUATION_V2_EXTERNAL.selectedReview },
+    "continuation-v2-parent-artifact-sidecar": { artifact: CONTINUATION_V2_EXTERNAL.artifact },
+    "continuation-v2-parent-evidence-sidecar": { evidence: CONTINUATION_V2_EXTERNAL.evidence },
+    "continuation-v2-parent-review-sidecar": { review: CONTINUATION_V2_EXTERNAL.review },
+    "continuation-v2-planning-reuse": { review: CONTINUATION_V2_EXTERNAL.review, artifact: CONTINUATION_V2_EXTERNAL.artifact },
+  };
+  const canonicalPath = paths[id];
+  if (!canonicalPath) throw new TypeError(`missing canonical schema-v2 continuation fixture for ${id}`);
+  const run = {
+    schema_version: 1, run_id: "child-run", mode: "autonomous", status: "running", base_ref: "main", base_commit: SHA_A,
+    branch: "child", worktree: "/tmp/child", github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, gates: {}, continuation,
+    post_pr: { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
+    slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["README.md"], effective_paths: ["README.md"], status: "pending", attempts: 0 }],
+    steps: [],
+  };
+  return { run, canonicalPath, source: structuredClone(valueAt(run, canonicalPath, id)), externalSources: structuredClone(sources[id] ?? {}) };
 }
 
 function postPrPhaseEntry(phase) {
@@ -3299,45 +3091,14 @@ export function createDurableCatalogBaseline(record) {
         ...AMENDMENT_REVIEW_CLOSURE, completion_token_hash: AMENDMENT_REVIEW_CLAIM.completion_token_hash,
       }, externalSources: {} });
     }
-    return { consumer: "validateRun/checkRunConsistency", ...createRepairCatalogBaseline(record) };
+    throw new TypeError(`unrecognized integration amendment catalog row ${record.id}`);
   }
-  if (record.authorityClassId === "continuation-planning-draft-reuse") {
-    const fixture = continuationCatalogFixture(record.id);
+  if (record.authorityClassId === "continuation-v2-carry-forward") {
+    const fixture = continuationV2CatalogFixture(record.id);
     if (canonicalJson(record.source) !== canonicalJson(fixture.source) || canonicalJson(record.canonicalPath) !== canonicalJson(fixture.canonicalPath)) throw new TypeError(`${record.id} does not match its canonical continuation baseline fixture`);
     return structuredClone({ consumer: "validateRun", run: fixture.run, externalSources: fixture.externalSources });
   }
   return structuredClone({ consumer: "validateRun", run: canonicalRunFixture(record), externalSources: record.externalSources ?? {} });
-}
-
-export function createRepairCatalogBaseline(record) {
-  if (record?.authorityClassId !== "pr79-merged-slice-repair") throw new TypeError("repair fixture requires a registered PR79 repair record");
-  if (canonicalJson(record.canonicalPath) !== canonicalJson(["merged_slice_repair"])) throw new TypeError(`${record.id} must bind run.json.merged_slice_repair`);
-  const ownerEvidence = { ref: "evidence/owner.json", bytes: `{"subject":"owner","attempt":1,"status":"pass","review_ready":true,"head_sha":"${SHA_A}"}\n` };
-  const ownerReview = { ref: "reviews/owner.json", bytes: `{"subject":"owner","attempt":1,"verdict":"APPROVE","convergence":"converging","late_discovery_strike":false,"remaining_fix_count":0,"required_fixes":[],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[]},"reviewed_commit":"${SHA_A}"}\n` };
-  const ownerEvidenceHash = hashBytes(ownerEvidence.bytes);
-  const ownerReviewHash = hashBytes(ownerReview.bytes);
-  const ownerAttemptReview = { attempt: 1, evidence_ref: ownerEvidence.ref, evidence_hash: ownerEvidenceHash, review_ref: ownerReview.ref, review_hash: ownerReviewHash, reviewed_commit: SHA_A, diff_base_commit: SHA_A, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 };
-  const run = {
-    schema_version: 1,
-    run_id: "repair-catalog-run",
-    branch: "repair-feature",
-    status: "running",
-    gates: {},
-    steps: [],
-    slices: [
-      { id: "owner", stack: "backend", depends_on: [], declared_paths: ["src/owner/**"], effective_paths: ["src/owner/**"], status: "merged", attempts: 1, branch: "repair-feature--owner", worktree: "/tmp/repair-feature--owner", evidence_ref: ownerEvidence.ref, evidence_hash: ownerEvidenceHash, review_ref: ownerReview.ref, review_hash: ownerReviewHash, reviewed_commit: SHA_A, attempt_reviews: [ownerAttemptReview], merge_commit: SHA_A, updated_at: NOW },
-      { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
-    ],
-    merged_slice_repair: structuredClone(record.source),
-  };
-  return structuredClone({
-    run,
-    externalSources: record.externalSources,
-    supportSources: {
-      ownerEvidence,
-      ownerReview,
-    },
-  });
 }
 
 export const ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS = Object.freeze([
@@ -3749,7 +3510,7 @@ function issue128ExpectedRejection(id, code, target) {
           : "v2 carry-forward first-parent range must contain all and only accepted merge commits exactly once"
         : code === "K" && sourceName === "owner_source" && ["stack", "branch", "worktree"].includes(field) ? "slice builder dispatch claim identity is invalid"
           : code === "K" && sourceName === "owner_source" && field === "depends_on" ? id.startsWith("checkpoint-")
-            ? "v2 carry-forward requires durably accepted unchanged planning and no draft_spec_reuse"
+            ? "parent run slices must exactly classify the bound plan"
             : "accepted work-decomposer plan authority for the bound plan is invalid: parent run slices must exactly classify the bound plan"
           : code === "V" && target.path.includes("modified_extensions") && field === "path" ? "ratified_paths: must exactly equal modified_extensions paths"
         : code === "K" || code === "V" && !schemaValidExtensionValue ? issue128SchemaDiscriminator(field)
@@ -3973,7 +3734,7 @@ function buildIssue128FinishAndDiscloseCatalog() {
     const ownerSource = issue128OwnerSlice();
     for (const key of ["stack", "depends_on", "status", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]) delete accepted[key];
     rows.push(issue128Row({
-      id, authorityClass: "continuation-planning-draft-reuse", variant: checkpoint ? "checkpoint CF2 with A2/S2 owner pair" : "ordinary CF2 with A2/S2 owner pair", canonicalPath: "continuation.carry_forward.accepted_slices[i]", shape: "CF2+A2+S2", writer: checkpoint ? "checked checkpoint-bound factory continue" : "checked ordinary factory continue", readers: issue128Readers("C", "P", "D"),
+      id, authorityClass: "continuation-v2-carry-forward", variant: checkpoint ? "checkpoint CF2 with A2/S2 owner pair" : "ordinary CF2 with A2/S2 owner pair", canonicalPath: "continuation.carry_forward.accepted_slices[i]", shape: "CF2+A2+S2", writer: checkpoint ? "checked checkpoint-bound factory continue" : "checked ordinary factory continue", readers: issue128Readers("C", "P", "D"),
       tests: issue128ProductionTests(id), source: accepted, ownerSource, externalSources: issue128CatalogExternalSources(id, accepted), dispositions: issue128Dispositions(id, accepted, ownerSource), facts: [{ path: ["source", "effective_paths"], expected: [ISSUE128_DECLARED_PATH, ISSUE128_SIBLING_PATH] }, { path: ["source", "attempt_reviews", 0, "modified_extensions", 0, "authority"], expected: "non-conflicting-sibling" }],
     }));
   }
@@ -4009,8 +3770,8 @@ const ISSUE128_FINISH_AND_DISCLOSE_ORACLE_DIGESTS = Object.freeze([
   ["slice-blocked-ordinary-v2-history", "5ba31480ba4732fd6056c4f7eef5c1de0b0b31f2172f498a5bc9cdcfeb7b6497", "da46ffdc524250765f1091358e0ab5dfa7fc46f040cf01ae83a6de972b92ef9a", "b0c844056b7ca090b3bd2300e8a2837dc54d920e3c123b66a199101f4f61bf2b"],
   ["slice-blocked-nonconvergent-v2-history", "880c51c472c9d996172f4ebbd304e9c21127ff6beb0aeafbd9d15d2499a1535e", "13482462ee238cd5ef40645c04155c3c86bb4e212509f8c5393eb402c0739165", "16ac9022bcb20caf262715e3881292102324f5ca142ed7ce75740f8119b20076"],
   ["terminal-nonconvergence-v2-source-review", "b02c8ee1d2a58e1a86b6bdb7831f0973d95eb5b3213335122a09cb3dc8281053", "580ea713f4df3dff696d7aed6f99fa82eb443c02f45857a4fd6389ace854371c", "ef82a147840477858dd1d479b567c104254a8b19274fb89413656636a97fd221"],
-  ["continuation-carry-forward-accepted-slice-v2", "6dc73d0ad5b6473b4ed0c4a94967383729a5aacdd2f3006f97d72d38f2bf6a1a", "08ac2f6b7d1df33055d34a052d37635f28fc828dc40227163379e3b5e001ec68", "7710e61652b301ceb71fdcae2c9101166cbcec71adfde38ee0866f274af87a4f"],
-  ["checkpoint-carry-forward-accepted-slice-v2", "7bb9fdaeaa09c62c31366bcb64108db1b24fad3a3283b9d8ca015cf733bd8b51", "08ac2f6b7d1df33055d34a052d37635f28fc828dc40227163379e3b5e001ec68", "1d9923bb6b5a686c8f69ebdf1790731cbbd59dd75a4d3c4e31301eab4f43b102"],
+  ["continuation-carry-forward-accepted-slice-v2", "5728a3ee594b4e2d176084bc2dff29ab3891b0f736f9cac7ad00b366e28c1e7f", "08ac2f6b7d1df33055d34a052d37635f28fc828dc40227163379e3b5e001ec68", "7710e61652b301ceb71fdcae2c9101166cbcec71adfde38ee0866f274af87a4f"],
+  ["checkpoint-carry-forward-accepted-slice-v2", "5e1bf57cb6108616792e154346b2b2ee667ba0868db0265a677c9b9e633c0fcd", "08ac2f6b7d1df33055d34a052d37635f28fc828dc40227163379e3b5e001ec68", "7cba293192110828d2b6bc35a2d86ccf79c5e8865480e95d3fe1a31019f4a1bc"],
   ["amendment-owner-snapshot-v2-history", "bc3058f7fd9bee9165de32300fddcd12e12e54fa864efb95ca4b5c536eaa3e21", "ef9dbacdb8e20470e0a75cd22420ba3b512eac876207b0a1a3f6fc847bdaede0", "2bf2354da6b3663af1d1ea3fe4f79f01573135ff14125082822c240d36fb64e7"],
 ]);
 
@@ -4186,19 +3947,37 @@ function canonicalRunFixture(record) {
   }
   container[record.canonicalPath.at(-1)] = structuredClone(record.source);
   if (record.id === "step-inherited-acceptance") {
-    const continuation = structuredClone(continuationCatalogFixture("continuation-planning-reuse-eligible").run.continuation);
     run.branch = "catalog-child";
     run.worktree = "/tmp/catalog-child";
-    continuation.target = { ...continuation.target, run_id: run.run_id, branch: run.branch, worktree: run.worktree };
-    continuation.planning_reuse = {
-      eligible: true,
-      spec_review_ref: record.source.inherited_acceptance.parent_spec_review_ref,
-      spec_review_hash: record.source.inherited_acceptance.review_hash,
-      spec_artifact_ref: record.source.acceptance.artifact_ref,
-      spec_artifact_hash: record.source.inherited_acceptance.artifact_hash,
-      child_spec_review_ref: record.source.review_ref,
+    run.mode = "autonomous";
+    run.github_account = null;
+    run.pr_mode = "ready";
+    run.max_parallel_slices = 3;
+    run.max_retries = 3;
+    const policy = postPrPolicy(false);
+    run.post_pr = { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null };
+    run.continuation = {
+      schema_version: 2,
+      kind: "blocked-run-continuation",
+      created_at: NOW,
+      operator_summary: "Continue blocked run 'parent-run' from reviews/parent.json.",
+      parent: { run_id: "parent-run", status: "blocked", run_ref: ".opencode/factory/parent-run/run.json", run_hash: HASH_A, branch: "parent-run", commit: SHA_A, worktree: "/tmp/parent-run" },
+      review: { kind: "validator", ref: "reviews/parent.json", hash: HASH_A, subject: "parent-run", summary: "Continue current carry-forward.", required_fixes: ["finish"], source: "run.validator.review_ref" },
+      target: { run_id: run.run_id, branch: run.branch, worktree: run.worktree, base_ref: "refs/remotes/origin/main", base_commit: SHA_A },
+      parent_artifacts: [],
+      parent_evidence: [],
+      parent_reviews: [{ kind: "review", ref: "reviews/parent.json", hash: HASH_A }],
+      planning_reuse: {
+        eligible: true,
+        spec_review_ref: record.source.inherited_acceptance.parent_spec_review_ref,
+        spec_review_hash: record.source.inherited_acceptance.review_hash,
+        spec_artifact_ref: record.source.acceptance.artifact_ref,
+        spec_artifact_hash: record.source.inherited_acceptance.artifact_hash,
+        child_spec_review_ref: record.source.review_ref,
+      },
+      configuration: { mode: run.mode, github_account: null, pr_mode: run.pr_mode, max_parallel_slices: 3, max_retries: 3, post_pr_policy: policy },
+      carry_forward: { scope: "full-remaining-plan", plan_ref: "plan/slices.json", plan_hash: HASH_A, start_commit: SHA_A, accepted_slices: [], remaining_slice_ids: ["slice"] },
     };
-    run.continuation = continuation;
   }
   return run;
 }
@@ -4765,73 +4544,14 @@ function amendmentReviewProvenanceEntry(id, variant) {
     typePath: ["attempt"],
     facts: exactFacts(source),
     observations: [
-      repairReobservation("reviewer-effect-states", ["absent", "active-claim-only", "review-published-without-closure", "closed-unconsumed", "consumed", "orphan-or-cross-bound"], "inspectIntegrationAmendmentInventory"),
-      repairReobservation("compatibility", "immutable create-only sidecar; no run schema bump and no overwrite/backfill", "completeIntegrationAmendmentReviewTaskDispatch and downstream consistency"),
+      reobservation("reviewer-effect-states", ["absent", "active-claim-only", "review-published-without-closure", "closed-unconsumed", "consumed", "orphan-or-cross-bound"], "inspectIntegrationAmendmentInventory"),
+      reobservation("compatibility", "immutable create-only sidecar; no run schema bump and no overwrite/backfill", "completeIntegrationAmendmentReviewTaskDispatch and downstream consistency"),
     ],
     targets,
   });
 }
 
-function repairEntry(id, status, attempts, options) {
-  const source = {
-    schema_version: 1,
-    plan_hash: hashBytes(REPAIR_EXTERNAL.plan.bytes),
-    owner_slice_id: "owner",
-    consumer_slice_id: "consumer",
-    defect_path: "src/owner/records.js",
-    evidence_ref: REPAIR_EXTERNAL.originalEvidence.ref,
-    evidence_hash: hashBytes(REPAIR_EXTERNAL.originalEvidence.bytes),
-    status: status.startsWith("review:") ? "review" : status.startsWith("blocked-from-") ? "blocked" : status,
-    attempts,
-    max_attempts: 2,
-    created_at: NOW,
-    updated_at: NOW,
-    ...options.record,
-  };
-  const externalSources = {
-    plan: structuredClone(REPAIR_EXTERNAL.plan),
-    "original-evidence": structuredClone(REPAIR_EXTERNAL.originalEvidence),
-    ...(options.sidecars.includes("repair-evidence") ? { "repair-evidence": structuredClone(REPAIR_EXTERNAL.repairEvidence) } : {}),
-    ...(options.sidecars.includes("review") ? { review: structuredClone(options.reviewExternal) } : {}),
-    ...(options.sidecars.includes("verification") ? { verification: structuredClone(REPAIR_EXTERNAL.verification) } : {}),
-  };
-  const definitions = {
-    plan: sidecar("plan", ["$external", "plan", "ref"], ["plan_hash"], ["$external", "plan", "bytes"]),
-    "original-evidence": externalSidecar("original-evidence", ["evidence_ref"], ["evidence_hash"]),
-    "repair-evidence": externalSidecar("repair-evidence", ["repair_evidence_ref"], ["repair_evidence_hash"]),
-    review: externalSidecar("review", ["review_ref"], ["review_hash"]),
-    verification: externalSidecar("verification", ["verification_ref"], ["verification_hash"]),
-  };
-  const sidecars = options.sidecars.map((name) => definitions[name]);
-  const targets = sidecars.flatMap((binding) => sidecarTargets(binding.name, binding.refPath, binding.hashPath, binding.bytesPath));
-  targets.push(schema(["schema_version"]), time(["updated_at"]), stale(["attempts"], attempts === 0 ? 1 : attempts - 1), cross(["consumer_slice_id"], "owner"), drift([], "evidence_ref", "reproduction_ref"));
-  if (source.baseline_commit) targets.push(stale(["baseline_commit"], SHA_C));
-  if (source.reviewed_commit) targets.push(cross(["reviewed_commit"], SHA_C));
-  if (source.merge_commit) targets.push(stale(["merge_commit"], SHA_B));
-  return recordEntry({
-    authorityClassId: "pr79-merged-slice-repair", id, record: "run.json.merged_slice_repair", variant: status,
-    writer: `transitionMergedSliceRepair ${status} transition`,
-    readers: ["validateMergedSliceRepair", "transitionMergedSliceRepair next-state checks", "mergedSliceRepairFence and resume eligibility", "slice/step/panel/gate/PR lifecycle fences"],
-    source, canonicalPath: ["merged_slice_repair"], externalSources, requiredPath: ["status"], typePath: ["attempts"], sidecars, facts: options.facts, observations: options.observations, targets,
-  });
-}
-
-function repairReviewFields(reviewExternal) {
-  return {
-    baseline_commit: SHA_A,
-    reviewed_commit: SHA_B,
-    review_ref: reviewExternal.ref,
-    review_hash: hashBytes(reviewExternal.bytes),
-    repair_evidence_ref: REPAIR_EXTERNAL.repairEvidence.ref,
-    repair_evidence_hash: hashBytes(REPAIR_EXTERNAL.repairEvidence.bytes),
-  };
-}
-
-function repairObservation(name, source, path, expected, consumer) {
-  return { name, source, path, expected, consumer };
-}
-
-function repairReobservation(name, expected, consumer) {
+function reobservation(name, expected, consumer) {
   return { name, source: "re-observed", expected, consumer };
 }
 
@@ -4935,9 +4655,6 @@ function validateCanonicalCoreRecord(record, path) {
 function rejectSyntheticCanonicalKeys(record, path) {
   const forbidden = new Set(["sidecar_bytes"]);
   if (record.authorityClassId === "post-pr-nested-records") forbidden.add("run_status");
-  if (record.id.startsWith("repair-")) {
-    for (const key of ["plan_ref", "owner_snapshot", "quiescent", "review_verdict", "reviewed_tree", "merge_tree", "sidecar_bytes", "blocked_from"]) forbidden.add(key);
-  }
   if (record.authorityClassId === "slices-review-evidence-bindings") {
     forbidden.add("review_binding");
   }

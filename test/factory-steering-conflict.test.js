@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hashFile } from "../src/refs.js";
-import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
+import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
+import { createPanelReviewRecord, createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { transitionSteeringAcknowledged, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued } from "../src/run-state.js";
 import { collectProtectedSteeringState } from "../src/steering-conflicts.js";
 import { validateRunDir } from "../src/validate.js";
@@ -96,7 +97,7 @@ describe("factory steering conflict transition", () => {
       await assert.rejects(
         transitionSteeringConflict(heartbeatFixture.runDir, { ref: consumed.ref, hash: consumed.hash }, {
           now: "2026-07-09T12:02:00.000Z",
-          processAliveFn: (pid) => pid === 4242,
+          livenessProbe: (pid) => ({ status: pid === 4242 ? "live" : "absent" }),
         }),
         /active-heartbeat/u,
       );
@@ -203,9 +204,15 @@ function writeDurableFilesAndRun(runDir, runId) {
   writeJson(join(runDir, "reviews", "test.json"), { subject: "test-verifier", verdict: "APPROVE" });
   writeJson(join(runDir, "reviews", "be-api.json"), createSliceReviewRecord({ subject: "be-api", attempt: 1, reviewedCommit }));
   writeJson(join(runDir, "reviews", "be-docs.json"), createSliceReviewRecord({ subject: "be-docs", attempt: 1, reviewedCommit }));
-  writeJson(join(runDir, "reviews", "validator.json"), { subject: "implementation-validator", verdict: "GO-WITH-NITS" });
-  writeJson(join(runDir, "reviews", "security.json"), { subject: "security-reviewer", verdict: "PASS" });
-  writeJson(join(runDir, "plan", "slices.json"), { slices: [] });
+  writeJson(join(runDir, "reviews", "validator.json"), createPanelReviewRecord({ subject: runId, reviewedHeadSha: reviewedCommit, verdict: "GO-WITH-NITS" }));
+  writeJson(join(runDir, "reviews", "security.json"), createPanelReviewRecord({ subject: runId, reviewedHeadSha: reviewedCommit, verdict: "PASS" }));
+  writeJson(join(runDir, "plan", "slices.json"), withDeliveryEnvelope({
+    slices: [
+      { id: "be-api", stack: "backend", paths: ["be-api.txt"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] },
+      { id: "be-docs", stack: "backend", paths: ["be-docs.txt"], depends_on: [], acceptance: ["Docs work"], test_plan: ["node --test"] },
+    ],
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+  }));
   const evidenceRef = "evidence/be-api.json";
   const reviewRef = "reviews/be-api.json";
   const evidenceHash = hashFile(join(runDir, evidenceRef));
@@ -250,8 +257,13 @@ function writeDurableFilesAndRun(runDir, runId) {
       { id: "be-api", declared_paths: ["be-api.txt"], effective_paths: ["be-api.txt"], status: "merged", branch: "be-api", worktree: "/tmp/be-api", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, merge_commit: "abc123" },
       { id: "be-docs", declared_paths: ["be-docs.txt"], effective_paths: ["be-docs.txt"], status: "blocked", branch: "be-docs", worktree: "/tmp/be-docs", attempts: 1, evidence_ref: "evidence/be-docs.json", review_ref: "reviews/be-docs.json", blocked_reason: "blocked by upstream" },
     ],
-    validator: { verdict: "GO-WITH-NITS", report: "artifacts/validator.md", review_ref: "reviews/validator.json" },
-    security_review: { verdict: "PASS", review_ref: "reviews/security.json" },
+    validator: {
+      verdict: "GO-WITH-NITS", report: "artifacts/validator.md", report_hash: hashFile(join(runDir, "artifacts", "validator.md")),
+      review_ref: "reviews/validator.json", review_hash: hashFile(join(runDir, "reviews", "validator.json")), reviewed_head_sha: reviewedCommit,
+    },
+    security_review: {
+      verdict: "PASS", review_ref: "reviews/security.json", review_hash: hashFile(join(runDir, "reviews", "security.json")), reviewed_head_sha: reviewedCommit,
+    },
     pr_url: "https://github.com/acme/project/pull/123",
   });
 }

@@ -7,6 +7,17 @@ import { PR79_GENERIC_PARITY, blocked, buildingAttempt, cleanupFixtures, exercis
 after(cleanupFixtures);
 
 describe("generic integration amendment catalog coverage", () => {
+  it("retains exactly the 48 current integration-amendment rows", () => {
+    const ids = DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"];
+    const catalogIds = DURABLE_AUTHORITY_CATALOG
+      .find(({ id }) => id === "pr79-merged-slice-repair")
+      .records.map(({ id }) => id);
+    assert.equal(ids.length, 48);
+    assert.equal(new Set(ids).size, 48);
+    assert.equal(ids.every((id) => id.startsWith("amendment-")), true);
+    assert.deepEqual(catalogIds, ids);
+  });
+
   it("ports all 28 PR #79 adversarial categories through their generic production sinks", async (t) => {
     assert.deepEqual(PR79_GENERIC_PARITY.map(({ id }) => id), Array.from({ length: 28 }, (_, index) => index + 1));
     assert.equal(new Set(PR79_GENERIC_PARITY.map(({ category }) => category)).size, 28);

@@ -63,7 +63,7 @@ describe("B4 delivery-contract extension seams", () => {
     assert.throws(() => validateInvariantFamilyLedger(unknownKey), /authority: is not allowed/u);
   });
 
-  it("keeps legacy admission inactive while applying active checked review policy", () => {
+  it("applies active current admission and checked review policy", () => {
     const plan = deliveryPlan();
     const review = { subject: "api", attempt: 1, verdict: "REJECT", reviewed_commit: COMMIT, invariant_family_ledger: invariantFamilyLedger() };
     let observedRef = null;
@@ -82,9 +82,10 @@ describe("B4 delivery-contract extension seams", () => {
     assert.deepEqual(validateAdmissionExtensionResult(admission), {
       schema_version: 1,
       extension: "delivery-envelope-admission",
-      status: "inactive",
-      grants_b4_authority: false,
-      reason: "b4-admission-policy-inactive",
+      status: "active",
+      grants_b4_authority: true,
+      decision: "admit",
+      reasons: ["admit:delivery-envelope-within-bounds"],
     });
     assert.deepEqual(validateReviewExtensionResult(reviewResult), {
       schema_version: 1,
@@ -118,14 +119,8 @@ describe("B4 delivery-contract extension seams", () => {
     }).decision, "approve");
   });
 
-  it("preserves omission compatibility while rejecting any supplied malformed reservation", () => {
-    assert.deepEqual(evaluateDeliveryEnvelopeAdmission({ plan: { slices: [] } }), {
-      schema_version: 1,
-      extension: "delivery-envelope-admission",
-      status: "inactive",
-      grants_b4_authority: false,
-      reason: "b4-admission-policy-inactive",
-    });
+  it("rejects omitted current admission contracts and supplied malformed reservations", () => {
+    assert.throws(() => evaluateDeliveryEnvelopeAdmission({ plan: { slices: [] } }), /plan\.integration_gate: is required/u);
     assert.deepEqual(evaluateInvariantFamilyReview({ plan: { slices: [] }, sliceId: "legacy", review: {} }), {
       schema_version: 1,
       extension: "invariant-family-review",
@@ -134,7 +129,7 @@ describe("B4 delivery-contract extension seams", () => {
       reason: "b4-review-policy-inactive",
     });
     assert.throws(
-      () => evaluateDeliveryEnvelopeAdmission({ plan: { slices: [], delivery_envelope: { schema_version: 1, delivery_units: [], active: true } } }),
+      () => evaluateDeliveryEnvelopeAdmission({ plan: { integration_gate: integrationGate(), slices: [], delivery_envelope: { schema_version: 1, delivery_units: [], active: true } } }),
       /delivery_envelope\.active: is not allowed/u,
     );
   });
@@ -161,6 +156,7 @@ describe("B4 delivery-contract extension seams", () => {
 
 function deliveryPlan() {
   return {
+    integration_gate: integrationGate(),
     slices: [
       { id: "api", stack: "backend", paths: ["src/api/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/api.test.js"] },
       { id: "contract", stack: "backend", paths: ["test/contract/**"], depends_on: ["api"], acceptance: ["AC2"], test_plan: ["node --test test/contract.test.js"] },
@@ -173,14 +169,14 @@ function deliveryPlan() {
           slice_id: "api",
           invariant_families: [{ id: "api-behavior", description: "API behavior remains stable" }],
           obligations: [{ id: "api-response-obligation", description: "Return the specified API response", invariant_family_id: "api-behavior", verification_artifact_id: "api-tests" }],
-          verification_artifacts: [{ id: "api-tests", test_plan_index: 0, test_plan_entry: "node --test test/api.test.js" }],
+          verification_artifacts: [{ id: "api-tests", test_plan_index: 0, test_plan_entry: "node --test test/api.test.js", timeout_ms: 600_000 }],
         },
         {
           id: "contract-unit",
           slice_id: "contract",
           invariant_families: [{ id: "contract-behavior", description: "Contract remains stable" }],
           obligations: [{ id: "contract-obligation", description: "Exercise the public contract", invariant_family_id: "contract-behavior", verification_artifact_id: "api-contract-tests" }],
-          verification_artifacts: [{ id: "api-contract-tests", test_plan_index: 0, test_plan_entry: "node --test test/contract.test.js" }],
+          verification_artifacts: [{ id: "api-contract-tests", test_plan_index: 0, test_plan_entry: "node --test test/contract.test.js", timeout_ms: 600_000 }],
         },
       ],
     },
@@ -262,6 +258,10 @@ function reviewedCheckpointPlan() {
   };
 }
 
+function integrationGate() {
+  return { required_commands: [{ program: "npm", args: ["run", "check"] }], timeout_ms: 600_000 };
+}
+
 function failedVerificationReceipt() {
   const stream = { captured_bytes: 0, sha256: `sha256:${"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`, truncated: false };
   return {
@@ -275,6 +275,7 @@ function failedVerificationReceipt() {
     plan_ref: "plan/slices.json",
     plan_hash: `sha256:${"d".repeat(64)}`,
     head_sha: COMMIT,
+    timeout_ms: 600_000,
     verification_artifact_id: "api-tests",
     probe: {
       type: "verification-artifact",
@@ -302,6 +303,7 @@ function completedVerificationClaim(receiptRef, receipt) {
     schema_version: 1, kind: "checked-verification-artifact-execution-claim", state: "completed",
     nonce: receipt.claim_nonce, run_id: receipt.run_id, slice_id: receipt.slice_id, attempt: receipt.attempt,
     plan_ref: receipt.plan_ref, plan_hash: receipt.plan_hash, head_sha: receipt.head_sha,
+    timeout_ms: receipt.timeout_ms,
     verification_artifact_id: receipt.verification_artifact_id, probe: receipt.probe, receipt_ref: receiptRef,
     claimed_at: "2026-07-19T09:59:59.000Z", completed_at: receipt.completed_at, status: receipt.status, receipt_hash: HASH,
   };

@@ -1,4 +1,4 @@
-Status — implemented v2 reviewed carry-forward, 2026-07-17. Option A(a) / D is selected only by explicit pre-PR `factory continue ... --carry-forward`. Unflagged and post-PR continuation remain schema v1.
+Status: current schema-v2 reviewed carry-forward. Option A(a) / D is selected only by explicit pre-PR `factory continue ... --carry-forward`; schema v2 full-plan carry-forward is the only current continuation shape.
 
 # Continuation Scope and Reviewed Carry-Forward
 
@@ -8,9 +8,11 @@ A blocked feature has one continuation, not one continuation per remaining conce
 
 This approves Option A(a) (branch from the validated integration HEAD and durably re-adopt accepted slices) and Option D (do not fragment one blocked run into sibling continuations). Scope-aware partial PR gates, cross-continuation joins, replaying already accepted slices, and independent sibling continuations are rejected.
 
-## Current v1 boundary
+## Current continuation boundary
 
-The shipped v1 continuation remains current, narrow, and readable. It decomposes only `continuation.review.required_fixes`, inherits accepted planning only through the existing checked adoption path, and otherwise runs the current gates. Existing v1 post-PR continuation behavior is unchanged. V2 requires the explicit selector; a v2 payload is admissible only when it exactly matches a checked, published child.
+Only schema-v2 full-plan carry-forward is current. It requires the explicit selector and a payload that exactly matches a checked, published child. V1, unflagged, partial, draft-reuse, and post-PR continuation shapes reject before effects and require abandonment and re-seeding when current authority is unavailable.
+
+The current privileged contract is uniform across continuation and generic integration amendment consumers. Every plan requires `integration_gate.required_commands`, `integration_gate.timeout_ms`, and a complete `delivery_envelope` with per-artifact timeouts. A present PR fence requires `{operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft}`; validator requires `{report,report_hash,review_ref,review_hash,reviewed_head_sha}` and security requires `{review_ref,review_hash,reviewed_head_sha}`. Missing or partial current authority rejects and requires re-seeding. Ordinary slice completion permits only the capability-authenticated callback closure or checked candidate adoption, with no widened closure shape.
 
 ## Implemented v2 carry-forward schema
 
@@ -42,13 +44,13 @@ The `carry_forward` object is closed to exactly `scope`, `plan_ref`, `plan_hash`
 
 `plan_ref` is the parent-relative `plan/slices.json`, and `plan_hash` binds its exact regular-file bytes. `accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order. `remaining_slice_ids` contains every nonmerged slice ID, in PLAN order. IDs are unique within each array, the arrays are disjoint, and their set union is exactly the bound plan's complete `slices[].id` set, with no omission or extra ID. They are ordered filtered subsequences, not a prefix/suffix split: for plan order `[A, B, C]`, merged `A` and `C` produces `accepted_slices: [A, C]` and `remaining_slice_ids: [B]`, which is valid. Remaining rows inherit identity and plan dependencies only: they inherit no status, attempts, evidence, review, reviewed commit, merge commit, test result, panel verdict, or other authority from the parent.
 
-Schema-v2 eligibility also requires root `plan.integration_gate.required_commands`. It is the closed ordered structured-argv contract: 1-32 exact `{program,args}` entries, no shell text, bounded UTF-8 program/args/list sizes, and exact `{program:"npm",args:["run","check"]}` once and last. The parent work-decomposer accepted step must bind exact `plan/slices.json` and its review through the existing closed `acceptance` ref/hash shape. Construction, staged publication, adoption, local authority checks, replay, resume, test dispatch, and downstream transitions rehash the accepted files and reject missing/malformed/drifted authority. Publication copies plan and review bytes unchanged; after observing target absence it repeats parent binding and staged-byte checks immediately before the no-replace move. Compatibility reads keep legacy v1 plans/accepted steps valid, but they cannot become v2 carry-forward authority.
+Schema-v2 eligibility requires root `plan.integration_gate.required_commands` and `plan.delivery_envelope`. The gate is the closed ordered structured-argv contract: 1-32 exact `{program,args}` entries, no shell text, bounded UTF-8 program/args/list sizes, and exact `{program:"npm",args:["run","check"]}` once and last. The parent work-decomposer accepted step must bind exact `plan/slices.json` and its review through the existing closed `acceptance` ref/hash shape. Every plan reader, construction, staged publication, adoption, local authority check, replay, resume, test dispatch, and downstream transition rehashs the accepted files and rejects missing, malformed, partial, or drifted authority. Publication copies plan and review bytes unchanged; after observing target absence it repeats parent binding and staged-byte checks immediately before the no-replace move. Missing current plan authority requires re-seeding.
 
 After every child row is merged, only `factory test-execute <run-id> --json` may execute that command authority. The locked active claim binds nonce, run/attempt, exact plan hash, clean child HEAD, and fixed receipt ref before process creation. The shell-free executor uses exact child cwd, reduced environment, sequential bounded commands, captured-prefix hashes instead of raw output, and fail-closed unknown states for process, authority, or receipt-publication uncertainty. Finalization rechecks every merged commit remains ancestral to exact clean HEAD before create-only receipt publication. A completed pass remains running for independent test-report review; a decided failure rejects the same attempt. Active/unknown state has no supported retry, clear, replacement, terminal, steering-conflict, step-advance, or recovery path. Caller/model reason text grants no authority. B1R requires trusted out-of-band operator/process reconciliation and intentionally exposes no autonomous command or authority flag.
 
 ## V2 eligibility and integration proof
 
-V2 carry-forward is eligible only for a valid parent whose status is exactly `blocked` before PR creation. The parent has no PR URL or PR-created tuple and no active post-PR observation, remediation, revalidation, push, or continuation state. It must also have `planning_reuse.eligible === true` from durably accepted unchanged planning and no `draft_spec_reuse`. A parent with a PR, active post-PR state, a non-`blocked` status, no nonmerged slice, draft/unaccepted planning, or ambiguous state is ineligible for v2. Current v1 post-PR continuation remains unchanged and is not routed through v2 carry-forward.
+V2 carry-forward is eligible only for a valid parent whose status is exactly `blocked` before PR creation. The parent has no PR URL or PR-created tuple and no active post-PR observation, remediation, revalidation, push, or continuation state. It must also have `planning_reuse.eligible === true` from durably accepted unchanged planning. A parent with a PR, active post-PR state, a non-`blocked` status, no nonmerged slice, draft/unaccepted planning, or ambiguous state is ineligible and rejects before effects.
 
 Each accepted row must match the same-ID parent slice with positive `attempts`, status exactly `merged`, the complete B0MR successor tuple, and unchanged exact evidence/review bytes. Actual integration merge order may differ from PLAN and dependency-execution order. The Git first-parent range from `target.base_commit` exclusive through `start_commit` inclusive must contain exactly once the set of `accepted_slices[].merge_commit` values and no extra commit; its chain length equals `accepted_slices.length`. Every first-parent commit is associated by its `merge_commit` value with exactly one accepted entry and is revalidated with that entry's B0MR proof: exactly two ordered parents `P1, reviewed_commit`, a unique full `git merge-base --all`, equal NUL-delimited rename-disabled changed-path sets, and per-path absence or mode/type/object identity. `start_commit` is the parent branch HEAD and the last actual merge in that first-parent range, or equals `target.base_commit` when `accepted_slices` is empty. This does not require `accepted_slices` order to equal first-parent chain order: for PLAN-ordered `accepted_slices: [A, C]`, an actual first-parent chain `[C, A]` is valid when both mapped merges pass B0MR. Missing, duplicate, squash, linear, manual, or unrecorded commits fail closed.
 
@@ -121,7 +123,7 @@ The child root remains `schema_version: 1`; only `continuation.schema_version` i
 
 Initial child state contains exact accepted planning/spec acceptance at attempt zero, PLAN-ordered mixed merged/pending rows, fresh steering, empty gates, null validator/security, and no inherited test/panel/PR/outcome authority. Adopted rows and sidecars are immutable. Pending rows start at attempt zero and become runnable only when all dependencies are merged. Fresh execution skips bootstrap/story/research/spec/decomposition and enters normal remaining-slice execution; only after every full-plan row is merged may fresh test-verifier attempt one, validator, security, and whole-story pre-PR authority run.
 
-Schema-v1 publication and schema-v2 allocation share one create-only target reservation at `refs/opencode/continuation-targets/<sha256-child-run-id>`. The canonical reservation binds route schema, crash-stable creation time, and the complete continuation hash, so concurrent cross-schema retries cannot both acquire authority and only exact replay can continue after a crash.
+Schema-v2 allocation uses one create-only target reservation at `refs/opencode/continuation-targets/<sha256-child-run-id>`. The canonical reservation binds route schema 2, crash-stable creation time, and the complete continuation hash, so conflicting retries cannot acquire authority and only exact replay can continue after a crash.
 
 The transport remains `ffpayload-v1:`. Candidate, claim, branch, worktree, or caller payload alone is never authority. A reservation alone is likewise insufficient: parsing checks the exact reservation-bound continuation, and v2 additionally checks the exact published child and persisted driver projection. Resume/replay rechecks immutable adoption and parent/origin/reservation/claim/branch/worktree/plan authority. Replay preserves progressed remaining-slice, gate, panel, and post-PR state. Terminal replay returns current terminal state without launching, and the permanent allocation records survive cleanup and terminalization.
 
@@ -130,13 +132,11 @@ The transport remains `ffpayload-v1:`. Candidate, claim, branch, worktree, or ca
 - Do not weaken the whole-story pre-PR gate.
 - Do not build a cross-run merge train or sibling-continuation join.
 - Do not replay already reviewed accepted slices.
-- Do not change or remove the current v1 narrow or post-PR continuation paths.
+- Do not add a narrow, post-PR, compatibility, or replacement continuation path.
 
 ## B5 integration amendment decision
 
-Status: canonical B5.1 design, planned but not runtime authority. B5.2-B5.4 must
-implement and prove this contract before the generic route may replace new PR #79
-repair admission.
+Status: implemented current generic integration amendment authority.
 
 ### Architectural additions
 
@@ -167,7 +167,7 @@ Admission requires all of the following under the run lock:
 3. No slice is `running` or `review`; test-verifier is absent or pristine at attempt
    zero; validator, security, `gates.pre_pr`, PR fence, PR URL/tuple, and actual
    post-PR authority are absent.
-4. No legacy repair or generic amendment exists. `special_builder_dispatch` is
+4. No generic amendment exists. `special_builder_dispatch` is
    absent and no orphan or unconsumed special claim/closure exists. Ordinary
    dispatches may retain exact closed history, but none may be active, unknown,
    orphaned, or unconsumed. Completed historical test/artifact claims and receipts
@@ -206,8 +206,10 @@ The baseline is the sole report substrate. No consumer branch, commit, worktree,
 untracked file, or synthetic owner/consumer overlay is read or copied. Verification
 runs the byte-identical probe against the staged integration tree, whose only delta
 is the reviewed owner-owned path set. A probe or fixture available only on a consumer
-branch is outside the generic route. It cannot authorize publication; blocked and
-branch-only incidents remain a disjoint narrowed legacy/recovery class.
+branch is outside the generic route and cannot authorize publication. Continuation,
+checkpoint, blocked, previously attempted, branch-only, and other non-pristine cases
+reject amendment and require checked terminalization followed by fresh schema-v2
+full-plan carry-forward.
 
 | Observed report outcome | Durable result |
 |---|---|
@@ -261,7 +263,7 @@ with different caller selectors. The complete observation table is closed:
 |---|---|
 | all absent | one report may create the active fixed claim |
 | active claim only | owned or unresolved process; all semantic writers reject |
-| unknown claim, with optional exact bound receipt | operator reconciliation; no retry, clear, terminalization, or legacy fallback |
+| unknown claim, with optional exact bound receipt | operator reconciliation; no retry, clear, terminalization, or fallback |
 | completed pass plus exact receipt, no manifest | settled `not-reproduced`; ordinary work may continue; no second report |
 | completed diagnostic fail plus exact signal/launch-error/timeout/output-limit receipt, no manifest | settled diagnostic; ordinary work may continue; no second report |
 | completed nonzero fail plus exact receipt, no manifest | unconsumed report; all semantic writers reject; exact report replay creates `reported` |
@@ -272,7 +274,7 @@ with different caller selectors. The complete observation table is closed:
 Malformed or foreign bytes at a fixed ref are a permanent conflict. A different
 identity never receives another report-claim path. Ordinary writers, all amendment
 transitions, generic run writers, slice/step/gate/panel/PR/post-PR writers, heartbeat,
-resume/recovery, terminalization, cleanup, continuation, legacy report admission,
+resume/recovery, terminalization, cleanup, continuation,
 `validateRun`, and `checkRunConsistency` inspect this tombstone and its complete
 sidecar inventory under lock and immediately before protected replacement. Cleanup
 protects rather than deletes pre-manifest claims and invalid or unknown authority.
@@ -450,7 +452,7 @@ before and after claim creation, process/receipt publication, Task claim/closure
 staging ref/worktree creation, feature CAS, worktree reconciliation, and protected
 `run.json` replacement. Unreferenced commit objects grant no authority.
 
-### Consumers, continuation, and migration
+### Consumers and continuation
 
 Before `merged`, ordinary builder dispatch, slice start/review/merge, artifact/test
 execution, steps/test-verifier, panels, gate boundaries/decisions, pre-PR fence, PR,
@@ -482,28 +484,22 @@ integration HEAD. A blocked or previously attempted consumer is deliberately
 ineligible because existing blocked slices are terminal and B5 introduces no unsafe
 blocked-to-running transition, attempt reset, consumer overlay, or branch rewrite.
 
-V1 and V2 continuation are intentionally unsupported for any parent or child carrying
+Schema-v2 continuation is intentionally unsupported for any parent or child carrying
 `integration_amendment`. Construction, target reservation/allocation, publication,
 adoption, payload parsing/replay, local-authority checks, resume, and synthetic child
 injection all reject before effects with
 `integration-amendment-continuation-unsupported`. Supporting amendment continuation
 would require a separately approved sidecar-copy and first-parent proof design.
 
-Persisted `merged_slice_repair` records retain their original schema and may progress
-through their original transition/dispatch/readers. Generic and legacy records cannot
-coexist. After every generic parity case passes in the same reviewed tree, new legacy
-admission is retired only for pristine-pending, baseline-substrate incidents covered
-by the generic route. A blocked, previously attempted, or branch-only consumer stays
-in the explicitly narrowed legacy/recovery class; it cannot fall back after any
-generic claim or tombstone exists. Legal successors of an already persisted legacy
-record remain unchanged. This makes the two admission sets disjoint rather than
-keeping competing maximally strict workflows for one incident.
+The amendment itself is the sole in-place repair authority. Ineligible consumers do
+not receive another repair route; they terminalize through their checked class-specific
+boundary and proceed only through a fresh schema-v2 full-plan carry-forward child.
 
 ### Finite source-to-sink matrix
 
 | Sink | Required amendment policy |
 |---|---|
-| `validateRun` / `checkRunConsistency` | closed variant; exact claim/receipt/review/dispatch bytes and Git identities; no generic/legacy overlap |
+| `validateRun` / `checkRunConsistency` | closed current variant; exact claim/receipt/review/dispatch bytes and Git identities |
 | fixed report-claim inventory | classify absent/active/unknown/settled/unconsumed/consumed/orphan under lock; never infer authority from a missing manifest |
 | all amendment transitions | exact prior variant, current plan/owner/branch/sidecars, idempotent same-input replay, protected replacement recheck |
 | generic run writers | cannot create, change, or remove amendment or its authority bindings |
@@ -513,9 +509,9 @@ keeping competing maximally strict workflows for one incident.
 | panels / Gate 3 / pre-PR fence / PR | reject unresolved/blocked amendment; rehash merged route before publication |
 | resume / heartbeat / terminal / recovery / cleanup | no bypass; active/unknown effects stay fail-closed; blocked routes only to checked terminalization |
 | post-PR | report rejects actual post-PR authority; post-PR transitions reject unresolved amendment; merged then proceeds normally |
-| V1/V2 continuation | reject any generic amendment at construction, allocation, publication, adoption, replay, and resume |
+| schema-v2 continuation | reject any generic amendment at construction, allocation, publication, adoption, replay, and resume |
 
-### PR #79 parity inventory
+### Amendment adversarial parity inventory
 
 B5.4 maps the existing finite adversarial suite individually to the generic route:
 
@@ -552,7 +548,7 @@ B5.4 maps the existing finite adversarial suite individually to the generic rout
 
 ### CLI and durable catalog
 
-The planned strict CLI is:
+The current strict CLI is:
 
 ```text
 factory amendment <run-id> report --owner-slice ID --consumer-slice ID --defect-path PATH --artifact-id ID --json
@@ -579,16 +575,15 @@ callback session/call IDs are process-local selectors; the completion capability
 retained only in the immutable claim/closure binding. Each row has a concrete target or
 record-specific nonempty exclusion for all twelve families: missing key, unknown key,
 wrong schema, kind, time, type, ref, hash, bytes, descriptor key-shape drift, stale
-identity, and cross-bound identity. All eight legacy PR #79 variants remain registered.
-B5.4 activates all 48 generic rows, bringing the complete durable catalog to exactly
-196 variants and 195 production-covered variants while retaining
+identity, and cross-bound identity. All 48 generic rows are current, bringing the
+complete durable catalog to exactly 185 variants and 184 production-covered variants while retaining
 `final-plan-descriptor` as the sole future-only row.
 
-### Canonical machine-readable B5.1 contract
+### Canonical machine-readable integration-amendment contract
 
 The JSON object between the markers is normative. Family-level catalog policy applies
 to every explicitly listed variant in that family; no wildcard or inferred variant is
-allowed. B5.2-B5.4 may add runtime fields only by first changing this design contract
+allowed. Runtime changes may add fields only by first changing this design contract
 and its independent structural fixture.
 
 <!-- integration-amendment-contract:start -->
@@ -596,7 +591,7 @@ and its independent structural fixture.
 {
   "schema_version": 1,
   "kind": "integration-amendment-design-contract",
-  "runtime_authority": false,
+  "runtime_authority": true,
   "identity": {
     "keys": ["schema_version", "kind", "run_id", "defect_path", "admission"],
     "canonicalization": "recursive-lexicographic-object-keys-array-order-json-utf8-no-bom-no-newline",
@@ -747,7 +742,7 @@ and its independent structural fixture.
     "review_dispatch_variants": {"writer":"src/plugin.js checked work-reviewer before/after callback through prepare/complete integration-amendment review dispatch","readers":["validateIntegrationAmendmentReviewDispatchClaim","validateIntegrationAmendmentReviewDispatchClosure","inspectIntegrationAmendmentInventory reviewer-effect classifier","callback replay","review transition","downstream amendment consistency"],"tests":["integration-amendment-contract","integration-amendment-runtime","plugin","durable-record-mutations"]}
   },
   "review_dispatch_observations": ["absent", "active-claim-only", "review-published-without-closure", "closed-unconsumed", "consumed", "orphan-or-cross-bound"],
-  "review_dispatch_compatibility": {"run_schema_bump":false,"pre-dispatch_legacy":"absent-compatible","reviewed_attempt":"claim-and-closure-required","publication":"create-only-exact-replay-no-overwrite","unresolved":"semantic-fence-and-operator-reconciliation-no-redispatch","consumed":"immutable-downstream-revalidation"},
+  "review_dispatch_compatibility": {"run_schema_bump":false,"pre-dispatch":"absent","reviewed_attempt":"claim-and-closure-required","publication":"create-only-exact-replay-no-overwrite","unresolved":"semantic-fence-and-operator-reconciliation-no-redispatch","consumed":"immutable-downstream-revalidation"},
   "transitions": ["reported->building-1", "building-1->reviewed-approve-1", "building-1->reviewed-reject-1", "reviewed-reject-1->building-2", "building-2->reviewed-approve-2", "building-2->reviewed-reject-2", "reviewed-approve-1->integrated", "reviewed-approve-2->integrated", "integrated->verified", "verified->merged"],
   "blocked_origins": ["reported", "building", "reviewed-approve", "reviewed-reject", "integrated", "verified"],
   "report_outcomes": [
@@ -770,9 +765,9 @@ and its independent structural fixture.
   ],
   "report_claim_observations": ["all-absent", "active-claim-only", "unknown-claim-optional-bound-receipt", "completed-pass-receipt-no-manifest", "completed-diagnostic-receipt-no-manifest", "completed-nonzero-receipt-no-manifest", "completed-nonzero-receipt-matching-manifest", "receipt-without-claim", "cross-bound-or-orphan-sidecar"],
   "publication_cases": ["ref-and-clean-worktree-at-baseline", "ref-and-clean-worktree-at-integration", "ref-at-integration-worktree-at-exact-clean-pre-cas-baseline"],
-  "writer_fences": ["amendment-transitions", "generic-run-writers", "slice-writers", "step-writers", "gate-writers", "panel-writers", "pre-pr-and-pr-writers", "post-pr-writers", "heartbeat-writers", "resume-and-recovery", "terminalization", "cleanup", "continuation", "legacy-report-admission", "validateRun", "checkRunConsistency"],
+  "writer_fences": ["amendment-transitions", "generic-run-writers", "slice-writers", "step-writers", "gate-writers", "panel-writers", "pre-pr-and-pr-writers", "post-pr-writers", "heartbeat-writers", "resume-and-recovery", "terminalization", "cleanup", "continuation", "validateRun", "checkRunConsistency"],
   "continuation_boundaries": ["construction", "target-reservation", "allocation", "publication", "adoption", "payload-replay", "local-authority-check", "resume"],
-  "migration": ["persisted-legacy-progresses-unchanged", "generic-and-legacy-never-coexist", "generic-tombstone-forbids-legacy-fallback", "generic-retires-legacy-only-for-pristine-pending-baseline-substrate", "blocked-previously-attempted-and-branch-only-remain-narrowed-legacy-recovery", "all-28-adversarial-guarantees-port-before-cutover"],
+  "current_shape": ["generic-amendment-is-sole-in-place-repair", "continuation-checkpoint-and-non-pristine-require-fresh-v2-carry-forward", "old-shapes-reject-fail-closed", "all-28-adversarial-guarantees-retained"],
   "parity": [
     {"id":1,"category":"report eligibility","sink":"checked failure execution and report admission"},
     {"id":2,"category":"ratified ownership and overlap","sink":"current effective-owner observation"},
