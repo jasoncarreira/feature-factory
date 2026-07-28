@@ -1906,12 +1906,19 @@ function normalizePersistedOwnershipDisclosure(value, sliceId, unexpected) {
     }
     return { path: entry.path, rationale };
   });
-  const paths = normalized.map((entry) => entry.path);
-  if (JSON.stringify(paths) !== JSON.stringify([...paths].sort()) || new Set(paths).size !== paths.length
-    || JSON.stringify(paths) !== JSON.stringify(unexpected)) {
-    throw new Error(`slice '${sliceId}' persisted ownership disclosure path set is stale`);
-  }
-  return normalized;
+  // The persisted disclosure was written by the factory from its own out-of-lane
+  // computation, so re-deriving the set and demanding byte-equality is internal
+  // attestation on a factory-authored record. Index the persisted prose by path
+  // and key the result off the freshly derived set instead: order and membership
+  // come from the derivation, and a persisted entry for a path that is no longer
+  // out-of-lane is inert rather than fatal. The result stays total over
+  // `unexpected`, which the caller dereferences unguarded.
+  const persistedByPath = new Map(normalized.map((entry) => [entry.path, entry.rationale]));
+  return unexpected.map((path) => {
+    const rationale = persistedByPath.get(path);
+    if (!rationale) throw new Error(`slice '${sliceId}' persisted ownership disclosure does not explain '${path}'`);
+    return { path, rationale };
+  });
 }
 
 function observeConsistencyPathSet(runDir, from, to, label) {

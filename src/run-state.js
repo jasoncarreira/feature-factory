@@ -6053,7 +6053,7 @@ function observeSliceOwnershipAuthority(runDir, run, sliceId, slice, review, evi
   const unexpected = changedPaths.filter((path) => !declaredLanes.some((lane) => ownershipLaneContains(lane, path)));
   const reviewResult = validateSliceReviewResult(review, { sliceId });
   const { ownership_schema_version: ownershipSchemaVersion, verdict } = reviewResult;
-  const ownershipDisclosure = normalizeOwnershipDisclosure(evidence?.ownership_disclosure, sliceId, unexpected);
+  const ownershipDisclosure = deriveOwnershipDisclosure(evidence?.ownership_disclosure, sliceId, unexpected);
   if (options.publication === true && ownershipSchemaVersion !== 2) {
     throw new Error(`slice '${sliceId}' new checked review publication requires pathless ownership_ratification schema_version 2`);
   }
@@ -6257,14 +6257,22 @@ function recordChangedPathKind(kinds, path, kind) {
   kinds.set(path, kind);
 }
 
-function normalizeOwnershipDisclosure(value, sliceId, unexpectedPaths) {
-  if (unexpectedPaths.length === 0) {
-    if (value === undefined) return [];
-    if (!Array.isArray(value) || value.length !== 0) throw new Error(`slice '${sliceId}' ownership_disclosure must be empty when every changed path is declared`);
-    return [];
-  }
-  if (!Array.isArray(value)) throw new Error(`slice '${sliceId}' evidence must include ownership_disclosure for every changed path outside declared ownership`);
-  const normalized = value.map((entry, index) => {
+// The factory computes the out-of-lane set itself, so that set is authoritative
+// and the builder supplies only the prose keyed to it. Previously the builder
+// had to echo the set back byte-for-byte - sorted, unique, and exactly equal -
+// and any disagreement rejected the attempt even though the factory already
+// knew the answer. That echo is gone: entries are indexed by path, the derived
+// set decides which paths appear and in what order, and a disclosure naming a
+// path that turned out to be in-lane is ignored rather than fatal.
+//
+// What remains is a content requirement, not an echo: every derived out-of-lane
+// path needs a rationale, because that prose is the only thing here a human
+// reads. The error names the specific unexplained path instead of reporting a
+// set mismatch. The result is total over unexpectedPaths, which both consumers
+// rely on - each dereferences disclosedByPath.get(path).rationale unguarded.
+function deriveOwnershipDisclosure(value, sliceId, unexpectedPaths) {
+  const supplied = new Map();
+  for (const [index, entry] of (Array.isArray(value) ? value : []).entries()) {
     if (!isRecord(entry) || Object.keys(entry).length !== 2 || !Object.hasOwn(entry, "path") || !Object.hasOwn(entry, "rationale")) {
       throw new Error(`slice '${sliceId}' ownership_disclosure[${index}] must contain exactly path and rationale`);
     }
@@ -6275,16 +6283,16 @@ function normalizeOwnershipDisclosure(value, sliceId, unexpectedPaths) {
     if (!rationale || rationale !== rationale.trim() || rationale !== rationale.normalize("NFC") || /[\x00-\x1f\x7f-\x9f]/u.test(rationale)) {
       throw new Error(`slice '${sliceId}' ownership_disclosure[${index}].rationale must be nonempty normalized text`);
     }
-    return { path: entry.path, rationale };
+    supplied.set(entry.path, rationale);
+  }
+  if (unexpectedPaths.length === 0) return [];
+  return unexpectedPaths.map((path) => {
+    const rationale = supplied.get(path);
+    if (!rationale) {
+      throw new Error(`slice '${sliceId}' ownership_disclosure must explain changed path '${path}' outside declared ownership`);
+    }
+    return { path, rationale };
   });
-  const disclosedPaths = normalized.map((entry) => entry.path);
-  if (!sameJson(disclosedPaths, [...disclosedPaths].sort()) || new Set(disclosedPaths).size !== disclosedPaths.length) {
-    throw new Error(`slice '${sliceId}' ownership_disclosure paths must be sorted and unique`);
-  }
-  if (!sameJson(disclosedPaths, unexpectedPaths)) {
-    throw new Error(`slice '${sliceId}' ownership_disclosure paths must exactly equal every changed path outside declared ownership`);
-  }
-  return normalized;
 }
 
 function ownershipLane(path) {
