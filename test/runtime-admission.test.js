@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
-import { admitRuntimeLaunch, revalidateRuntimeLaunchBinding } from "../src/runtime-identity.js";
-import { runForegroundFactory } from "../src/factory.js";
+import { admitRuntimeLaunch, revalidateRuntimeLaunchBinding, RuntimeAdmissionError } from "../src/runtime-identity.js";
+import { runForegroundFactory, startDetached } from "../src/factory.js";
 import { superviseDetachedLaunch } from "../src/detached-log-supervisor.js";
 
 describe("runtime launch admission", () => {
@@ -63,6 +63,128 @@ describe("runtime launch admission", () => {
       rmSync(fixture.opencode);
       symlinkSync(replacement, fixture.opencode);
       assert.throws(() => revalidateRuntimeLaunchBinding(rebound, options(fixture)), /opencode executable changed before spawn/u);
+    } finally { cleanup(fixture); }
+  });
+
+  it("rejects simultaneous symlink-backed package and PATH CLI drift", () => {
+    const fixture = runtimeFixture("package-path-lockstep-drift");
+    try {
+      const accepted = join(fixture.root, "accepted-cli.js");
+      const replacement = join(fixture.root, "replacement-cli.js");
+      writeExecutable(accepted, "#!/bin/sh\nexit 0\n");
+      writeExecutable(replacement, "#!/bin/sh\nprintf 'replacement\\n'\n");
+      rmSync(fixture.packageCli);
+      symlinkSync(accepted, fixture.packageCli);
+      symlinkSync(fixture.packageCli, fixture.effectiveCli);
+      const binding = admit(fixture);
+
+      rmSync(fixture.packageCli);
+      symlinkSync(replacement, fixture.packageCli);
+      assert.equal(realpathSync(fixture.effectiveCli), realpathSync(replacement));
+      assert.throws(
+        () => revalidateRuntimeLaunchBinding(binding, options(fixture)),
+        /package CLI source changed before spawn/u,
+      );
+    } finally { cleanup(fixture); }
+  });
+
+  it("rejects package CLI byte drift when the PATH CLI follows the same file", () => {
+    const fixture = runtimeFixture("package-path-byte-drift");
+    try {
+      symlinkSync(fixture.packageCli, fixture.effectiveCli);
+      const binding = admit(fixture);
+      writeExecutable(fixture.packageCli, "#!/bin/sh\nprintf 'replacement\\n'\n");
+      assert.throws(
+        () => revalidateRuntimeLaunchBinding(binding, options(fixture)),
+        /package CLI bytes changed before spawn/u,
+      );
+    } finally { cleanup(fixture); }
+  });
+
+  it("does not let injected launch or supervisor seams bypass production admission", () => {
+    const fixture = runtimeFixture("injected-production-admission");
+    let launches = 0;
+    try {
+      writeExecutable(fixture.effectiveCli, "#!/bin/sh\nprintf 'different-cli\\n'\n");
+      assert.throws(() => runForegroundFactory(fixture.root, ["run"], {
+        ...options(fixture),
+        foregroundLaunchFn: () => { launches += 1; },
+      }), /CLI bytes differ/u);
+      assert.throws(() => startDetached(fixture.root, ["run"], {
+        ...options(fixture),
+        detachedLaunchFn: () => { launches += 1; },
+      }), /CLI bytes differ/u);
+      assert.throws(() => startDetached(fixture.root, ["run"], {
+        ...options(fixture),
+        supervisorSpawnFn: () => { launches += 1; },
+      }), /CLI bytes differ/u);
+      assert.equal(launches, 0);
+    } finally { cleanup(fixture); }
+  });
+
+  it("runs immediate revalidation before injected foreground and detached launch seams", () => {
+    const fixture = runtimeFixture("injected-revalidation");
+    const remediation = "runtime admission failed: accepted runtime changed; remediation: restore exact bytes";
+    let launches = 0;
+    const injected = {
+      runtimeAdmissionFn: () => ({ package_cli: { source: fixture.packageCli, hash: `sha256:${"a".repeat(64)}` }, opencode: { source: fixture.opencode, hash: `sha256:${"b".repeat(64)}` } }),
+      runtimeRevalidateFn: () => { throw new RuntimeAdmissionError(remediation); },
+    };
+    try {
+      assert.throws(() => runForegroundFactory(fixture.root, ["run"], {
+        ...injected,
+        foregroundLaunchFn: () => { launches += 1; },
+      }), (error) => error.code === "RUNTIME_ADMISSION_FAILED" && error.message === remediation);
+      assert.throws(() => startDetached(fixture.root, ["run"], {
+        ...injected,
+        detachedLaunchFn: () => { launches += 1; },
+      }), (error) => error.code === "RUNTIME_ADMISSION_FAILED" && error.message === remediation);
+      assert.throws(() => startDetached(fixture.root, ["run"], {
+        ...injected,
+        supervisorSpawnFn: () => { launches += 1; },
+      }), (error) => error.code === "RUNTIME_ADMISSION_FAILED" && error.message === remediation);
+      assert.equal(launches, 0);
+    } finally { cleanup(fixture); }
+  });
+
+  it("preserves typed admission failure through detached pre-child handling and parent IPC", async () => {
+    const fixture = runtimeFixture("typed-detached-admission");
+    const remediation = "runtime admission failed: accepted package CLI source=[redacted]; remediation: exact safe command";
+    const binding = {
+      package_cli: { source: fixture.packageCli, hash: `sha256:${"a".repeat(64)}` },
+      opencode: { source: fixture.opencode, hash: `sha256:${"b".repeat(64)}` },
+    };
+    let childSpawns = 0;
+    try {
+      await assert.rejects(superviseDetachedLaunch({
+        repo: fixture.root,
+        commandArgs: ["run"],
+        env: fixture.env,
+        runtimeBinding: binding,
+        log: join(fixture.root, "pre-child.log"),
+        recordEvidence: false,
+      }, {
+        runtimeRevalidateFn: () => { throw new RuntimeAdmissionError(remediation); },
+        spawnFn: () => { childSpawns += 1; },
+      }), (error) => error instanceof RuntimeAdmissionError
+        && error.code === "RUNTIME_ADMISSION_FAILED"
+        && error.message === remediation);
+      assert.equal(childSpawns, 0);
+
+      const supervisor = childProcessStub();
+      supervisor.send = (message, callback) => {
+        callback?.(null);
+        if (message?.type === "init") queueMicrotask(() => supervisor.emit("message", { type: "error", error: remediation, code: "RUNTIME_ADMISSION_FAILED" }));
+      };
+      supervisor.unref = () => {};
+      supervisor.disconnect = () => {};
+      await assert.rejects(startDetached(fixture.root, ["run"], {
+        runtimeAdmissionFn: () => binding,
+        runtimeRevalidateFn: () => fixture.opencode,
+        supervisorSpawnFn: () => supervisor,
+      }), (error) => error instanceof RuntimeAdmissionError
+        && error.code === "RUNTIME_ADMISSION_FAILED"
+        && error.message === remediation);
     } finally { cleanup(fixture); }
   });
 

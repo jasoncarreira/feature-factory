@@ -6,7 +6,7 @@ import { inspectProcessIdentity } from "./hardening/process-verification.js";
 import { readProcessEvidence, recordDetachedProcessEvidence, writeProcessEvidence } from "./process-evidence.js";
 import { FACTORY_LAUNCH_CLAIM_ENV, stopHeartbeatInRunDir } from "./factory.js";
 import { timestamp } from "./utils.js";
-import { revalidateRuntimeLaunchBinding } from "./runtime-identity.js";
+import { isRuntimeAdmissionError, revalidateRuntimeLaunchBinding, RuntimeAdmissionError } from "./runtime-identity.js";
 
 const ABORT_GRACE_MS = 1000;
 const IDENTITY_SETTLE_TIMEOUT_MS = 5000;
@@ -36,8 +36,8 @@ export async function superviseDetachedLaunch(init, options = {}) {
     terminateChild(child);
     try { await cleanupHeartbeat(); } catch { /* the failed-closed evidence preserves ambiguous ownership */ }
     await markMatchingEvidence(init, child?.pid, "failed-closed", options);
-    const failure = new Error(renderErrorForTerminal(error));
-    failure.code = error?.code;
+    const rendered = renderErrorForTerminal(error);
+    const failure = isRuntimeAdmissionError(error) ? new RuntimeAdmissionError(rendered) : new Error(rendered);
     throw failure;
   };
 
@@ -104,7 +104,8 @@ export async function superviseDetachedLaunch(init, options = {}) {
     if (child && !failedClosed) {
       try { await failClosed(error); } catch (safeError) { throw safeError; }
     }
-    throw new Error(renderErrorForTerminal(error));
+    const rendered = renderErrorForTerminal(error);
+    throw isRuntimeAdmissionError(error) ? new RuntimeAdmissionError(rendered) : new Error(rendered);
   }
 }
 

@@ -32,7 +32,7 @@ import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
 import { checkedExecutionEnvironment, executeCheckedCommand } from "./test-execution.js";
 import { BASE_ADVANCE_ERROR_CODES } from "./base-advance/state-model.js";
 import { effectiveCheckedExecutionTimeoutMs } from "./checked-execution-timeout.js";
-import { admitRuntimeLaunch, isRuntimeAdmissionError, revalidateRuntimeLaunchBinding } from "./runtime-identity.js";
+import { admitRuntimeLaunch, isRuntimeAdmissionError, revalidateRuntimeLaunchBinding, RuntimeAdmissionError } from "./runtime-identity.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -2018,6 +2018,7 @@ export async function transitionGateDecisionAndHandoff(runIdOrDir, gateName, dec
   try {
     handoff = await handoffApprovedInteractiveRun(runDir, run, gateName, { ...opts, repo });
   } catch (error) {
+    if (isRuntimeAdmissionError(error)) throw error;
     handoff = handoffEnvelope(run.run_id, gateName, error?.handoffCode || "claim-acquisition-failed", error?.preservedClaim ? { claim: true } : {});
   }
   return { ...transition, gate_accepted: true, handoff };
@@ -2110,10 +2111,9 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
     });
   } catch (error) {
     if (isRuntimeAdmissionError(error)) {
-      let claimPreserved = true;
-      try { claimPreserved = !claimFunctions.release(runDir, token, { ...opts, expectedPhase: "spawning", runId }); } catch { /* preserve ambiguous claim */ }
-      if (!claimPreserved) throw error;
-      return handoffEnvelope(runId, gateName, "launch-evidence-mismatch", { claim: true, reason: error.message });
+      try { error.preservedClaim = !claimFunctions.release(runDir, token, { ...opts, expectedPhase: "spawning", runId }); }
+      catch { error.preservedClaim = true; }
+      throw error;
     }
     let preservedClaim = launchAttempted;
     if (!launchAttempted) {
@@ -5676,11 +5676,10 @@ function allRunDirs(opts = {}) {
 }
 
 export function runForegroundFactory(repo, commandArgs, opts = {}) {
-  if (typeof opts.foregroundLaunchFn === "function") {
-    if (typeof opts.runtimeAdmissionFn === "function") opts.runtimeAdmissionFn({ ...opts, cwd: repo, env: opts.env || process.env });
-    return opts.foregroundLaunchFn(repo, commandArgs, opts);
-  }
-  const binding = (opts.runtimeAdmissionFn || admitRuntimeLaunch)({ ...opts, cwd: repo, env: opts.env || process.env });
+  const env = opts.env || process.env;
+  const binding = (opts.runtimeAdmissionFn || admitRuntimeLaunch)({ ...opts, cwd: repo, env });
+  const executable = (opts.runtimeRevalidateFn || revalidateRuntimeLaunchBinding)(binding, { ...opts, cwd: repo, env });
+  if (typeof opts.foregroundLaunchFn === "function") return opts.foregroundLaunchFn(repo, commandArgs, { ...opts, runtimeBinding: binding, executable });
   const spawnProcess = typeof opts.spawnFn === "function" ? opts.spawnFn : spawn;
   return new Promise((resolveRun, rejectRun) => {
     let settled = false;
@@ -5694,10 +5693,9 @@ export function runForegroundFactory(repo, commandArgs, opts = {}) {
     });
     let child;
     try {
-      const executable = (opts.runtimeRevalidateFn || revalidateRuntimeLaunchBinding)(binding, { ...opts, cwd: repo, env: opts.env || process.env });
       child = spawnProcess(executable, commandArgs, {
         cwd: repo,
-        env: opts.env || process.env,
+        env,
         stdio: ["inherit", "pipe", "pipe"],
         shell: false,
       });
@@ -5728,15 +5726,10 @@ export function runForegroundFactory(repo, commandArgs, opts = {}) {
 }
 
 export function startDetached(repo, commandArgs, opts = {}) {
-  if (typeof opts.detachedLaunchFn === "function") {
-    if (typeof opts.runtimeAdmissionFn === "function") opts.runtimeAdmissionFn({ ...opts, cwd: repo, env: opts.env || process.env });
-    return opts.detachedLaunchFn(repo, commandArgs, opts);
-  }
   const env = opts.env || process.env;
-  const injectedSupervisor = typeof opts.supervisorSpawnFn === "function";
-  const runtimeBinding = injectedSupervisor && typeof opts.runtimeAdmissionFn !== "function"
-    ? null
-    : (opts.runtimeAdmissionFn || admitRuntimeLaunch)({ ...opts, cwd: repo, env });
+  const runtimeBinding = (opts.runtimeAdmissionFn || admitRuntimeLaunch)({ ...opts, cwd: repo, env });
+  const executable = (opts.runtimeRevalidateFn || revalidateRuntimeLaunchBinding)(runtimeBinding, { ...opts, cwd: repo, env });
+  if (typeof opts.detachedLaunchFn === "function") return opts.detachedLaunchFn(repo, commandArgs, { ...opts, runtimeBinding, executable });
   const scopedRunDir = opts.runDir || null;
   const recordsProcessEvidence = Boolean(scopedRunDir && opts.runId);
   if (recordsProcessEvidence) {
@@ -5750,7 +5743,7 @@ export function startDetached(repo, commandArgs, opts = {}) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const executionId = opts.executionId || randomUUID();
   const log = join(processes, scopedRunDir ? `${stamp}-${executionId}.log` : `${stamp}.log`);
-  const spawnProcess = injectedSupervisor ? opts.supervisorSpawnFn : spawn;
+  const spawnProcess = typeof opts.supervisorSpawnFn === "function" ? opts.supervisorSpawnFn : spawn;
   const supervisorPath = fileURLToPath(new URL("./detached-log-supervisor.js", import.meta.url));
   const supervisor = spawnProcess(process.execPath, [supervisorPath], {
     cwd: repo,
@@ -5788,8 +5781,10 @@ function awaitDetachedReadiness(supervisor, init) {
         try { process.kill(supervisor.pid, "SIGTERM"); } catch { /* already exited */ }
         if (init.scopedRunDir && !existsSync(join(init.scopedRunDir, "run.json")) && !existsSync(join(init.scopedRunDir, PROCESS_EVIDENCE_FILE))) removeFailedDetachedLaunchDir(init.scopedRunDir);
       }, DETACHED_ABORT_GRACE_MS).unref?.();
-      const failure = new Error(`detached launch failed: ${renderErrorForTerminal(error)}`);
-      failure.code = error?.code;
+      const rendered = renderErrorForTerminal(error);
+      const failure = isRuntimeAdmissionError(error)
+        ? new RuntimeAdmissionError(rendered)
+        : new Error(`detached launch failed: ${rendered}`);
       rejectReady(failure);
     };
     const timer = setTimeout(() => finishFailure(new Error("readiness timed out")), timeoutMs);
@@ -5799,8 +5794,9 @@ function awaitDetachedReadiness(supervisor, init) {
     supervisor.on("message", (message) => {
       if (message?.type === "spawned" && Number.isInteger(message.pid)) actualPid = message.pid;
       if (message?.type === "error") {
-        const error = new Error(message.error || "supervisor failed safely");
-        error.code = message.code;
+        const error = message.code === "RUNTIME_ADMISSION_FAILED"
+          ? new RuntimeAdmissionError(message.error || "runtime admission failed safely")
+          : new Error(message.error || "supervisor failed safely");
         finishFailure(error);
       }
       if (message?.type !== "ready" || settled) return;

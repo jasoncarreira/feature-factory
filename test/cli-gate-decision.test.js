@@ -236,6 +236,8 @@ function runBehaviorGateCli(fixture, reasonCode) {
     };
     const gateDecisionOptions = {
       ...processOptions,
+      runtimeAdmissionFn: () => ({ package_cli: { source: process.execPath, hash: "sha256:" + "a".repeat(64) }, opencode: { source: process.execPath, hash: "sha256:" + "a".repeat(64) } }),
+      runtimeRevalidateFn: () => process.execPath,
       acquireLaunchClaimFn: (dir, input, opts) => {
         try { return acquireLaunchClaim(dir, input, opts); }
         catch (error) { metrics.acquireError = String(error?.stack || error); persistMetrics(); throw error; }

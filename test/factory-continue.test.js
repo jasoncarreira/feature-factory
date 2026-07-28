@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
-import { assertContinuationBindingsCurrent, buildContinuation, continueFactory, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory, startFactory } from "../src/factory.js";
+import { assertContinuationBindingsCurrent, buildContinuation, continueFactory as continueFactoryImpl, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory as resumeFactoryImpl, startFactory as startFactoryImpl } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
 import { CARRY_FORWARD_REQUIRED_SUMMARY, assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, transitionIntegrationAmendment, transitionTerminalResult, completeSpecialBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
 import { ISSUE128_BASELINE_ROUTE_INVENTORY, ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG, emitIssue128FinishAndDiscloseMutations } from "./helpers/durable-record-mutations.js";
@@ -19,6 +19,11 @@ import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { RuntimeAdmissionError } from "../src/runtime-identity.js";
 import { deliveryEnvelopeForSlices, passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 import { publishAmendmentReportFor, writeOwnerDispatch } from "./helpers/integration-amendment/fixture.js";
+import { withTestRuntimeAdmission } from "./helpers/runtime-admission.js";
+
+const continueFactory = (runId, options) => continueFactoryImpl(runId, withTestRuntimeAdmission(options));
+const resumeFactory = (runId, options) => resumeFactoryImpl(runId, withTestRuntimeAdmission(options));
+const startFactory = (args, options) => startFactoryImpl(args, withTestRuntimeAdmission(options));
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 const currentTestPath = fileURLToPath(import.meta.url);
@@ -221,9 +226,9 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
     }
   });
 
-  it("fails carry-forward runtime admission before invoking its launch seam", async () => {
-    const fixture = createV2Fixture("carry-runtime-admission", { accepted: ["A"], mergeOrder: ["A"] });
-    const childRunId = "carry-runtime-admission-next";
+  for (const detached of [false, true]) it(`fails carry-forward ${detached ? "detached" : "foreground"} runtime admission before invoking its launch seam`, async () => {
+    const fixture = createV2Fixture(`carry-runtime-admission-${detached ? "detached" : "foreground"}`, { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = `${fixture.runId}-next`;
     const remediation = "runtime admission failed: accepted package CLI source=[redacted]; remediation: run npm with exact argv [\"install\",\"--global\",\"--\",\"[redacted]\"]";
     let launches = 0;
     try {
@@ -232,8 +237,11 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
         review: "reviewer.json",
         runId: childRunId,
         carryForward: true,
+        detached,
+        headless: detached,
         runtimeAdmissionFn: () => { throw new RuntimeAdmissionError(remediation); },
         foregroundLaunchFn: async () => { launches += 1; },
+        detachedLaunchFn: async () => { launches += 1; },
       }), (error) => error.message === remediation);
       assert.equal(launches, 0);
     } finally { cleanup(fixture.repo); }

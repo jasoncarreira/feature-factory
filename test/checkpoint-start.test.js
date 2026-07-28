@@ -6,12 +6,18 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { attachCheckpointCompletionRecovery, cleanupRun, closeFactoryCheckpointRoute, continueFactory, recordFactoryCheckpointMerged, resumeFactory, startFactory, startFactoryCheckpoint } from "../src/factory.js";
+import { attachCheckpointCompletionRecovery, cleanupRun, closeFactoryCheckpointRoute, continueFactory as continueFactoryImpl, recordFactoryCheckpointMerged, resumeFactory as resumeFactoryImpl, startFactory as startFactoryImpl, startFactoryCheckpoint as startFactoryCheckpointImpl } from "../src/factory.js";
 import { runCliCommand } from "../src/cli.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
 import { validateRunDir } from "../src/validate.js";
 import { execFileSync } from "./helpers/git-fixture.js";
+import { withTestRuntimeAdmission } from "./helpers/runtime-admission.js";
+
+const continueFactory = (runId, options) => continueFactoryImpl(runId, withTestRuntimeAdmission(options));
+const resumeFactory = (runId, options) => resumeFactoryImpl(runId, withTestRuntimeAdmission(options));
+const startFactory = (args, options) => startFactoryImpl(args, withTestRuntimeAdmission(options));
+const startFactoryCheckpoint = (runId, checkpointId, options) => startFactoryCheckpointImpl(runId, checkpointId, withTestRuntimeAdmission(options));
 
 describe("B4.3 normal checkpoint child start", () => {
   it("publishes complete normal configuration and launches with only an ordinary resume payload", async () => {

@@ -50,6 +50,12 @@ export function revalidateRuntimeLaunchBinding(binding, options = {}) {
   }
   const identity = observeRuntimeIdentity(options, { probeOpenCodeVersion: false });
   assertMatchingPackageCli(identity, options.packageRoot || root);
+  if (identity.package_cli.source !== binding.package_cli.source) {
+    throw admissionError(`package CLI source changed before spawn; accepted source=${publicSource(binding.package_cli)}, observed source=${publicSource(identity.package_cli)}; retry after restoring the accepted package installation`);
+  }
+  if (identity.package_cli.hash !== binding.package_cli.hash) {
+    throw admissionError(`package CLI bytes changed before spawn at ${publicSource(binding.package_cli)}; retry after the package update is complete`);
+  }
   if (!completeFileIdentity(identity.opencode)) {
     throw admissionError("effective PATH opencode executable became unavailable before spawn; retry after restoring the accepted OpenCode executable");
   }

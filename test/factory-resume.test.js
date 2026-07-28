@@ -3,11 +3,16 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FACTORY_LAUNCH_CLAIM_ENV, consumeSteering, factoryLaunchEnv, persistFactoryRunResumeEnv, resumeFactory, startFactory, transitionGateDecisionAndHandoff, writeSteering } from "../src/factory.js";
+import { FACTORY_LAUNCH_CLAIM_ENV, consumeSteering, factoryLaunchEnv, persistFactoryRunResumeEnv, resumeFactory as resumeFactoryImpl, startFactory as startFactoryImpl, transitionGateDecisionAndHandoff as transitionGateDecisionAndHandoffImpl, writeSteering } from "../src/factory.js";
 import { acquireLaunchClaim, recordDetachedProcessEvidence, transitionLaunchClaimPhase, writeProcessEvidence } from "../src/process-evidence.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { transitionGateDecision, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 import { RuntimeAdmissionError } from "../src/runtime-identity.js";
+import { withTestRuntimeAdmission } from "./helpers/runtime-admission.js";
+
+const resumeFactory = (runId, options) => resumeFactoryImpl(runId, withTestRuntimeAdmission(options));
+const startFactory = (args, options) => startFactoryImpl(args, withTestRuntimeAdmission(options));
+const transitionGateDecisionAndHandoff = (runDir, gate, decision, options) => transitionGateDecisionAndHandoffImpl(runDir, gate, decision, withTestRuntimeAdmission(options));
 
 describe("factory resume", () => {
   it("strips inherited launch tokens before a checked launch injects its own", () => {
@@ -275,44 +280,57 @@ describe("factory resume", () => {
     }
   });
 
-  it("fails start and resume routes before injected launchers on runtime admission errors", async () => {
+  it("fails the complete start, start-resume, resume, and approval-handoff route matrix before launch", async () => {
     const remediation = "runtime admission failed: accepted package CLI source=[redacted]; remediation: run npm with exact argv [\"install\",\"--global\",\"--\",\"[redacted]\"]";
     const rows = [
-      ["start", (fixture, opts) => startFactory(["admission test"], opts)],
-      ["resume", (fixture, opts) => resumeFactory(fixture.runId, opts)],
-      ["start-resume", (fixture, opts) => startFactory([`resume ${fixture.runId}`], {
+      ["new start foreground", createFixture, (fixture, opts) => startFactory(["admission test"], opts)],
+      ["new start detached", createFixture, (fixture, opts) => startFactory(["admission test"], { ...opts, detached: true, headless: true })],
+      ["resume foreground", createFixture, (fixture, opts) => resumeFactory(fixture.runId, opts)],
+      ["resume detached", createFixture, (fixture, opts) => resumeFactory(fixture.runId, { ...opts, detached: true, headless: true })],
+      ["start-resume foreground", createFixture, (fixture, opts) => startFactory([`resume ${fixture.runId}`], {
         ...opts,
         recoverDisruptedRunFn: async () => ({ ok: true, run_dir: fixture.runDir, run_file: join(fixture.runDir, "run.json") }),
       })],
+      ["start-resume detached", createFixture, (fixture, opts) => startFactory([`resume ${fixture.runId}`], {
+        ...opts,
+        detached: true,
+        headless: true,
+        recoverDisruptedRunFn: async () => ({ ok: true, run_dir: fixture.runDir, run_file: join(fixture.runDir, "run.json") }),
+      })],
+      ["approval-handoff detached sink", createApprovedHandoffFixture, async (fixture, opts) => {
+        let claim;
+        return transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, {
+          ...opts,
+          inspectLaunchClaimFn: () => ({ ok: false, missing: true }),
+          acquireLaunchClaimFn: (_runDir, input) => {
+            claim = { ...fakeClaim(fixture), execution_id: input.executionId, phase: input.phase, approval: input.approval };
+            return { ok: true, acquired: true, claim, token: claim.nonce };
+          },
+          transitionLaunchClaimPhaseFn: (_runDir, _token, phase) => {
+            claim = { ...claim, phase };
+            return { ok: true, claim };
+          },
+          releaseLaunchClaimFn: () => { fixture.handoffReleaseCount = (fixture.handoffReleaseCount || 0) + 1; return true; },
+        });
+      }],
     ];
-    for (const [name, invoke] of rows) {
-      const fixture = createFixture(`runtime-admission-${name}`);
+    assert.equal(rows.length, 7);
+    for (const [name, makeFixture, invoke] of rows) {
+      const fixture = await makeFixture(`runtime-admission-${name.replaceAll(" ", "-")}`);
       let launches = 0;
       try {
         await assert.rejects(invoke(fixture, {
           cwd: fixture.repo,
           runtimeAdmissionFn: () => { throw new RuntimeAdmissionError(remediation); },
           foregroundLaunchFn: async () => { launches += 1; },
+          detachedLaunchFn: async () => { launches += 1; },
         }), (error) => error.message === remediation, name);
         assert.equal(launches, 0, name);
+        if (name === "approval-handoff detached sink") {
+          assert.equal(fixture.handoffReleaseCount, 1, "admission refusal must release the handoff claim exactly once");
+        }
       } finally { cleanup(fixture.repo); }
     }
-  });
-
-  it("fails detached resume admission without invoking the detached launcher", async () => {
-    const fixture = createFixture("runtime-admission-detached");
-    const remediation = "runtime admission failed: accepted package CLI source=[redacted]; remediation: run npm with exact argv [\"install\",\"--global\",\"--\",\"[redacted]\"]";
-    let launches = 0;
-    try {
-      await assert.rejects(resumeFactory(fixture.runId, {
-        cwd: fixture.repo,
-        detached: true,
-        headless: true,
-        runtimeAdmissionFn: () => { throw new RuntimeAdmissionError(remediation); },
-        detachedLaunchFn: async () => { launches += 1; },
-      }), (error) => error.message === remediation);
-      assert.equal(launches, 0);
-    } finally { cleanup(fixture.repo); }
   });
 
   it("rejects every supplied generic-start continuation before filesystem, Git, or launch effects", async () => {
