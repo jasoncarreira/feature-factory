@@ -270,17 +270,22 @@ export function validateSliceReviewResult(review, { sliceId = "slice", priorRevi
           continue;
         }
         allowedKeys(errors, classification, SLICE_REMEDIATION_V2_FIX_KEYS, fixPath);
-        boundedInteger(errors, classification, "required_fix_index", 0, Math.max(0, fixes.length - 1), `${fixPath}.required_fix_index`);
-        if (classification.required_fix_index !== index) errors.push({ path: `${fixPath}.required_fix_index`, message: "must equal its required_fixes position" });
+        // `required_fix_index` is still accepted, because the reviewer prompt
+        // still emits it and rejecting it would break every current review, but
+        // its value is no longer enforced or read: a fix's index is its position
+        // in this array. Miscounting it used to fail closed and burn an attempt
+        // with zero semantic disagreement about the fixes themselves, and on
+        // attempt 3 terminalize the run for bookkeeping. #112 removes the field
+        // from the prompt once this relaxation has shipped.
         requiredEnum(errors, classification, "classification", SLICE_FIX_CLASSIFICATION_SET, `${fixPath}.classification`);
         requiredEnum(errors, classification, "scope_effect", SLICE_FIX_SCOPE_EFFECT_SET, `${fixPath}.scope_effect`);
         requiredTerminalSafeString(errors, classification, "fix_owner", `${fixPath}.fix_owner`);
         validateLikelyRepositoryPaths(errors, classification.likely_paths, `${fixPath}.likely_paths`);
       }
-      const hasNonconvergent = context.fixes.some((fix) => fix?.classification === "nonconvergent");
-      if ((review.convergence === "nonconvergent") !== hasNonconvergent) {
-        errors.push({ path: `${path}.remediation_context.fixes`, message: "must classify nonconvergent exactly when review convergence is nonconvergent" });
-      }
+      // Nonconvergence was encoded twice and cross-checked: `review.convergence`
+      // and a per-fix `nonconvergent` classification had to agree exactly.
+      // `convergence` is the routed field, so the per-fix restatement is the
+      // echo; disagreement between them is no longer fatal.
     }
   }
   if (errors.length) fail(errors.map((error) => ({ ...error, message: `${error.message} for slice '${sliceId}'` })));
@@ -371,8 +376,8 @@ export function validateSliceReviewFeasibility(review, plan, { sliceId = "slice"
   return {
     schema_version: 2,
     slice_id: sliceId,
-    fixes: review.remediation_context.fixes.map((fix) => ({
-      required_fix_index: fix.required_fix_index,
+    fixes: review.remediation_context.fixes.map((fix, index) => ({
+      required_fix_index: index,
       classification: fix.classification,
       scope_effect: fix.scope_effect,
       likely_paths: [...fix.likely_paths],

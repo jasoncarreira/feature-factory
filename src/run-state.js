@@ -7774,9 +7774,13 @@ function sliceDispatchClaimName(runId, sliceId, attempt) {
 }
 
 function assertReviewedSliceRetryRoute(review, sliceId, run) {
-  const rerouted = review.remediation_context.fixes.filter((fix) => ["sibling-owned", "contract-change"].includes(fix.scope_effect));
+  // Index by position rather than reading the reviewer's echoed
+  // `required_fix_index`, which is no longer enforced.
+  const rerouted = review.remediation_context.fixes
+    .map((fix, index) => ({ ...fix, index }))
+    .filter((fix) => ["sibling-owned", "contract-change"].includes(fix.scope_effect));
   if (rerouted.length === 0) return;
-  const routes = rerouted.map((fix) => `${fix.required_fix_index}:${fix.scope_effect}:${fix.fix_owner}`).join(", ");
+  const routes = rerouted.map((fix) => `${fix.index}:${fix.scope_effect}:${fix.fix_owner}`).join(", ");
   const first = rerouted[0];
   if (first.scope_effect === "contract-change") {
     throw new Error(`slice '${sliceId}' retry cannot consume another attempt; contract-change requires plan/brief amendment (${routes})`);
