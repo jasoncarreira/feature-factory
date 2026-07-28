@@ -924,6 +924,10 @@ describe("run schema and consistency", () => {
     const successor = validateRun({ ...runningRun(), validator: currentValidatorPanel(sha), security_review: currentSecurityPanel(sha) });
     assert.equal(successor.validator.reviewed_head_sha, sha);
     assert.equal(successor.security_review.review_hash, HASH);
+    assert.throws(
+      () => validateRun({ ...runningRun(), validator: currentValidatorPanel(sha), security_review: currentSecurityPanel("b".repeat(40)) }),
+      /reviewed_head_sha values must match/u,
+    );
   });
 
   it("accepts continuation reviews with summary or required fixes", () => {

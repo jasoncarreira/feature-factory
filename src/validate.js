@@ -4838,6 +4838,8 @@ function validatePanelBindingGeneration(errors, run) {
   const securitySuccessor = hasCompleteBinding(run.security_review, SECURITY_BINDING_KEYS);
   if (validatorSuccessor !== securitySuccessor) {
     errors.push({ path: "run", message: "validator and security_review must both use complete current reviewed-head bindings" });
+  } else if (validatorSuccessor && run.validator.reviewed_head_sha !== run.security_review.reviewed_head_sha) {
+    errors.push({ path: "run", message: "validator and security_review reviewed_head_sha values must match" });
   }
 }
 
