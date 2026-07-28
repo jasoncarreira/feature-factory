@@ -235,9 +235,9 @@ async function startFactoryImplementation(args, opts = {}, telemetry) {
   }
   if (opts.detached) {
     const runDir = join(factoryRoot(repo), detachedRunId);
-    return (opts.detachedLaunchFn || startDetached)(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: detachedRunId, runDir }), env: launchEnv });
+    return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: detachedRunId, runDir }), env: launchEnv });
   }
-  return (opts.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...opts, env: launchEnv });
+  return runForegroundFactory(repo, commandArgs, { ...opts, env: launchEnv });
 }
 
 export async function startFactoryCheckpoint(parentRunId, checkpointId, opts = {}) {
