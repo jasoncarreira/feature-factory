@@ -298,6 +298,43 @@ export function normalizeReview(input = {}) {
   return { verdict: "indeterminate", review: null };
 }
 
+// GitHub reports mergeability on two axes. `mergeable` is CONFLICTING only when
+// the diff genuinely cannot apply; `mergeStateStatus` DIRTY is the same fact
+// from the merge-state side. BEHIND means main moved ahead without conflicting,
+// which only matters here once it has turned merge-ref CI red — a green behind
+// PR still merges fine and must not be stalled.
+//
+// UNKNOWN is deliberately not treated as conflicted. GitHub computes
+// mergeability asynchronously and reports UNKNOWN for a window after every
+// push, so treating it as a conflict would park healthy runs on a value that
+// resolves itself seconds later. Absent or unrecognized values fall through to
+// the pre-existing routing rather than inventing a verdict.
+// Closed sets so an unrecognized value is rejected as a protocol error rather
+// than silently reinterpreted. Absent (null/undefined) stays legal: older gh
+// versions and permission-limited tokens omit these fields, and the caller must
+// keep observing exactly as it did before rather than fail the run.
+const MERGEABLE_VALUES = new Set(["MERGEABLE", "CONFLICTING", "UNKNOWN"]);
+const MERGE_STATE_VALUES = new Set(["BEHIND", "BLOCKED", "CLEAN", "DIRTY", "DRAFT", "HAS_HOOKS", "UNKNOWN", "UNSTABLE"]);
+
+function optionalMergeEnum(value, allowed, label) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw protocol(`${label} must be a string`);
+  const normalized = upper(value);
+  if (!allowed.has(normalized)) throw protocol(`${label} is invalid`);
+  return normalized;
+}
+
+const CONFLICTING_MERGEABLE = "CONFLICTING";
+const CONFLICTING_MERGE_STATE = "DIRTY";
+const BEHIND_MERGE_STATE = "BEHIND";
+
+function isAwaitingOperatorMerge(mergeable, mergeStateStatus, checkVerdict) {
+  const merge = upper(mergeable);
+  const state = upper(mergeStateStatus);
+  if (merge === CONFLICTING_MERGEABLE || state === CONFLICTING_MERGE_STATE) return true;
+  return state === BEHIND_MERGE_STATE && checkVerdict === "red";
+}
+
 export function aggregateObservation(input) {
   const expected = fullSha(input.expectedHeadSha, "expectedHeadSha");
   const observed = fullSha(input.headRefOid, "headRefOid");
@@ -308,6 +345,17 @@ export function aggregateObservation(input) {
   const checks = input.checkVerdict;
   const review = input.reviewVerdict;
   if (review === "red") return terminal("needs-human", "review-red", "review");
+  // Base drift is the operator's to resolve, not the factory's to remediate. A
+  // conflicted PR, or one left behind by a moving main whose merge-ref CI went
+  // red as a result, stays open and observed instead of entering check-red
+  // remediation or terminalizing. GitHub already shows the conflict, and the
+  // operator resolves it with update-branch or a local merge; the factory never
+  // attempts a merge itself. Placed after review-red so a reviewer asking for
+  // changes still routes normally, and before the check and green branches so a
+  // drifted run neither remediates nor declares success it cannot merge.
+  if (isAwaitingOperatorMerge(input.mergeable, input.mergeStateStatus, checks)) {
+    return terminal("pending", "awaiting-operator-merge");
+  }
   if (checks === "red") return terminal("red", "check-red", "checks");
   if (["pending", "not_started", "indeterminate"].includes(checks)) return terminal("pending", "checks-pending");
   if (["pass", "not_applicable"].includes(checks) && ["pass", "not_required"].includes(review)) {
@@ -334,11 +382,15 @@ export function normalizePullRequestResponse(response, options) {
     reviewerLogin: options.reviewerLogin, required: options.reviewRequired,
     expectedHeadSha: options.expectedHeadSha, isDraft: response.isDraft,
   });
+  const mergeable = optionalMergeEnum(response.mergeable, MERGEABLE_VALUES, "mergeable");
+  const mergeStateStatus = optionalMergeEnum(response.mergeStateStatus, MERGE_STATE_VALUES, "mergeStateStatus");
   return {
     head_sha: fullSha(response.headRefOid, "headRefOid"), state, is_draft: response.isDraft,
+    mergeable, merge_state_status: mergeStateStatus,
     checks, review,
     aggregate: aggregateObservation({ expectedHeadSha: options.expectedHeadSha, headRefOid: response.headRefOid,
-      state, isDraft: response.isDraft, checkVerdict: checks.verdict, reviewVerdict: review.verdict }),
+      state, isDraft: response.isDraft, checkVerdict: checks.verdict, reviewVerdict: review.verdict,
+      mergeable, mergeStateStatus }),
   };
 }
 
@@ -526,7 +578,7 @@ export function buildFailureEvidenceInput(input) {
     pr: { url: canonicalPrUrl, number: prNumber, repository },
     expected_head_sha: fullSha(input.expectedHeadSha, "expectedHeadSha"), observed_head_sha: fullSha(input.observedHeadSha, "observedHeadSha"),
     failing_checks: failing, review, primary_failure: review !== null ? "review-red" : "check-red",
-    ownership, command: { program: "gh", args: ["pr", "view", String(prNumber), "--repo", repository, "--json", "headRefOid,isDraft,reviewDecision,reviews,state,statusCheckRollup"], exit_code: nonNegativeInteger(input.exitCode ?? 0, "exitCode") },
+    ownership, command: { program: "gh", args: ["pr", "view", String(prNumber), "--repo", repository, "--json", "headRefOid,isDraft,mergeable,mergeStateStatus,reviewDecision,reviews,state,statusCheckRollup"], exit_code: nonNegativeInteger(input.exitCode ?? 0, "exitCode") },
   };
   return { ...evidence, failure_fingerprint: `sha256:${createHash("sha256").update(stableJson(evidence)).digest("hex")}` };
 }
@@ -550,7 +602,7 @@ export async function runGitHubOperation(input) {
 
 export async function queryPullRequest(input) {
   const identity = checkedIdentity(input.repository, input.prNumber);
-  const args = ["pr", "view", String(identity.number), "--repo", identity.repository, "--json", "headRefOid,isDraft,reviewDecision,reviews,state,statusCheckRollup"];
+  const args = ["pr", "view", String(identity.number), "--repo", identity.repository, "--json", "headRefOid,isDraft,mergeable,mergeStateStatus,reviewDecision,reviews,state,statusCheckRollup"];
   const result = await runGitHubOperation({ ...input, args, limits: GITHUB_LIMITS.verdict });
   return parseJsonObject(result.stdout);
 }

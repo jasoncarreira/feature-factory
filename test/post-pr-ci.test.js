@@ -84,6 +84,65 @@ describe("post-PR normalization", () => {
     assert.equal(aggregateObservation({ ...base, checkVerdict: "pending" }).verdict, "pending");
     assert.equal(aggregateObservation(base).verdict, "green");
   });
+
+  it("parks a conflicted or drift-reddened PR as awaiting-operator-merge instead of remediating it", () => {
+    const base = { expectedHeadSha: SHA, headRefOid: SHA, state: "OPEN", checkVerdict: "red", reviewVerdict: "pass" };
+    const awaiting = { verdict: "pending", reason: "awaiting-operator-merge", primary: null };
+
+    // Conflicts are the operator's to resolve; the factory keeps observing.
+    assert.deepEqual(aggregateObservation({ ...base, mergeable: "CONFLICTING" }), awaiting);
+    assert.deepEqual(aggregateObservation({ ...base, mergeStateStatus: "DIRTY" }), awaiting);
+    // Behind counts only once the drift has actually reddened merge-ref CI.
+    assert.deepEqual(aggregateObservation({ ...base, mergeStateStatus: "BEHIND" }), awaiting);
+    // A conflicted PR must not be declared complete either, green CI or not.
+    assert.deepEqual(aggregateObservation({ ...base, checkVerdict: "pass", mergeable: "CONFLICTING" }), awaiting);
+  });
+
+  it("leaves every other mergeability signal on the pre-existing route", () => {
+    const base = { expectedHeadSha: SHA, headRefOid: SHA, state: "OPEN", checkVerdict: "red", reviewVerdict: "pass" };
+
+    // UNKNOWN is GitHub still computing mergeability, which it reports for a
+    // window after every push. Treating it as a conflict would park healthy
+    // runs on a value that resolves itself moments later.
+    assert.equal(aggregateObservation({ ...base, mergeable: "UNKNOWN" }).reason, "check-red");
+    // BLOCKED is branch protection, not a conflict — normal while checks run.
+    assert.equal(aggregateObservation({ ...base, mergeStateStatus: "BLOCKED" }).reason, "check-red");
+    // Absent fields (older gh, restricted token) keep the original behavior.
+    assert.equal(aggregateObservation(base).reason, "check-red");
+    // A green behind PR merges fine and must not be stalled.
+    assert.equal(aggregateObservation({ ...base, checkVerdict: "pass", mergeStateStatus: "BEHIND" }).verdict, "green");
+    // Review-red still outranks drift: the reviewer asked for changes.
+    assert.equal(aggregateObservation({ ...base, reviewVerdict: "red", mergeable: "CONFLICTING" }).primary, "review");
+    // So do the external terminal states.
+    assert.equal(aggregateObservation({ ...base, state: "MERGED", mergeable: "CONFLICTING" }).reason, "external-merge");
+    assert.equal(aggregateObservation({ ...base, headRefOid: OTHER_SHA, mergeable: "CONFLICTING" }).reason, "head-mismatch");
+  });
+
+  it("validates mergeability fields as closed enums and surfaces them on the observation", () => {
+    const response = {
+      headRefOid: SHA, isDraft: false, state: "OPEN", reviewDecision: null, reviews: [],
+      statusCheckRollup: [{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS" }],
+    };
+    const options = {
+      startedAt: "2026-07-27T00:00:00Z", now: "2026-07-27T01:00:00Z", checkStartGraceMs: 1000,
+      expectedHeadSha: SHA, reviewerLogin: null, reviewRequired: false,
+    };
+
+    const conflicted = normalizePullRequestResponse({ ...response, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }, options);
+    assert.equal(conflicted.mergeable, "CONFLICTING");
+    assert.equal(conflicted.merge_state_status, "DIRTY");
+    assert.equal(conflicted.aggregate.reason, "awaiting-operator-merge");
+
+    // Absent stays legal and null, so the observation shape is stable.
+    const bare = normalizePullRequestResponse(response, options);
+    assert.equal(bare.mergeable, null);
+    assert.equal(bare.merge_state_status, null);
+    assert.equal(bare.aggregate.verdict, "green");
+
+    assert.throws(() => normalizePullRequestResponse({ ...response, mergeable: "WAT" }, options), /mergeable is invalid/u);
+    assert.throws(() => normalizePullRequestResponse({ ...response, mergeStateStatus: "WAT" }, options), /mergeStateStatus is invalid/u);
+    assert.throws(() => normalizePullRequestResponse({ ...response, mergeable: 7 }, options), /mergeable must be a string/u);
+  });
 });
 
 describe("durable scheduling decisions", () => {
