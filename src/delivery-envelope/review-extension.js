@@ -23,9 +23,12 @@ export function evaluateInvariantFamilyReview({ plan, sliceId, review, observeEv
         if (observed?.ref !== disposition.evidence_ref) {
           throw new Error(`invariant family ledger evidence ref is not current for '${disposition.evidence_ref}'`);
         }
-        if (observed?.hash !== disposition.evidence_hash) {
-          throw new Error(`invariant family ledger evidence hash is stale for '${disposition.evidence_ref}'`);
-        }
+        // The factory hashes the evidence itself, so the reviewer's transcribed
+        // `evidence_hash` is an echo of a value already known here. The ref
+        // above is different - that is the reviewer naming which evidence the
+        // disposition covers, and it stays enforced. Relaxing this unblocks the
+        // #111 item that drops the reviewer's hand-re-verification of receipt
+        // fields, which could not ship while the transcription was required.
         assertCheckedDispositionReceipt({ deliveryEnvelope, sliceId, review, disposition, observed });
       }
     }

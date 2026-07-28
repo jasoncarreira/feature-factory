@@ -226,8 +226,14 @@ export function validateSliceReviewResult(review, { sliceId = "slice", priorRevi
   requiredEnum(errors, review, "verdict", SLICE_REVIEW_VERDICTS, `${path}.verdict`);
   requiredEnum(errors, review, "convergence", SLICE_REVIEW_CONVERGENCE, `${path}.convergence`);
   appendSliceReviewStrikePolicyErrors(errors, review, path, priorReviews);
-  boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${path}.remaining_fix_count`);
-  if (review.remaining_fix_count !== fixes.length) errors.push({ path: `${path}.remaining_fix_count`, message: "must equal required_fixes length" });
+  // remaining_fix_count is required_fixes.length restated. Nothing routes on the
+  // reviewer's copy - the one other reader, integration-amendment consumer
+  // progress, compares the derived projection - so it fails the routed-fields test: a reviewer that
+  // miscounts it agrees about every fix and still fails closed. Accepted when
+  // present so current prompt output keeps validating, but no longer compared.
+  if (review.remaining_fix_count !== undefined) {
+    boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${path}.remaining_fix_count`);
+  }
   if (review.verdict === "APPROVE" && fixes.length !== 0) errors.push({ path: `${path}.required_fixes`, message: "APPROVE review requires zero remaining fixes" });
   if (review.verdict === "REJECT" && fixes.length < 1) errors.push({ path: `${path}.required_fixes`, message: "REJECT review requires at least one remaining fix" });
   const ratification = review.ownership_ratification;
@@ -270,17 +276,22 @@ export function validateSliceReviewResult(review, { sliceId = "slice", priorRevi
           continue;
         }
         allowedKeys(errors, classification, SLICE_REMEDIATION_V2_FIX_KEYS, fixPath);
-        boundedInteger(errors, classification, "required_fix_index", 0, Math.max(0, fixes.length - 1), `${fixPath}.required_fix_index`);
-        if (classification.required_fix_index !== index) errors.push({ path: `${fixPath}.required_fix_index`, message: "must equal its required_fixes position" });
+        // `required_fix_index` is still accepted, because the reviewer prompt
+        // still emits it and rejecting it would break every current review, but
+        // its value is no longer enforced or read: a fix's index is its position
+        // in this array. Miscounting it used to fail closed and burn an attempt
+        // with zero semantic disagreement about the fixes themselves, and on
+        // attempt 3 terminalize the run for bookkeeping. #112 removes the field
+        // from the prompt once this relaxation has shipped.
         requiredEnum(errors, classification, "classification", SLICE_FIX_CLASSIFICATION_SET, `${fixPath}.classification`);
         requiredEnum(errors, classification, "scope_effect", SLICE_FIX_SCOPE_EFFECT_SET, `${fixPath}.scope_effect`);
         requiredTerminalSafeString(errors, classification, "fix_owner", `${fixPath}.fix_owner`);
         validateLikelyRepositoryPaths(errors, classification.likely_paths, `${fixPath}.likely_paths`);
       }
-      const hasNonconvergent = context.fixes.some((fix) => fix?.classification === "nonconvergent");
-      if ((review.convergence === "nonconvergent") !== hasNonconvergent) {
-        errors.push({ path: `${path}.remediation_context.fixes`, message: "must classify nonconvergent exactly when review convergence is nonconvergent" });
-      }
+      // Nonconvergence was encoded twice and cross-checked: `review.convergence`
+      // and a per-fix `nonconvergent` classification had to agree exactly.
+      // `convergence` is the routed field, so the per-fix restatement is the
+      // echo; disagreement between them is no longer fatal.
     }
   }
   if (errors.length) fail(errors.map((error) => ({ ...error, message: `${error.message} for slice '${sliceId}'` })));
@@ -289,7 +300,7 @@ export function validateSliceReviewResult(review, { sliceId = "slice", priorRevi
     verdict: review.verdict,
     convergence: review.convergence,
     late_discovery_strike: review.late_discovery_strike,
-    remaining_fix_count: review.remaining_fix_count,
+    remaining_fix_count: fixes.length,
     ownership_schema_version: ratification.schema_version,
     ratified_paths: ratification.schema_version === 1 && Array.isArray(ratification.paths) ? [...ratification.paths] : [],
     task_context: classifications.length > 0 && classifications.every((classification) => classification === "narrow-correction") ? "reuse" : "fresh",
@@ -371,8 +382,8 @@ export function validateSliceReviewFeasibility(review, plan, { sliceId = "slice"
   return {
     schema_version: 2,
     slice_id: sliceId,
-    fixes: review.remediation_context.fixes.map((fix) => ({
-      required_fix_index: fix.required_fix_index,
+    fixes: review.remediation_context.fixes.map((fix, index) => ({
+      required_fix_index: index,
       classification: fix.classification,
       scope_effect: fix.scope_effect,
       likely_paths: [...fix.likely_paths],
@@ -1799,7 +1810,11 @@ function assertIntegrationAmendmentConsumerProgress(runDir, run, consumer) {
       || review.reviewed_commit !== entry.reviewed_commit || review.verdict !== entry.verdict || review.convergence !== entry.convergence
       || result.late_discovery_strike !== entry.late_discovery_strike
       || entry.diff_base_commit !== consumer.authorized_baseline_commit
-      || review.remaining_fix_count !== entry.remaining_fix_count
+      // Derived, not raw: the sidecar's own remaining_fix_count is now accepted
+      // absent or miscounted, so comparing it here would let a review that
+      // validateSliceReviewResult admitted fail as stale later. `result` is
+      // already the validated projection used for late_discovery_strike above.
+      || result.remaining_fix_count !== entry.remaining_fix_count
       || !attemptOwnershipEquals(entry, observePersistedSliceAttemptOwnership(runDir, run, consumer, entry))) {
       throw new Error(`integration amendment consumer attempt ${entry.attempt} review authority is stale`);
     }
@@ -1906,12 +1921,19 @@ function normalizePersistedOwnershipDisclosure(value, sliceId, unexpected) {
     }
     return { path: entry.path, rationale };
   });
-  const paths = normalized.map((entry) => entry.path);
-  if (JSON.stringify(paths) !== JSON.stringify([...paths].sort()) || new Set(paths).size !== paths.length
-    || JSON.stringify(paths) !== JSON.stringify(unexpected)) {
-    throw new Error(`slice '${sliceId}' persisted ownership disclosure path set is stale`);
-  }
-  return normalized;
+  // The persisted disclosure was written by the factory from its own out-of-lane
+  // computation, so re-deriving the set and demanding byte-equality is internal
+  // attestation on a factory-authored record. Index the persisted prose by path
+  // and key the result off the freshly derived set instead: order and membership
+  // come from the derivation, and a persisted entry for a path that is no longer
+  // out-of-lane is inert rather than fatal. The result stays total over
+  // `unexpected`, which the caller dereferences unguarded.
+  const persistedByPath = new Map(normalized.map((entry) => [entry.path, entry.rationale]));
+  return unexpected.map((path) => {
+    const rationale = persistedByPath.get(path);
+    if (!rationale) throw new Error(`slice '${sliceId}' persisted ownership disclosure does not explain '${path}'`);
+    return { path, rationale };
+  });
 }
 
 function observeConsistencyPathSet(runDir, from, to, label) {

@@ -138,8 +138,12 @@ describe("B4.4 invariant-family review authority", () => {
     }
   });
 
-  it("rejects stale hashes and mismatched observed evidence refs", () => {
+  it("rejects mismatched observed evidence refs, and still catches a stale hash through receipt authority", () => {
     const stale = sliceReview();
+    // The reviewer's transcribed evidence_hash is no longer compared against the
+    // factory's own observation - that echo is gone. A genuinely stale hash is
+    // still caught, one layer down, because the checked execution claim no longer
+    // matches the observed receipt.
     assert.throws(
       () => evaluateInvariantFamilyReview({
         plan: deliveryPlan(),
@@ -147,7 +151,7 @@ describe("B4.4 invariant-family review authority", () => {
         review: stale,
         observeEvidence: (ref, disposition) => ({ ...currentEvidence(ref, disposition), hash: `sha256:${"f".repeat(64)}` }),
       }),
-      /evidence hash is stale for 'evidence\/api\.artifact-api-tests\.attempt-1\.json'/u,
+      /checked execution claim is not the exact completed authority for the observed receipt/u,
     );
     assert.throws(
       () => evaluateInvariantFamilyReview({

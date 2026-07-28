@@ -225,10 +225,12 @@ describe("uniform slice attempt evidence", () => {
     }
   });
 
-  it("rejects non-atomic, duplicate, and inconsistent review issue counts", async () => {
+  // A miscounted remaining_fix_count is no longer one of these: it is derivable
+  // from required_fixes and routed nowhere, so it is absorbed rather than fatal.
+  // The positive assertion lives in test/review-hardening.test.js.
+  it("rejects non-atomic, duplicate, and inconsistent review issue shapes", async () => {
     for (const [name, review, error] of [
       ["missing-convergence", { verdict: "REJECT", required_fixes: ["fix"], remaining_fix_count: 1 }, /convergence.*must be/u],
-      ["wrong-count", { verdict: "REJECT", convergence: "converging", required_fixes: ["fix"], remaining_fix_count: 2 }, /must equal required_fixes length/u],
       ["duplicate", { verdict: "REJECT", convergence: "converging", required_fixes: ["fix", "fix"], remaining_fix_count: 2 }, /unique trimmed NFC-normalized/u],
       ["approve-with-fix", { verdict: "APPROVE", convergence: "converging", required_fixes: ["fix"], remaining_fix_count: 1 }, /APPROVE review requires zero/u],
       ["missing-classification", { verdict: "REJECT", convergence: "converging", required_fixes: ["fix"], remaining_fix_count: 1, remediation_context: undefined }, /remediation_context.*required/u],

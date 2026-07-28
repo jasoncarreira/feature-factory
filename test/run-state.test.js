@@ -2996,12 +2996,13 @@ describe("simplified run-state transitions", () => {
         { path: "docs/a.md", rationale: "The first documentation fixture is required by this rejected attempt." },
         { path: "docs/z.md", rationale: "The second documentation fixture is required by this rejected attempt." },
       ];
+      // The factory derives the out-of-lane set, so the builder no longer echoes
+      // it back. What still rejects is missing prose for a derived path - named
+      // specifically rather than reported as a set mismatch - and malformed
+      // rationale content.
       const invalidCases = [
-        ["missing", undefined, /must include ownership_disclosure/u],
-        ["extra", [...validDisclosure, { path: "docs/zz.md", rationale: "Extra path." }], /must exactly equal/u],
-        ["unsorted", [...validDisclosure].reverse(), /sorted and unique/u],
-        ["duplicate", [validDisclosure[0], validDisclosure[0], validDisclosure[1]], /sorted and unique/u],
-        ["wrong-path", [validDisclosure[0], { ...validDisclosure[1], path: "docs/y.md" }], /must exactly equal/u],
+        ["missing", undefined, /must explain changed path 'docs\/a\.md'/u],
+        ["wrong-path", [validDisclosure[0], { ...validDisclosure[1], path: "docs/y.md" }], /must explain changed path 'docs\/z\.md'/u],
         ["empty-rationale", [{ ...validDisclosure[0], rationale: "" }, validDisclosure[1]], /nonempty normalized text/u],
         ["non-nfc-rationale", [{ ...validDisclosure[0], rationale: "Cafe\u0301 rationale" }, validDisclosure[1]], /nonempty normalized text/u],
       ];
@@ -3022,6 +3023,23 @@ describe("simplified run-state transitions", () => {
         await assert.rejects(publishPreparedSliceReview(fixture), /nonempty normalized text/u, `U+${codePoint.toString(16).padStart(4, "0")}`);
         assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, `U+${codePoint.toString(16).padStart(4, "0")}`);
       }
+      // Set-shape disagreements the builder used to be rejected for are now
+      // absorbed: an extra path that is actually in-lane is ignored, and order
+      // and duplication come from the derived set rather than the input.
+      const absorbedCases = [
+        ["extra", [...validDisclosure, { path: "docs/zz.md", rationale: "Extra path that is not out-of-lane." }]],
+        ["unsorted", [...validDisclosure].reverse()],
+        ["duplicate", [validDisclosure[0], validDisclosure[0], validDisclosure[1]]],
+      ];
+      const pristineRun = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      for (const [name, ownershipDisclosure] of absorbedCases) {
+        writeJson(evidencePath, { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit, ownership_disclosure: ownershipDisclosure });
+        const absorbed = await publishPreparedSliceReview(fixture);
+        assert.deepEqual(absorbed.slice.attempt_reviews[0].modified_extensions, [], name);
+        assert.deepEqual(absorbed.slice.effective_paths, ["src/**"], name);
+        writeFileSync(join(fixture.runDir, "run.json"), pristineRun);
+      }
+
       writeJson(evidencePath, { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit, ownership_disclosure: validDisclosure });
       const published = await publishPreparedSliceReview(fixture);
       assert.deepEqual(published.slice.attempt_reviews[0].ratified_paths, []);

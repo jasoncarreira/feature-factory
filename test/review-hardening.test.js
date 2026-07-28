@@ -129,18 +129,42 @@ describe("slice remediation task context", () => {
     const unknown = classifiedReview(["unknown"]);
     assert.throws(() => validateSliceReviewResult(unknown), /classification.*one of/u);
 
-    const skipped = classifiedReview(["narrow-correction", "narrow-correction"]);
-    skipped.remediation_context.fixes[1].required_fix_index = 0;
-    assert.throws(() => validateSliceReviewResult(skipped), /must equal its required_fixes position/u);
+    // A miscounted required_fix_index is absorbed: the index is the fix's
+    // position in the array, so the echoed value is accepted and ignored rather
+    // than burning an attempt over bookkeeping. The republished context carries
+    // the derived positions.
+    const miscounted = classifiedReview(["narrow-correction", "narrow-correction"]);
+    miscounted.remediation_context.fixes[1].required_fix_index = 0;
+    assert.equal(validateSliceReviewResult(miscounted).verdict, "REJECT");
 
     const incomplete = classifiedReview(["narrow-correction", "narrow-correction"]);
     incomplete.remediation_context.fixes.pop();
     assert.throws(() => validateSliceReviewResult(incomplete), /classify every required fix exactly once/u);
   });
 
-  it("keeps nonconvergent review state and fix classification consistent", () => {
-    assert.throws(() => validateSliceReviewResult(classifiedReview(["nonconvergent"])), /classify nonconvergent exactly when review convergence is nonconvergent/u);
-    assert.throws(() => validateSliceReviewResult(classifiedReview(["narrow-correction"], { convergence: "nonconvergent" })), /classify nonconvergent exactly when review convergence is nonconvergent/u);
+  it("absorbs a miscounted remaining_fix_count and reports the derived count", () => {
+    // remaining_fix_count is required_fixes.length restated, and nothing outside
+    // the validator reads it, so a reviewer that miscounts it agrees about every
+    // fix and must not fail closed. The reported count comes from the fixes.
+    const miscounted = classifiedReview(["narrow-correction", "narrow-correction"]);
+    miscounted.remaining_fix_count = 7;
+    assert.equal(validateSliceReviewResult(miscounted).remaining_fix_count, 2);
+
+    const absent = classifiedReview(["narrow-correction"]);
+    delete absent.remaining_fix_count;
+    assert.equal(validateSliceReviewResult(absent).remaining_fix_count, 1);
+  });
+
+  it("no longer cross-checks the doubly encoded nonconvergence", () => {
+    // `review.convergence` is the routed field; the per-fix `nonconvergent`
+    // classification restated it, and the two had to agree exactly. Either
+    // direction of disagreement now validates, and convergence is reported from
+    // the routed field alone.
+    const fixClassifiedOnly = validateSliceReviewResult(classifiedReview(["nonconvergent"]));
+    assert.equal(fixClassifiedOnly.convergence, "converging");
+
+    const reviewMarkedOnly = validateSliceReviewResult(classifiedReview(["narrow-correction"], { convergence: "nonconvergent" }));
+    assert.equal(reviewMarkedOnly.convergence, "nonconvergent");
   });
 
   it("validates the required late-discovery strike shape", () => {
