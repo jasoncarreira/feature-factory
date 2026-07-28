@@ -135,15 +135,57 @@ describe("doctor output projection", () => {
       const human = runDoctorFixture(fixture);
       assert.equal(human.status, 1);
       assert.match(human.stdout, /missing: global feature-factory definitions \(stale global feature-factory definitions detected/u);
-      assert.match(human.stdout, /replace them with exact current packaged definitions; then restart opencode/u);
+      assert.match(human.stdout, /replace them with exact current packaged definitions; unset unsupported OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT overrides for factory operation; then restart opencode/u);
 
       const json = runDoctorFixture(fixture, ["--json"]);
       const payload = JSON.parse(json.stdout);
       const check = payload.checks.find((item) => item.label === "global feature-factory definitions");
+      const command = payload.checks.find((item) => item.label === "/feature command registered");
       assert.equal(json.status, 1);
       assert.equal(check.level, "missing");
+      assert.equal(command.level, "ok", "diagnostic plugin config resolution must remain available");
       assert.match(check.detail, /stale global feature-factory definitions detected/u);
       assert.match(check.detail, /restart opencode/u);
+    } finally {
+      cleanup(fixture.dir);
+    }
+  });
+
+  it("diagnoses stale effective config-dir definitions without publishing raw paths", () => {
+    const fixture = doctorFixture();
+    const configDir = join(fixture.dir, "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "opencode");
+    const stale = join(configDir, "agents", "backend-builder.md");
+    try {
+      mkdirSync(join(configDir, "agents"), { recursive: true });
+      writeFileSync(stale, "stale agent\n", "utf8");
+      const proc = runDoctorFixture(fixture, ["--json"], { OPENCODE_CONFIG_DIR: configDir });
+      const payload = JSON.parse(proc.stdout);
+      const check = payload.checks.find((item) => item.label === "global feature-factory definitions");
+      assert.equal(proc.status, 1);
+      assert.equal(check.level, "missing");
+      assert.match(check.detail, /stale global feature-factory definitions detected/u);
+      assert.doesNotMatch(proc.stdout, /QWxhZGRpb/u);
+      assert.doesNotMatch(proc.stdout, new RegExp(escapeRegExp(stale), "u"));
+    } finally {
+      cleanup(fixture.dir);
+    }
+  });
+
+  it("diagnoses unsupported inline config overrides without crashing or exposing content", () => {
+    const fixture = doctorFixture();
+    const secret = "github_pat_123456789012345678901234567890";
+    try {
+      const proc = runDoctorFixture(fixture, ["--json"], {
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({ agent: { "feature-factory": { prompt: secret } } }),
+      });
+      const payload = JSON.parse(proc.stdout);
+      const check = payload.checks.find((item) => item.label === "global feature-factory definitions");
+      const command = payload.checks.find((item) => item.label === "/feature command registered");
+      assert.equal(proc.status, 1);
+      assert.equal(check.level, "missing");
+      assert.equal(command.level, "ok");
+      assert.match(check.detail, /unset unsupported OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT/u);
+      assert.doesNotMatch(proc.stdout, new RegExp(secret, "u"));
     } finally {
       cleanup(fixture.dir);
     }

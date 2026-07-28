@@ -9,6 +9,7 @@ import plugin from "./plugin.js";
 import { readJsoncConfig } from "./config.js";
 import { timestamp } from "./utils.js";
 import { normalizeRuntimeIdentity, resolveRuntimeIdentity } from "./runtime-identity.js";
+import { DIAGNOSTIC_PLUGIN_CONFIG_INVOCATION } from "./plugin-diagnostics.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const SENSITIVE_ENV_KEY_PATTERN = /(?:secret|token|password|passwd|pwd|api[_-]?key|private[_-]?key|credential|authorization|auth[_-]?header|access[_-]?key|bearer|cookie)/iu;
@@ -106,7 +107,7 @@ export async function collectEffectiveProvenance({ repo, gitCwd, pluginOptions, 
 }
 
 export async function resolvePluginConfig(pluginOptions = {}) {
-  const hooks = await plugin({}, pluginOptions);
+  const hooks = await plugin({}, { ...pluginOptions, [DIAGNOSTIC_PLUGIN_CONFIG_INVOCATION]: true });
   const cfg = {};
   hooks.config(cfg);
   return cfg;

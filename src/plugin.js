@@ -7,6 +7,8 @@ import { normalizePostPrCiConfig } from "./config.js";
 import { completeIntegrationAmendmentReviewTaskDispatch, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, isReplayableIntegrationAmendmentReviewCompletionError, prepareIntegrationAmendmentReviewTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, revalidateSliceBuilderTaskDispatchContext } from "./run-state.js";
 import { inspectLaunchClaim } from "./process-evidence.js";
 import { emitB6Span, isB6TelemetryEnabled, startB6Span } from "./telemetry.js";
+import { assertGlobalDefinitionsCurrent } from "./global-definitions.js";
+import { DIAGNOSTIC_PLUGIN_CONFIG_INVOCATION } from "./plugin-diagnostics.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const assets = join(root, "assets");
@@ -843,6 +845,10 @@ function newCompletionToken(options) {
 }
 
 export default async function featureFactoryPlugin(pluginInput, options = {}) {
+  const diagnosticConfigInvocation = options[DIAGNOSTIC_PLUGIN_CONFIG_INVOCATION] === true;
+  if (!diagnosticConfigInvocation) {
+    assertGlobalDefinitionsCurrent({ env: process.env, cwd: process.cwd() });
+  }
   const pendingCallbacks = createPendingCallbackStore();
   const builderTaskBindings = new Map();
   const activeSliceDispatches = new Set();
@@ -1057,6 +1063,7 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
       }, telemetryOptions);
     },
     config(cfg) {
+      if (!diagnosticConfigInvocation) assertGlobalDefinitionsCurrent({ env: process.env, cwd: process.cwd() });
       registerCommand(cfg, options);
       registerAgents(cfg);
       applyProfileOptions(cfg, options);

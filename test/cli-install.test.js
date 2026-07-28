@@ -144,6 +144,37 @@ describe("feature-factory install", () => {
     }
   });
 
+  it("warns for stale agent definitions under OPENCODE_CONFIG_DIR", () => {
+    const home = tempHome();
+    const configDir = join(home, "effective-opencode");
+    const agent = join(configDir, "agents", "codebase-researcher.md");
+    try {
+      writeFile(agent, "stale researcher\n");
+      const proc = runInstall(home, { OPENCODE_CONFIG_DIR: configDir });
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.match(proc.stderr, /existing global feature-factory agent definitions/u);
+      assert.match(proc.stderr, new RegExp(escapeRegExp(agent), "u"));
+    } finally {
+      cleanup(home);
+    }
+  });
+
+  it("diagnoses unsupported OpenCode config overrides without exposing their values", () => {
+    const home = tempHome();
+    const secret = "github_pat_123456789012345678901234567890";
+    try {
+      const proc = runInstall(home, {
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({ agent: { "feature-factory": { prompt: secret } } }),
+      });
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.match(proc.stderr, /unsupported OpenCode config override detected/u);
+      assert.match(proc.stderr, /Unset OPENCODE_CONFIG_CONTENT for feature-factory operation/u);
+      assert.doesNotMatch(`${proc.stdout}${proc.stderr}`, new RegExp(secret, "u"));
+    } finally {
+      cleanup(home);
+    }
+  });
+
   it("terminal-encodes both conflict path lists under a hostile HOME", () => {
     const home = mkdtempSync(join(tmpdir(), "feature-factory-install-\u001B]0;pwned\u0007-"));
     const skill = join(home, ".config", "opencode", "skills", "feature", "SKILL.md");

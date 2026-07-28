@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
 import { resumeFactory, startFactory } from "../src/factory.js";
-import { inspectGlobalDefinitions } from "../src/global-definitions.js";
+import { assertGlobalDefinitionsCurrent, inspectGlobalDefinitions } from "../src/global-definitions.js";
+import { spawnSync } from "./helpers/git-fixture.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const CLI = join(ROOT, "src", "cli.js");
+const PLUGIN_URL = pathToFileURL(join(ROOT, "src", "plugin.js")).href;
 const FEATURE_FACTORY_AGENT_FILES = Object.freeze([
   "backend-builder.md",
   "codebase-researcher.md",
@@ -47,7 +50,7 @@ Do not use older global instructions, old \`version\` manifests, \`status: intak
 describe("global feature-factory definition inspection", () => {
   it("treats absent definitions as healthy", () => {
     withHome((home) => {
-      const result = inspectGlobalDefinitions({ home });
+      const result = inspect(home);
       assert.equal(result.ok, true);
       assert.equal(result.status, "healthy");
       assert.equal(result.definitions.every((item) => item.status === "absent"), true);
@@ -72,12 +75,58 @@ describe("global feature-factory definition inspection", () => {
         ["agent", ".config", "opencode", "agents", "feature-factory.md"],
       ].map(([kind, ...segments]) => ({ kind, path: join(home, ...segments) }));
 
-      const result = inspectGlobalDefinitions({ home });
+      const result = inspect(home);
       assert.deepEqual(
         result.definitions.map(({ kind, path }) => ({ kind, path })),
         expected,
       );
       assert.equal(new Set(result.definitions.map(({ path }) => path)).size, 30);
+    });
+  });
+
+  it("deduplicates HOME and effective config-dir definitions while preserving the 30-path oracle", () => {
+    withHome((home) => {
+      const result = inspect(home, { OPENCODE_CONFIG_DIR: join(home, ".config", "opencode") });
+      assert.equal(result.definitions.length, 30);
+      assert.equal(new Set(result.definitions.map(({ path }) => path)).size, 30);
+    });
+  });
+
+  it("inspects singular and plural definition paths under OPENCODE_CONFIG_DIR", () => {
+    withHome((home) => {
+      const configDir = join(home, "effective-config");
+      const skill = join(configDir, "skill", "feature", "SKILL.md");
+      const agent = join(configDir, "agents", FEATURE_FACTORY_AGENT_FILES[0]);
+      write(skill, "stale skill\n");
+      write(agent, "stale agent\n");
+
+      const result = inspect(home, { OPENCODE_CONFIG_DIR: configDir });
+      assert.equal(result.definitions.length, 58);
+      assert.equal(result.findings.some((item) => item.path === skill && item.status === "mismatch"), true);
+      assert.equal(result.findings.some((item) => item.path === agent && item.status === "mismatch"), true);
+    });
+  });
+
+  it("fails closed for inline and file config overrides without publishing their values", () => {
+    withHome((home) => {
+      const result = inspect(home, {
+        OPENCODE_CONFIG: join(home, "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "opencode.json"),
+        OPENCODE_CONFIG_CONTENT: "{\"agent\":{\"feature-factory\":{\"prompt\":\"stale\"}}}",
+      });
+      assert.equal(result.ok, false);
+      assert.deepEqual(result.findings.map(({ kind, source, status }) => ({ kind, source, status })), [
+        { kind: "override", source: "OPENCODE_CONFIG", status: "unsupported" },
+        { kind: "override", source: "OPENCODE_CONFIG_CONTENT", status: "unsupported" },
+      ]);
+      let error;
+      try {
+        assertGlobalDefinitionsCurrent({ inspect: () => result });
+      } catch (caught) {
+        error = caught;
+      }
+      assert.ok(error);
+      assert.doesNotMatch(error.message, /QWxhZGRpb/u);
+      assert.doesNotMatch(error.message, /feature-factory.*prompt.*stale/u);
     });
   });
 
@@ -88,7 +137,7 @@ describe("global feature-factory definition inspection", () => {
     ]) {
       withHome((home) => {
         write(join(home, ".config", "opencode", "skills", "feature", "SKILL.md"), contents);
-        const result = inspectGlobalDefinitions({ home });
+        const result = inspect(home);
         assert.equal(result.ok, true);
         assert.equal(result.definitions.find((item) => item.kind === "skill" && item.status !== "absent")?.status, "exact");
       });
@@ -102,7 +151,7 @@ describe("global feature-factory definition inspection", () => {
       contents[contents.length - 1] ^= 1;
       write(path, contents);
 
-      const result = inspectGlobalDefinitions({ home });
+      const result = inspect(home);
       assert.equal(result.ok, false);
       assert.deepEqual(result.findings, [{ kind: "skill", path, status: "mismatch" }]);
     });
@@ -112,44 +161,35 @@ describe("global feature-factory definition inspection", () => {
     withHome((home) => {
       const path = join(home, ".agents", "skills", "feature", "SKILL.md");
       write(path, "old feature workflow\n");
-      const result = inspectGlobalDefinitions({ home });
+      const result = inspect(home);
       assert.equal(result.ok, false);
       assert.deepEqual(result.findings, [{ kind: "skill", path, status: "mismatch" }]);
     });
   });
 
-  it("accepts exact and rejects stale bytes for every asset agent", () => {
-    withHome((home) => {
-      const exactPaths = FEATURE_FACTORY_AGENT_FILES.map((name) => {
-        const path = join(home, ".config", "opencode", "agent", name);
-        write(path, readFileSync(join(ROOT, "assets", "agent", name)));
-        return path;
-      });
-      const stalePaths = FEATURE_FACTORY_AGENT_FILES.map((name) => {
-        const path = join(home, ".config", "opencode", "agents", name);
-        const contents = readFileSync(join(ROOT, "assets", "agent", name));
-        contents[contents.length - 1] ^= 1;
-        write(path, contents);
-        return path;
-      });
+  it("accepts exact and rejects one-byte mutations for all asset agents in both directory forms", () => {
+    for (const directory of ["agent", "agents"]) {
+      for (const name of FEATURE_FACTORY_AGENT_FILES) {
+        for (const expectedStatus of ["exact", "mismatch"]) {
+          withHome((home) => {
+            const path = join(home, ".config", "opencode", directory, name);
+            const contents = readFileSync(join(ROOT, "assets", "agent", name));
+            if (expectedStatus === "mismatch") contents[contents.length - 1] ^= 1;
+            write(path, contents);
 
-      const result = inspectGlobalDefinitions({ home });
-      assert.deepEqual(
-        result.definitions.filter((item) => exactPaths.includes(item.path)).map(({ path, status }) => ({ path, status })),
-        exactPaths.map((path) => ({ path, status: "exact" })),
-      );
-      assert.deepEqual(
-        result.definitions.filter((item) => stalePaths.includes(item.path)).map(({ path, status }) => ({ path, status })),
-        stalePaths.map((path) => ({ path, status: "mismatch" })),
-      );
-    });
+            const result = inspect(home);
+            assert.equal(result.definitions.find((item) => item.path === path)?.status, expectedStatus, `${directory}/${name} ${expectedStatus}`);
+          });
+        }
+      }
+    }
   });
 
   it("rejects extra recognized primary-agent definition files", () => {
     withHome((home) => {
       const path = join(home, ".config", "opencode", "agent", "feature-factory.md");
       write(path, "old primary agent prompt\n");
-      const result = inspectGlobalDefinitions({ home });
+      const result = inspect(home);
       assert.deepEqual(result.findings, [{ kind: "agent", path, status: "mismatch" }]);
     });
   });
@@ -163,7 +203,7 @@ describe("global feature-factory definition inspection", () => {
       symlinkSync(target, skill);
       write(join(home, ".config", "opencode", "agent"), "not a directory\n");
 
-      const result = inspectGlobalDefinitions({ home });
+      const result = inspect(home);
       assert.equal(result.ok, false);
       assert.equal(result.findings.some((item) => item.path === skill && item.status === "symlink"), true);
       assert.equal(result.findings.some((item) => item.path === join(home, ".config", "opencode", "agent") && item.status === "ambiguous"), true);
@@ -176,7 +216,7 @@ describe("global feature-factory definition inspection", () => {
       write(path, readFileSync(join(ROOT, "assets", "agent", FEATURE_FACTORY_AGENT_FILES[0])));
       chmodSync(path, 0o000);
       try {
-        const result = inspectGlobalDefinitions({ home });
+        const result = inspect(home);
         const finding = result.findings.find((item) => item.path === path);
         if (!finding) return context.skip("the current user can read mode-000 files");
         assert.equal(finding.status, "unreadable");
@@ -214,6 +254,123 @@ describe("global feature-factory definition inspection", () => {
       });
     }
   }
+
+  it("blocks stale OPENCODE_CONFIG_DIR inherited by factory children before launch", async () => {
+    const home = mkdtempSync(join(tmpdir(), "feature-factory-config-dir-home-"));
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-config-dir-repo-"));
+    const configDir = join(home, "effective-opencode");
+    let launches = 0;
+    try {
+      write(join(configDir, "agents", FEATURE_FACTORY_AGENT_FILES[0]), "stale\n");
+      await assert.rejects(startFactory(["build feature"], {
+        cwd: repo,
+        env: cleanEnv(home, { OPENCODE_CONFIG_DIR: configDir }),
+        foregroundLaunchFn: async () => { launches += 1; },
+      }), (error) => error?.code === "ERR_STALE_GLOBAL_DEFINITIONS");
+      assert.equal(launches, 0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the same inspected OpenCode environment to a healthy child launch", async () => {
+    const home = mkdtempSync(join(tmpdir(), "feature-factory-launch-env-home-"));
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-launch-env-repo-"));
+    const configDir = join(home, "effective-opencode");
+    const env = cleanEnv(home, { OPENCODE_CONFIG_DIR: configDir, FEATURE_FACTORY_TEST_ENV: "inherited-exactly" });
+    let launchedEnv;
+    try {
+      await startFactory(["build feature"], {
+        cwd: repo,
+        env,
+        foregroundLaunchFn: async (_repo, _args, options) => { launchedEnv = options.env; },
+      });
+      assert.equal(launchedEnv.HOME, home);
+      assert.equal(launchedEnv.OPENCODE_CONFIG_DIR, configDir);
+      assert.equal(launchedEnv.FEATURE_FACTORY_TEST_ENV, "inherited-exactly");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("requires an injected inspection result to use boolean ok=true", async () => {
+    let launches = 0;
+    await assert.rejects(startFactory(["build feature"], {
+      inspectGlobalDefinitionsFn: () => ({ ok: 1, findings: [] }),
+      foregroundLaunchFn: async () => { launches += 1; },
+    }), (error) => error?.code === "ERR_STALE_GLOBAL_DEFINITIONS");
+    assert.equal(launches, 0);
+  });
+
+  it("rejects direct plugin startup under stale effective definitions despite serialized bypass-like options", () => {
+    withHome((home) => {
+      const configDir = join(home, "effective-opencode");
+      const stale = join(configDir, "agent", FEATURE_FACTORY_AGENT_FILES[0]);
+      write(stale, "stale\n");
+      const proc = runPlugin(home, { OPENCODE_CONFIG_DIR: configDir }, { diagnosticOnly: true, skipGlobalDefinitions: true });
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /stale global feature-factory definitions detected/u);
+      assert.doesNotMatch(proc.stderr, new RegExp(escapeRegExp(stale), "u"));
+    });
+  });
+
+  it("registers /feature, the primary agent, and subagents under healthy effective definitions", () => {
+    withHome((home) => {
+      const proc = runPlugin(home);
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.deepEqual(JSON.parse(proc.stdout), { command: true, primary: true, subagents: 12 });
+    });
+  });
+
+  it("rechecks admission at config registration before mutating config", () => {
+    withHome((home) => {
+      const configDir = join(home, "effective-opencode");
+      const stale = join(configDir, "agent", FEATURE_FACTORY_AGENT_FILES[0]);
+      const script = `
+        import { mkdirSync, writeFileSync } from "node:fs";
+        import { dirname } from "node:path";
+        import plugin from ${JSON.stringify(PLUGIN_URL)};
+        const hooks = await plugin({});
+        mkdirSync(dirname(${JSON.stringify(stale)}), { recursive: true });
+        writeFileSync(${JSON.stringify(stale)}, "stale\\n");
+        const cfg = {};
+        try { hooks.config(cfg); } catch (error) {
+          console.log(JSON.stringify({ code: error.code, keys: Object.keys(cfg) }));
+          process.exit(7);
+        }
+      `;
+      const proc = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+        encoding: "utf8",
+        env: cleanEnv(home, { OPENCODE_CONFIG_DIR: configDir }),
+      });
+      assert.equal(proc.status, 7, proc.stderr);
+      assert.deepEqual(JSON.parse(proc.stdout), { code: "ERR_STALE_GLOBAL_DEFINITIONS", keys: [] });
+    });
+  });
+
+  it("does not expose Basic credentials from a hostile HOME in factory launch stderr", () => {
+    const parent = mkdtempSync(join(tmpdir(), "feature-factory-hostile-launch-"));
+    const secret = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==";
+    const home = join(parent, `Authorization: Basic ${secret},visible`);
+    const repo = join(parent, "repo");
+    try {
+      mkdirSync(repo, { recursive: true });
+      write(join(home, ".config", "opencode", "agent", FEATURE_FACTORY_AGENT_FILES[0]), "stale\n");
+      const proc = spawnSync(process.execPath, [CLI, "factory", "start", "build feature"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: cleanEnv(home),
+      });
+      assert.equal(proc.status, 1);
+      assert.match(proc.stderr, /stale global feature-factory definitions detected/u);
+      assert.doesNotMatch(proc.stderr, new RegExp(secret, "u"));
+      assert.doesNotMatch(proc.stderr, new RegExp(escapeRegExp(home), "u"));
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
 });
 
 function withHome(fn) {
@@ -228,4 +385,34 @@ function withHome(fn) {
 function write(path, contents) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, contents);
+}
+
+function inspect(home, extraEnv = {}) {
+  return inspectGlobalDefinitions({ home, env: cleanEnv(home, extraEnv) });
+}
+
+function cleanEnv(home, extra = {}) {
+  const env = { ...process.env, HOME: home, ...extra };
+  for (const name of ["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR"]) {
+    if (!Object.hasOwn(extra, name)) delete env[name];
+  }
+  return env;
+}
+
+function runPlugin(home, extraEnv = {}, options = {}) {
+  const script = `
+    import plugin from ${JSON.stringify(PLUGIN_URL)};
+    const hooks = await plugin({}, ${JSON.stringify(options)});
+    const cfg = {};
+    hooks.config(cfg);
+    console.log(JSON.stringify({ command: Boolean(cfg.command?.feature), primary: Boolean(cfg.agent?.["feature-factory"]), subagents: Object.keys(cfg.agent || {}).length - 1 }));
+  `;
+  return spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+    encoding: "utf8",
+    env: cleanEnv(home, extraEnv),
+  });
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

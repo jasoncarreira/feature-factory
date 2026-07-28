@@ -154,6 +154,17 @@ function install(args) {
   const definitions = inspectGlobalDefinitions({ home });
   warnGlobalFeatureSkillConflicts(definitions.findings.filter((item) => item.kind === "skill").map((item) => item.path));
   warnGlobalAgentConflicts(definitions.findings.filter((item) => item.kind === "agent").map((item) => item.path));
+  warnUnsupportedOpenCodeConfigOverrides(definitions.findings.filter((item) => item.kind === "override").map((item) => item.source));
+}
+
+function warnUnsupportedOpenCodeConfigOverrides(sources) {
+  if (!sources.length) return;
+  console.warn([
+    "",
+    "WARNING: unsupported OpenCode config override detected.",
+    `Unset ${sources.join(", ")} for feature-factory operation unless its shadowing definitions can be independently established as exact current definitions.`,
+    "Restart opencode after changing config overrides.",
+  ].join("\n"));
 }
 
 function warnGlobalAgentConflicts(paths) {

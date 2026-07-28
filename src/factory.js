@@ -5835,7 +5835,7 @@ function awaitDetachedReadiness(supervisor, init) {
 
 export function factoryLaunchEnv(opts = {}, runId = null) {
   try {
-    const env = prepareTelemetryEnv(process.env, {
+    const env = prepareTelemetryEnv(factoryBaseEnv(opts), {
       parentSpanId: opts.parentSpanId,
       traceparent: opts.traceparent,
       tracestate: opts.tracestate,
@@ -6007,9 +6007,15 @@ export function seedRepoSkill(repo, opts = {}) {
 
 function assertLaunchDefinitionsCurrent(opts = {}) {
   return assertGlobalDefinitionsCurrent({
-    home: opts.home,
+    env: factoryBaseEnv(opts),
+    cwd: opts.cwd || process.cwd(),
     inspect: opts.inspectGlobalDefinitionsFn,
   });
+}
+
+function factoryBaseEnv(opts) {
+  if (!opts.home) return opts.env ?? process.env;
+  return { ...(opts.env ?? process.env), HOME: resolve(opts.home) };
 }
 
 function ensureRepoSeedSkillDirectory(repo) {

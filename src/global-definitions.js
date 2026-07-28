@@ -41,43 +41,78 @@ const AGENT_DIRECTORIES = Object.freeze([
   [".config", "opencode", "agents"],
 ]);
 const EXTRA_RECOGNIZED_STALE_AGENT_FILES = Object.freeze(["feature-factory.md"]);
+const UNSUPPORTED_CONFIG_OVERRIDES = Object.freeze(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT"]);
+const STALE_DEFINITIONS_MESSAGE = "stale global feature-factory definitions detected. Reconcile symlink, unreadable, or ambiguous definition sources; remove mismatched definition files or replace them with exact current packaged definitions; unset unsupported OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT overrides for factory operation; then restart opencode.";
 
 export class StaleGlobalDefinitionsError extends Error {
   constructor(inspection) {
-    super(formatGlobalDefinitionsDetail(inspection));
+    super(STALE_DEFINITIONS_MESSAGE);
     this.name = "StaleGlobalDefinitionsError";
     this.code = "ERR_STALE_GLOBAL_DEFINITIONS";
-    this.inspection = inspection;
+    Object.defineProperty(this, "inspection", { value: inspection });
   }
 }
 
 export function inspectGlobalDefinitions(options = {}) {
-  const home = resolve(options.home || homedir());
+  const env = options.env ?? process.env;
+  const home = resolve(options.home || env?.HOME || homedir());
+  const cwd = resolve(options.cwd || process.cwd());
   const packagedSkill = readFileSync(join(root, "assets", "skills", "feature", "SKILL.md"));
   const sanctionedSkill = Buffer.from(SANCTIONED_GLOBAL_FEATURE_SKILL, "utf8");
   const packagedAgents = FEATURE_FACTORY_AGENT_FILES.map((name) => ({
     name,
     bytes: readFileSync(join(agentAssetDir, name)),
   }));
-  const candidates = [
+  const homeCandidates = [
     ...SKILL_PATHS.map((segments) => ({
       kind: "skill",
+      root: home,
       path: join(home, ...segments),
       expected: [packagedSkill, sanctionedSkill],
     })),
     ...AGENT_DIRECTORIES.flatMap((segments) => packagedAgents.map(({ name, bytes }) => ({
       kind: "agent",
+      root: home,
       path: join(home, ...segments, name),
       expected: [bytes],
     }))),
     ...AGENT_DIRECTORIES.flatMap((segments) => EXTRA_RECOGNIZED_STALE_AGENT_FILES.map((name) => ({
       kind: "agent",
+      root: home,
       path: join(home, ...segments, name),
       expected: [],
     }))),
   ];
-  const definitions = candidates.map((candidate) => inspectCandidate(home, candidate));
-  const findings = deduplicateFindings(definitions.filter((item) => !["absent", "exact"].includes(item.status)));
+  const configDir = stringValue(env?.OPENCODE_CONFIG_DIR) ? resolve(cwd, env.OPENCODE_CONFIG_DIR) : null;
+  const configCandidates = configDir ? [
+    ...[["skills", "feature", "SKILL.md"], ["skill", "feature", "SKILL.md"]].map((segments) => ({
+      kind: "skill",
+      root: dirname(configDir),
+      path: join(configDir, ...segments),
+      expected: [packagedSkill, sanctionedSkill],
+    })),
+    ...[["agent"], ["agents"]].flatMap((segments) => packagedAgents.map(({ name, bytes }) => ({
+      kind: "agent",
+      root: dirname(configDir),
+      path: join(configDir, ...segments, name),
+      expected: [bytes],
+    }))),
+    ...[["agent"], ["agents"]].flatMap((segments) => EXTRA_RECOGNIZED_STALE_AGENT_FILES.map((name) => ({
+      kind: "agent",
+      root: dirname(configDir),
+      path: join(configDir, ...segments, name),
+      expected: [],
+    }))),
+  ] : [];
+  const definitions = deduplicateCandidates([...homeCandidates, ...configCandidates])
+    .map((candidate) => inspectCandidate(candidate.root, candidate));
+  const overrideFindings = UNSUPPORTED_CONFIG_OVERRIDES
+    .filter((source) => stringValue(env?.[source]))
+    .map((source) => ({ kind: "override", source, path: env[source], status: "unsupported" }));
+  const findings = deduplicateFindings([
+    ...definitions.filter((item) => !["absent", "exact"].includes(item.status)),
+    ...overrideFindings,
+  ]);
   return {
     ok: findings.length === 0,
     status: findings.length === 0 ? "healthy" : "stale",
@@ -90,17 +125,13 @@ export function assertGlobalDefinitionsCurrent(options = {}) {
   const inspection = typeof options.inspect === "function"
     ? options.inspect(options)
     : inspectGlobalDefinitions(options);
-  if (!inspection?.ok) throw new StaleGlobalDefinitionsError(inspection);
+  if (inspection?.ok !== true) throw new StaleGlobalDefinitionsError(inspection);
   return inspection;
 }
 
 export function formatGlobalDefinitionsDetail(inspection) {
-  if (inspection?.ok) return "absent or exact current global definitions";
-  const findings = Array.isArray(inspection?.findings) ? inspection.findings : [];
-  const summary = findings.length
-    ? findings.map((item) => `${item.status}: ${item.path}`).join("; ")
-    : "inspection could not establish current definitions";
-  return `stale global feature-factory definitions detected (${summary}). Reconcile symlink, unreadable, or ambiguous paths; remove mismatched definition files or replace them with exact current packaged definitions; then restart opencode.`;
+  if (inspection?.ok === true) return "absent or exact current global definitions";
+  return STALE_DEFINITIONS_MESSAGE;
 }
 
 function inspectCandidate(home, candidate) {
@@ -160,4 +191,18 @@ function deduplicateFindings(findings) {
     seen.add(key);
     return true;
   });
+}
+
+function deduplicateCandidates(candidates) {
+  const seen = new Set();
+  return candidates.filter((item) => {
+    const key = JSON.stringify([item.kind, item.path]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function stringValue(value) {
+  return typeof value === "string" && value.length > 0;
 }
