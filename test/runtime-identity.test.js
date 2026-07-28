@@ -97,6 +97,31 @@ describe("runtime identity observation", () => {
     }
   });
 
+  it("matches native default lookup when PATH is absent instead of searching cwd", { skip: process.platform === "win32" }, () => {
+    const root = mkdtempSync(join(tmpdir(), "runtime-identity-absent-path-"));
+    const current = join(root, "opencode");
+    try {
+      writeExecutable(current, "cwd-only-opencode");
+      const env = { ...process.env };
+      delete env.PATH;
+      const executed = spawnSync("opencode", ["--version"], { cwd: root, env, encoding: "utf8" });
+      const observed = resolveRuntimeIdentity({ cwd: root, env }).opencode;
+
+      assert.notEqual((executed.stdout || executed.stderr || "").trim(), "cwd-only-opencode");
+      assert.notEqual(observed.source, realpathSync(current));
+      if (executed.error) {
+        assert.equal(executed.error.code, "ENOENT");
+        assert.deepEqual(observed, { source: null, version: null, hash: null });
+      } else {
+        assert.equal(executed.status, 0, executed.stderr);
+        assert.equal(observed.version, (executed.stdout || executed.stderr).trim());
+        assert.match(observed.hash, /^sha256:[0-9a-f]{64}$/u);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("redacts sensitive identity text and removes terminal controls before reuse", () => {
     const identity = normalizeRuntimeIdentity({
       cli: { source: "/tmp/secret-cli\u001b[2J", version: "token-version\u202e", hash: `sha256:${"a".repeat(64)}`, ignored: true },

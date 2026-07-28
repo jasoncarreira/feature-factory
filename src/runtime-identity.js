@@ -7,6 +7,7 @@ import { isRecognizedSensitiveValue } from "./hardening/sensitive-data.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const PACKAGE_NAME = "opencode-feature-factory";
+const DEFAULT_UNIX_EXECUTABLE_PATH = "/usr/bin:/bin";
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const UNSAFE_TERMINAL_TEXT = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 const UNSAFE_TERMINAL_TEXT_GLOBAL = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
@@ -78,7 +79,10 @@ function commandIdentity(command, options, probeVersion) {
 function resolveCommand(command, options) {
   const env = options.env ?? process.env;
   const cwd = resolve(options.cwd ?? process.cwd());
-  for (const component of String(env?.PATH ?? "").split(delimiter)) {
+  const path = Object.hasOwn(env, "PATH")
+    ? env.PATH
+    : process.platform === "win32" ? process.env.PATH ?? "" : DEFAULT_UNIX_EXECUTABLE_PATH;
+  for (const component of String(path).split(delimiter)) {
     const directory = component ? (isAbsolute(component) ? component : resolve(cwd, component)) : cwd;
     const suffixes = process.platform === "win32" ? String(env?.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";") : [""];
     for (const suffix of suffixes) {
