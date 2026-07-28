@@ -193,7 +193,7 @@ describe("factory heartbeat lifecycle", () => {
     writeJson(join(runDir, "run.json"), runningRun());
     writeJson(join(runDir, "heartbeat.json"), heartbeatRecord(424242));
     try {
-      const opts = { cwd: repo, now: "2026-07-06T11:05:01.000Z", processAliveFn: () => "truthy-but-malformed" };
+      const opts = { cwd: repo, now: "2026-07-06T11:05:01.000Z", livenessProbe: () => "truthy-but-malformed" };
       assert.equal(heartbeatStatus(RUN_ID, opts).process_alive, null);
       await assert.rejects(startHeartbeat(RUN_ID, { phase: "slice-review", intervalMs: 1000 }, opts), /already active/i);
       assert.equal(readJson(join(runDir, "heartbeat.json")).pid, 424242);
@@ -203,7 +203,7 @@ describe("factory heartbeat lifecycle", () => {
   });
 
   it("signals live lifecycle owners, clears absent owners, and fails closed for indeterminate pids", async () => {
-    for (const [name, value, clears, signalCount] of [["absent", false, true, 0], ["live", true, true, 1], ["indeterminate", {}, false, 0]]) {
+    for (const [name, status, clears, signalCount] of [["absent", "absent", true, 0], ["live", "live", true, 1], ["indeterminate", "indeterminate", false, 0]]) {
       const repo = tempRepo();
       const runDir = createRunDir(repo);
       const signals = [];
@@ -214,7 +214,7 @@ describe("factory heartbeat lifecycle", () => {
         process.kill = (pid, signal) => { signals.push({ pid, signal }); return true; };
         const action = stopHeartbeat(RUN_ID, {}, {
           cwd: repo,
-          processAliveFn: () => value,
+          livenessProbe: () => ({ status }),
           heartbeatInspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "heartbeat-start", command_name: "node", cwd: repo }),
         });
         if (clears) assert.equal((await action).pid, null, name);
@@ -238,7 +238,7 @@ describe("factory heartbeat lifecycle", () => {
       await assert.rejects(
         stopHeartbeat(RUN_ID, {}, {
           cwd: repo,
-          processAliveFn: () => true,
+          livenessProbe: () => ({ status: "live" }),
           heartbeatInspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "reused-pid", command_name: "node", cwd: repo }),
           signalFn: (pid, signal) => signals.push({ pid, signal }),
         }),

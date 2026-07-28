@@ -17,7 +17,7 @@ import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLau
 import { assertCarryForwardSiblingOwnerPairs, encodeFeatureCommandPayload } from "./feature-command-payload.js";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
-import { publicLivenessBoolean, probeLegacyBooleanLiveness, probeProcessLiveness } from "./hardening/process-verification.js";
+import { publicLivenessBoolean, probeProcessLiveness } from "./hardening/process-verification.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 import { affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyGitHubFailure, classifyOwnership, createOwnershipIndex, decideObservationSchedule, decideTransientSchedule, emitAffectedJson, fetchChangedFiles, inspectPanelRunnerReturn, isPollDue, normalizePullRequestResponse, normalizeRepositoryPath, queryPullRequest, requestReviewer, runBoundedProcess, snapshotPanelAffectedValue, validateLane, PostPrCiError } from "./post-pr-ci.js";
 import { githubAccountEnvironment } from "./github-account-env.js";
@@ -6522,7 +6522,7 @@ async function heartbeatTick(runtime, lockOptions = {}) {
 }
 
 function heartbeatTickLockOptions(runtime, lockOptions = {}) {
-  const allowed = ["lockHooks", "retryDelayMs", "staleLockMs", "missingOwnerStealMs", "processAliveFn", "heartbeatAtomicWriteHooks"];
+  const allowed = ["lockHooks", "retryDelayMs", "staleLockMs", "missingOwnerStealMs", "livenessProbe", "heartbeatAtomicWriteHooks"];
   const options = { timeoutMs: lockOptions.timeoutMs ?? runtime.tickTimeoutMs };
   for (const key of allowed) {
     if (lockOptions[key] !== undefined) options[key] = lockOptions[key];
@@ -7631,7 +7631,6 @@ function heartbeatBlocksReplacement(heartbeat, now, opts = {}) {
 
 function heartbeatProcessLiveness(pid, opts = {}) {
   if (pid === null) return "absent";
-  if (typeof opts.processAliveFn === "function") return probeLegacyBooleanLiveness(opts.processAliveFn, pid);
   return probeProcessLiveness(pid, opts).status;
 }
 

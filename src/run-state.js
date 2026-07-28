@@ -5,7 +5,7 @@ import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { appendCostAttributionEntry } from "./cost-attribution.js";
 import { git, repoRoot } from "./git.js";
-import { probeLegacyBooleanLiveness } from "./hardening/process-verification.js";
+import { probeProcessLiveness } from "./hardening/process-verification.js";
 import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
 import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
@@ -427,18 +427,10 @@ function sameReclaimClaim(left, right) {
 
 function inspectLockOwnerLiveness(owner, options = {}) {
   if (!isDurableLockOwner(owner) || owner.hostname !== hostname()) return "indeterminate";
-  if (typeof options.processAliveFn === "function") {
-    const status = probeLegacyBooleanLiveness(options.processAliveFn, owner.pid);
-    if (status === "live") return "alive";
-    if (status === "absent") return "dead";
-    return "indeterminate";
-  }
-  try {
-    process.kill(owner.pid, 0);
-    return "alive";
-  } catch (error) {
-    return error?.code === "ESRCH" ? "dead" : "indeterminate";
-  }
+  const status = probeProcessLiveness(owner.pid, options).status;
+  if (status === "live") return "alive";
+  if (status === "absent") return "dead";
+  return "indeterminate";
 }
 
 async function lockOwnerEntryExists(ownerPath) {
@@ -4330,15 +4322,8 @@ function inspectHeartbeatLiveness(heartbeat, options = {}) {
 }
 
 function inspectProcessLiveness(pid, options = {}) {
-  if (typeof options.processAliveFn === "function") return probeLegacyBooleanLiveness(options.processAliveFn, pid);
   if (!Number.isInteger(pid) || pid <= 0) return "absent";
-  try {
-    process.kill(pid, 0);
-    return "live";
-  } catch (error) {
-    if (error?.code === "ESRCH") return "absent";
-    return "indeterminate";
-  }
+  return probeProcessLiveness(pid, options).status;
 }
 
 function assertExpectedCurrentHash(run, expectedCurrentHash) {

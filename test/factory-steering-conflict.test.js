@@ -97,7 +97,7 @@ describe("factory steering conflict transition", () => {
       await assert.rejects(
         transitionSteeringConflict(heartbeatFixture.runDir, { ref: consumed.ref, hash: consumed.hash }, {
           now: "2026-07-09T12:02:00.000Z",
-          processAliveFn: (pid) => pid === 4242,
+          livenessProbe: (pid) => ({ status: pid === 4242 ? "live" : "absent" }),
         }),
         /active-heartbeat/u,
       );

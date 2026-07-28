@@ -132,7 +132,7 @@ describe("lock-protected steering boundaries", () => {
         withRunJsonLock(fixture.runDir, async () => {}, {
           timeoutMs: 50,
           staleLockMs: 1,
-          processAliveFn: () => false,
+          livenessProbe: () => ({ status: "absent" }),
           lockHooks: { onContended: async () => { neverEntry.resolve(); await neverRelease.promise; } },
         }),
         /timed out waiting for run\.json lock/u,
@@ -184,7 +184,7 @@ describe("lock-protected steering boundaries", () => {
           boundaryToken: gateFixture.boundary.token,
           timeoutMs: 5000,
           retryDelayMs: 1,
-          processAliveFn: () => false,
+          livenessProbe: () => ({ status: "absent" }),
           lockHooks: hooks,
         }),
         assertMutation: (run) => assert.equal(run.gates.story.status, "approved"),
@@ -195,7 +195,7 @@ describe("lock-protected steering boundaries", () => {
           id: "serialized-steering",
           timeoutMs: 5000,
           retryDelayMs: 1,
-          processAliveFn: () => false,
+          livenessProbe: () => ({ status: "absent" }),
           lockHooks: hooks,
         }),
         assertMutation: (run) => assert.equal(run.steering.pending.id, "serialized-steering"),
@@ -206,7 +206,7 @@ describe("lock-protected steering boundaries", () => {
           token: "serialized-fence-token",
           timeoutMs: 5000,
           retryDelayMs: 1,
-          processAliveFn: () => false,
+          livenessProbe: () => ({ status: "absent" }),
           lockHooks: hooks,
         })),
         assertMutation: (run) => assert.equal(run.steering.pr_fence.token, "serialized-fence-token"),
@@ -232,7 +232,7 @@ describe("lock-protected steering boundaries", () => {
         const reclaimer = tracked(withRunJsonLock(fixture.runDir, () => { reclaimerCallbackEntered = true; reclaimerEntered.resolve(); }, {
           timeoutMs: 5000,
           retryDelayMs: 1,
-          processAliveFn: () => false,
+          livenessProbe: () => ({ status: "absent" }),
           lockHooks: {
             onReclaimClaimed: async () => { reclaimerClaimed.resolve(); await releaseReclaimerClaim.promise; },
             onReclaimRenamed: async () => { reclaimerRenamed.resolve(); await releaseReclaimerRename.promise; },
@@ -466,7 +466,7 @@ describe("lock-protected steering boundaries", () => {
       {
         name: "orphan recovery",
         setup: (fixture) => seedInactiveHeartbeat(fixture, NOW, 987654321, 60000),
-        options: { processAliveFn: (pid) => pid !== 987654321 },
+        options: { livenessProbe: (pid) => ({ status: pid !== 987654321 ? "live" : "absent" }) },
         invoke: (fixture, options) => transitionRecoverOrphan(fixture.runDir, "must not recover", { ...options, now: LATER }),
         rejected: /recover rejected: active pre-PR fence/u,
         absent: (fixture, run) => {
@@ -642,7 +642,7 @@ describe("lock-protected steering boundaries", () => {
     const fixture = await createRecoveryFixture("recovery-terminal-race");
     runGit(fixture.repo, ["worktree", "add", fixture.worktree, fixture.runId]);
     seedInactiveHeartbeat(fixture, NOW, 987654321, 60000);
-    const liveness = { processAliveFn: (pid) => pid !== 987654321 };
+    const liveness = { livenessProbe: (pid) => ({ status: pid !== 987654321 ? "live" : "absent" }) };
     const authority = prOptions(fixture);
     const authorityGit = authority.gitFn;
     try {
@@ -835,7 +835,7 @@ describe("lock-protected steering boundaries", () => {
         seedInactiveHeartbeat(fixture, LATER, process.pid, 60000);
         const runBeforeAbort = bytes(fixture.runPath);
         const heartbeatBeforeAbort = bytes(fixture.heartbeatPath);
-        await assert.rejects(transitionSteeringActionAborted(fixture.runDir, kind, claim.token, { now: LATER, processAliveFn: () => true }), /inactive heartbeat: active-heartbeat/u);
+        await assert.rejects(transitionSteeringActionAborted(fixture.runDir, kind, claim.token, { now: LATER, livenessProbe: () => ({ status: "live" }) }), /inactive heartbeat: active-heartbeat/u);
         assertBytes(fixture.runPath, runBeforeAbort);
         assertBytes(fixture.heartbeatPath, heartbeatBeforeAbort);
       } finally {
@@ -1175,7 +1175,7 @@ function seedDeadLock(fixture) {
 }
 
 function agedLiveLockOptions() {
-  return { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 1, processAliveFn: () => true };
+  return { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 1, livenessProbe: () => ({ status: "live" }) };
 }
 
 async function stopIfActive(fixture) {

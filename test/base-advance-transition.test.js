@@ -150,18 +150,18 @@ describe("checked active-run base advancement", () => {
 
   it("classifies fresh and stale live heartbeats as active, dead as inactive, and indeterminate as invalid", async () => {
     const rejected = [
-      ["stale-live", "2026-07-23T11:00:00.000Z", () => true, "BASE_ADVANCE_INELIGIBLE"],
-      ["fresh-live", LATER, () => true, "BASE_ADVANCE_INELIGIBLE"],
-      ["indeterminate", LATER, () => null, "BASE_ADVANCE_RUN_INVALID"],
+      ["stale-live", "2026-07-23T11:00:00.000Z", () => ({ status: "live" }), "BASE_ADVANCE_INELIGIBLE"],
+      ["fresh-live", LATER, () => ({ status: "live" }), "BASE_ADVANCE_INELIGIBLE"],
+      ["indeterminate", LATER, () => ({ status: "indeterminate" }), "BASE_ADVANCE_RUN_INVALID"],
     ];
-    for (const [name, lastTickAt, processAliveFn, code] of rejected) {
+    for (const [name, lastTickAt, livenessProbe, code] of rejected) {
       const fixture = createBaseAdvanceTransitionFixture(name);
       try {
         fixture.advance();
         writeHeartbeat(fixture, lastTickAt);
         const manifest = readFileSync(join(fixture.runDir, "run.json"));
         const integrationHead = output(fixture.worktree, ["rev-parse", "HEAD"]);
-        await assert.rejects(transitionRunBaseAdvance(fixture.runDir, { now: LATER, processAliveFn }), (error) => error.code === code);
+        await assert.rejects(transitionRunBaseAdvance(fixture.runDir, { now: LATER, livenessProbe }), (error) => error.code === code);
         assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), manifest, `${name} manifest`);
         assert.equal(output(fixture.worktree, ["rev-parse", "HEAD"]), integrationHead, `${name} integration head`);
       } finally {
@@ -173,7 +173,7 @@ describe("checked active-run base advancement", () => {
     try {
       const target = dead.advance();
       writeHeartbeat(dead, LATER);
-      const result = await transitionRunBaseAdvance(dead.runDir, { now: LATER, processAliveFn: () => false });
+      const result = await transitionRunBaseAdvance(dead.runDir, { now: LATER, livenessProbe: () => ({ status: "absent" }) });
       assert.deepEqual(result, success(dead.run, target, "advanced", true, false));
       assert.equal(dead.readRun().base_commit, target);
       assert.equal(output(dead.worktree, ["rev-parse", "HEAD"]), target);

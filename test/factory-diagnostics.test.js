@@ -61,7 +61,7 @@ describe("factory diagnostics", () => {
     writeJson(join(runDir, "heartbeat.json"), heartbeatState({ last_tick_at: "2026-07-08T11:00:00.000Z", pid: 987654321 }));
 
     try {
-      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => false });
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, livenessProbe: () => ({ status: "absent" }) });
       assert.deepEqual(diagnostics.items.map((item) => item.condition), ["missing-heartbeat-process", "stale-heartbeat"]);
       assert.equal(diagnostics.classification, "recoverable");
       assert.equal(diagnostics.items[0].evidence.liveness_only, true);
@@ -71,7 +71,7 @@ describe("factory diagnostics", () => {
     }
   });
 
-  it("accepts only primitive booleans from legacy heartbeat liveness callbacks", () => {
+  it("accepts canonical heartbeat liveness and fails closed for malformed or throwing probes", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
     writeJson(join(runDir, "run.json"), runningRun({ heartbeat_at: "2026-07-08T11:00:00.000Z" }));
@@ -79,19 +79,19 @@ describe("factory diagnostics", () => {
 
     try {
       for (const value of ["false", new Boolean(false), {}, [], 0, 1, null, undefined]) {
-        const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => value });
+        const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, livenessProbe: () => value });
         assert.deepEqual(diagnostics.items.map((item) => item.condition), ["stale-heartbeat"]);
         assert.equal(diagnostics.items[0].evidence.process_alive, null);
       }
       const thrown = diagnoseRunDir(runDir, {
         cwd: repo,
         now: CHECKED_AT,
-        processAliveFn: () => { throw new Error("probe failed"); },
+        livenessProbe: () => { throw new Error("probe failed"); },
       });
       assert.deepEqual(thrown.items.map((item) => item.condition), ["stale-heartbeat"]);
       assert.equal(thrown.items[0].evidence.process_alive, null);
 
-      const live = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => true });
+      const live = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, livenessProbe: () => ({ status: "live" }) });
       assert.deepEqual(live.items.map((item) => item.condition), ["stale-heartbeat"]);
       assert.equal(live.items[0].evidence.process_alive, true);
     } finally {
@@ -127,7 +127,7 @@ describe("factory diagnostics", () => {
     writeJson(join(runDir, "heartbeat.json"), heartbeatState({ last_tick_at: "2026-07-08T11:00:00.000Z", pid: 987654321 }));
 
     try {
-      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => false });
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, livenessProbe: () => ({ status: "absent" }) });
       assert.deepEqual(diagnostics.items, []);
       assert.equal(diagnostics.classification, "healthy");
     } finally {
@@ -144,7 +144,7 @@ describe("factory diagnostics", () => {
     writeJson(join(runDir, "heartbeat.json"), heartbeatState({ last_tick_at: "2026-07-08T11:00:00.000Z", pid: 987654321 }));
 
     try {
-      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => false });
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, livenessProbe: () => ({ status: "absent" }) });
       assert.deepEqual(diagnostics.items.map((item) => item.condition), ["protected-gate"]);
       assert.equal(diagnostics.classification, "needs-human");
     } finally {
@@ -159,7 +159,7 @@ describe("factory diagnostics", () => {
     writeJson(join(runDir, "heartbeat.json"), heartbeatState({ last_tick_at: "2026-07-08T11:00:00.000Z", pid: 987654321 }));
 
     try {
-      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => false });
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, livenessProbe: () => ({ status: "absent" }) });
       assert.deepEqual(diagnostics.items.map((item) => item.condition), ["terminal-run"]);
       assert.equal(diagnostics.classification, "terminal");
       assert.equal(diagnostics.authoritative, true);

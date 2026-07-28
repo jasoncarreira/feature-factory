@@ -15,7 +15,6 @@ import { hasInFlightHeartbeatWork } from "./run-state.js";
 import { physicalPath, timestamp } from "./utils.js";
 import { projectDiagnosticData } from "./hardening/output-policy.js";
 import {
-  probeLegacyBooleanLiveness,
   probeProcessLiveness,
   publicLivenessBoolean,
 } from "./hardening/process-verification.js";
@@ -379,9 +378,6 @@ function inspectWorktree(run, options) {
 }
 
 function processLiveness(pid, options = {}) {
-  if (typeof options.processAliveFn === "function") {
-    return probeLegacyBooleanLiveness(options.processAliveFn, pid);
-  }
   return probeProcessLiveness(pid, options).status;
 }
 

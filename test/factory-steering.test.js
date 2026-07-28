@@ -191,7 +191,7 @@ describe("factory steering queue and consume", () => {
         consumeSteering(fixture.runId, { ref: queued.steering.ref, hash: queued.steering.hash }, {
           cwd: fixture.repo,
           now: "2026-07-08T12:01:00.000Z",
-          processAliveFn: (pid) => pid === 4242,
+          livenessProbe: (pid) => ({ status: pid === 4242 ? "live" : "absent" }),
         }),
         /active-heartbeat/u,
       );

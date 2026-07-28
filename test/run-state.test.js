@@ -1675,7 +1675,7 @@ describe("simplified run-state transitions", () => {
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
 
       await assert.rejects(
-        transitionCostUsage(fixture.runDir, { agent: "backend-builder", input_tokens: 1 }, { now: NOW, id: "active-cost", processAliveFn: (pid) => pid === process.pid }),
+        transitionCostUsage(fixture.runDir, { agent: "backend-builder", input_tokens: 1 }, { now: NOW, id: "active-cost", livenessProbe: (pid) => ({ status: pid === process.pid ? "live" : "absent" }) }),
         /cost-record requires inactive heartbeat: active-heartbeat/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
@@ -3957,7 +3957,7 @@ describe("simplified run-state transitions", () => {
       let observedOwner = null;
       await withRunJsonLock(fixture.runDir, ({ owner }) => {
         observedOwner = owner;
-      }, { timeoutMs: 5, retryDelayMs: 1, processAliveFn: () => false });
+      }, { timeoutMs: 5, retryDelayMs: 1, livenessProbe: () => ({ status: "absent" }) });
 
       assert.equal(observedOwner.stolen_from.pid, 999999);
       assert.equal(observedOwner.stolen_from.hostname, hostname());
@@ -3981,7 +3981,7 @@ describe("simplified run-state transitions", () => {
         withRunJsonLock(fixture.runDir, () => { calls.push("callback"); }, {
           reclaimMode: "never",
           timeoutMs: 60000,
-          processAliveFn: () => { calls.push("inspect-owner"); return false; },
+          livenessProbe: () => { calls.push("inspect-owner"); return { status: "absent" }; },
           lockHooks: {
             onContended: () => calls.push("contended"),
             onBeforeReclaimClaim: () => calls.push("before-reclaim"),
@@ -4036,9 +4036,9 @@ describe("simplified run-state transitions", () => {
         withRunJsonLock(fixture.runDir, () => { callbackEntered = true; }, {
           timeoutMs: 5000,
           retryDelayMs: 1,
-          processAliveFn: () => {
+          livenessProbe: () => {
             livenessChecks += 1;
-            return livenessChecks < 3 ? false : true;
+            return { status: livenessChecks < 3 ? "absent" : "live" };
           },
           lockHooks: {
             onReclaimRenamed: ({ quarantine: path }) => { quarantine = path; },
@@ -4066,7 +4066,7 @@ describe("simplified run-state transitions", () => {
       writeJson(join(lockDir, "owner.json"), { pid: process.pid, hostname: hostname(), acquired_at: "2000-01-01T00:00:00.000Z", nonce: "22222222-2222-4222-8222-222222222222" });
 
       await assert.rejects(
-        withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 1, processAliveFn: () => true }),
+        withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 1, livenessProbe: () => ({ status: "live" }) }),
         /timed out waiting for run\.json lock/u,
       );
       assert.equal(readJson(join(lockDir, "owner.json")).nonce, "22222222-2222-4222-8222-222222222222");
@@ -4159,7 +4159,7 @@ describe("simplified run-state transitions", () => {
         mkdirSync(lockDir);
         if (owner) writeJson(join(lockDir, "owner.json"), owner);
         await assert.rejects(
-          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, missingOwnerStealMs, processAliveFn: () => false }),
+          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, missingOwnerStealMs, livenessProbe: () => ({ status: "absent" }) }),
           /timed out waiting for run\.json lock/u,
         );
         assert.equal(existsSync(lockDir), true);
@@ -4226,7 +4226,7 @@ describe("simplified run-state transitions", () => {
       const first = withRunJsonLock(fixture.runDir, () => callback(firstEntered), {
         timeoutMs: 5000,
         retryDelayMs: 1,
-        processAliveFn: () => false,
+        livenessProbe: () => ({ status: "absent" }),
         lockHooks: {
           onReclaimClaimed: async () => { firstClaimed.resolve(); await releaseFirstClaim.promise; },
           onReclaimRenamed: async () => { firstRenamed.resolve(); await releaseFirstRename.promise; },
@@ -4236,7 +4236,7 @@ describe("simplified run-state transitions", () => {
       const second = withRunJsonLock(fixture.runDir, () => callback(secondEntered, releaseSecondCallback), {
         timeoutMs: 5000,
         retryDelayMs: 1,
-        processAliveFn: () => false,
+        livenessProbe: () => ({ status: "absent" }),
         lockHooks: {
           onContended: () => secondContended.resolve(),
           onLockCreated: async () => { secondCreated.resolve(); await releaseSecondPublication.promise; },
@@ -4290,7 +4290,7 @@ describe("simplified run-state transitions", () => {
       const delayed = withRunJsonLock(fixture.runDir, () => { delayedCallbackEntered = true; }, {
         timeoutMs: 5000,
         retryDelayMs: 1,
-        processAliveFn: () => false,
+        livenessProbe: () => ({ status: "absent" }),
         lockHooks: {
           onBeforeReclaimClaim: async () => { delayedObserved.resolve(); await releaseDelayedClaim.promise; },
           onReclaimAbandoned: () => delayedAbandoned.resolve(),
@@ -4300,7 +4300,7 @@ describe("simplified run-state transitions", () => {
       const winner = withRunJsonLock(fixture.runDir, () => { winnerCallbackEntered = true; }, {
         timeoutMs: 5000,
         retryDelayMs: 1,
-        processAliveFn: () => false,
+        livenessProbe: () => ({ status: "absent" }),
         lockHooks: { onReclaimRemoved: async () => { winnerRemoved.resolve(); await releaseWinnerRemoved.promise; } },
       });
       await winnerRemoved.promise;
@@ -4333,7 +4333,7 @@ describe("simplified run-state transitions", () => {
 
   it("fails closed for remote and indeterminate owner liveness", async () => {
     const cases = [
-      ["remote", "remote-host.invalid", () => false],
+      ["remote", "remote-host.invalid", () => ({ status: "absent" })],
       ["undefined", hostname(), () => undefined],
       ["true-string", hostname(), () => "true"],
       ["false-string", hostname(), () => "false"],
@@ -4346,7 +4346,7 @@ describe("simplified run-state transitions", () => {
       ["eperm", hostname(), () => { throw Object.assign(new Error("not permitted"), { code: "EPERM" }); }],
       ["probe-error", hostname(), () => { throw new Error("probe failed"); }],
     ];
-    for (const [name, ownerHostname, processAliveFn] of cases) {
+    for (const [name, ownerHostname, livenessProbe] of cases) {
       const fixture = createFixture(`indeterminate-${name}`);
       const lockDir = join(fixture.runDir, "run-json.lock");
       try {
@@ -4358,7 +4358,7 @@ describe("simplified run-state transitions", () => {
           nonce: "66666666-6666-4666-8666-666666666666",
         });
         await assert.rejects(
-          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, processAliveFn }),
+          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, livenessProbe }),
           /timed out waiting for run\.json lock/u,
         );
         assert.equal(readJson(join(lockDir, "owner.json")).nonce, "66666666-6666-4666-8666-666666666666");
@@ -4368,10 +4368,10 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("clears heartbeat evidence only for literal-false legacy liveness", async () => {
+  it("clears heartbeat evidence only for canonical absent liveness", async () => {
     const cases = [
-      ["live", () => true, false, /fresh-heartbeat/u],
-      ["absent", () => false, true, null],
+      ["live", () => ({ status: "live" }), false, /fresh-heartbeat/u],
+      ["absent", () => ({ status: "absent" }), true, null],
       ["string", () => "false", false, /indeterminate-heartbeat-process/u],
       ["boxed", () => new Boolean(false), false, /indeterminate-heartbeat-process/u],
       ["object", () => ({ status: "dead" }), false, /indeterminate-heartbeat-process/u],
@@ -4381,18 +4381,18 @@ describe("simplified run-state transitions", () => {
       ["undefined", () => undefined, false, /indeterminate-heartbeat-process/u],
       ["throw", () => { throw new Error("probe failed"); }, false, /indeterminate-heartbeat-process/u],
     ];
-    for (const [name, processAliveFn, recoverable, rejection] of cases) {
+    for (const [name, livenessProbe, recoverable, rejection] of cases) {
       const fixture = createFixture(`heartbeat-liveness-${name}`);
       try {
         writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
         if (recoverable) {
-          const result = await transitionRecoverOrphan(fixture.runDir, "confirmed absent", { now: NOW, processAliveFn });
+          const result = await transitionRecoverOrphan(fixture.runDir, "confirmed absent", { now: NOW, livenessProbe });
           assert.equal(result.recovery.reason, "dead-heartbeat-process");
           assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, null);
           assert.equal(readJson(join(fixture.runDir, "run.json")).status, "needs-human");
         } else {
           await assert.rejects(
-            transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, processAliveFn }),
+            transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, livenessProbe }),
             rejection,
           );
           assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, process.pid);
@@ -4412,7 +4412,7 @@ describe("simplified run-state transitions", () => {
         last_tick_at: "2026-07-08T11:00:00.000Z",
       });
       await assert.rejects(
-        transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, processAliveFn: () => true }),
+        transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, livenessProbe: () => ({ status: "live" }) }),
         /stale-heartbeat/u,
       );
       assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, process.pid);
