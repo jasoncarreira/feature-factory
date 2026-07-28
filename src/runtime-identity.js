@@ -11,8 +11,7 @@ const DEFAULT_UNIX_EXECUTABLE_PATH = "/usr/bin:/bin";
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const UNSAFE_TERMINAL_TEXT = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 const UNSAFE_TERMINAL_TEXT_GLOBAL = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
-// Short fragments are an obfuscation shape; longer release words delimit runs.
-const SEPARATOR_FRAGMENT_RUN_PATTERN = /(?<![A-Za-z0-9])[A-Za-z0-9]{1,6}(?:[\s\p{P}\p{S}]+[A-Za-z0-9]{1,6})+(?![A-Za-z0-9])/gu;
+const SEPARATOR_FRAGMENT_RUN_PATTERN = /[A-Za-z0-9]+(?:[\s\p{P}\p{S}]+[A-Za-z0-9]+)+/gu;
 export const RUNTIME_IDENTITY_SOURCE_MAX = 4096;
 export const RUNTIME_IDENTITY_VERSION_MAX = 512;
 
@@ -166,7 +165,8 @@ function normalizeIdentityText(value, maxLength, { trim = false, pathSegments = 
   const sensitive = isSensitiveValue(pathSegments ? `${normalized}#` : normalized)
     || containsSensitiveDelimitedToken(normalized)
     || (pathSegments
-      ? normalized.split(/[\\/]/u).some(sensitivePathSegment)
+      ? containsSensitiveSeparatorComposite(normalized, { recognizedOnly: true })
+        || normalized.split(/[\\/]/u).some(sensitivePathSegment)
       : containsSensitiveSeparatorComposite(normalized));
   return sensitive ? "[redacted]" : normalized;
 }
@@ -183,10 +183,27 @@ function containsSensitiveDelimitedToken(value) {
   return value.split(/[\s\p{P}\p{S}]+/u).some((token) => token && isSensitiveValue(token));
 }
 
-function containsSensitiveSeparatorComposite(value) {
+function containsSensitiveSeparatorComposite(value, { recognizedOnly = false } = {}) {
   for (const match of value.matchAll(SEPARATOR_FRAGMENT_RUN_PATTERN)) {
-    const reconstructed = match[0].split(/[\s\p{P}\p{S}]+/u).join("");
-    if (isSensitiveValue(reconstructed)) return true;
+    const fragments = match[0].split(/[\s\p{P}\p{S}]+/u).filter(Boolean);
+    if (!recognizedOnly && containsOpaqueFragmentWindow(fragments)) return true;
+    const bearerIndex = fragments.findIndex((fragment) => fragment.toLowerCase() === "bearer");
+    if (bearerIndex >= 0 && isSensitiveValue(`Bearer ${fragments.slice(bearerIndex + 1).join("")}`)) return true;
+  }
+  return false;
+}
+
+function containsOpaqueFragmentWindow(fragments) {
+  const bounded = fragments.slice(0, 128);
+  for (let start = 0; start < bounded.length; start += 1) {
+    let candidate = "";
+    for (let end = start; end < bounded.length && candidate.length <= RUNTIME_IDENTITY_VERSION_MAX; end += 1) {
+      candidate += bounded[end];
+      if (!/[a-z]/u.test(candidate)
+        && /[A-Z]/u.test(candidate)
+        && /[0-9]/u.test(candidate)
+        && isSensitiveValue(candidate)) return true;
+    }
   }
   return false;
 }
