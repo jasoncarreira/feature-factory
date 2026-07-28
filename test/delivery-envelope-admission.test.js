@@ -2,12 +2,14 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
 import {
+  ADMISSION_MAX_ACCEPTANCE_ROWS_PER_SLICE,
+  ADMISSION_MAX_DECLARED_PATHS_PER_SLICE,
   ADMISSION_MAX_DEPENDENCY_WAVES,
   MIXED_FAMILY_CHECKPOINT_OBLIGATIONS,
 } from "../src/delivery-envelope/admission-policy.js";
 import { evaluateInvariantFamilyReview } from "../src/delivery-envelope/review-extension.js";
 import { DeliveryContractValidationError } from "../src/delivery-envelope/extensions.js";
-import { validateSlicesPlan } from "../src/validate.js";
+import { ValidationError, validateSlicesPlan } from "../src/validate.js";
 
 describe("B4 delivery-envelope admission", () => {
   it("rejects missing current gates and delivery envelopes outright", () => {
@@ -41,6 +43,77 @@ describe("B4 delivery-envelope admission", () => {
       assert.deepEqual(result.reasons, entry.decision === "admit"
         ? ["admit:delivery-envelope-within-bounds"]
         : [`checkpoint:mixed-invariant-families:unit=api-unit:families=${entry.families}:obligations=${entry.obligations}`], entry.name);
+    }
+  });
+
+  it("checkpoints per-slice mass that exceeds acceptance-row or declared-path budgets", () => {
+    assert.equal(ADMISSION_MAX_ACCEPTANCE_ROWS_PER_SLICE, 3);
+    assert.equal(ADMISSION_MAX_DECLARED_PATHS_PER_SLICE, 6);
+    const cases = [
+      { name: "both metrics at budget", acceptanceRows: 3, declaredPaths: 6, reasons: [] },
+      { name: "acceptance rows over budget", acceptanceRows: 4, declaredPaths: 6, reasons: [
+        "checkpoint:slice-width:slice=api:metric=acceptance-rows:observed=4:budget=3",
+      ] },
+      { name: "declared paths over budget", acceptanceRows: 3, declaredPaths: 7, reasons: [
+        "checkpoint:slice-width:slice=api:metric=declared-paths:observed=7:budget=6",
+      ] },
+      { name: "packed incident shape", acceptanceRows: 8, declaredPaths: 16, reasons: [
+        "checkpoint:slice-width:slice=api:metric=acceptance-rows:observed=8:budget=3",
+        "checkpoint:slice-width:slice=api:metric=declared-paths:observed=16:budget=6",
+      ] },
+    ];
+
+    for (const entry of cases) {
+      const plan = planWithUnits([unitSpec("api", 1, 1)]);
+      setSliceWidth(plan.slices[0], entry);
+      const result = evaluateDeliveryEnvelopeAdmission({ plan });
+      const decision = entry.reasons.length === 0 ? "admit" : "checkpoint";
+      assert.deepEqual(result, activeAdmission(decision, entry.reasons.length === 0
+        ? ["admit:delivery-envelope-within-bounds"]
+        : entry.reasons), entry.name);
+    }
+  });
+
+  it("fails closed with structured errors for malformed width inputs", () => {
+    const cases = [
+      {
+        name: "missing acceptance array",
+        mutate(plan) { delete plan.slices[0].acceptance; },
+        path: "plan.slices[0].acceptance",
+        message: "must be an array",
+      },
+      {
+        name: "null paths array",
+        mutate(plan) { plan.slices[0].paths = null; },
+        path: "plan.slices[0].paths",
+        message: "must be an array",
+      },
+      {
+        name: "lone-surrogate slice id",
+        mutate(plan) {
+          plan.slices[0].id = "api\ud800";
+          plan.delivery_envelope.delivery_units[0].slice_id = "api\ud800";
+        },
+        path: "plan.slices[0].id",
+        message: "must be valid Unicode text",
+      },
+    ];
+    const entries = [
+      ["direct admission", DeliveryContractValidationError, (plan) => evaluateDeliveryEnvelopeAdmission({ plan })],
+      ["plan validation", ValidationError, (plan) => validateSlicesPlan(plan, { requireIntegrationGate: true })],
+    ];
+
+    for (const entry of cases) {
+      for (const [pathName, ErrorType, validate] of entries) {
+        const plan = planWithUnits([unitSpec("api")]);
+        entry.mutate(plan);
+        assert.throws(
+          () => validate(plan),
+          (error) => error instanceof ErrorType
+            && error.errors.some(({ path, message }) => path === entry.path && message === entry.message),
+          `${entry.name} through ${pathName}`,
+        );
+      }
     }
   });
 
@@ -179,6 +252,11 @@ function replaceUnitShape(plan, index, families, obligations) {
   const id = plan.slices[index].id;
   plan.slices[index] = slice(id, plan.slices[index].depends_on, obligations);
   plan.delivery_envelope.delivery_units[index] = deliveryUnit(unitSpec(id, families, obligations), plan.slices[index]);
+}
+
+function setSliceWidth(plannedSlice, { acceptanceRows, declaredPaths }) {
+  plannedSlice.acceptance = Array.from({ length: acceptanceRows }, (_, index) => `accept behavior ${index + 1}`);
+  plannedSlice.paths = Array.from({ length: declaredPaths }, (_, index) => `src/path-${index + 1}.js`);
 }
 
 function integrationGate() {

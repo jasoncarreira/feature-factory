@@ -55,9 +55,11 @@ function runSnapshot(runs) {
     panel: run.panel,
     pr_url: run.pr_url,
     terminal_reason: run.terminal_reason,
+    process: run.process,
     branch: run.branch,
     diagnostic_status: run.diagnostic_status,
     diagnostic_classification: run.diagnostic_classification,
+    diagnostic_condition: run.diagnostic_condition,
     diagnostic_summary: run.diagnostic_summary,
     updated_at: run.updated_at,
   })));
@@ -113,6 +115,9 @@ function View(props) {
                       </Show>
                       <Show when={run.terminal_reason}>
                         <text fg={theme().warning}>{rendered.terminal_reason_line}</text>
+                      </Show>
+                      <Show when={rendered.process_line}>
+                        <text fg={theme().warning}>{rendered.process_line}</text>
                       </Show>
                       <Show when={hasNonOkDiagnostic(run)}>
                         <text fg={diagnosticColor(theme(), run.diagnostic_status)}>

@@ -469,6 +469,35 @@ describe("factory resume", () => {
     }
   });
 
+  it("refuses to resume a run written by a newer schema", async () => {
+    // The newer-schema condition is a display refinement, never a relaxation:
+    // an older reader must not resume a record it cannot fully validate. This
+    // is the fail-open the derived FAIL_CLOSED_DIAGNOSTIC_CONDITIONS set exists
+    // to prevent — a hand-listed set would have omitted the new condition and
+    // handed this run to a reader that does not understand it.
+    const fixture = createFixture("resume-newer-schema");
+    try {
+      const runPath = join(fixture.runDir, "run.json");
+      const run = JSON.parse(readFileSync(runPath, "utf8"));
+      writeFileSync(runPath, `${JSON.stringify({ ...run, ownership_schema_version: 2 }, null, 2)}\n`, "utf8");
+      const before = readFileSync(runPath, "utf8");
+
+      // Resume never reaches the diagnostic layer here: loading the record
+      // fails validation outright, which is the strongest form of fail-closed.
+      await assert.rejects(
+        resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, json: true }),
+        /run\.ownership_schema_version: is not allowed/u,
+      );
+      await assert.rejects(
+        persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:01:00.000Z" }),
+        /run\.ownership_schema_version: is not allowed/u,
+      );
+      assert.equal(readFileSync(runPath, "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects pending steering hash mismatch before dry-run resume or record-resume mutation", async () => {
     const fixture = createFixture("resume-bad-steering");
     try {

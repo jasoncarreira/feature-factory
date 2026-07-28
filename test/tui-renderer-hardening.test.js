@@ -7,6 +7,7 @@ import {
   renderHiddenRunsLine,
   renderRunMode,
   renderRunStatus,
+  renderProcessLine,
   renderRunTextFields,
 } from "../src/tui-rendering.js";
 
@@ -42,6 +43,8 @@ describe("TUI renderer hardening seam", () => {
       panel_line: "panel: GO / PASS",
       pr_line: "PR: https://example.test/pull/54",
       terminal_reason_line: "reason: waiting",
+      // Ordinary rows carry no process record, so the line stays absent.
+      process_line: null,
       diagnostic_line: "diagnostic: recoverable: Heartbeat is stale.",
       branch_line: "branch: diagnostics-tui",
     });
@@ -111,3 +114,64 @@ describe("TUI renderer hardening seam", () => {
 function hasTerminalControl(value) {
   return /[\u0000-\u001F\u007F-\u009F]/u.test(value);
 }
+
+describe("process line rendering", () => {
+  it("stays silent for a healthy running process", () => {
+    // A running process with a current heartbeat is the normal case; adding a
+    // line for it would be noise, and the absent/unknown classifications are
+    // what the operator is actually looking for.
+    assert.equal(renderProcessLine({ classification: "running", detail: "process running, heartbeat current" }), null);
+    assert.equal(renderProcessLine(null), null);
+    assert.equal(renderProcessLine({ classification: "not-a-classification", detail: "x" }), null);
+  });
+
+  it("labels every actionable classification", () => {
+    const cases = {
+      stopped: /^process stopped: /u,
+      working: /^working \(heartbeat stale\): /u,
+      orphaned: /^process gone \(heartbeat stale\): /u,
+      "heartbeat-orphaned": /^heartbeat outlived process: /u,
+      unknown: /^process state unknown: /u,
+    };
+    for (const [classification, pattern] of Object.entries(cases)) {
+      assert.match(renderProcessLine({ classification, detail: "detail text" }), pattern, classification);
+    }
+  });
+});
+
+describe("newer-schema diagnostic rendering", () => {
+  it("shows the refining condition next to the classification", () => {
+    assert.equal(
+      renderDiagnosticLine({
+        diagnostic_classification: "invalid",
+        diagnostic_condition: "newer-schema",
+        diagnostic_summary: "Factory run state uses a newer schema than this reader (feature-factory 0.2.1).",
+      }),
+      "invalid - newer-schema: Factory run sta...",
+    );
+  });
+
+  it("leaves the line unchanged for conditions that do not refine the classification", () => {
+    // These conditions are already implied by the classification, so showing
+    // them would only steal width from the summary.
+    assert.equal(
+      renderDiagnosticLine({ diagnostic_classification: "recoverable", diagnostic_condition: "stale-heartbeat", diagnostic_summary: "Heartbeat is stale." }),
+      "recoverable: Heartbeat is stale.",
+    );
+    assert.equal(
+      renderDiagnosticLine({ diagnostic_classification: "invalid", diagnostic_condition: "invalid-run-state", diagnostic_summary: "Bad JSON." }),
+      "invalid: Bad JSON.",
+    );
+  });
+
+  it("drops a condition that is not a known diagnostic identity", () => {
+    const hostile = ["newer-schema[31m", "../../etc/passwd", "", null, undefined, 7, { toString: () => "newer-schema" }];
+    for (const value of hostile) {
+      assert.equal(
+        renderDiagnosticLine({ diagnostic_classification: "invalid", diagnostic_condition: value, diagnostic_summary: "Bad JSON." }),
+        "invalid: Bad JSON.",
+        String(value),
+      );
+    }
+  });
+});

@@ -1,13 +1,18 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
+import { inspectProcessEvidence, readProcessEvidence } from "./process-evidence.js";
 import { directFactoryRootForLookup, safeFactoryRootForLookup } from "./factory-paths.js";
 import { repoRoot } from "./git.js";
 import {
   DIAGNOSTIC_CLASSIFICATIONS,
   DIAGNOSTIC_CONDITIONS,
+  aggregateDiagnostics,
+  FAIL_CLOSED_DIAGNOSTIC_CONDITIONS,
   DIAGNOSTIC_SEVERITIES,
   DIAGNOSTIC_STATUSES,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  MIN_STALE_HEARTBEAT_MS,
   diagnoseRunFile,
   diagnoseRunObject,
   diagnosticEnvelope,
@@ -30,7 +35,6 @@ const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache",
 const MAX_SCAN_DIRS = 2000;
 const MAX_DIAGNOSTIC_SUMMARY = 180;
 const ROOT_CACHE_TTL_MS = 30000;
-const FAIL_CLOSED_CONDITIONS = new Set(["invalid-run-state"]);
 const DIAGNOSTIC_IDENTITIES = Object.freeze({
   condition: new Set(DIAGNOSTIC_CONDITIONS),
   classification: new Set(DIAGNOSTIC_CLASSIFICATIONS),
@@ -235,7 +239,7 @@ function readRootRuns(root, options = {}) {
         const run = JSON.parse(readFileSync(file, "utf8"));
         const diagnostics = options.diagnostics === false ? healthyDiagnostics() : safeDiagnoseRunObject(run, file, { repoRoot });
         if (shouldUseFallbackRow(diagnostics)) return [fallbackRun(runID, file, diagnostics)];
-        return [summarize(run, runID, file, diagnostics)];
+        return [summarize(run, runID, file, diagnostics, options)];
       } catch (error) {
         if (error?.code === "ENOENT") return [];
         const diagnostics = options.diagnostics === false ? parseErrorDiagnostics(file, error) : safeDiagnoseRunFile(file, { repoRoot });
@@ -272,7 +276,102 @@ function parseErrorDiagnostics(file, error) {
   ], { checkedAt, authoritative: false });
 }
 
-function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
+// Staleness must match the authoritative calculation in run-state's
+// `inspectHeartbeatLiveness` and factory-diagnostics' heartbeat projection:
+// max(2 * interval_ms, MIN_STALE_HEARTBEAT_MS), taking interval_ms from the
+// heartbeat record and falling back to DEFAULT_HEARTBEAT_INTERVAL_MS. Using the
+// floor alone would classify a still-current heartbeat as stale for any
+// interval above 60s and probe the process early. The constants are imported
+// from factory-diagnostics rather than redefined so this reader cannot drift
+// from them independently.
+function heartbeatStaleMs(intervalMs) {
+  const interval = Number.isInteger(intervalMs) && intervalMs > 0 ? intervalMs : DEFAULT_HEARTBEAT_INTERVAL_MS;
+  return Math.max(2 * interval, MIN_STALE_HEARTBEAT_MS);
+}
+
+// Display-only liveness classification. Heartbeat freshness and process state
+// fail in opposite directions — a heartbeat can go stale while work continues,
+// and a heartbeat daemon can outlive a dead run — so neither answers "wait or
+// intervene?" alone. This never becomes workflow authority: the checked
+// transitions remain the only thing that gates work, and anything unreadable or
+// unverifiable reports `unknown` rather than guessing in either direction.
+function projectProcessActivity(runDir, options = {}) {
+  const read = safeReadProcessRecord(runDir, options);
+  if (!read || read.missing) return null;
+  if (!read.ok || !read.evidence) return processActivity("unknown", "process record is unreadable");
+
+  const evidence = read.evidence;
+  const stale = heartbeatIsStale(runDir, options);
+  const stopped = evidence.state !== "running";
+
+  if (stopped && !stale) {
+    return processActivity("heartbeat-orphaned", `process ${evidence.state} while the heartbeat still ticks`, evidence);
+  }
+  if (stopped) return processActivity("stopped", `process ${evidence.state}`, evidence);
+  if (!stale) return processActivity("running", "process running, heartbeat current", evidence);
+
+  // Stale heartbeat with a process record still claiming `running`: the record
+  // may predate a supervisor that died before it could write an exit, so verify
+  // identity rather than trusting either signal.
+  const status = verifiedProcessStatus(runDir, options);
+  if (status === "live" || status === "live-and-matching") {
+    return processActivity("working", "heartbeat stale, process verified live", evidence);
+  }
+  if (status === "absent") return processActivity("orphaned", "heartbeat stale, process absent", evidence);
+  if (status === "mismatched") return processActivity("orphaned", "heartbeat stale, pid reused by another process", evidence);
+  return processActivity("unknown", "heartbeat stale, process liveness indeterminate", evidence);
+}
+
+function processActivity(classification, detail, evidence = null) {
+  return {
+    classification,
+    detail: projectFreeformText(detail),
+    state: evidence ? projectOptionalFreeformText(stringOrNull(evidence.state)) : null,
+    updated_at: evidence ? projectOptionalFreeformText(stringOrNull(evidence.updated_at)) : null,
+    log_ref: evidence ? projectOptionalFreeformData(stringOrNull(evidence.log_ref)) : null,
+  };
+}
+
+function safeReadProcessRecord(runDir, options = {}) {
+  if (typeof options.readProcessRecord === "function") return options.readProcessRecord(runDir);
+  try {
+    return readProcessEvidence(runDir);
+  } catch {
+    return { ok: false, missing: false, reason: "process record read failed", evidence: null };
+  }
+}
+
+// Verification spawns an identity probe, so it runs only on the stale-heartbeat
+// path rather than on every poll of a healthy run.
+function verifiedProcessStatus(runDir, options = {}) {
+  if (typeof options.verifyProcess === "function") return options.verifyProcess(runDir);
+  try {
+    return stringOrNull(inspectProcessEvidence(runDir)?.verification?.status);
+  } catch {
+    return null;
+  }
+}
+
+function heartbeatIsStale(runDir, options = {}) {
+  const nowMs = typeof options.now === "function" ? options.now() : Date.now();
+  const record = readHeartbeatRecord(runDir);
+  if (record === null || record.tickMs === null) return true;
+  return nowMs - record.tickMs > heartbeatStaleMs(record.intervalMs);
+}
+
+function readHeartbeatRecord(runDir) {
+  try {
+    const file = join(runDir, "heartbeat.json");
+    if (!safeIsFile(file)) return null;
+    const heartbeat = JSON.parse(readFileSync(file, "utf8"));
+    const parsed = Date.parse(heartbeat?.last_tick_at || "");
+    return { tickMs: Number.isFinite(parsed) ? parsed : null, intervalMs: heartbeat?.interval_ms };
+  } catch {
+    return null;
+  }
+}
+
+function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics(), options = {}) {
   return {
     run_id: run.run_id === fallbackID && isDisplaySafeRunId(run.run_id) ? run.run_id : REDACTED_VALUE,
     status: projectFreeformText(run.status || "unknown"),
@@ -289,6 +388,7 @@ function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
     slices: sliceSummary(run),
     panel: projectOptionalFreeformText(panelSummary(run)),
     terminal_reason: projectOptionalFreeformText(run.terminal_result?.reason),
+    process: projectProcessActivity(dirname(file), options),
     file: projectFreeformText(file),
     run_dir: projectFreeformText(dirname(file)),
     ...diagnosticSummary(diagnostics),
@@ -319,7 +419,7 @@ function fallbackRun(fallbackID, file, diagnostics) {
 }
 
 function shouldUseFallbackRow(diagnostics) {
-  return Array.isArray(diagnostics?.items) && diagnostics.items.some((item) => FAIL_CLOSED_CONDITIONS.has(item?.condition));
+  return Array.isArray(diagnostics?.items) && diagnostics.items.some((item) => FAIL_CLOSED_DIAGNOSTIC_CONDITIONS.has(item?.condition));
 }
 
 function safeDiagnoseRunFile(file, options) {
@@ -361,6 +461,10 @@ function diagnosticSummary(diagnostics) {
     diagnostic_status: stringOrDefault(envelope.status, "ok"),
     diagnostic_severity: stringOrDefault(envelope.severity, "info"),
     diagnostic_classification: stringOrDefault(envelope.classification, "healthy"),
+    // The primary item's condition, taken from the same aggregator the envelope
+    // used, so the row can tell apart two failures that share one classification
+    // (a corrupt run.json vs. one written by a newer schema). Display only.
+    diagnostic_condition: stringOrDefault(aggregateDiagnostics(envelope.items).primary?.condition, ""),
     diagnostic_summary: truncateDiagnosticSummary(stringOrDefault(envelope.summary, "No diagnostics")),
   };
 }

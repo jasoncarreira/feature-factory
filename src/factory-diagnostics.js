@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   TERMINAL_RUN_STATUSES,
   claimsCheckpointRoutingParent,
@@ -25,7 +26,8 @@ export const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000;
 export const MIN_STALE_HEARTBEAT_MS = 120000;
 
 const CONDITIONS = Object.freeze([
-  Object.freeze({ condition: "invalid-run-state", classification: "invalid", severity: "critical", status: "error", message: "Factory run state is invalid or cannot be parsed.", action: "Treat the run as untrusted until run.json and required sidecars validate." }),
+  Object.freeze({ condition: "invalid-run-state", failClosed: true, classification: "invalid", severity: "critical", status: "error", message: "Factory run state is invalid or cannot be parsed.", action: "Treat the run as untrusted until run.json and required sidecars validate." }),
+  Object.freeze({ condition: "newer-schema", failClosed: true, classification: "invalid", severity: "critical", status: "error", message: "Factory run state uses a newer schema than this reader.", action: "Read the run with a feature-factory build that recognizes its schema; this reader must treat it as untrusted." }),
   Object.freeze({ condition: "missing-worktree", classification: "blocked", severity: "error", status: "error", message: "A recorded worktree path is missing or inaccessible.", action: "Restore the worktree or complete cleanup/recovery from durable state." }),
   Object.freeze({ condition: "missing-heartbeat-process", classification: "recoverable", severity: "warning", status: "warning", message: "The heartbeat helper process recorded in heartbeat.json is not alive.", action: "Inspect the run log and validate durable state before resuming; do not infer run failure from PID liveness alone." }),
   Object.freeze({ condition: "stale-heartbeat", classification: "recoverable", severity: "warning", status: "warning", message: "Heartbeat has not advanced within the stale threshold.", action: "Inspect the run log and validate durable state before resuming; do not restart blindly." }),
@@ -34,6 +36,13 @@ const CONDITIONS = Object.freeze([
 ]);
 
 export const DIAGNOSTIC_CONDITIONS = Object.freeze(CONDITIONS.map((item) => item.condition));
+// Derived from the table rather than restated by each caller: a condition that
+// denies this reader workflow authority must fail every consumer closed, and a
+// hand-maintained literal in each consumer silently fails open the moment a new
+// such condition is added.
+export const FAIL_CLOSED_DIAGNOSTIC_CONDITIONS = Object.freeze(
+  new Set(CONDITIONS.filter((item) => item.failClosed).map((item) => item.condition)),
+);
 export const DIAGNOSTIC_CLASSIFICATIONS = Object.freeze(["healthy", "recoverable", "blocked", "needs-human", "terminal", "invalid"]);
 export const DIAGNOSTIC_STATUSES = Object.freeze(["ok", "warning", "error"]);
 export const DIAGNOSTIC_SEVERITIES = Object.freeze(["info", "warning", "error", "critical"]);
@@ -53,6 +62,64 @@ const DIAGNOSTIC_IDENTITY_FIELDS = Object.freeze({
   classification: new Set(DIAGNOSTIC_CLASSIFICATIONS),
   condition: new Set(DIAGNOSTIC_CONDITIONS),
 });
+
+// Exactly the message allowedKeys() emits for a key the schema does not know.
+// Matched by equality, not substring: several real constraint violations embed
+// the same phrase ("is not allowed for schema_version 1", "untrusted raw or
+// sensitive data is not allowed"), and those are genuine invalid state, not a
+// writer running ahead of this reader.
+const UNKNOWN_KEY_MESSAGE = "is not allowed";
+const MAX_REPORTED_UNKNOWN_KEYS = 12;
+
+let readerVersionCache = null;
+
+function readerVersion() {
+  if (readerVersionCache) return readerVersionCache;
+  try {
+    const pkg = JSON.parse(readFileSync(join(dirname(dirname(fileURLToPath(import.meta.url))), "package.json"), "utf8"));
+    readerVersionCache = typeof pkg.version === "string" && pkg.version ? pkg.version : "unknown";
+  } catch {
+    readerVersionCache = "unknown";
+  }
+  return readerVersionCache;
+}
+
+// Returns the unknown-key paths when a validation failure consists of nothing
+// but unrecognized keys, and null otherwise. That shape means every constraint
+// this reader knows about passed and the record merely carries fields a newer
+// writer added, which is worth telling the operator apart from a corrupt run.
+// It grants no authority: the caller still emits a critical, fail-closed item.
+function unknownKeyPaths(error) {
+  const errors = error?.errors;
+  if (!Array.isArray(errors) || errors.length === 0) return null;
+  if (!errors.every((item) => item?.message === UNKNOWN_KEY_MESSAGE && typeof item?.path === "string")) return null;
+  return errors.map((item) => item.path);
+}
+
+function runValidationDiagnostic(error, { checkedAt, runDir, runFile }) {
+  const unknownKeys = unknownKeyPaths(error);
+  const evidence = { source: "run.json", run_dir: runDir, run_path: runFile, error: error.message };
+  if (!unknownKeys) {
+    return diagnosticItem("invalid-run-state", {
+      checkedAt,
+      authoritative: false,
+      message: `Factory run state is invalid: ${error.message}`,
+      evidence,
+    });
+  }
+  const reported = unknownKeys.slice(0, MAX_REPORTED_UNKNOWN_KEYS);
+  return diagnosticItem("newer-schema", {
+    checkedAt,
+    authoritative: false,
+    message: `Factory run state uses a newer schema than this reader (feature-factory ${readerVersion()}): unrecognized ${reported.join(", ")}${unknownKeys.length > reported.length ? `, and ${unknownKeys.length - reported.length} more` : ""}.`,
+    evidence: {
+      ...evidence,
+      reader_version: readerVersion(),
+      unknown_keys: reported,
+      unknown_key_count: unknownKeys.length,
+    },
+  });
+}
 
 export function diagnoseRunDir(runDir, options = {}) {
   return diagnoseRunFile(join(runDir, "run.json"), { ...options, runDir });
@@ -101,12 +168,7 @@ export function diagnoseRunObject(input, options = {}) {
     run = validateRun(input);
   } catch (error) {
     return diagnosticEnvelope([
-      diagnosticItem("invalid-run-state", {
-        checkedAt,
-        authoritative: false,
-        message: `Factory run state is invalid: ${error.message}`,
-        evidence: { source: "run.json", run_dir: runDir, run_path: runFile, error: error.message },
-      }),
+      runValidationDiagnostic(error, { checkedAt, runDir, runFile }),
     ], { checkedAt, authoritative: false });
   }
 
