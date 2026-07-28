@@ -153,20 +153,21 @@ describe("runtime identity observation", () => {
     assert.equal(JSON.stringify(identity).includes("ignored\":true"), false);
   });
 
-  it("redacts opaque identity versions and high-entropy source path segments", () => {
-    const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
-    const versionSecret = "N8R2K7M4Q9V5X1C6L3P0T8Y2U7I4O9A5";
-    const identity = normalizeRuntimeIdentity({
-      cli: {
-        source: `/tmp/home ${sourceSecret}/feature-factory`,
-        version: `feature-factory 1.2.3 ${versionSecret}`,
-        hash: `sha256:${"b".repeat(64)}`,
-      },
-    });
-    const serialized = JSON.stringify(identity);
+  it("redacts separator-fragmented high-entropy identity credentials", () => {
+    const secret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+    for (const separator of ["-", "_", ".", ":", " "]) {
+      const fragmented = secret.match(/.{1,4}/gu).join(separator);
+      const identity = normalizeRuntimeIdentity({
+        cli: {
+          source: `/tmp/home ${fragmented}/feature-factory`,
+          version: `feature-factory 1.2.3 ${fragmented}`,
+          hash: `sha256:${"b".repeat(64)}`,
+        },
+      });
 
-    assert.deepEqual(identity.cli, { source: "[redacted]", version: "[redacted]", hash: `sha256:${"b".repeat(64)}` });
-    assert.doesNotMatch(serialized, new RegExp(`${sourceSecret}|${versionSecret}`, "u"));
+      assert.deepEqual(identity.cli, { source: "[redacted]", version: "[redacted]", hash: `sha256:${"b".repeat(64)}` }, JSON.stringify(separator));
+      assert.equal(JSON.stringify(identity).includes(fragmented), false, JSON.stringify(separator));
+    }
   });
 
   it("preserves benign delimited identity source and version text", () => {

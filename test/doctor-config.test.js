@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   collectTelemetryReadiness,
@@ -132,35 +132,41 @@ describe("doctor output projection", () => {
     }
   });
 
-  it("keeps opaque CLI identity bytes out of human and JSON output", () => {
-    const fixture = doctorFixture();
-    const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
-    const versionSecret = "N8R2K7M4Q9V5X1C6L3P0T8Y2U7I4O9A5";
-    const packageRoot = join(fixture.dir, `home ${sourceSecret}`, "node_modules", "opencode-feature-factory");
-    const bin = join(packageRoot, "bin");
-    try {
-      mkdirSync(bin, { recursive: true });
-      writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
-        name: "opencode-feature-factory",
-        version: `feature-factory 1.2.3 ${versionSecret}`,
-      }), "utf8");
-      writeExecutable(join(bin, "feature-factory"), "#!/bin/sh\nexit 0\n");
-      const env = { PATH: `${bin}:${fixture.bin}:${process.env.PATH}` };
+  it("keeps separator-fragmented high-entropy CLI credentials out of human and JSON output", () => {
+    const secret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+    for (const separator of ["-", "_", ".", ":", " "]) {
+      const fixture = doctorFixture();
+      const fragmented = secret.match(/.{1,4}/gu).join(separator);
+      const packageRoot = join(fixture.dir, `home ${fragmented}`, "node_modules", "opencode-feature-factory");
+      const effectiveCli = join(packageRoot, "feature-factory");
+      const bin = join(fixture.dir, "identity-bin");
+      try {
+        mkdirSync(bin, { recursive: true });
+        mkdirSync(packageRoot, { recursive: true });
+        writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+          name: "opencode-feature-factory",
+          version: `feature-factory 1.2.3 ${fragmented}`,
+        }), "utf8");
+        writeExecutable(effectiveCli, "#!/bin/sh\nexit 0\n");
+        symlinkSync(effectiveCli, join(bin, "feature-factory"));
+        const env = { PATH: `${bin}${delimiter}${fixture.bin}${delimiter}${process.env.PATH}` };
 
-      const human = runDoctorFixture(fixture, [], env);
-      const json = runDoctorFixture(fixture, ["--json"], env);
-      const payload = JSON.parse(json.stdout);
-      for (const output of [human.stdout, human.stderr, json.stdout, json.stderr]) {
-        assert.doesNotMatch(output, new RegExp(`${sourceSecret}|${versionSecret}`, "u"));
+        const human = runDoctorFixture(fixture, [], env);
+        const json = runDoctorFixture(fixture, ["--json"], env);
+        const payload = JSON.parse(json.stdout);
+        for (const output of [human.stdout, human.stderr, json.stdout, json.stderr]) {
+          assert.equal(output.includes(fragmented), false, JSON.stringify(separator));
+        }
+        assert.match(human.stdout, /feature-factory CLI identity \(\[redacted\]\)/u);
+        assert.deepEqual(payload.env.cli_identity, {
+          source: REDACTED_ENV_VALUE,
+          version: REDACTED_ENV_VALUE,
+          hash: payload.env.cli_identity.hash,
+        }, JSON.stringify(separator));
+        assert.match(payload.env.cli_identity.hash, /^sha256:[0-9a-f]{64}$/u);
+      } finally {
+        cleanup(fixture.dir);
       }
-      assert.deepEqual(payload.env.cli_identity, {
-        source: REDACTED_ENV_VALUE,
-        version: REDACTED_ENV_VALUE,
-        hash: payload.env.cli_identity.hash,
-      });
-      assert.match(payload.env.cli_identity.hash, /^sha256:[0-9a-f]{64}$/u);
-    } finally {
-      cleanup(fixture.dir);
     }
   });
 });

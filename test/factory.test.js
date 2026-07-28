@@ -393,33 +393,34 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
-  it("keeps composite opaque CLI identity bytes out of persisted run snapshots", async () => {
-    const fixture = createFixture("env-redaction-run");
-    const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
-    const versionSecret = "N8R2K7M4Q9V5X1C6L3P0T8Y2U7I4O9A5";
+  it("keeps separator-fragmented high-entropy CLI credentials out of persisted run snapshots", async () => {
+    const secret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
     const hash = `sha256:${"c".repeat(64)}`;
-    try {
-      await persistFactoryRunCreatedEnv(fixture.runId, {
-        cwd: fixture.repo,
-        runtimeIdentity: {
-          cli: {
-            source: `/tmp/home ${sourceSecret}/feature-factory`,
-            version: `feature-factory 1.2.3 ${versionSecret}`,
-            hash,
+    for (const [index, separator] of ["-", "_", ".", ":", " "].entries()) {
+      const fixture = createFixture(`env-redaction-run-${index}`);
+      const fragmented = secret.match(/.{1,4}/gu).join(separator);
+      try {
+        await persistFactoryRunCreatedEnv(fixture.runId, {
+          cwd: fixture.repo,
+          runtimeIdentity: {
+            cli: {
+              source: `/tmp/home ${fragmented}/feature-factory`,
+              version: `feature-factory 1.2.3 ${fragmented}`,
+              hash,
+            },
           },
-        },
-      });
-      const run = readJson(join(fixture.runDir, "run.json"));
-      const serialized = JSON.stringify(run);
+        });
+        const run = readJson(join(fixture.runDir, "run.json"));
 
-      assert.deepEqual(run.debug_snapshot.created_with.env.cli_identity, {
-        source: "[redacted]",
-        version: "[redacted]",
-        hash,
-      });
-      assert.doesNotMatch(serialized, new RegExp(`${sourceSecret}|${versionSecret}`, "u"));
-    } finally {
-      cleanup(fixture.repo);
+        assert.deepEqual(run.debug_snapshot.created_with.env.cli_identity, {
+          source: "[redacted]",
+          version: "[redacted]",
+          hash,
+        }, JSON.stringify(separator));
+        assert.equal(JSON.stringify(run).includes(fragmented), false, JSON.stringify(separator));
+      } finally {
+        cleanup(fixture.repo);
+      }
     }
   });
 

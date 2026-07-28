@@ -138,24 +138,25 @@ describe("environment snapshot redaction", () => {
     assert.equal(snapshot.provenance, undefined);
   });
 
-  it("keeps opaque CLI identity bytes out of run snapshots", async () => {
-    const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
-    const versionSecret = "N8R2K7M4Q9V5X1C6L3P0T8Y2U7I4O9A5";
+  it("keeps separator-fragmented high-entropy CLI credentials out of run snapshots", async () => {
+    const secret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
     const hash = `sha256:${"b".repeat(64)}`;
-    const snapshot = await collectRunDebugSnapshot({
-      cwd: process.cwd(),
-      runtimeIdentity: {
-        cli: {
-          source: `/tmp/home ${sourceSecret}/feature-factory`,
-          version: `feature-factory 1.2.3 ${versionSecret}`,
-          hash,
+    for (const separator of ["-", "_", ".", ":", " "]) {
+      const fragmented = secret.match(/.{1,4}/gu).join(separator);
+      const snapshot = await collectRunDebugSnapshot({
+        cwd: process.cwd(),
+        runtimeIdentity: {
+          cli: {
+            source: `/tmp/home ${fragmented}/feature-factory`,
+            version: `feature-factory 1.2.3 ${fragmented}`,
+            hash,
+          },
         },
-      },
-    });
-    const serialized = JSON.stringify(snapshot);
+      });
 
-    assert.deepEqual(snapshot.env.cli_identity, { source: REDACTED_ENV_VALUE, version: REDACTED_ENV_VALUE, hash });
-    assert.doesNotMatch(serialized, new RegExp(`${sourceSecret}|${versionSecret}`, "u"));
+      assert.deepEqual(snapshot.env.cli_identity, { source: REDACTED_ENV_VALUE, version: REDACTED_ENV_VALUE, hash }, JSON.stringify(separator));
+      assert.equal(JSON.stringify(snapshot).includes(fragmented), false, JSON.stringify(separator));
+    }
   });
 
   it("hashes effective prompts, skills, plugin bytes, and git state without raw prompt content", async () => {

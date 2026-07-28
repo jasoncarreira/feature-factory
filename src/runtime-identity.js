@@ -11,6 +11,10 @@ const DEFAULT_UNIX_EXECUTABLE_PATH = "/usr/bin:/bin";
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const UNSAFE_TERMINAL_TEXT = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 const UNSAFE_TERMINAL_TEXT_GLOBAL = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
+const SEPARATOR_FRAGMENT_RUN_PATTERNS = Object.freeze([
+  /[A-Za-z0-9]+(?:[^\p{L}\p{N}\s/\\]+[A-Za-z0-9]+)+/gu,
+  /[A-Za-z0-9]+(?:\s+[A-Za-z0-9]+)+/gu,
+]);
 export const RUNTIME_IDENTITY_SOURCE_MAX = 4096;
 export const RUNTIME_IDENTITY_VERSION_MAX = 512;
 
@@ -159,18 +163,37 @@ function normalizeIdentityText(value, maxLength, { trim = false, pathSegments = 
   if (!normalized || normalized.length > maxLength) return "[redacted]";
   const sensitive = isSensitiveValue(pathSegments ? `${normalized}#` : normalized)
     || containsSensitiveDelimitedToken(normalized)
-    || (pathSegments && normalized.split(/[\\/]/u).some(sensitivePathSegment));
+    || (pathSegments
+      ? normalized.split(/[\\/]/u).some(sensitivePathSegment)
+      : containsSensitiveSeparatorComposite(normalized));
   return sensitive ? "[redacted]" : normalized;
 }
 
 function sensitivePathSegment(segment) {
-  if (!segment || !isSensitiveValue(segment)) return false;
+  if (!segment) return false;
+  if (containsSensitiveSeparatorComposite(segment)) return true;
+  if (!isSensitiveValue(segment)) return false;
   return containsRecognizedSensitiveFragment(segment)
     || segment.split(/[-_.]+/u).some((part) => part && isSensitiveValue(part));
 }
 
 function containsSensitiveDelimitedToken(value) {
   return value.split(/[\s\p{P}\p{S}]+/u).some((token) => token && isSensitiveValue(token));
+}
+
+function containsSensitiveSeparatorComposite(value) {
+  for (const pattern of SEPARATOR_FRAGMENT_RUN_PATTERNS) {
+    for (const match of value.matchAll(pattern)) {
+      const fragments = match[0].split(/[^A-Za-z0-9]+/u);
+      for (let start = 0; start < fragments.length;) {
+        let end = start + 1;
+        while (end < fragments.length && fragments[end].length === fragments[start].length) end += 1;
+        if (end - start > 1 && isSensitiveValue(fragments.slice(start, end).join(""))) return true;
+        start = end;
+      }
+    }
+  }
+  return false;
 }
 
 function firstLine(value) {
