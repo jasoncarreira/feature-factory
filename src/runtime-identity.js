@@ -14,17 +14,64 @@ const UNSAFE_TERMINAL_TEXT_GLOBAL = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
 const SEPARATOR_FRAGMENT_RUN_PATTERN = /[A-Za-z0-9]+(?:[\s\p{P}\p{S}]+[A-Za-z0-9]+)+/gu;
 export const RUNTIME_IDENTITY_SOURCE_MAX = 4096;
 export const RUNTIME_IDENTITY_VERSION_MAX = 512;
+export const RUNTIME_ADMISSION_ERROR_CODE = "RUNTIME_ADMISSION_FAILED";
+
+export class RuntimeAdmissionError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RuntimeAdmissionError";
+    this.code = RUNTIME_ADMISSION_ERROR_CODE;
+  }
+}
+
+export function isRuntimeAdmissionError(error) {
+  return error?.code === RUNTIME_ADMISSION_ERROR_CODE;
+}
 
 export function resolveRuntimeIdentity(options = {}) {
+  return normalizeRuntimeIdentity(observeRuntimeIdentity(options));
+}
+
+export function admitRuntimeLaunch(options = {}) {
+  const identity = observeRuntimeIdentity(options);
+  assertMatchingPackageCli(identity, options.packageRoot || root);
+  if (!completeFileIdentity(identity.opencode)) {
+    throw admissionError("effective PATH opencode executable is unavailable; install OpenCode and ensure PATH resolves it before retrying");
+  }
+  return {
+    package_cli: { source: identity.package_cli.source, hash: identity.package_cli.hash },
+    opencode: { source: identity.opencode.source, hash: identity.opencode.hash },
+  };
+}
+
+export function revalidateRuntimeLaunchBinding(binding, options = {}) {
+  if (!completeFileIdentity(binding?.package_cli) || !completeFileIdentity(binding?.opencode)) {
+    throw admissionError("launch identity binding is invalid");
+  }
+  const identity = observeRuntimeIdentity(options, { probeOpenCodeVersion: false });
+  assertMatchingPackageCli(identity, options.packageRoot || root);
+  if (!completeFileIdentity(identity.opencode)) {
+    throw admissionError("effective PATH opencode executable became unavailable before spawn; retry after restoring the accepted OpenCode executable");
+  }
+  if (identity.opencode.source !== binding.opencode.source) {
+    throw admissionError(`effective PATH opencode executable changed before spawn; accepted source=${publicSource(binding.opencode)}, observed source=${publicSource(identity.opencode)}; retry with PATH resolving the accepted executable`);
+  }
+  if (identity.opencode.hash !== binding.opencode.hash) {
+    throw admissionError(`OpenCode executable bytes changed before spawn at ${publicSource(binding.opencode)}; retry after the executable update is complete`);
+  }
+  return binding.opencode.source;
+}
+
+function observeRuntimeIdentity(options = {}, { probeOpenCodeVersion = true } = {}) {
   const packageRoot = realpathOrResolve(options.packageRoot || root);
   const pkg = readPackage(packageRoot);
-  return normalizeRuntimeIdentity({
+  return {
     schema_version: 1,
     plugin: fileIdentity(join(packageRoot, "src", "plugin.js"), pkg.version),
     package_cli: fileIdentity(join(packageRoot, "src", "cli.js"), pkg.version),
     cli: commandIdentity("feature-factory", options, false),
-    opencode: commandIdentity("opencode", options, true),
-  });
+    opencode: commandIdentity("opencode", options, probeOpenCodeVersion),
+  };
 }
 
 export function normalizeRuntimeIdentity(value = {}) {
@@ -79,6 +126,37 @@ function commandIdentity(command, options, probeVersion) {
     version: probeVersion ? commandVersion(observed.source, options) : packageVersionFor(observed.source),
     hash: observed.hash,
   };
+}
+
+function assertMatchingPackageCli(identity, packageRoot) {
+  if (!completeFileIdentity(identity.package_cli)) {
+    throw admissionError("accepted package CLI bytes are unavailable; reinstall opencode-feature-factory from a complete package before retrying");
+  }
+  const accepted = publicSource(identity.package_cli);
+  const installRoot = publicPath(realpathOrResolve(packageRoot));
+  const remediation = `run npm with exact argv [\"install\",\"--global\",\"--\",${JSON.stringify(installRoot)}], then ensure PATH feature-factory resolves to the accepted bytes`;
+  if (!completeFileIdentity(identity.cli)) {
+    throw admissionError(`effective PATH feature-factory CLI is unavailable; accepted package CLI source=${accepted}; remediation: ${remediation}`);
+  }
+  if (identity.cli.hash !== identity.package_cli.hash) {
+    throw admissionError(`effective PATH feature-factory CLI bytes differ from the plugin/package CLI bytes; accepted package CLI source=${accepted}; observed PATH CLI source=${publicSource(identity.cli)}; remediation: ${remediation}`);
+  }
+}
+
+function admissionError(message) {
+  return new RuntimeAdmissionError(`runtime admission failed: ${message}`);
+}
+
+function completeFileIdentity(value) {
+  return typeof value?.source === "string" && isAbsolute(value.source) && HASH_PATTERN.test(value.hash ?? "");
+}
+
+function publicSource(value) {
+  return normalizeCliIdentity(value).source ?? "[unavailable]";
+}
+
+function publicPath(value) {
+  return normalizeCliIdentity({ source: value, hash: `sha256:${"0".repeat(64)}` }).source ?? "[unavailable]";
 }
 
 function resolveCommand(command, options) {

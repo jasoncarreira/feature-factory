@@ -2,11 +2,15 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { superviseDetachedLaunch } from "../src/detached-log-supervisor.js";
+import { admitRuntimeLaunch } from "../src/runtime-identity.js";
+
+const PACKAGE_CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
 describe("detached log supervisor", () => {
   it("reports the actual child pid and drains serialized sanitized stdout/stderr", async () => {
@@ -245,14 +249,17 @@ process.stdout.write("out Authorization: Basic dXNlcjpzdXBlci1zZWNyZXQ=\\r\\n");
 process.stderr.write("err \\u001b]8;;https://evil.test\\u0007x\\n");
 `, "utf8");
   chmodSync(script, 0o755);
+  symlinkSync(PACKAGE_CLI, join(bin, "feature-factory"));
   return { root, bin, log: join(root, "child.log") };
 }
 
 function init(fixture) {
+  const env = { ...process.env, PATH: `${fixture.bin}:${process.env.PATH || ""}` };
   return {
     repo: fixture.root,
     commandArgs: ["run", "test"],
-    env: { ...process.env, PATH: `${fixture.bin}:${process.env.PATH || ""}` },
+    env,
+    runtimeBinding: admitRuntimeLaunch({ cwd: fixture.root, env }),
     log: fixture.log,
     recordEvidence: false,
   };

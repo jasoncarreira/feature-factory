@@ -576,6 +576,7 @@ const { writeFileSync } = require("node:fs");
 writeFileSync(process.env.FEATURE_FACTORY_CAPTURE, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }, null, 2) + "\\n");
 `, "utf8");
   chmodSync(script, 0o755);
+  symlinkSync(CLI, join(bin, "feature-factory"));
   return bin;
 }
 

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "./helpers/git-fixture.js";
@@ -78,6 +78,7 @@ process.stderr.write("stderr Authorization: ${SECRET}\\u001b[31m boom\\u001b[0m\
 process.exitCode = ${exitCode};
 `, "utf8");
   chmodSync(script, 0o755);
+  symlinkSync(CLI, join(bin, "feature-factory"));
   return { root, repo, bin };
 }
 

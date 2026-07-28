@@ -7,6 +7,7 @@ import { FACTORY_LAUNCH_CLAIM_ENV, consumeSteering, factoryLaunchEnv, persistFac
 import { acquireLaunchClaim, recordDetachedProcessEvidence, transitionLaunchClaimPhase, writeProcessEvidence } from "../src/process-evidence.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { transitionGateDecision, transitionSteeringBoundaryOpened } from "../src/run-state.js";
+import { RuntimeAdmissionError } from "../src/runtime-identity.js";
 
 describe("factory resume", () => {
   it("strips inherited launch tokens before a checked launch injects its own", () => {
@@ -272,6 +273,46 @@ describe("factory resume", () => {
     } finally {
       cleanup(repo);
     }
+  });
+
+  it("fails start and resume routes before injected launchers on runtime admission errors", async () => {
+    const remediation = "runtime admission failed: accepted package CLI source=[redacted]; remediation: run npm with exact argv [\"install\",\"--global\",\"--\",\"[redacted]\"]";
+    const rows = [
+      ["start", (fixture, opts) => startFactory(["admission test"], opts)],
+      ["resume", (fixture, opts) => resumeFactory(fixture.runId, opts)],
+      ["start-resume", (fixture, opts) => startFactory([`resume ${fixture.runId}`], {
+        ...opts,
+        recoverDisruptedRunFn: async () => ({ ok: true, run_dir: fixture.runDir, run_file: join(fixture.runDir, "run.json") }),
+      })],
+    ];
+    for (const [name, invoke] of rows) {
+      const fixture = createFixture(`runtime-admission-${name}`);
+      let launches = 0;
+      try {
+        await assert.rejects(invoke(fixture, {
+          cwd: fixture.repo,
+          runtimeAdmissionFn: () => { throw new RuntimeAdmissionError(remediation); },
+          foregroundLaunchFn: async () => { launches += 1; },
+        }), (error) => error.message === remediation, name);
+        assert.equal(launches, 0, name);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("fails detached resume admission without invoking the detached launcher", async () => {
+    const fixture = createFixture("runtime-admission-detached");
+    const remediation = "runtime admission failed: accepted package CLI source=[redacted]; remediation: run npm with exact argv [\"install\",\"--global\",\"--\",\"[redacted]\"]";
+    let launches = 0;
+    try {
+      await assert.rejects(resumeFactory(fixture.runId, {
+        cwd: fixture.repo,
+        detached: true,
+        headless: true,
+        runtimeAdmissionFn: () => { throw new RuntimeAdmissionError(remediation); },
+        detachedLaunchFn: async () => { launches += 1; },
+      }), (error) => error.message === remediation);
+      assert.equal(launches, 0);
+    } finally { cleanup(fixture.repo); }
   });
 
   it("rejects every supplied generic-start continuation before filesystem, Git, or launch effects", async () => {

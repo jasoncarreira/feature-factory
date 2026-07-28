@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { spawnSync as runSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -366,8 +366,9 @@ function installFakeOpencode(repo) {
   const bin = join(repo, "bin");
   mkdirSync(bin, { recursive: true });
   const script = join(bin, "opencode");
-  writeFileSync(script, "#!/usr/bin/env node\nconst keepAlive = setInterval(() => {}, 1000);\nprocess.once(\"SIGTERM\", () => { clearInterval(keepAlive); process.exit(0); });\n", "utf8");
+  writeFileSync(script, "#!/usr/bin/env node\nif (process.argv[2] === \"--version\") { console.log(\"opencode-test 1\"); process.exit(0); }\nconst keepAlive = setInterval(() => {}, 1000);\nprocess.once(\"SIGTERM\", () => { clearInterval(keepAlive); process.exit(0); });\n", "utf8");
   chmodSync(script, 0o755);
+  symlinkSync(CLI, join(bin, "feature-factory"));
   return bin;
 }
 

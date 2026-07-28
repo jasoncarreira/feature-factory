@@ -16,6 +16,7 @@ import { CARRY_FORWARD_REQUIRED_SUMMARY, assertPublishedCarryForwardRun, complet
 import { ISSUE128_BASELINE_ROUTE_INVENTORY, ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG, emitIssue128FinishAndDiscloseMutations } from "./helpers/durable-record-mutations.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
+import { RuntimeAdmissionError } from "../src/runtime-identity.js";
 import { deliveryEnvelopeForSlices, passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 import { publishAmendmentReportFor, writeOwnerDispatch } from "./helpers/integration-amendment/fixture.js";
 
@@ -218,6 +219,24 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
     } finally {
       cleanup(fixture.repo);
     }
+  });
+
+  it("fails carry-forward runtime admission before invoking its launch seam", async () => {
+    const fixture = createV2Fixture("carry-runtime-admission", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-runtime-admission-next";
+    const remediation = "runtime admission failed: accepted package CLI source=[redacted]; remediation: run npm with exact argv [\"install\",\"--global\",\"--\",\"[redacted]\"]";
+    let launches = 0;
+    try {
+      await assert.rejects(continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        runtimeAdmissionFn: () => { throw new RuntimeAdmissionError(remediation); },
+        foregroundLaunchFn: async () => { launches += 1; },
+      }), (error) => error.message === remediation);
+      assert.equal(launches, 0);
+    } finally { cleanup(fixture.repo); }
   });
 
   it("rejects a legacy plan without integration_gate at v2 carry-forward construction", () => {

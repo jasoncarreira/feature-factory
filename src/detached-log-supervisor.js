@@ -6,6 +6,7 @@ import { inspectProcessIdentity } from "./hardening/process-verification.js";
 import { readProcessEvidence, recordDetachedProcessEvidence, writeProcessEvidence } from "./process-evidence.js";
 import { FACTORY_LAUNCH_CLAIM_ENV, stopHeartbeatInRunDir } from "./factory.js";
 import { timestamp } from "./utils.js";
+import { revalidateRuntimeLaunchBinding } from "./runtime-identity.js";
 
 const ABORT_GRACE_MS = 1000;
 const IDENTITY_SETTLE_TIMEOUT_MS = 5000;
@@ -35,16 +36,20 @@ export async function superviseDetachedLaunch(init, options = {}) {
     terminateChild(child);
     try { await cleanupHeartbeat(); } catch { /* the failed-closed evidence preserves ambiguous ownership */ }
     await markMatchingEvidence(init, child?.pid, "failed-closed", options);
-    throw new Error(renderErrorForTerminal(error));
+    const failure = new Error(renderErrorForTerminal(error));
+    failure.code = error?.code;
+    throw failure;
   };
 
   try {
     await append(init.log, Buffer.alloc(0));
-    child = spawnProcess("opencode", init.commandArgs, {
+    const executable = (options.runtimeRevalidateFn || revalidateRuntimeLaunchBinding)(init.runtimeBinding, { cwd: init.repo, env: init.env });
+    child = spawnProcess(executable, init.commandArgs, {
       cwd: init.repo,
       detached: true,
       env: init.env,
       stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
     });
     activeChild = child;
     // Register the close listener before any awaited work. `close` is emitted
@@ -140,7 +145,7 @@ function processInspectionOptions(options) {
 
 function validateInit(init) {
   if (!init || typeof init !== "object") throw new Error("invalid detached supervisor init");
-  if (typeof init.repo !== "string" || !Array.isArray(init.commandArgs) || typeof init.log !== "string") {
+  if (typeof init.repo !== "string" || !Array.isArray(init.commandArgs) || typeof init.log !== "string" || !init.runtimeBinding) {
     throw new Error("invalid detached supervisor init");
   }
   if (init.recordEvidence && (!init.runDir || !init.runId || !init.executionId || !init.logRef)) {
@@ -209,7 +214,7 @@ if (typeof process.send === "function") {
       await superviseDetachedLaunch(message);
       process.disconnect?.();
     } catch (error) {
-      try { sendIpc({ type: "error", error: renderErrorForTerminal(error) }); } catch { /* launcher disconnected */ }
+      try { sendIpc({ type: "error", error: renderErrorForTerminal(error), code: error?.code }); } catch { /* launcher disconnected */ }
       process.exitCode = 1;
       process.disconnect?.();
     }
