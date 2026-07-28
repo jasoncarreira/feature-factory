@@ -65,7 +65,18 @@ Current guarantees:
 - Diagnostic `run.json.debug_snapshot` records redacted factory/opencode/plugin creation and resume snapshots for debugging only. Snapshot persistence must omit sensitive keys and redact token-shaped/high-entropy credential values such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar secrets.
 - Diagnostic `run.json.cost_attribution` records local current-run cost/usage attribution only. It is not billing authority, invoice state, quota enforcement, or cross-run chargeback data. The factory records provider-supplied usage/cost metadata only; it must not maintain pricing tables, call pricing APIs, estimate missing costs, or coerce missing values to zero.
 
-Explicit limits:
+## Implemented Runtime Consistency
+
+This is descriptive observation only; `README.md` remains the current operator authority.
+
+- Install and doctor expose the effective PATH CLI's terminal-safe `source`, package `version`, and SHA-256 `hash`. Launch admission observes package/plugin CLI, PATH CLI, and OpenCode identity. Creation and mutating resume persist only the effective PATH CLI observation as `debug_snapshot.created_with.env.cli_identity` / `last_resumed_with.env.cli_identity` through `factory env record-created` and `record-resume`.
+- `cli_identity` is closed diagnostic-only state and is never provenance or semantic authority. It does not authorize gates, reviews, merges, PRs, or later launches; launch admission always re-observes current bytes.
+- Every factory start/start-as-resume/resume/continue/checkpoint/approval-handoff launch, foreground or detached, requires exact SHA-256 byte equality between package `src/cli.js` and PATH `feature-factory`. Failure reports the `npm` executable with safe exact argv `["install","--global","--","<observed-package-root>"]`, after which PATH must resolve the accepted bytes. Admission binds package CLI and OpenCode absolute source/hash, immediately rechecks both before spawn, and the detached supervisor repeats the OpenCode/package binding recheck. Spawn uses the bound absolute OpenCode executable with `shell:false`.
+- Definition admission inspects recognized skill and agent files across HOME, effective `XDG_CONFIG_HOME/opencode`, and non-empty `OPENCODE_CONFIG_DIR`, covering singular/plural OpenCode forms plus HOME `.claude` and `.agents` feature skills. Non-empty `OPENCODE_CONFIG` or `OPENCODE_CONFIG_CONTENT` fails closed. Skills must be byte-exact packaged content or the sanctioned repo-seeded delegator; subagents must be byte-exact packaged definitions; a global primary `feature-factory.md` is always stale. A mismatch, symlink, unreadable, or ambiguous path is stale. Doctor fails; every launch route and direct plugin initialization/config registration reject before effects.
+- `feature-factory factory --help` exits 0 with deterministic usage and no unknown-command diagnostic. Doctor requires primary `permission.task: "allow"` and every subagent `permission.task: "deny"`, treating the supported one-level delegation policy as healthy.
+- Child publication for checkpoint and schema-v2 carry-forward routes uses Node-native serialized no-overwrite filesystem rename rather than host `mv`. Runtime dependencies after Node/npm installation are the documented OpenCode, `git`, operation-specific `gh`, and platform process inspection (`/proc` on Linux; `ps` and `lsof` on Darwin). Autonomous operation does not require `python3` or another undeclared helper runtime.
+
+## Explicit Limits
 
 - Local-only, not cryptographic or tamper-proof.
 - A coherent rewrite of local files and Git history is outside the model.

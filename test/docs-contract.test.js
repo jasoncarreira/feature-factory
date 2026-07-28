@@ -67,6 +67,66 @@ const BASE_ADVANCE_DOCS = Object.freeze({
   SKILL: markdownSection(SKILL, "Checked Active-Run Base Advancement"),
   SCHEMA: markdownSection(SCHEMA, "Checked Active-Run Base Advancement"),
 });
+const RUNTIME_CONSISTENCY_DOCS = Object.freeze({
+  README: markdownSection(README, "Runtime Consistency"),
+  SPEC: markdownSection(SPEC, "Implemented Runtime Consistency"),
+  SKILL: markdownSection(SKILL, "Runtime Consistency And Declared Tooling"),
+  SCHEMA: markdownSection(SCHEMA, "Runtime Identity, Admission, And Definitions"),
+});
+
+describe("runtime consistency documentation contract", () => {
+  it("keeps effective CLI observation diagnostic-only across install, doctor, launch, creation, and resume", () => {
+    for (const [name, text] of documentEntries(RUNTIME_CONSISTENCY_DOCS)) {
+      assert.match(text, /install[\s\S]*doctor[\s\S]*(?:launch|spawn)/i, `${name} must cover install, doctor, and launch observation`);
+      assert.match(text, /source[\s\S]*version[\s\S]*(?:SHA-256|hash)/i, `${name} must document the complete CLI identity tuple`);
+      assert.match(text, /debug_snapshot[\s\S]*(?:created_with|creation)[\s\S]*(?:last_resumed_with|resume)/i, `${name} must document creation/resume persistence`);
+      assert.match(text, /cli_identity[\s\S]*diagnostic-only|diagnostic-only[\s\S]*cli_identity/i, `${name} must classify CLI identity as diagnostic-only`);
+      assert.match(text, /never[\s\S]{0,160}(?:provenance|authority)/i, `${name} must deny CLI identity authority`);
+    }
+    assert.match(README, /README is the current packaged operator contract/i);
+    assert.match(RUNTIME_CONSISTENCY_DOCS.SPEC, /descriptive observation only; `README\.md` remains the current operator authority/i);
+  });
+
+  it("documents exact CLI-byte admission, bound OpenCode recheck, and safe npm remediation", () => {
+    for (const [name, text] of documentEntries(RUNTIME_CONSISTENCY_DOCS)) {
+      assert.match(text, /(?:package(?:'s)? )?`src\/cli\.js`/i, `${name} must name the package CLI`);
+      assert.match(text, /PATH `feature-factory`/i, `${name} must name the effective PATH CLI`);
+      assert.match(text, /exact SHA-256 byte equality|SHA-256 bytes[\s\S]{0,80}exactly equal/i, `${name} must require exact CLI byte equality`);
+      assert.match(text, /`?npm`? executable[\s\S]{0,80}\["install","--global","--","<observed-package-root>"\]/u, `${name} must retain the exact remediation executable and argv`);
+      assert.match(text, /package CLI[\s\S]*OpenCode[\s\S]*(?:source|absolute)[\s\S]*(?:hash|bytes)[\s\S]*(?:recheck|re-observe)/i, `${name} must bind and recheck package/OpenCode identity`);
+      assert.match(text, /detached[\s\S]*(?:supervisor|supervision)[\s\S]*(?:recheck|rechecks|repeats)/i, `${name} must document the detached recheck`);
+      assert.match(text, /bound absolute OpenCode|bound OpenCode executable/i, `${name} must document absolute OpenCode spawn`);
+      assert.match(text, /shell:false/u, `${name} must forbid shell resolution at spawn`);
+    }
+  });
+
+  it("documents the closed global-definition inventory, exact sanctioned bytes, and every enforcement route", () => {
+    for (const [name, text] of documentEntries(RUNTIME_CONSISTENCY_DOCS)) {
+      for (const source of ["HOME", "XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT"]) {
+        assert.match(text, literalPattern(source), `${name} must name definition source ${source}`);
+      }
+      assert.match(text, /singular(?: and|\/)plural|singular and plural/i, `${name} must cover both OpenCode directory forms`);
+      assert.match(text, /packaged[\s\S]*(?:sanctioned|delegator)[\s\S]*(?:byte|exact)/i, `${name} must define exact sanctioned skill bytes`);
+      assert.match(text, /subagent[\s\S]*(?:byte-exact|byte-equal|exact)/i, `${name} must define exact agent bytes`);
+      assert.match(text, /feature-factory\.md[\s\S]*(?:always stale|no global primary-agent file is sanctioned|no sanctioned global primary-agent)/i, `${name} must reject a global primary-agent file`);
+      assert.match(text, /(?:mismatch|mismatched)[\s\S]*symlink[\s\S]*unreadable[\s\S]*ambiguous/i, `${name} must fail closed on unsafe definition states`);
+      assert.match(text, /(?:start|launch)[\s\S]*resume[\s\S]*continu(?:e|ation)[\s\S]*checkpoint[\s\S]*(?:approval|handoff)/i, `${name} must cover every factory launch route`);
+      assert.match(text, /direct plugin[\s\S]*(?:initialization|config)/i, `${name} must close direct-plugin bypasses`);
+    }
+  });
+
+  it("documents deterministic help, supported task denial, and the declared runtime tool boundary", () => {
+    for (const [name, text] of documentEntries(RUNTIME_CONSISTENCY_DOCS)) {
+      assert.match(text, /feature-factory factory --help/i, `${name} must document factory help`);
+      assert.match(text, /exits? 0|exit-0/i, `${name} must document successful help exit`);
+      assert.match(text, /no unknown-command|no unknown command/i, `${name} must forbid an unknown-command help diagnostic`);
+      assert.match(text, /primary[\s\S]*permission\.task: "allow"[\s\S]*(?:every )?subagent[\s\S]*permission\.task: "deny"/i, name);
+      assert.match(text, /Node-native[\s\S]*(?:rename|filesystem publication)/i, `${name} must require Node-native publication`);
+      assert.match(text, /OpenCode[\s\S]*`git`[\s\S]*(?:operation-specific )?`gh`[\s\S]*(?:platform process inspection|`\/proc`)/i, `${name} must enumerate external runtime tools`);
+      assert.match(text, /(?:does not require|not required|Do not assume) `?python3`?|`python3`[^.\n]*not required/i, `${name} must reject undeclared Python assumptions`);
+    }
+  });
+});
 
 describe("checked active-run base advancement operator contract", () => {
   it("documents the exact JSON command, CLI API export, closed exits, and caller-authority rejection", () => {

@@ -129,6 +129,18 @@ Optional top-level `run.json.provenance` has `schema_version: 1`, `created`, `la
 
 Provenance stores hashes and byte counts, never raw dynamic prompts, dirty path lists, credentials, or trace context. It is diagnostic and non-authoritative. Configured model/variant is distinct from the actual provider-selected model: `actual` is null and `actual_source` is `unavailable` unless trustworthy OpenCode runtime metadata supplies it. Creation and resume are recorded by `factory env record-created|record-resume`; every review dispatch is stamped immediately before Task with `factory provenance review-dispatch <run-id> --agent AGENT --subject SUBJECT --attempts N --hash sha256:<hash> --prompt-bytes N --json`.
 
+## Runtime Identity, Admission, And Definitions
+
+The effective CLI identity is a closed `{source, version, hash}` observation. Install and doctor expose the effective PATH CLI source/package-version/SHA-256 tuple. Run creation and mutating resume store it only at `debug_snapshot.created_with.env.cli_identity` and `debug_snapshot.last_resumed_with.env.cli_identity`. It is diagnostic-only and never top-level state, provenance, or gate/review/merge/PR/launch authority.
+
+Every factory launch route (start, start-as-resume, resume, schema-v2 continue, checkpoint-start, and approval handoff; foreground and detached) requires package `src/cli.js` and PATH `feature-factory` to have exact SHA-256 byte equality. Missing or mismatched bytes return `RUNTIME_ADMISSION_FAILED` with the `npm` executable and safe exact argv `["install","--global","--","<observed-package-root>"]`, followed by a requirement that PATH resolve the accepted bytes. The package CLI and effective PATH OpenCode absolute sources/hashes are bound and immediately rechecked before spawn; detached supervision performs another recheck before child spawn. Source/byte drift or disappearance rejects. The bound absolute OpenCode executable is spawned with `shell:false`.
+
+Global-definition admission is a closed inventory across HOME, effective `XDG_CONFIG_HOME/opencode`, and non-empty `OPENCODE_CONFIG_DIR`. It covers singular/plural OpenCode skill and agent forms, HOME `.claude/skills/feature/SKILL.md` and `.agents/skills/feature/SKILL.md`, all twelve packaged subagents, and recognized global `feature-factory.md` primary-agent files. Non-empty `OPENCODE_CONFIG` or `OPENCODE_CONFIG_CONTENT` is unsupported and fails closed. Absence is healthy. A skill is exact only when byte-equal to packaged `SKILL.md` or the sanctioned delegator to repo-seeded `SKILL.md`/`SCHEMA.md`; a subagent is exact only when byte-equal to its packaged definition; no global primary-agent file is sanctioned. Mismatch, symlink, unreadable, and ambiguous paths are stale. Doctor exits missing; every launch route and direct plugin initialization/config registration rejects before effects. Installation warns but does not mutate definitions. Reconcile and restart OpenCode.
+
+`feature-factory factory --help` is deterministic normal usage with exit 0 and no unknown-command diagnostic. Doctor's supported Task contract is primary `permission.task: "allow"` and every subagent `permission.task: "deny"`.
+
+Checkpoint and schema-v2 carry-forward child-directory publication is Node-native serialized no-overwrite filesystem rename, not a host `mv` command. Runtime external tools are the documented OpenCode, `git`, operation-specific `gh`, and platform process inspection (`/proc` on Linux; `ps` and `lsof` on Darwin). `python3` and other undeclared helper runtimes are not required.
+
 ## Checked Active-Run Base Advancement
 
 The dedicated active-run operation is:
@@ -424,6 +436,11 @@ Heartbeat diagnostics require heartbeat-bracketed in-flight work in `run.json`: 
       "feature_factory_version": "0.1.0",
       "opencode_version": "1.17.13",
       "plugin_spec": "opencode-feature-factory",
+      "cli_identity": {
+        "source": "/usr/local/lib/node_modules/opencode-feature-factory/src/cli.js",
+        "version": "0.2.1",
+        "hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
       "resolved_models": {},
       "driver": {"kind": "cli", "name": "feature-factory"},
       "capabilities": {"git": true, "gh": true}
@@ -440,6 +457,8 @@ Rules:
 - `resume_count` is a non-negative integer incremented by resume recording.
 - Use `feature-factory factory env record-created <run-id> --json` after initial manifest creation.
 - Use `feature-factory factory env record-resume <run-id> --json` before a mutating resume step.
+- New creation/resume snapshots include `env.cli_identity` closed to exactly `source`, `version`, and `hash`. Source is an absolute terminal-safe path, `[redacted]`, or null; version is bounded terminal-safe text or null; hash is `sha256:<64-lowercase-hex>` or null. Source absence requires version/hash absence, and a present source requires a hash.
+- `cli_identity` is diagnostic-only and never provenance or semantic workflow/launch authority.
 - Sensitive keys are omitted. Token-shaped or high-entropy credential values are replaced with `[redacted]`; raw `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, and `xoxb_*` values are invalid in persisted diagnostic state.
 - If snapshot collection or validation fails, do not persist raw diagnostics.
 

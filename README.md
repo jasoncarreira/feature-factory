@@ -67,7 +67,7 @@ feature-factory install
 feature-factory doctor
 ```
 
-`npm install -g` installs the package; it does not edit opencode configuration. `feature-factory install` updates `~/.config/opencode/opencode.jsonc` with one package plugin entry: it rewrites the first matching registration (preferring a tuple entry so its options survive) and removes any other duplicate string or tuple registrations for this package, including stale legacy local specs. It preserves unrelated values and existing tuple options, and an already matching registration is idempotent. JSONC input is serialized as formatted strict JSON, so comments and trailing commas are not preserved. Shadowing files under `~/.config/opencode/agent/`, `~/.config/opencode/agents/`, `~/.config/opencode/skill/`, or `~/.config/opencode/skills/` produce warnings only and are not changed.
+`npm install -g` installs the package; it does not edit opencode configuration. `feature-factory install` updates `~/.config/opencode/opencode.jsonc` with one package plugin entry: it rewrites the first matching registration (preferring a tuple entry so its options survive) and removes any other duplicate string or tuple registrations for this package, including stale legacy local specs. It preserves unrelated values and existing tuple options, and an already matching registration is idempotent. JSONC input is serialized as formatted strict JSON, so comments and trailing commas are not preserved. The installer reports the effective PATH-resolved CLI as terminal-safe JSON containing exact `source`, package `version`, and SHA-256 `hash`. Shadowing definition findings produce warnings only during installation and are not changed; doctor and runtime launch apply the fail-closed policy documented below.
 
 The installer does not add a second, independent TUI registration. The package has a separately importable TUI object, but this repository does not prove host discovery or automatic TUI activation. Restart opencode after installation or after resolving a shadowing warning; config and plugin code are loaded at startup.
 
@@ -86,6 +86,50 @@ feature-factory doctor --local
 Then restart opencode. Config is loaded at startup.
 
 Local installs configure the package root, not `src/plugin.js`, so the package entry points remain available. The verified contract is still one config entry plus a separately importable TUI export, not automatic TUI activation.
+
+## Runtime Consistency
+
+Runtime identity is observed at four operator-relevant points:
+
+- `feature-factory install` prints `feature-factory CLI: {"source":...,"version":...,"hash":"sha256:..."}` for the effective PATH-resolved CLI.
+- `feature-factory doctor` reports the same effective CLI `source`, package `version`, and SHA-256 `hash`; `--json` exposes them at `env.cli_identity`.
+- Every foreground or detached OpenCode launch observes the package/plugin CLI, effective PATH `feature-factory`, and effective PATH `opencode` before spawn. CLI version is diagnostic; exact CLI bytes and bound OpenCode source/bytes are the admission checks.
+- Run creation and every mutating resume persist that invocation's effective PATH CLI observation at `run.json.debug_snapshot.created_with.env.cli_identity` or `last_resumed_with.env.cli_identity` through `factory env record-created` / `record-resume`.
+
+`cli_identity` exists only inside `debug_snapshot`. It is redacted diagnostic-only creation/resume metadata, never top-level workflow state, provenance, gate/review/merge/PR authority, or a substitute for fresh launch admission. Creation preserves the original observation; resume preserves it and records the latest observation separately.
+
+### Launch admission
+
+Before any factory child launch, the SHA-256 bytes of the effective PATH `feature-factory` must exactly equal the package's `src/cli.js`; different absolute source paths are allowed only when their bytes are equal. A missing or mismatched PATH CLI fails with `RUNTIME_ADMISSION_FAILED` and a terminal-safe remediation expressed as exact argv, not shell text:
+
+```text
+npm executable with exact argv ["install","--global","--","<observed-package-root>"]
+```
+
+Run `npm` with that exact argv, then ensure PATH `feature-factory` resolves to the accepted package CLI bytes. Do not interpolate the displayed package path into a shell command.
+
+Admission also binds the package CLI source/hash and effective PATH OpenCode absolute source/hash. Immediately before foreground spawn, both package CLI and OpenCode bindings are re-observed; detached launch performs the launcher recheck and the detached supervisor rechecks again before child spawn. Source or byte drift, disappearance, or an incomplete binding fails closed. The child is executed through the bound absolute OpenCode path with `shell:false`, not by resolving `opencode` again after admission.
+
+These gates cover every production factory launch route: new `factory start`, start-as-resume, `factory resume`, schema-v2 `factory continue`, `factory checkpoint-start`, and interactive approval handoff, in foreground and detached forms.
+
+### Global definitions
+
+The stale-definition check uses the same environment inherited by the OpenCode child and inspects this closed inventory:
+
+- Under `HOME`: singular and plural OpenCode `skill(s)/feature/SKILL.md`, singular and plural OpenCode `agent(s)/` definitions, plus `.claude/skills/feature/SKILL.md` and `.agents/skills/feature/SKILL.md`.
+- Under effective `XDG_CONFIG_HOME/opencode` (defaulting to `HOME/.config/opencode`): singular and plural skill and agent forms.
+- Under non-empty `OPENCODE_CONFIG_DIR`, resolved relative to the target repository when relative: singular and plural skill and agent forms.
+- Non-empty `OPENCODE_CONFIG` or `OPENCODE_CONFIG_CONTENT` is unsupported for factory operation and fails closed because its effective definition inventory cannot be established safely.
+
+Absent recognized definitions are healthy. A recognized global feature skill is accepted only when its bytes exactly equal the current packaged feature skill or the sanctioned small delegator that requires the repo-seeded `.opencode/skills/feature/SKILL.md` and `SCHEMA.md`. Each recognized subagent file is accepted only when its bytes exactly equal the corresponding packaged agent. A global `feature-factory.md` primary-agent file is always stale because there is no sanctioned global primary-agent definition. Mismatched, symlinked, unreadable, ambiguous, or otherwise uninspectable recognized paths fail closed; duplicate paths from overlapping HOME/XDG/config roots are inspected once.
+
+Install reports actionable warnings without modifying these files. Doctor classifies stale definitions or unsupported config overrides as `missing` and exits 1. New starts, resumes, continuations, checkpoint launches, and approval handoffs stop before child spawn. Direct plugin initialization and plugin `config` registration perform the same check, so loading the plugin outside the CLI is not a bypass. Remove mismatched files or replace them with exact sanctioned definitions, unset unsupported overrides, and restart OpenCode.
+
+### Diagnostics and tooling
+
+`feature-factory factory --help` deterministically prints normal usage to stdout, writes no unknown-command diagnostic, and exits 0. Doctor treats the supported one-level delegation policy as healthy only when the primary `feature-factory` agent has `permission.task: "allow"` and every subagent has `permission.task: "deny"`; subagent task denial is intentional, not a defect.
+
+The installed runtime requires Node `>=20`. Child-directory publication for checkpoint and schema-v2 carry-forward routes uses Node-native filesystem rename under the factory's serialized no-overwrite checks; it does not invoke host `mv`. After Node/npm installation, autonomous runtime command dependencies are limited to the documented OpenCode, `git`, and operation-specific `gh` CLIs plus platform process inspection: Linux `/proc`, or Darwin `ps` and `lsof`. The workflow does not require `python3` or another undeclared scripting/helper runtime. Missing required tools or unsupported process inspection fails with bounded diagnostics rather than silently selecting an undeclared fallback.
 
 ## Package Surface
 
@@ -163,7 +207,7 @@ The primary `feature-factory` agent is the only agent allowed to dispatch tasks.
 
 Research, planning, and review agents work inside the evidence they are handed: the researcher makes one scoped discovery pass with a bounded search/read budget and no repeated scans, and planning and review agents do not re-run broad repository discovery — they scope to the supplied research map, brief, diff, and observed evidence, and inspect only the remediation delta on reruns. This keeps depth and cost bounded and avoids re-scanning the whole repo every review round.
 
-`feature-factory install` warns when global files under `~/.config/opencode/agent/` or `agents/` duplicate plugin-owned agent names. Remove stale copies or replace them with delegators; otherwise an old global prompt may shadow the package prompt until opencode restarts.
+`feature-factory install` warns about stale recognized global definitions, including files that duplicate plugin-owned agent names, across the complete HOME, XDG, and OpenCode config-directory inventory described in Runtime Consistency. Runtime launch accepts only absent or exact sanctioned definitions and requires an OpenCode restart after reconciliation.
 
 ## Configure Plugin Options
 
@@ -722,7 +766,7 @@ feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
 ```
 
-These commands update `run.json.debug_snapshot.created_with`, `last_resumed_with`, and `resume_count` using redacted diagnostic-only snapshots. They must not persist raw token-shaped or high-entropy credentials such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, or `xoxb_*`.
+These commands update `run.json.debug_snapshot.created_with`, `last_resumed_with`, and `resume_count` using redacted diagnostic-only snapshots. Each new snapshot includes the effective PATH CLI `cli_identity` closed to `source`, `version`, and `hash`. It is never provenance or authority for gates, reviews, merges, PRs, or later launches. The commands must not persist raw token-shaped or high-entropy credentials such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, or `xoxb_*`.
 
 After the final steering drain/checkpoint, Gate 3 approval, and final push, establish the checked fence before creating the external PR:
 
@@ -918,7 +962,7 @@ feature-factory doctor --local --provider-smoke
 feature-factory doctor --telemetry
 ```
 
-It checks opencode run support, plugin registration, command/agent/skill registration, provider auth visibility, `HOME`, `git`, `gh`, base branch detection, and whether `.opencode/factory/` / `.opencode/worktrees/` are gitignored.
+It checks the effective PATH CLI source/version/hash, OpenCode run support, plugin registration, command/agent/skill registration, the complete global-definition inventory and unsupported config overrides, the supported primary-allow/subagent-deny Task policy, provider auth visibility, `HOME`, `git`, `gh`, base branch detection, and whether `.opencode/factory/` / `.opencode/worktrees/` are gitignored. Stale definitions are an actionable `missing` result, while exact packaged/sanctioned definitions or absence are healthy.
 
 `--provider-smoke` is accepted by the CLI but omitted from the current help text. It runs a real `opencode run` in the selected working directory, with a 30-second default timeout, once per distinct resolved model string—not once per provider or agent. These calls can consume quota or incur cost. A success is point-in-time evidence that invocation and authentication worked for that model; it is not a deterministic release check and does not guarantee future credentials, model availability, capacity, or provider service.
 
