@@ -298,17 +298,6 @@ export function normalizeReview(input = {}) {
   return { verdict: "indeterminate", review: null };
 }
 
-// GitHub reports mergeability on two axes. `mergeable` is CONFLICTING only when
-// the diff genuinely cannot apply; `mergeStateStatus` DIRTY is the same fact
-// from the merge-state side. BEHIND means main moved ahead without conflicting,
-// which only matters here once it has turned merge-ref CI red — a green behind
-// PR still merges fine and must not be stalled.
-//
-// UNKNOWN is deliberately not treated as conflicted. GitHub computes
-// mergeability asynchronously and reports UNKNOWN for a window after every
-// push, so treating it as a conflict would park healthy runs on a value that
-// resolves itself seconds later. Absent or unrecognized values fall through to
-// the pre-existing routing rather than inventing a verdict.
 // Closed sets so an unrecognized value is rejected as a protocol error rather
 // than silently reinterpreted. Absent (null/undefined) stays legal: older gh
 // versions and permission-limited tokens omit these fields, and the caller must
@@ -324,15 +313,29 @@ function optionalMergeEnum(value, allowed, label) {
   return normalized;
 }
 
+// Only a genuine conflict parks the run. `mergeable` CONFLICTING and
+// `mergeStateStatus` DIRTY are the same fact reported on two axes: the diff
+// cannot apply, so no amount of factory-side remediation makes it mergeable.
+//
+// BEHIND is deliberately NOT included. GitHub defines it as nothing more than
+// "the head ref is out of date", which says nothing about why a check failed. A
+// PR can be behind and simultaneously carry a real product regression, and
+// parking that would suppress the ordinary check-red remediation route that
+// #124 explicitly leaves unchanged. Attributing a red check to drift needs
+// evidence GitHub does not supply here — the run's own whole-story receipt
+// passed the same commands on its own base plus diff, so a red merge ref with a
+// green local receipt is the actual signal. That receipt lives at the caller,
+// not in this pure projection, so drift attribution belongs there.
+//
+// UNKNOWN is likewise not a conflict: GitHub computes mergeability
+// asynchronously and reports UNKNOWN for a window after every push, so treating
+// it as one would park healthy runs on a value that resolves itself seconds
+// later. Absent values fall through to the pre-existing routing.
 const CONFLICTING_MERGEABLE = "CONFLICTING";
 const CONFLICTING_MERGE_STATE = "DIRTY";
-const BEHIND_MERGE_STATE = "BEHIND";
 
-function isAwaitingOperatorMerge(mergeable, mergeStateStatus, checkVerdict) {
-  const merge = upper(mergeable);
-  const state = upper(mergeStateStatus);
-  if (merge === CONFLICTING_MERGEABLE || state === CONFLICTING_MERGE_STATE) return true;
-  return state === BEHIND_MERGE_STATE && checkVerdict === "red";
+function isAwaitingOperatorMerge(mergeable, mergeStateStatus) {
+  return upper(mergeable) === CONFLICTING_MERGEABLE || upper(mergeStateStatus) === CONFLICTING_MERGE_STATE;
 }
 
 export function aggregateObservation(input) {
@@ -345,15 +348,13 @@ export function aggregateObservation(input) {
   const checks = input.checkVerdict;
   const review = input.reviewVerdict;
   if (review === "red") return terminal("needs-human", "review-red", "review");
-  // Base drift is the operator's to resolve, not the factory's to remediate. A
-  // conflicted PR, or one left behind by a moving main whose merge-ref CI went
-  // red as a result, stays open and observed instead of entering check-red
-  // remediation or terminalizing. GitHub already shows the conflict, and the
-  // operator resolves it with update-branch or a local merge; the factory never
-  // attempts a merge itself. Placed after review-red so a reviewer asking for
-  // changes still routes normally, and before the check and green branches so a
-  // drifted run neither remediates nor declares success it cannot merge.
-  if (isAwaitingOperatorMerge(input.mergeable, input.mergeStateStatus, checks)) {
+  // A conflict is the operator's to resolve, not the factory's to remediate: the
+  // PR stays open and observed rather than entering check-red remediation or
+  // terminalizing, and the factory never attempts a merge itself. Placed after
+  // review-red so a reviewer asking for changes still routes normally, and
+  // before the check and green branches so a conflicted run neither remediates a
+  // failure it cannot merge past nor declares success it cannot merge at all.
+  if (isAwaitingOperatorMerge(input.mergeable, input.mergeStateStatus)) {
     return terminal("pending", "awaiting-operator-merge");
   }
   if (checks === "red") return terminal("red", "check-red", "checks");

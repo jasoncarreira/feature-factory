@@ -85,17 +85,35 @@ describe("post-PR normalization", () => {
     assert.equal(aggregateObservation(base).verdict, "green");
   });
 
-  it("parks a conflicted or drift-reddened PR as awaiting-operator-merge instead of remediating it", () => {
+  it("parks a conflicted PR as awaiting-operator-merge instead of remediating it", () => {
     const base = { expectedHeadSha: SHA, headRefOid: SHA, state: "OPEN", checkVerdict: "red", reviewVerdict: "pass" };
     const awaiting = { verdict: "pending", reason: "awaiting-operator-merge", primary: null };
 
     // Conflicts are the operator's to resolve; the factory keeps observing.
     assert.deepEqual(aggregateObservation({ ...base, mergeable: "CONFLICTING" }), awaiting);
     assert.deepEqual(aggregateObservation({ ...base, mergeStateStatus: "DIRTY" }), awaiting);
-    // Behind counts only once the drift has actually reddened merge-ref CI.
-    assert.deepEqual(aggregateObservation({ ...base, mergeStateStatus: "BEHIND" }), awaiting);
     // A conflicted PR must not be declared complete either, green CI or not.
     assert.deepEqual(aggregateObservation({ ...base, checkVerdict: "pass", mergeable: "CONFLICTING" }), awaiting);
+  });
+
+  it("keeps ordinary check-red remediation for a behind PR, since BEHIND cannot attribute the failure to drift", () => {
+    // GitHub defines BEHIND as nothing more than "the head ref is out of date",
+    // so a behind PR can carry a genuine product regression. Parking it would
+    // suppress the remediation route #124 leaves unchanged for ordinary check
+    // failures. Attributing a red check to drift needs the run's own passing
+    // whole-story receipt, which is not available in this pure projection.
+    const base = { expectedHeadSha: SHA, headRefOid: SHA, state: "OPEN", reviewVerdict: "pass" };
+
+    assert.deepEqual(
+      aggregateObservation({ ...base, checkVerdict: "red", mergeable: "MERGEABLE", mergeStateStatus: "BEHIND" }),
+      { verdict: "red", reason: "check-red", primary: "checks" },
+    );
+    // Behind with no mergeable signal at all is likewise ordinary.
+    assert.equal(aggregateObservation({ ...base, checkVerdict: "red", mergeStateStatus: "BEHIND" }).reason, "check-red");
+    // A green behind PR still merges fine and must not be stalled.
+    assert.equal(aggregateObservation({ ...base, checkVerdict: "pass", mergeStateStatus: "BEHIND" }).verdict, "green");
+    // But a behind PR that is also genuinely conflicted still parks.
+    assert.equal(aggregateObservation({ ...base, checkVerdict: "red", mergeable: "CONFLICTING", mergeStateStatus: "BEHIND" }).reason, "awaiting-operator-merge");
   });
 
   it("leaves every other mergeability signal on the pre-existing route", () => {
@@ -109,8 +127,6 @@ describe("post-PR normalization", () => {
     assert.equal(aggregateObservation({ ...base, mergeStateStatus: "BLOCKED" }).reason, "check-red");
     // Absent fields (older gh, restricted token) keep the original behavior.
     assert.equal(aggregateObservation(base).reason, "check-red");
-    // A green behind PR merges fine and must not be stalled.
-    assert.equal(aggregateObservation({ ...base, checkVerdict: "pass", mergeStateStatus: "BEHIND" }).verdict, "green");
     // Review-red still outranks drift: the reviewer asked for changes.
     assert.equal(aggregateObservation({ ...base, reviewVerdict: "red", mergeable: "CONFLICTING" }).primary, "review");
     // So do the external terminal states.
