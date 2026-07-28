@@ -5,8 +5,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { completeSliceBuilderTaskDispatch, observeIntegrationAmendmentExecutionAuthority, prepareSliceBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionRunJson, transitionRunSlice, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
 import { checkRunConsistency, validateRun } from "../src/validate.js";
-import { executeIntegrationAmendment } from "../src/factory.js";
-import { CARRY_FORWARD_REQUIRED_SUMMARY, FEATURE_BRANCH, NOW, RUN_ID, addAcceptedTechnicalBrief, advanceMergedAmendmentConsumer, bindAmendmentDispatch, blocked, carryForwardTerminalResult, cleanup, cleanupFixtures, commitCandidate, createFixture, executionOptions, git, publishAmendmentReview, publishConsumerReview, reachIntegrated, reachMerged, readJson, readRun, reportRequest, sha, snapshotRuntimeFiles, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
+import { continueFactory, executeIntegrationAmendment } from "../src/factory.js";
+import { CARRY_FORWARD_REQUIRED_SUMMARY, FEATURE_BRANCH, NOW, RUN_ID, addAcceptedTechnicalBrief, advanceMergedAmendmentConsumer, blockRuntimeAmendment, bindAmendmentDispatch, blocked, carryForwardTerminalResult, cleanup, cleanupFixtures, commitCandidate, createFixture, executionOptions, git, publishAmendmentReview, publishConsumerReview, reachIntegrated, reachMerged, readJson, readRun, reportRequest, sha, snapshotRuntimeFiles, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
 
 after(cleanupFixtures);
 
@@ -146,6 +146,55 @@ describe("generic integration amendment lifecycle and execution", () => {
       assert.equal(terminal.terminal_result.summary, CARRY_FORWARD_REQUIRED_SUMMARY);
       assert.deepEqual(terminal.terminal_result.artifacts, {});
       assert.equal(terminal.run.integration_amendment, undefined);
+    } finally { cleanup(fixture); }
+  });
+
+  it("lets a carry-forward-required parent continue while its settled blocked amendment is retained", async () => {
+    // The terminal summary instructs the operator to continue in a fresh
+    // schema-v2 carry-forward child, and that terminalization deliberately keeps
+    // the blocked amendment authority. Continuation admission previously demanded
+    // an all-absent inventory, so the only documented recovery was unreachable
+    // for exactly the parent that needed it. Verified against the real sidecar
+    // inventory, not a hand-written run.json field: a synthesized
+    // `integration_amendment` alone classifies all-absent and would pass the old
+    // guard vacuously.
+    const fixture = createFixture();
+    const runId = RUN_ID;
+    const continueOpts = { cwd: fixture.repo, review: "reviews/work-decomposer.json", runId: "amendment-carry-child", carryForward: true, dryRun: true, json: true };
+    const amendmentRejection = /integration-amendment-continuation-unsupported/u;
+    try {
+      const head = git(fixture.repo, ["rev-parse", "HEAD"]).trim();
+      const runPath = join(fixture.runDir, "run.json");
+      writeJson(runPath, { ...readRun(fixture), base_ref: "main", base_commit: head });
+      addAcceptedTechnicalBrief(fixture);
+
+      // An amendment that is merely reported is active authority and still rejects.
+      await transitionIntegrationAmendment(fixture.runDir, reportRequest(), { repoRoot: fixture.repo, now: NOW });
+      assert.equal(readRun(fixture).integration_amendment.status, "reported");
+      assert.throws(() => continueFactory(runId, continueOpts), amendmentRejection, "reported amendment must still reject");
+
+      // Blocked but not yet terminalized is also still live authority.
+      const blockedRun = await blockRuntimeAmendment(fixture);
+      assert.equal(blockedRun.integration_amendment.status, "blocked");
+      assert.throws(() => continueFactory(runId, continueOpts), amendmentRejection, "blocked without carry-forward terminalization must still reject");
+
+      // Only the exact terminalized shape is admitted.
+      const terminal = await transitionTerminalResult(fixture.runDir, carryForwardTerminalResult(), { now: NOW, blockedAmendmentTerminal: true });
+      assert.equal(terminal.terminal_result.reason, "carry-forward-required");
+      assert.equal(terminal.run.integration_amendment.status, "blocked", "terminalization retains the blocked amendment");
+
+      // The amendment gate no longer blocks. Continuation now proceeds to the
+      // ordinary carry-forward authority checks; this fixture's git history has
+      // no accepted merge-commit ancestry, so it stops there rather than
+      // publishing. That later stop is the proof the gate was passed.
+      assert.throws(
+        () => continueFactory(runId, continueOpts),
+        (error) => {
+          assert.doesNotMatch(error.message, amendmentRejection, "amendment gate must no longer reject a terminalized parent");
+          assert.match(error.message, /first-parent range must contain all and only accepted merge commits/u);
+          return true;
+        },
+      );
     } finally { cleanup(fixture); }
   });
 

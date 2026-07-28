@@ -82,7 +82,7 @@ const STEERING_BOUNDARY_KINDS = new Set(["gate", "dispatch", "remediation", "ter
 const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]);
 const POST_PR_HEARTBEAT_PHASES = new Set(["observing", "remediation-running", "revalidating"]);
 const POST_PR_TERMINAL_PHASE = Object.freeze({ completed: "succeeded", blocked: "blocked", "needs-human": "needs-human" });
-const CARRY_FORWARD_REQUIRED_SUMMARY = "Integration amendment is unsupported for this run state; continue remaining work in a fresh schema-v2 carry-forward child.";
+export const CARRY_FORWARD_REQUIRED_SUMMARY = "Integration amendment is unsupported for this run state; continue remaining work in a fresh schema-v2 carry-forward child.";
 const INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY = Symbol("integration-amendment-transition-authority");
 const INTEGRATION_AMENDMENT_DOWNSTREAM_MERGE_AUTHORITY = Symbol("integration-amendment-downstream-merge-authority");
 const FAILED_PRE_REVIEW_RETRY_AUTHORITY = Symbol("failed-pre-review-retry-authority");
@@ -3982,6 +3982,32 @@ function assertV2AuthorityExtends(actual, expected) {
   }
 }
 
+const AMENDMENT_ACTIVE_EFFECT_STATES = new Set(["active", "unknown"]);
+const AMENDMENT_UNRESOLVED_REVIEW_STATES = new Set(["active-claim-only", "review-published-without-closure", "closed-unconsumed"]);
+
+// A blocked amendment is *settled* when nothing is still executing or awaiting
+// consumption: no active/unknown verification effect and no unresolved reviewer
+// effect. Only then is its authority inert enough to be carried past, which is
+// why the terminal writer already admits exactly this state. Exported so the
+// continuation guard binds the same definition instead of restating it - the two
+// must agree or a run terminalizes into a recovery step it cannot take.
+export function isSettledBlockedAmendment(inventory, amendment) {
+  return amendment?.status === "blocked"
+    && !AMENDMENT_ACTIVE_EFFECT_STATES.has(inventory?.verification_effect?.state)
+    && !AMENDMENT_UNRESOLVED_REVIEW_STATES.has(inventory?.review_effect?.classification || "absent");
+}
+
+// The exact terminal shape assertCarryForwardRequiredTerminalAuthority admits.
+// Continuation keys off this rather than off `status === "blocked"` alone: a
+// blocked-but-not-yet-terminalized amendment still has live authority that the
+// rejection is correctly protecting.
+export function isCarryForwardRequiredTerminal(run) {
+  return run?.status === "blocked"
+    && isRecord(run.terminal_result)
+    && run.terminal_result.reason === "carry-forward-required"
+    && run.terminal_result.summary === CARRY_FORWARD_REQUIRED_SUMMARY;
+}
+
 function observeIntegrationAmendmentWriterAuthority(runDir, run, options = {}) {
   const inventory = inspectIntegrationAmendmentInventory(runDir, run);
   const amendment = run.integration_amendment;
@@ -3990,15 +4016,15 @@ function observeIntegrationAmendmentWriterAuthority(runDir, run, options = {}) {
       ? options.integrationAmendmentPendingSliceMerge
       : null,
   });
-  const activeEffect = ["active", "unknown"].includes(inventory.verification_effect?.state);
+  const activeEffect = AMENDMENT_ACTIVE_EFFECT_STATES.has(inventory.verification_effect?.state);
   const reviewState = inventory.review_effect?.classification || "absent";
-  const unresolvedReview = ["active-claim-only", "review-published-without-closure", "closed-unconsumed"].includes(reviewState);
+  const unresolvedReview = AMENDMENT_UNRESOLVED_REVIEW_STATES.has(reviewState);
   if (options.dedicated !== true) {
     if (["active-claim-only", "unknown-claim-optional-bound-receipt", "completed-nonzero-receipt-no-manifest"].includes(inventory.classification)) {
       throw new Error(`run.json writer rejected: integration amendment authority is ${inventory.classification}`);
     }
     if (amendment && amendment.status !== "merged") {
-      if (!(options.blockedTerminal === true && amendment.status === "blocked" && !activeEffect && !unresolvedReview)) {
+      if (!(options.blockedTerminal === true && isSettledBlockedAmendment(inventory, amendment))) {
         throw new Error(`run.json writer rejected: integration amendment is ${amendment.status}`);
       }
     }
