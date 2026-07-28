@@ -393,6 +393,36 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
+  it("keeps composite opaque CLI identity bytes out of persisted run snapshots", async () => {
+    const fixture = createFixture("env-redaction-run");
+    const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+    const versionSecret = "N8R2K7M4Q9V5X1C6L3P0T8Y2U7I4O9A5";
+    const hash = `sha256:${"c".repeat(64)}`;
+    try {
+      await persistFactoryRunCreatedEnv(fixture.runId, {
+        cwd: fixture.repo,
+        runtimeIdentity: {
+          cli: {
+            source: `/tmp/home ${sourceSecret}/feature-factory`,
+            version: `feature-factory 1.2.3 ${versionSecret}`,
+            hash,
+          },
+        },
+      });
+      const run = readJson(join(fixture.runDir, "run.json"));
+      const serialized = JSON.stringify(run);
+
+      assert.deepEqual(run.debug_snapshot.created_with.env.cli_identity, {
+        source: "[redacted]",
+        version: "[redacted]",
+        hash,
+      });
+      assert.doesNotMatch(serialized, new RegExp(`${sourceSecret}|${versionSecret}`, "u"));
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("resolves bare run ids under the factory root before same-name repo paths", () => {
     const fixture = createFixture("shadow-run");
     try {

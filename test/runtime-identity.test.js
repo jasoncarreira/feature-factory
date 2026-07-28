@@ -155,14 +155,28 @@ describe("runtime identity observation", () => {
 
   it("redacts opaque identity versions and high-entropy source path segments", () => {
     const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
-    const versionSecret = "N8R2V6C0X4M9L3K7P1Y5T9B2Q6W0F4J8";
+    const versionSecret = "N8R2K7M4Q9V5X1C6L3P0T8Y2U7I4O9A5";
     const identity = normalizeRuntimeIdentity({
-      cli: { source: `/tmp/benign/${sourceSecret}/feature-factory`, version: versionSecret, hash: `sha256:${"b".repeat(64)}` },
+      cli: {
+        source: `/tmp/home ${sourceSecret}/feature-factory`,
+        version: `feature-factory 1.2.3 ${versionSecret}`,
+        hash: `sha256:${"b".repeat(64)}`,
+      },
     });
     const serialized = JSON.stringify(identity);
 
     assert.deepEqual(identity.cli, { source: "[redacted]", version: "[redacted]", hash: `sha256:${"b".repeat(64)}` });
     assert.doesNotMatch(serialized, new RegExp(`${sourceSecret}|${versionSecret}`, "u"));
+  });
+
+  it("preserves benign delimited identity source and version text", () => {
+    const cli = {
+      source: "/tmp/home feature factory/build-123/feature-factory",
+      version: "feature-factory 1.2.3 stable (darwin-arm64)",
+      hash: `sha256:${"c".repeat(64)}`,
+    };
+
+    assert.deepEqual(normalizeRuntimeIdentity({ cli }).cli, cli);
   });
 });
 

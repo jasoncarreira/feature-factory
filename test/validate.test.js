@@ -361,6 +361,21 @@ describe("run schema and consistency", () => {
     }
   });
 
+  it("rejects unsanitized composite opaque debug snapshot CLI identity", () => {
+    const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+    const versionSecret = "N8R2K7M4Q9V5X1C6L3P0T8Y2U7I4O9A5";
+    const valid = { source: "/usr/local/bin/feature-factory", version: "0.2.1", hash: HASH };
+    for (const identity of [
+      { ...valid, source: `/tmp/home ${sourceSecret}/feature-factory` },
+      { ...valid, version: `feature-factory 1.2.3 ${versionSecret}` },
+    ]) {
+      assert.throws(
+        () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { cli_identity: identity } }) }),
+        (error) => error instanceof ValidationError && error.message.includes("must be redacted in debug snapshot"),
+      );
+    }
+  });
+
   it("rejects unredacted sensitive debug snapshot values", () => {
     assert.throws(
       () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { observed: "github_pat_123456789012345678901234567890" } }) }),

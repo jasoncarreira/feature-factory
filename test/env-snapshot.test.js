@@ -140,12 +140,16 @@ describe("environment snapshot redaction", () => {
 
   it("keeps opaque CLI identity bytes out of run snapshots", async () => {
     const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
-    const versionSecret = "N8R2V6C0X4M9L3K7P1Y5T9B2Q6W0F4J8";
+    const versionSecret = "N8R2K7M4Q9V5X1C6L3P0T8Y2U7I4O9A5";
     const hash = `sha256:${"b".repeat(64)}`;
     const snapshot = await collectRunDebugSnapshot({
       cwd: process.cwd(),
       runtimeIdentity: {
-        cli: { source: `/tmp/benign/${sourceSecret}/feature-factory`, version: versionSecret, hash },
+        cli: {
+          source: `/tmp/home ${sourceSecret}/feature-factory`,
+          version: `feature-factory 1.2.3 ${versionSecret}`,
+          hash,
+        },
       },
     });
     const serialized = JSON.stringify(snapshot);

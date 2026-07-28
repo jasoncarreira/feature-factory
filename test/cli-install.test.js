@@ -145,6 +145,37 @@ describe("feature-factory install", () => {
     }
   });
 
+  it("redacts composite opaque CLI identity bytes from install output", () => {
+    const home = tempHome();
+    const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+    const versionSecret = "N8R2K7M4Q9V5X1C6L3P0T8Y2U7I4O9A5";
+    const packageRoot = join(home, `home ${sourceSecret}`);
+    const effectiveCli = join(packageRoot, "feature-factory");
+    const bin = join(home, "bin");
+    try {
+      writeFile(join(packageRoot, "package.json"), JSON.stringify({
+        name: "opencode-feature-factory",
+        version: `feature-factory 1.2.3 ${versionSecret}`,
+      }));
+      writeFile(effectiveCli, "#!/bin/sh\nexit 0\n");
+      chmodSync(effectiveCli, 0o755);
+      mkdirSync(bin, { recursive: true });
+      symlinkSync(effectiveCli, join(bin, "feature-factory"));
+
+      const proc = runInstall(home, { PATH: `${bin}${delimiter}${process.env.PATH}` });
+
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.deepEqual(installIdentity(proc.stdout), {
+        source: "[redacted]",
+        version: "[redacted]",
+        hash: hashFile(effectiveCli),
+      });
+      assert.doesNotMatch(`${proc.stdout}${proc.stderr}`, new RegExp(`${sourceSecret}|${versionSecret}`, "u"));
+    } finally {
+      cleanup(home);
+    }
+  });
+
   it("redacts Basic credentials from install and both conflict path outputs", () => {
     const parent = tempHome();
     const secret = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==";

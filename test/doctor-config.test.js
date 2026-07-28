@@ -135,12 +135,15 @@ describe("doctor output projection", () => {
   it("keeps opaque CLI identity bytes out of human and JSON output", () => {
     const fixture = doctorFixture();
     const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
-    const versionSecret = "N8R2V6C0X4M9L3K7P1Y5T9B2Q6W0F4J8";
-    const packageRoot = join(fixture.dir, sourceSecret, "node_modules", "opencode-feature-factory");
+    const versionSecret = "N8R2K7M4Q9V5X1C6L3P0T8Y2U7I4O9A5";
+    const packageRoot = join(fixture.dir, `home ${sourceSecret}`, "node_modules", "opencode-feature-factory");
     const bin = join(packageRoot, "bin");
     try {
       mkdirSync(bin, { recursive: true });
-      writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "opencode-feature-factory", version: versionSecret }), "utf8");
+      writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+        name: "opencode-feature-factory",
+        version: `feature-factory 1.2.3 ${versionSecret}`,
+      }), "utf8");
       writeExecutable(join(bin, "feature-factory"), "#!/bin/sh\nexit 0\n");
       const env = { PATH: `${bin}:${fixture.bin}:${process.env.PATH}` };
 

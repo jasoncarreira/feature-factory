@@ -158,6 +158,7 @@ function normalizeIdentityText(value, maxLength, { trim = false, pathSegments = 
   if (trim) normalized = normalized.trim();
   if (!normalized || normalized.length > maxLength) return "[redacted]";
   const sensitive = isSensitiveValue(pathSegments ? `${normalized}#` : normalized)
+    || containsSensitiveDelimitedToken(normalized)
     || (pathSegments && normalized.split(/[\\/]/u).some(sensitivePathSegment));
   return sensitive ? "[redacted]" : normalized;
 }
@@ -166,6 +167,10 @@ function sensitivePathSegment(segment) {
   if (!segment || !isSensitiveValue(segment)) return false;
   return containsRecognizedSensitiveFragment(segment)
     || segment.split(/[-_.]+/u).some((part) => part && isSensitiveValue(part));
+}
+
+function containsSensitiveDelimitedToken(value) {
+  return value.split(/[\s\p{P}\p{S}]+/u).some((token) => token && isSensitiveValue(token));
 }
 
 function firstLine(value) {
