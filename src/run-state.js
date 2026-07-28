@@ -2367,10 +2367,43 @@ export function assertOrdinaryResumeRunById(repoInput, runId) {
   if (!lstatSync(runFile).isFile()) throw routeSchemaError("resume-schema-route-mismatch");
   const run = validateRun(parseJsonObjectFile(runFile, "ordinary resume run.json"));
   if (run.integration_amendment != null) throw new Error("integration-amendment-continuation-unsupported");
-  if (run.continuation !== undefined || run.checkpoint_source !== undefined || run.checkpoint_progress !== undefined) {
+  if (run.continuation !== undefined || run.checkpoint_progress !== undefined) {
     throw routeSchemaError("resume-schema-route-mismatch");
   }
+  if (run.checkpoint_source !== undefined) assertCurrentCheckpointChildResumeAuthority(repo, dirname(runFile), run);
   return run;
+}
+
+function assertCurrentCheckpointChildResumeAuthority(repo, runDir, run) {
+  const source = run.checkpoint_source;
+  if (source?.kind !== "delivery-checkpoint-source" || source.root_child_run_id !== run.run_id
+    || source.initial_base_ref !== run.base_ref || source.initial_base_commit !== run.base_commit) {
+    throw routeSchemaError("resume-schema-route-mismatch");
+  }
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true, requireApprovingReview: true });
+  if (decomposition.plan_hash !== source.child_plan_hash || decomposition.review_hash !== source.child_disposition_hash) {
+    throw routeSchemaError("resume-schema-route-mismatch");
+  }
+
+  const parentRunDir = resolve(directFactoryRoot(repo), source.parent_run_id);
+  if (dirname(parentRunDir) !== directFactoryRoot(repo) || parentRunDir === runDir) throw routeSchemaError("resume-schema-route-mismatch");
+  const parent = validateRun(parseJsonObjectFile(join(parentRunDir, RUN_FILE), "checkpoint resume parent run.json"));
+  const parentAuthority = observeCheckpointProgressParentAuthority(parentRunDir, parent);
+  const matches = parent.checkpoint_progress.entries.filter((entry) => entry.checkpoint_id === source.checkpoint_id
+    && entry.ordinal === source.checkpoint_ordinal && entry.root_child_run_id === run.run_id);
+  if (matches.length !== 1 || !["child-published", "launched"].includes(matches[0].state)) throw routeSchemaError("resume-schema-route-mismatch");
+  const entry = matches[0];
+  const configuration = entry.configuration;
+  const reviewTierMatches = configuration.review_tier === null ? !Object.hasOwn(run, "review_tier") : run.review_tier === configuration.review_tier;
+  if (parent.run_id !== source.parent_run_id || parentAuthority.artifact.ref !== source.manifest_ref
+    || parentAuthority.artifact.hash !== source.manifest_hash || entry.child_plan_hash !== source.child_plan_hash
+    || entry.brief_scope_hash !== source.brief_scope_hash || entry.base_ref !== source.initial_base_ref
+    || entry.base_commit !== source.initial_base_commit || run.mode !== configuration.mode
+    || (run.github_account ?? null) !== configuration.github_account || run.pr_mode !== configuration.pr_mode
+    || run.max_parallel_slices !== configuration.max_parallel_slices || run.max_retries !== configuration.max_retries
+    || hashValue(run.post_pr?.policy) !== hashValue(configuration.post_pr_policy) || !reviewTierMatches) {
+    throw routeSchemaError("resume-schema-route-mismatch");
+  }
 }
 
 export function observeContinuationTargetReservation(repoInput, runId) {

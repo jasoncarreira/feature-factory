@@ -10,6 +10,7 @@ import { hashValue } from "../src/refs.js";
 import { computePrOperationId } from "../src/github.js";
 import { completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionPostPrState } from "../src/run-state.js";
 import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
+import { installCurrentWholeStoryAuthority } from "./helpers/current-whole-story-fixture.js";
 
 const SHA = "a".repeat(40);
 const EMPTY_PATHS_HASH = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
@@ -1024,12 +1025,17 @@ function expectedAccountEnvironment(parentEnv, account = "octocat") {
 function createFixture(runId, { nextPollAt = "2026-07-12T12:00:00.000Z", reviewer = null, requested = false } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "post-pr-workflow-"));
   const runDir = join(repo, ".opencode", "factory", runId);
-  mkdirSync(join(runDir, "plan"), { recursive: true });
-  writeFileSync(join(runDir, "plan", "slices.json"), `${JSON.stringify(currentPlan([{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] }]))}\n`);
+  const authority = installCurrentWholeStoryAuthority({
+    runDir,
+    runId,
+    head: SHA,
+    slices: [{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] }],
+  });
   const review = reviewer ? { required: true, reviewer_login: reviewer, source: "driver" } : { required: false, reviewer_login: null, source: "none" };
   writeFileSync(join(runDir, "run.json"), `${JSON.stringify({
     schema_version: 1, run_id: runId, status: "running", max_retries: 3, github_account: "octocat", branch: "feature", worktree: repo, base_ref: "main", base_commit: SHA, pr_url: "https://github.com/acme/widgets/pull/7", pr_mode: "ready", gates: {},
-    slices: [{ id: "api", stack: "backend", depends_on: [], declared_paths: ["src/api.js"], effective_paths: ["src/api.js"], status: "pending", attempts: 0 }],
+    slices: authority.slices,
+    steps: authority.steps,
     post_pr: { schema_version: 1, policy: { enabled: true, wait_ms: 3600000, initial_poll_ms: 30000, max_poll_ms: 120000, check_start_grace_ms: 300000, max_transient_errors: 12, review }, phase: "observing", attempt: 0,
       observation: { epoch: 1, expected_head_sha: SHA, started_at: "2026-07-12T12:00:00.000Z", deadline_at: "2026-07-12T13:00:00.000Z", next_poll_at: nextPollAt, poll_count: 0, unchanged_count: 0, current_interval_ms: 30000, consecutive_transient_errors: 0, last_observed_at: null, last_fingerprint: null, last_check_verdict: "not_started", last_review_verdict: reviewer ? "pending" : "not_required", last_verdict: "pending", last_error: null, review_request: reviewer ? { status: requested ? "requested" : "pending", attempts: requested ? 1 : 0, requested_at: requested ? "2026-07-12T11:59:00.000Z" : null } : null, snapshot: null },
       remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null,

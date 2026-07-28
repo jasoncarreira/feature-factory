@@ -99,7 +99,7 @@ describe("factory trace-context propagation", () => {
       assert.equal(decoded.payload.driver.mode, "interactive");
       const upgraded = structuredClone(decoded.payload);
       upgraded.resume.schema_version = 2;
-      assert.deepEqual(decodeFeatureCommandPayload(encodeFeatureCommandPayload(upgraded), { repo: fixture.repo }), { ok: false, reason: "resume-schema-route-mismatch" });
+      assert.deepEqual(decodeFeatureCommandPayload(encodeFeatureCommandPayload(upgraded), { repo: fixture.repo }), { ok: false, reason: "unpublished-or-mismatched-carry-forward-resume" });
     } finally {
       cleanup(fixture.root);
     }
