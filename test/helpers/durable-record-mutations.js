@@ -1178,7 +1178,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["steering-boundary", "efff0777e2943f002136ce1a38aad484c5d7ab7143e07eb5b93e2475c497ca55"],
   ["steering-action-claim", "9a94c1f05fec7cad1d2930995c464530088b99175c8430f336fe4f00a76d7384"],
   ["steering-last-action", "986caa05859db8fa98077f1d3e0b08340be3922854cb5cd33a95415fd5b250b4"],
-  ["steering-pr-fence", "372be755ffb890bc4fdc9ae5913adad802c809e3d35c0e8c4746917c82e59b8a"],
+  ["steering-pr-fence", "e21025a5e584db627db74d3c4b186de64f259bbe3711c22586c6b9a6db87f628"],
   ["pr-created-result", "3b863980fbc4b34d584f7ef02b57e5a16ca37858f2c8dc347addcdb02c8446a3"],
   ["continuation-v2-envelope", "5e79487bd2d9c06622c9a90ff9ccff117dec10d6b230a134ecec6e22dd49749e"],
   ["continuation-v2-parent-binding", "18a11882f7aa24ae43b9e95670109daf944aeb768083f2a7c5705dd5f517bf2c"],
@@ -2650,7 +2650,7 @@ function prFenceEntry() {
   return recordEntry({
     authorityClassId: "validator-security-pr-result", id: "steering-pr-fence", record: "run.json.steering.pr_fence", variant: "successor PR operation fence",
     writer: "transitionPrePrFenceEstablished from checked local/worktree/origin Git authority",
-    readers: ["validateSteering successor fence validation", "transitionPrCreated and transitionPrePrFenceCleared checked GitHub reconciliation", "resume/recover legacy fence terminalization"],
+    readers: ["validateSteering successor fence validation", "transitionPrCreated and transitionPrePrFenceCleared checked GitHub reconciliation"],
     canonicalPath: ["steering", "pr_fence"], source, facts: exactFacts(source),
     requiredPath: ["operation_id"], typePath: ["draft"],
     targets: [time(["created_at"]), ref(["repository"]), hash(["state_hash"]), drift([], "operation_id", "operation"), stale(["head_sha"], SHA_A), cross(["operation_id"], `ffpr-v1-${"e".repeat(64)}`)],

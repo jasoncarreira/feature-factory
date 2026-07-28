@@ -1454,7 +1454,7 @@ describe("finite durable-authority catalog", () => {
   it("reviews B0MR.2 fence and universal PR tuple values before manifest digest updates", () => {
     const expectedDigests = {
       "terminal-result-completed": ["624dd6c0050e64037c95aca7904c9841656bd09684c3d8548b05e15601ba094c", "8156685012bdcf0072fc38331dd34c2ee2f0ac59c94d14418a0cadc3f92b84be", "67cc3ac4f4bc522a7e48be30ea4b1cdfcba2016a309ba99224197641cfcb059e"],
-      "steering-pr-fence": ["372be755ffb890bc4fdc9ae5913adad802c809e3d35c0e8c4746917c82e59b8a", "aae0a3986f100717159038cc2b06cfd835b1313305e22fc7beeea4929db3d662", "16fa47900dbcbd6618a6ebd0eed5cb705910a2ccfc8478bd1f554c7f8ebef406"],
+      "steering-pr-fence": ["e21025a5e584db627db74d3c4b186de64f259bbe3711c22586c6b9a6db87f628", "aae0a3986f100717159038cc2b06cfd835b1313305e22fc7beeea4929db3d662", "16fa47900dbcbd6618a6ebd0eed5cb705910a2ccfc8478bd1f554c7f8ebef406"],
       "pr-created-result": ["3b863980fbc4b34d584f7ef02b57e5a16ca37858f2c8dc347addcdb02c8446a3", "6b510aefac2fe46ad7ea3679ab0b023eda0ad0702139fdcfe62176b0404272bc", "619a77468645eec8923dec7f7e3c8b0d1aa11064aac4494e039b7aa282e6f9ea"],
     };
     for (const [id, digests] of Object.entries(expectedDigests)) {
@@ -1476,6 +1476,10 @@ describe("finite durable-authority catalog", () => {
       if (id === "steering-pr-fence") {
         assert.equal(review.canonicalSource.canonicalPath.join("."), "steering.pr_fence");
         assert.equal(review.canonicalSource.source.created_at, "2026-07-16T12:00:00.000Z");
+        assert.deepEqual(review.metadata.readers, [
+          "validateSteering successor fence validation",
+          "transitionPrCreated and transitionPrePrFenceCleared checked GitHub reconciliation",
+        ]);
       } else {
         assert.equal(review.canonicalSource.source.pr_node_id, "PR_catalog_operation");
         assert.equal(review.canonicalSource.source.pr_url, "https://github.com/acme/repo/pull/7");
