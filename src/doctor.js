@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { readJsoncConfig, readStrictJsonConfig } from "./config.js";
 import { REDACTED_ENV_VALUE, collectEnv, resolvePluginConfig } from "./env-snapshot.js";
+import { formatCliIdentity } from "./runtime-identity.js";
 import { checkOpenTelemetryApiLoadability, evaluateContentCaptureRisk, sanitizeOtlpEnv } from "./telemetry.js";
 import {
   isSensitiveKey,
@@ -59,6 +60,7 @@ export async function runDoctor(options = {}) {
   add(checks, "opencode config", existsSync(configPath), configPath);
   add(checks, "plugin configured", Boolean(pluginEntry), pluginSpec);
   add(checks, "profile config shape", staleProfileKeys(pluginOptions).length === 0, staleProfileKeys(pluginOptions).join(", ") || "profiles", "warn");
+  add(checks, "feature-factory CLI identity", Object.values(env.cli_identity).every(Boolean), formatCliIdentity(env.cli_identity), "warn");
   add(checks, "opencode CLI", env.capabilities.opencode, env.opencode_version || "opencode");
   add(checks, "opencode run --command", env.capabilities.opencode_run_command, "opencode run --help");
   add(checks, "opencode run --dir", env.capabilities.opencode_run_dir, "opencode run --help");
@@ -113,6 +115,11 @@ export async function runDoctor(options = {}) {
   }
 
   const payload = projectFreeformData(telemetry ? { checks, env, telemetry } : { checks, env });
+  // The closed normalizer already redacted these fields; retain exact paths and
+  // hashes that the generic high-entropy policy would otherwise hide.
+  payload.env.cli_identity = env.cli_identity;
+  const cliIdentityCheck = payload.checks.find((check) => check.label === "feature-factory CLI identity");
+  if (cliIdentityCheck) cliIdentityCheck.detail = formatCliIdentity(env.cli_identity);
   if (options.json) {
     console.log(serializeTerminalJson(payload, { space: 2 }));
   } else {

@@ -1,8 +1,9 @@
 import { spawnSync } from "./helpers/git-fixture.js";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 
@@ -12,12 +13,20 @@ const cli = join(repo, "src", "cli.js");
 describe("feature-factory install", () => {
   it("configures the plugin without warning when no global feature skill exists", () => {
     const home = tempHome();
+    const bin = join(home, "bin");
 
     try {
-      const proc = runInstall(home);
+      mkdirSync(bin, { recursive: true });
+      symlinkSync(cli, join(bin, "feature-factory"));
+      const proc = runInstall(home, { PATH: `${bin}${delimiter}${process.env.PATH}` });
 
       assert.equal(proc.status, 0, proc.stderr);
       assert.match(proc.stdout, /configured opencode plugin:/);
+      assert.deepEqual(installIdentity(proc.stdout), {
+        source: realpathSync(cli),
+        version: "0.2.1",
+        hash: hashFile(cli),
+      });
       assert.match(proc.stdout, /restart opencode for plugin changes to take effect/);
       assert.equal(proc.stderr, "");
       const config = JSON.parse(readFileSync(join(home, ".config", "opencode", "opencode.jsonc"), "utf8"));
@@ -110,6 +119,32 @@ describe("feature-factory install", () => {
     }
   });
 
+  it("renders hostile CLI source and version through bounded identity fields", () => {
+    const home = tempHome();
+    const packageRoot = join(home, "visible\u001B]0;pwned\u0007", "node_modules", "opencode-feature-factory");
+    const effectiveCli = join(packageRoot, "src", "cli.js");
+    const bin = join(home, "bin");
+    try {
+      writeFile(join(packageRoot, "package.json"), JSON.stringify({ name: "opencode-feature-factory", version: "9.9.9\u001B[2J" }));
+      writeFile(effectiveCli, "#!/bin/sh\nexit 0\n");
+      chmodSync(effectiveCli, 0o755);
+      mkdirSync(bin, { recursive: true });
+      symlinkSync(effectiveCli, join(bin, "feature-factory"));
+
+      const proc = runInstall(home, { PATH: `${bin}${delimiter}${process.env.PATH}` });
+
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.deepEqual(installIdentity(proc.stdout), {
+        source: realpathSync(effectiveCli).replace(/[\u001B\u0007]/gu, "?"),
+        version: "9.9.9?[2J",
+        hash: hashFile(effectiveCli),
+      });
+      assert.doesNotMatch(proc.stdout, /[\u001B\u0007\u009B]/u);
+    } finally {
+      cleanup(home);
+    }
+  });
+
   it("redacts Basic credentials from install and both conflict path outputs", () => {
     const parent = tempHome();
     const secret = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==";
@@ -132,12 +167,23 @@ describe("feature-factory install", () => {
   });
 });
 
-function runInstall(home) {
+function runInstall(home, env = {}) {
   return spawnSync(process.execPath, [cli, "install", "--local"], {
     cwd: repo,
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, ...env, HOME: home },
     encoding: "utf8",
   });
+}
+
+function installIdentity(stdout) {
+  const prefix = "feature-factory CLI: ";
+  const line = stdout.split("\n").find((value) => value.startsWith(prefix));
+  assert.ok(line, "install output must report CLI identity");
+  return JSON.parse(line.slice(prefix.length));
+}
+
+function hashFile(path) {
+  return `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
 }
 
 function tempHome() {

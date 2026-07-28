@@ -353,15 +353,32 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
-  it("records redacted debug snapshots", async () => {
+  it("records the exact observed CLI identity at creation and resume without adding authority", async () => {
     const fixture = createFixture("env-run");
+    const cliIdentity = {
+      source: "/opt/feature-factory/bin/feature-factory",
+      version: "7.8.9-test",
+      hash: `sha256:${"a".repeat(64)}`,
+    };
     try {
-      const created = await persistFactoryRunCreatedEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z" });
-      const resumed = await persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T13:00:00.000Z" });
+      const initialKeys = Object.keys(readJson(join(fixture.runDir, "run.json")));
+      const runtimeIdentity = { cli: cliIdentity };
+      const created = await persistFactoryRunCreatedEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z", runtimeIdentity });
+      const resumed = await persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T13:00:00.000Z", runtimeIdentity });
       const run = readJson(join(fixture.runDir, "run.json"));
       assert.equal(created.resume_count, 0);
       assert.equal(resumed.resume_count, 1);
       assert.equal(run.debug_snapshot.last_resumed_with.event, "run-resumed");
+      assert.deepEqual(created.created_with.env.cli_identity, cliIdentity);
+      assert.deepEqual(resumed.created_with.env.cli_identity, cliIdentity);
+      assert.deepEqual(resumed.last_resumed_with.env.cli_identity, cliIdentity);
+      assert.deepEqual(run.debug_snapshot.created_with.env.cli_identity, cliIdentity);
+      assert.deepEqual(run.debug_snapshot.last_resumed_with.env.cli_identity, cliIdentity);
+      assert.deepEqual(Object.keys(cliIdentity), ["source", "version", "hash"]);
+      assert.deepEqual(Object.keys(run).filter((key) => !initialKeys.includes(key)).sort(), ["debug_snapshot", "provenance"]);
+      assert.equal(Object.hasOwn(run, "cli_identity"), false);
+      assert.equal(JSON.stringify(run.provenance).includes(cliIdentity.source), false);
+      assert.equal(JSON.stringify(run.provenance).includes(cliIdentity.version), false);
     } finally {
       cleanup(fixture.repo);
     }

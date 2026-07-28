@@ -16,6 +16,7 @@ import { checkWorktreeIdentity } from "./worktrees.js";
 import { effectiveCheckedExecutionTimeoutMs, MAX_CHECKED_EXECUTION_TIMEOUT_MS, MIN_CHECKED_EXECUTION_TIMEOUT_MS } from "./checked-execution-timeout.js";
 import { privilegedControlPlanePathReason } from "./privileged-path-policy.js";
 import { verificationArtifactExecutionClaimRef } from "./verification-artifact-refs.js";
+import { RUNTIME_IDENTITY_SOURCE_MAX, RUNTIME_IDENTITY_VERSION_MAX, isRuntimeIdentityTextSafe, normalizeCliIdentity } from "./runtime-identity.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -61,6 +62,7 @@ const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const HANDOFF_RECEIPT_KIND = "interactive-approval-handoff";
 const DEBUG_SNAPSHOT_KEYS = new Set(["created_with", "last_resumed_with", "resume_count"]);
 const DEBUG_SNAPSHOT_EVENT_KEYS = new Set(["collected_at", "event", "diagnostic_only", "env"]);
+const CLI_IDENTITY_KEYS = new Set(["source", "version", "hash"]);
 const PROVENANCE_KEYS = new Set(["schema_version", "created", "last_resumed", "resume_count", "review_dispatches"]);
 const PROVENANCE_EVENT_KEYS = new Set(["schema_version", "event", "captured_at", "dispatch", "content", "runtime"]);
 const COST_ATTRIBUTION_STATUS_SET = new Set(COST_ATTRIBUTION_STATUSES);
@@ -2893,7 +2895,30 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
     errors.push({ path: `${path}.env`, message: "must be an object" });
     return;
   }
-  validateRedactedEnv(errors, payload, `${path}.env`);
+  if (Object.hasOwn(payload, "cli_identity")) validateCliIdentity(errors, payload.cli_identity, `${path}.env.cli_identity`);
+  for (const [key, value] of Object.entries(payload)) {
+    if (key !== "cli_identity") validateRedactedEnv(errors, value, `${path}.env.${key}`);
+  }
+}
+
+function validateCliIdentity(errors, identity, path) {
+  if (!isRecord(identity)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  allowedKeys(errors, identity, CLI_IDENTITY_KEYS, path);
+  for (const [key, maxLength] of [["source", RUNTIME_IDENTITY_SOURCE_MAX], ["version", RUNTIME_IDENTITY_VERSION_MAX]]) {
+    if (!Object.hasOwn(identity, key)) errors.push({ path: `${path}.${key}`, message: "is required" });
+    else if (identity[key] !== null && !isRuntimeIdentityTextSafe(identity[key], maxLength)) errors.push({ path: `${path}.${key}`, message: "must be null or bounded terminal-safe NFC text" });
+  }
+  if (!Object.hasOwn(identity, "hash")) errors.push({ path: `${path}.hash`, message: "is required" });
+  else if (identity.hash !== null && (typeof identity.hash !== "string" || !HASH_PATTERN.test(identity.hash))) errors.push({ path: `${path}.hash`, message: "must be null or a sha256 hash" });
+  if (typeof identity.source === "string" && identity.source !== REDACTED_ENV_VALUE && !isAbsolute(identity.source)) errors.push({ path: `${path}.source`, message: "must be an absolute path, redacted, or null" });
+  const normalized = normalizeCliIdentity(identity);
+  if (typeof identity.source === "string" && normalized.source !== identity.source) errors.push({ path: `${path}.source`, message: "must be redacted in debug snapshot" });
+  if (typeof identity.version === "string" && normalized.version !== identity.version) errors.push({ path: `${path}.version`, message: "must be redacted in debug snapshot" });
+  if (identity.source === null && (identity.version !== null || identity.hash !== null)) errors.push({ path, message: "must not report version or hash without a source" });
+  if (typeof identity.source === "string" && identity.hash === null) errors.push({ path: `${path}.hash`, message: "is required when source is present" });
 }
 
 export function validateIntegrationAmendment(value, { run = null } = {}) {

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -101,9 +101,12 @@ describe("doctor output projection", () => {
 
       const json = runDoctorFixture(fixture, ["--json"], { FAKE_OPENCODE_VERSION: "safe\u001B[2J" });
       const payload = JSON.parse(json.stdout);
+      assert.equal(payload.env.cli_identity.source, CLI);
+      assert.equal(payload.env.cli_identity.version, "0.2.1");
+      assert.match(payload.env.cli_identity.hash, /^sha256:[0-9a-f]{64}$/u);
       assert.equal(payload.env.resolved_models["backend-builder"], "provider/safe-model");
       assert.equal(payload.env.resolved_models["test-verifier"], "provider/control\u001B]0;pwned\u0007");
-      assert.match(json.stdout, /safe\\u001B/iu);
+      assert.equal(payload.env.opencode_version, "safe?[2J");
       assert.doesNotMatch(json.stdout, /[\u001B\u0007\u009B\u202E]/u);
     } finally {
       cleanup(fixture.dir);
@@ -509,6 +512,7 @@ fi
 `);
   writeExecutable(join(bin, "git"), "#!/bin/sh\nif [ \"$1\" = \"symbolic-ref\" ]; then printf '%s\\n' 'origin/main'; fi\n");
   writeExecutable(join(bin, "gh"), "#!/bin/sh\nexit 0\n");
+  symlinkSync(CLI, join(bin, "feature-factory"));
   return { dir, repo, home, bin };
 }
 

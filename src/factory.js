@@ -7543,6 +7543,7 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
     driverKind: opts.driverKind,
     pluginSpec: opts.pluginSpec,
     pluginOptions: opts.pluginOptions,
+    runtimeIdentity: opts.runtimeIdentity,
     event: opts.event || (eventKind === "resume" ? "run-resumed" : "run-created"),
     now: opts.now,
   });

@@ -40,16 +40,17 @@ export function projectCliData(value) {
   return projectCliValue(value, null);
 }
 
-function projectCliValue(value, key) {
+function projectCliValue(value, key, parentKey = null) {
   if (typeof value === "string") {
+    if (parentKey === "cli_identity" && key === "source") return safeContractPath(value) ? value : REDACTED_VALUE;
     if (validatedIdentity(key, value)) return value;
     return contractualIdentityKey(key) ? REDACTED_VALUE : projectFreeformData(value);
   }
   if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((entry) => projectCliValue(entry, null));
+  if (Array.isArray(value)) return value.map((entry) => projectCliValue(entry, null, key));
   const projected = Object.create(null);
-  for (const [key, entry] of Object.entries(value)) {
-    defineEntry(projected, key, projectCliValue(entry, key));
+  for (const [childKey, entry] of Object.entries(value)) {
+    defineEntry(projected, childKey, projectCliValue(entry, childKey, key));
   }
   return projected;
 }
@@ -69,6 +70,11 @@ export function renderCliFreeform(value) {
 
 export function renderCliPath(value) {
   return renderTerminalSegments([identitySegment(projectPath(value))]);
+}
+
+export function renderCliIdentity(value) {
+  const prefix = renderTerminalSegments([identitySegment("feature-factory CLI"), TRUSTED_SEGMENTS.COLON_SPACE]);
+  return `${prefix}${serializeTerminalJson(projectCliData({ cli_identity: value }).cli_identity)}`;
 }
 
 function renderListRow(item, helpers) {

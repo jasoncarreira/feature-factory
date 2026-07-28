@@ -337,12 +337,28 @@ describe("run schema and consistency", () => {
   });
 
   it("accepts debug snapshots", () => {
+    const cliIdentity = { source: "/usr/local/bin/feature-factory", version: "0.2.1", hash: HASH };
     const run = validateRun({
       ...runningRun(),
-      debug_snapshot: snapshotRoot({ env: { tool: "opencode", token_value: REDACTED_ENV_VALUE } }),
+      debug_snapshot: snapshotRoot({ env: { tool: "opencode", token_value: REDACTED_ENV_VALUE, cli_identity: cliIdentity } }),
     });
 
     assert.equal(run.debug_snapshot.resume_count, 0);
+    assert.deepEqual(run.debug_snapshot.created_with.env.cli_identity, cliIdentity);
+  });
+
+  it("strictly validates debug snapshot CLI identity", () => {
+    const valid = { source: "/usr/local/bin/feature-factory", version: "0.2.1", hash: HASH };
+    for (const [identity, expected] of [
+      [{ ...valid, extra: true }, /cli_identity\.extra: is not allowed/u],
+      [{ ...valid, source: "relative/feature-factory" }, /source: must be an absolute path/u],
+      [{ ...valid, version: "bad\u001b[2J" }, /version: must be null or bounded terminal-safe/u],
+      [{ ...valid, hash: "sha256:nope" }, /hash: must be null or a sha256 hash/u],
+      [{ source: null, version: "0.2.1", hash: null }, /must not report version or hash without a source/u],
+      [{ source: "/usr/local/bin/feature-factory", version: null, hash: null }, /hash: is required when source is present/u],
+    ]) {
+      assert.throws(() => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { cli_identity: identity } }) }), expected);
+    }
   });
 
   it("rejects unredacted sensitive debug snapshot values", () => {

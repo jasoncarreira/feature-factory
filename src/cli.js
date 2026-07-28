@@ -15,13 +15,14 @@ import { adoptSliceBuilderTaskDispatchCandidate, retrySliceAfterFailedVerificati
 import { validateRun } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
-import { printCliResult, projectCliData, projectCostReport, renderCliPath } from "./cli-output.js";
+import { printCliResult, projectCliData, projectCostReport, renderCliIdentity, renderCliPath } from "./cli-output.js";
 import { freeformSegment, identitySegment, renderErrorForTerminal, renderTerminalSegments, StructuredOutputError, TRUSTED_SEGMENTS } from "./hardening/output-policy.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 import { runCleanupSweepCommand } from "./cleanup-sweep-command.js";
 import { renderCleanupSweepReport } from "./cleanup-sweep-output.js";
 import { executeCleanupSweep, previewCleanupSweep } from "./cleanup-sweep.js";
 import { executeCheckedTestExecution, executeCheckedVerificationArtifact } from "./test-execution.js";
+import { resolveRuntimeIdentity } from "./runtime-identity.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
@@ -147,6 +148,7 @@ function install(args) {
   writeFileSync(configPath, JSON.stringify(cfg, null, 2) + "\n");
   console.log(`configured opencode plugin: ${renderCliPath(pluginSpec)}`);
   console.log(`updated: ${renderCliPath(configPath)}`);
+  console.log(renderCliIdentity(resolveRuntimeIdentity().cli));
   console.log("restart opencode for plugin changes to take effect");
   warnGlobalFeatureSkillConflicts(findGlobalFeatureSkillConflicts(home));
   warnGlobalAgentConflicts(findGlobalAgentConflicts(home));
