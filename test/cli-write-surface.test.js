@@ -36,6 +36,34 @@ describe("cli write surface", () => {
     } finally { rmSync(repo, { recursive: true, force: true }); }
   });
 
+  it("removes repair, v1 adoption, and new-PR continuation from every CLI surface", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-retired-routes-"));
+    try {
+      initGitRepo(repo);
+      const cases = [
+        [["factory", "repair", RUN_ID, "reported", "--json"], /unknown factory command/u],
+        [["factory", "adopt-continuation", RUN_ID, "--json"], /unknown factory command/u],
+        [["factory", "continue", RUN_ID, "--review", "reviews/reviewer.json", "--run-id", "child", "--new-pr", "--json"], /unknown option: --new-pr/u],
+      ];
+      for (const [args, expected] of cases) {
+        const proc = spawnSync(process.execPath, [CLI, ...args], {
+          cwd: repo,
+          encoding: "utf8",
+          env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+        });
+        assert.equal(proc.status, 1, args.join(" "));
+        assert.match(proc.stderr, expected, args.join(" "));
+        assert.equal(existsSync(join(repo, ".opencode", "factory")), false, args.join(" "));
+      }
+
+      const help = spawnSync(process.execPath, [CLI, "--help"], { cwd: repo, encoding: "utf8" });
+      assert.equal(help.status, 0, help.stderr);
+      assert.doesNotMatch(help.stdout, /factory repair|adopt-continuation|--new-pr/u);
+      assert.match(help.stdout, /factory amendment/u);
+      assert.match(help.stdout, /factory continue .*--carry-forward/u);
+    } finally { rmSync(repo, { recursive: true, force: true }); }
+  });
+
   it("exposes only the exact JSON checked-test execution grammar", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-test-execute-grammar-"));
     try {
@@ -365,7 +393,7 @@ describe("cli write surface", () => {
       rmSync(planPath);
       writeJson(join(runDir, "plan", "slices.json"), { slices: record.source.slices });
       const legacyRejected = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]);
-      assert.match(legacyRejected.stderr, /plan\.integration_gate: is required for newly produced and schema-v2 plans/u);
+      assert.match(legacyRejected.stderr, /plan\.integration_gate: is required; plan\.delivery_envelope: is required/u);
       for (const mutationCase of cases) {
         writeJson(join(runDir, "plan", "slices.json"), mutationCase.record);
         const before = readFileSync(join(runDir, "run.json"), "utf8");

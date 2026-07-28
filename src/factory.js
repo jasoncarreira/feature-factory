@@ -3,9 +3,9 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
-import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
-import { assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, parseSlicesPlanBytes, pendingProtectedGate, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { createTwoRefsAtomicallyNoReplace, git, repoRoot } from "./git.js";
@@ -1184,17 +1184,7 @@ export async function recoverDisruptedRun(runId, opts = {}) {
   await assertRunClaimRoute(repo, run, opts);
   assertNoPendingSpecialBuilderDispatches(target.runDir, run);
   if (run.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(repo, target.runDir, run, opts);
-  await opts.recoveryHooks?.beforeLegacyFenceMutation?.({ runDir: target.runDir, run });
   assertRecoveryV2Authority(repo, target.runDir, run, opts);
-  const legacyFence = await transitionLegacyPrFenceNeedsHuman(target.runDir, opts);
-  if (legacyFence) return recoveryEnvelope(legacyFence.run, {
-    ok: false,
-    durable: true,
-    updated: true,
-    recovered: false,
-    runDir: target.runDir,
-    reason: legacyFence.reason,
-  });
   if (TERMINAL_STATUSES.has(run.status)) return recoveryEnvelope(run, {
     ok: false,
     durable: true,
@@ -1668,7 +1658,7 @@ export function continueFactory(parentRunId, opts = {}) {
 function continueFactoryImplementation(parentRunId, opts = {}, telemetry) {
   const repo = repoRoot(opts.cwd || process.cwd());
   telemetry.repo = repo;
-  const allocationReplay = opts.carryForward === true && !opts.dryRun;
+  const allocationReplay = !opts.dryRun;
   const { continuation, carryForwardConfig } = buildContinuationCandidate(parentRunId, { ...opts, cwd: repo, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
   telemetry.candidateRunId = continuation.target.run_id;
   telemetry.expectedContinuation = continuation;
@@ -1676,49 +1666,29 @@ function continueFactoryImplementation(parentRunId, opts = {}, telemetry) {
   const parentRunDir = resolveRunDir(continuation.parent.run_id, { ...opts, cwd: repo });
   if (!opts.dryRun) acquireContinuationTargetReservation(repo, continuation);
 
-  if (continuation.schema_version === 2) {
-    if (opts.dryRun) {
-      assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false, beforeOriginFetch: opts.beforeOriginFetch, originSpawnSync: opts.originSpawnSync });
-      return { status: "dry-run", launchable: false, candidate: continuation };
-    }
-    const publishedRunDir = join(factoryRoot(repo), continuation.target.run_id);
-    const targetPublished = pathExistsNoFollow(join(publishedRunDir, "run.json"));
-    if (targetPublished) {
-      const published = readRunFile(join(publishedRunDir, "run.json"));
-      if (!sameJsonValue(published.continuation?.configuration, continuation.configuration)) {
-        throw new Error("current carry-forward invocation conflicts with published immutable configuration");
-      }
-    }
-    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, {
-      targetPublished,
-      ...(targetPublished ? { childRunDir: publishedRunDir } : {}),
-      beforeOriginFetch: opts.beforeOriginFetch,
-      originSpawnSync: opts.originSpawnSync,
-      ...(!targetPublished ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}),
-    });
-    const allocation = targetPublished
-      ? inspectPublishedCarryForwardAllocation(repo, continuation)
-      : allocateCarryForwardResources(repo, continuation, { ...opts, carryForwardConfig });
-    return publishAndLaunchCarryForward(repo, parentRunDir, continuation, carryForwardConfig, allocation, opts);
+  if (opts.dryRun) {
+    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false, beforeOriginFetch: opts.beforeOriginFetch, originSpawnSync: opts.originSpawnSync });
+    return { status: "dry-run", launchable: false, candidate: continuation };
   }
-  const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
-  const payload = featureCommandPayload(prompt, { ...opts, repo, continuation });
-  const launchEnv = factoryLaunchEnv(opts, continuation.target.run_id);
-  if (opts.dryRun) return { status: "dry-run", payload, seed_plan: continuationSeedPlan(continuation) };
-
-  assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false });
-  seedRepoSkill(repo);
-  // Seed the accepted parent planning artifacts into the child run up front so the
-  // orchestrator reuses the approved brief/research/story instead of regenerating
-  // them (the dominant wall-clock cost of a continuation).
-  seedContinuationPlanningArtifacts(repo, parentRunDir, continuation, {
-    ...(typeof opts.beforeContinuationSeedPublish === "function" ? { beforePublish: opts.beforeContinuationSeedPublish } : {}),
+  const publishedRunDir = join(factoryRoot(repo), continuation.target.run_id);
+  const targetPublished = pathExistsNoFollow(join(publishedRunDir, "run.json"));
+  if (targetPublished) {
+    const published = readRunFile(join(publishedRunDir, "run.json"));
+    if (!sameJsonValue(published.continuation?.configuration, continuation.configuration)) {
+      throw new Error("current carry-forward invocation conflicts with published immutable configuration");
+    }
+  }
+  assertContinuationBindingsCurrent(repo, parentRunDir, continuation, {
+    targetPublished,
+    ...(targetPublished ? { childRunDir: publishedRunDir } : {}),
+    beforeOriginFetch: opts.beforeOriginFetch,
+    originSpawnSync: opts.originSpawnSync,
+    ...(!targetPublished ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}),
   });
-  const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
-  if (opts.model) commandArgs.push("--model", opts.model);
-  commandArgs.push(encodeFeatureCommandPayload(payload));
-  if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: continuation.target.run_id, runDir: join(factoryRoot(repo), continuation.target.run_id) }), env: launchEnv });
-  return runForegroundFactory(repo, commandArgs, { ...opts, env: launchEnv });
+  const allocation = targetPublished
+    ? inspectPublishedCarryForwardAllocation(repo, continuation)
+    : allocateCarryForwardResources(repo, continuation, { ...opts, carryForwardConfig });
+  return publishAndLaunchCarryForward(repo, parentRunDir, continuation, carryForwardConfig, allocation, opts);
 }
 
 function assertOrdinaryContinuationParent(parent) {
@@ -1802,9 +1772,7 @@ function startFactoryLifecycleSpan(operation, opts) {
     } catch { /* workflow validation records the failure on the unparented lifecycle span */ }
     return startB6Span(`feature_factory.factory.${operation}`, {
       "feature_factory.mode": opts.autonomous === true ? "autonomous" : opts.headless === true || opts.detached === true ? "headless" : "interactive",
-      "feature_factory.continuation_kind": operation === "continue"
-        ? opts.carryForward ? "full-plan-carry-forward" : opts.newPr ? "new-pr" : "narrow-remediation"
-        : undefined,
+      "feature_factory.continuation_kind": operation === "continue" ? "full-plan-carry-forward" : undefined,
       "gen_ai.agent.name": "feature-factory",
       "gen_ai.operation.name": "invoke_agent",
     }, {
@@ -4304,32 +4272,20 @@ function buildContinuationCandidate(parentRunId, opts = {}) {
   assertOrdinaryContinuationParent(parentRun);
   assertNoUnresolvedSliceDispatches(parentRunDir, parentRun);
   assertNoPendingSpecialBuilderDispatches(parentRunDir, parentRun);
+  if (opts.carryForward !== true) throw new Error("factory continue requires --carry-forward");
   if (parentRun.status !== "blocked") {
     throw new Error(`parent run '${parentRun.run_id}' must have status blocked`);
   }
-  const postPrParent = stringValue(parentRun.pr_url);
-  const carryForward = opts.carryForward === true;
-  if (parentRun.checkpoint_source?.kind === "delivery-checkpoint-source" && !carryForward) {
-    throw new Error("checkpoint-source continuation requires same-checkpoint --carry-forward");
-  }
-  const nonconvergenceSource = terminalNonconvergenceReviewSource(parentRun);
-  if (nonconvergenceSource && !carryForward) throw new Error("terminal slice-review nonconvergence requires --carry-forward schema v2");
-  let carryForwardConfig = carryForward ? opts.carryForwardConfig || resolveCarryForwardConfiguration(repo, opts) : null;
+  if (stringValue(parentRun.pr_url)) throw new Error("v2 carry-forward is available only before PR creation");
+  let carryForwardConfig = opts.carryForwardConfig || resolveCarryForwardConfiguration(repo, opts);
   let checkpointConfiguration = null;
-  if (carryForward && parentRun.checkpoint_source?.kind === "delivery-checkpoint-source") {
+  if (parentRun.checkpoint_source?.kind === "delivery-checkpoint-source") {
     assertResumeConfiguration(parentRun, opts);
     checkpointConfiguration = resolveCheckpointContinuationConfiguration(repo, parentRun);
     carryForwardConfig = checkpointCarryForwardConfiguration(checkpointConfiguration);
   }
-  if (carryForward && opts.newPr === true) throw new Error("factory continue --carry-forward is mutually exclusive with --new-pr");
-  if (carryForward && postPrParent) throw new Error("v2 carry-forward is available only before PR creation");
-  if (carryForward) {
-    assertCarryForwardParentEligible(parentRun);
-    for (const slice of parentRun.slices || []) assertSliceAttemptHistoryCurrent(parentRunDir, slice.id, slice);
-  }
-  if (postPrParent && opts.newPr !== true) throw new Error("factory continue for a blocked parent with pr_url requires --new-pr");
-  if (!postPrParent && opts.newPr === true) throw new Error("factory continue --new-pr is accepted only for a blocked parent with pr_url");
-  if (postPrParent) assertPostPrContinuationParent(parentRun);
+  assertCarryForwardParentEligible(parentRun);
+  for (const slice of parentRun.slices || []) assertSliceAttemptHistoryCurrent(parentRunDir, slice.id, slice);
   if (!stringValue(parentRun.branch)) {
     throw new Error(`parent run '${parentRun.run_id}' must have a local branch`);
   }
@@ -4339,30 +4295,23 @@ function buildContinuationCandidate(parentRunId, opts = {}) {
 
   const targetRunId = normalizeContinuationTargetRunId(opts.runId, parentRun.run_id);
   const reservedTarget = observeContinuationTargetReservation(repo, targetRunId);
-  const requestedSchema = carryForward ? 2 : 1;
-  if (reservedTarget && reservedTarget.route_schema !== requestedSchema) throw new Error(`continuation target '${targetRunId}' is already reserved by a conflicting schema or authority`);
-  const publishedReplay = opts[CARRY_FORWARD_ALLOCATION_REPLAY] && carryForward && continuationPublishedCreatedAt(repo, targetRunId);
+  if (reservedTarget && reservedTarget.route_schema !== 2) throw new Error(`continuation target '${targetRunId}' is already reserved by a conflicting schema or authority`);
+  const publishedReplay = opts[CARRY_FORWARD_ALLOCATION_REPLAY] && continuationPublishedCreatedAt(repo, targetRunId);
   if (opts[CARRY_FORWARD_ALLOCATION_REPLAY] && !publishedReplay) assertContinuationSemanticTargetAbsent(repo, targetRunId);
   else if (!publishedReplay) assertContinuationTargetAvailable(repo, targetRunId);
   const review = resolveContinuationReview(parentRunDir, requiredContinuationReview(opts.review));
-  if (postPrParent) {
-    if (review.ref !== parentRun.post_pr.continuation_review.ref) throw new Error("post-PR continuation must select run.post_pr.continuation_review.ref");
-    if (sha256File(review.path) !== parentRun.post_pr.continuation_review.hash) throw new Error("post-PR continuation review hash mismatch");
-    const failed = postPrConsistencyChecks(parentRunDir, parentRun).filter((check) => !check.ok);
-    if (failed.length) throw new Error("post-PR continuation parent has invalid evidence/review bindings");
-  }
   const reviewSource = resolveContinuationReviewSource(parentRun, review.ref);
   if (reviewSource.hash && sha256File(review.path) !== reviewSource.hash) throw new Error("terminal nonconvergence continuation must consume the exact source review bytes");
   const reviewMetadata = validateContinuationReview(readReviewJson(review.path), review.ref, reviewSource, parentRunDir);
-  const targetBaseRef = continuationBaseRef(parentRun, { carryForward });
-  if (carryForward && !/^[0-9a-f]{40}$/u.test(String(parentRun.base_commit || ""))) {
+  const targetBaseRef = continuationBaseRef(parentRun, { carryForward: true });
+  if (!/^[0-9a-f]{40}$/u.test(String(parentRun.base_commit || ""))) {
     throw continuationOutcomeError("origin-base-invalid", "v2 carry-forward requires one recorded full target base commit");
   }
   const targetBaseCommit = continuationBaseCommit(repo, parentRun, targetBaseRef);
 
   const continuation = {
     kind: "blocked-run-continuation",
-    schema_version: carryForward ? 2 : 1,
+    schema_version: 2,
     created_at: publishedReplay || reservedTarget?.created_at || timestamp(opts.now),
     operator_summary: `Continue blocked run '${parentRun.run_id}' from ${review.ref}.`,
     parent: {
@@ -4392,34 +4341,29 @@ function buildContinuationCandidate(parentRunId, opts = {}) {
     parent_reviews: collectContinuationParentReviews(parentRunDir, parentRun),
     planning_reuse: continuationPlanningReuse(parentRun, parentRunDir),
   };
-  const draftSpecReuse = continuationDraftSpecReuse(parentRun, parentRunDir);
-  if (draftSpecReuse) continuation.draft_spec_reuse = draftSpecReuse;
-  if (postPrParent) continuation.post_pr = continuationPostPrBinding(parentRun, parentRunDir);
-  if (carryForward) {
-    if (continuation.planning_reuse?.eligible !== true || continuation.draft_spec_reuse !== undefined) {
-      throw new Error("v2 carry-forward requires durably accepted unchanged planning and no draft_spec_reuse");
-    }
-    continuation.configuration = checkpointConfiguration ?? carryForwardConfigurationBinding(carryForwardConfig);
-    if (checkpointConfiguration) {
-      continuation.checkpoint_source_hash = hashValue(parentRun.checkpoint_source);
-      continuation.configuration_hash = hashValue(checkpointConfiguration);
-    }
-    if (publishedReplay) {
-      const published = readRunFile(join(factoryRoot(repo), targetRunId, "run.json"));
-      if (!sameJsonValue(published.continuation?.configuration, continuation.configuration)) {
-        throw new Error("current carry-forward invocation conflicts with published immutable configuration");
-      }
-    }
-    continuation.carry_forward = collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, opts);
-    if (typeof opts.beforeCarryForwardReturn === "function") opts.beforeCarryForwardReturn({ continuation, parentRunDir });
-    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, {
-      targetPublished: false,
-      beforeOriginFetch: opts.beforeOriginFetch,
-      originSpawnSync: opts.originSpawnSync,
-      ...(opts[CARRY_FORWARD_ALLOCATION_REPLAY] && !publishedReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}),
-      ...(publishedReplay ? { targetPublished: true, childRunDir: join(factoryRoot(repo), targetRunId) } : {}),
-    });
+  if (continuation.planning_reuse?.eligible !== true) {
+    throw new Error("v2 carry-forward requires durably accepted unchanged planning and no draft_spec_reuse");
   }
+  continuation.configuration = checkpointConfiguration ?? carryForwardConfigurationBinding(carryForwardConfig);
+  if (checkpointConfiguration) {
+    continuation.checkpoint_source_hash = hashValue(parentRun.checkpoint_source);
+    continuation.configuration_hash = hashValue(checkpointConfiguration);
+  }
+  if (publishedReplay) {
+    const published = readRunFile(join(factoryRoot(repo), targetRunId, "run.json"));
+    if (!sameJsonValue(published.continuation?.configuration, continuation.configuration)) {
+      throw new Error("current carry-forward invocation conflicts with published immutable configuration");
+    }
+  }
+  continuation.carry_forward = collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, opts);
+  if (typeof opts.beforeCarryForwardReturn === "function") opts.beforeCarryForwardReturn({ continuation, parentRunDir });
+  assertContinuationBindingsCurrent(repo, parentRunDir, continuation, {
+    targetPublished: false,
+    beforeOriginFetch: opts.beforeOriginFetch,
+    originSpawnSync: opts.originSpawnSync,
+    ...(opts[CARRY_FORWARD_ALLOCATION_REPLAY] && !publishedReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}),
+    ...(publishedReplay ? { targetPublished: true, childRunDir: join(factoryRoot(repo), targetRunId) } : {}),
+  });
   return { continuation, carryForwardConfig };
 }
 
@@ -4454,8 +4398,7 @@ export function assertContinuationBindingsCurrent(repo, parentRunDir, continuati
     gates: {},
     continuation,
   };
-  if (continuation.schema_version === 2) validateCarryForwardCandidate(candidateRun);
-  else validateRun(candidateRun);
+  validateCarryForwardCandidate(candidateRun);
   const canonicalRepo = repoRoot(repo);
   const parentRoot = resolve(parentRunDir);
   const parentFile = join(parentRoot, "run.json");
@@ -4507,30 +4450,23 @@ export function assertContinuationBindingsCurrent(repo, parentRunDir, continuati
   if (!sameJsonValue(normalizeContinuationReuseForComparison(continuation.planning_reuse), normalizeContinuationReuseForComparison(currentReuse))) {
     throw new Error("continuation planning_reuse binding is stale");
   }
-  const currentDraft = continuationDraftSpecReuse(parentRun, parentRoot);
-  if (!sameJsonValue(continuation.draft_spec_reuse ?? null, currentDraft ?? null)) throw new Error("continuation draft_spec_reuse binding is stale");
-  const currentPostPr = stringValue(parentRun.pr_url) ? continuationPostPrBinding(parentRun, parentRoot) : null;
-  if (!sameJsonValue(continuation.post_pr ?? null, currentPostPr)) throw new Error("continuation post_pr binding is stale");
-
   const target = continuation.target;
   if (!target || target.run_id === parentRun.run_id || target.branch !== target.run_id) throw new Error("continuation target identity is cross-bound");
   if (target.worktree !== resolve(canonicalRepo, ".opencode", "worktrees", target.run_id)) throw new Error("continuation target worktree binding is stale");
   if (continuationBaseCommit(repo, parentRun, target.base_ref) !== target.base_commit) throw new Error("continuation target base binding is stale");
-  if (continuation.schema_version === 2) {
-    assertCarryForwardParentEligible(parentRun);
-    if (target.base_ref !== continuationBaseRef(parentRun, { carryForward: true })) throw new Error("continuation target origin base ref binding is stale");
-    const currentCarryForward = collectCarryForwardAuthority(repo, parentRoot, parentRun, target.base_ref, target.base_commit, options);
-    if (!sameJsonValue(continuation.carry_forward, currentCarryForward)) throw new Error("continuation carry_forward authority changed since candidate build");
-    if (parentRun.checkpoint_source?.kind === "delivery-checkpoint-source") {
-      const configuration = resolveCheckpointContinuationConfiguration(repo, parentRun);
-      if (continuation.checkpoint_source_hash !== hashValue(parentRun.checkpoint_source)
-        || continuation.configuration_hash !== hashValue(configuration)
-        || !sameJsonValue(continuation.configuration, configuration)) {
-        throw new Error("continuation checkpoint_source or stored configuration binding is stale");
-      }
-    } else if (Object.hasOwn(continuation, "checkpoint_source_hash") || Object.hasOwn(continuation, "configuration_hash")) {
-      throw new Error("non-checkpoint continuation cannot carry checkpoint bindings");
+  assertCarryForwardParentEligible(parentRun);
+  if (target.base_ref !== continuationBaseRef(parentRun, { carryForward: true })) throw new Error("continuation target origin base ref binding is stale");
+  const currentCarryForward = collectCarryForwardAuthority(repo, parentRoot, parentRun, target.base_ref, target.base_commit, options);
+  if (!sameJsonValue(continuation.carry_forward, currentCarryForward)) throw new Error("continuation carry_forward authority changed since candidate build");
+  if (parentRun.checkpoint_source?.kind === "delivery-checkpoint-source") {
+    const configuration = resolveCheckpointContinuationConfiguration(repo, parentRun);
+    if (continuation.checkpoint_source_hash !== hashValue(parentRun.checkpoint_source)
+      || continuation.configuration_hash !== hashValue(configuration)
+      || !sameJsonValue(continuation.configuration, configuration)) {
+      throw new Error("continuation checkpoint_source or stored configuration binding is stale");
     }
+  } else if (Object.hasOwn(continuation, "checkpoint_source_hash") || Object.hasOwn(continuation, "configuration_hash")) {
+    throw new Error("non-checkpoint continuation cannot carry checkpoint bindings");
   }
   if (options.targetPublished) {
     const childRunDir = resolve(options.childRunDir || join(factoryRoot(repo), target.run_id));
@@ -4639,12 +4575,12 @@ function allocateCarryForwardResources(repo, continuation, options = {}) {
 }
 
 function acquireContinuationTargetReservation(repo, continuation) {
+  if (continuation?.schema_version !== 2) throw new Error("continuation target reservation requires schema-v2 carry-forward authority");
   const parentRunDir = resolve(repo, dirname(continuation.parent.run_ref));
   assertFactoryAmendmentContinuationAbsent(parentRunDir, readRunFile(join(parentRunDir, "run.json")));
   const runId = continuation.target.run_id;
   const claims = observePermanentContinuationClaims(repo, runId);
-  if (continuation.schema_version === 1 && claims.length > 0) throw new Error(`continuation target '${runId}' has schema-v2 claim authority`);
-  if (continuation.schema_version === 2 && claims.length === 1) {
+  if (claims.length === 1) {
     const expected = carryForwardRegistration(continuation);
     if (claims[0].ref !== expected.claimRef || claims[0].oid !== expected.claimOid || claims[0].bytes !== expected.claimBytes.toString("utf8")) {
       throw new Error(`continuation target '${runId}' has a foreign schema-v2 claim`);
@@ -4654,7 +4590,7 @@ function acquireContinuationTargetReservation(repo, continuation) {
     schema_version: 1,
     kind: "continuation-target-reservation",
     child_run_id: runId,
-    route_schema: continuation.schema_version,
+    route_schema: 2,
     created_at: continuation.created_at,
     authority_hash: hashValue(continuation),
   };
@@ -4668,7 +4604,7 @@ function acquireContinuationTargetReservation(repo, continuation) {
   const created = git(repo, ["update-ref", ref, oid, "0".repeat(40)]);
   if (created.ok) return { ref, oid, ...reservation, replayed: false };
   const observed = observeContinuationTargetReservation(repo, runId);
-  if (!observed || observed.ref !== ref || observed.oid !== oid || observed.route_schema !== continuation.schema_version || observed.authority_hash !== reservation.authority_hash) {
+  if (!observed || observed.ref !== ref || observed.oid !== oid || observed.route_schema !== 2 || observed.authority_hash !== reservation.authority_hash) {
     throw new Error(`continuation target '${runId}' is already reserved by a conflicting schema or authority`);
   }
   return { ...observed, replayed: true };
@@ -4733,7 +4669,7 @@ async function publishCarryForwardChild(repo, parentRunDir, continuation, config
   if (typeof options.beforeCarryForwardStage === "function") options.beforeCarryForwardStage({ continuation, allocation });
   assertCarryForwardPublicationBoundary(repo, parentRunDir, continuation, configuration, allocation, options);
   const inputs = collectCarryForwardPublicationInputs(parentRunDir, continuation);
-  const plan = parseSlicesPlanBytes(inputs.plan.bytes, { label: "carry-forward plan/slices.json", requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
+  const plan = parseSlicesPlanBytes(inputs.plan.bytes, { label: "carry-forward plan/slices.json", requireIntegrationGate: true });
   const parentRun = readRunFile(join(parentRunDir, "run.json"));
   const childRun = initialCarryForwardRun(continuation, configuration, plan, inputs.decomposition, parentRun.checkpoint_source);
   const stagingParent = dirname(factoryRoot(repo));
@@ -5143,9 +5079,6 @@ function assertCarryForwardParentEligible(parentRun) {
     || parentRun.steering?.pr_fence != null || activePostPr) {
     throw new Error("v2 carry-forward requires a pre-PR blocked parent with no PR or post-PR state");
   }
-  if (parentRun.continuation?.draft_spec_reuse !== undefined) {
-    throw new Error("v2 carry-forward requires accepted planning and forbids draft_spec_reuse");
-  }
 }
 
 function validateCarryForwardCandidate(run) {
@@ -5520,191 +5453,6 @@ function continuationPlanningReuse(parentRun, parentRunDir) {
   };
 }
 
-function continuationDraftSpecReuse(parentRun, parentRunDir) {
-  const step = (Array.isArray(parentRun.steps) ? parentRun.steps : [])
-    .find((entry) => stringValue(entry?.agent) && String(entry.agent).trim() === "spec-writer");
-  if (!step || !["rejected", "blocked"].includes(step.status)) return null;
-  if (!Number.isInteger(step.attempts) || step.attempts < 0) return null;
-  if (step.acceptance || step.inherited_acceptance) return null;
-  if (String(step.artifact_ref || "").trim() !== "artifacts/technical-brief.md") return null;
-  const maxRetries = Number.isInteger(parentRun.max_retries) ? parentRun.max_retries : 3;
-  if (maxRetries < 1 || step.attempts >= maxRetries) {
-    throw new Error(`parent spec-writer retry budget is exhausted (${step.attempts}/${maxRetries}); refusing to reset it in a continuation`);
-  }
-  const parentRoot = resolve(parentRunDir);
-  const artifactPath = resolve(parentRoot, "artifacts/technical-brief.md");
-  const entry = lstatOptionalNoSymlinks(parentRoot, artifactPath, "spec-writer draft 'artifacts/technical-brief.md'", "spec-writer draft must not contain symlinks");
-  if (!entry || !entry.isFile()) return null;
-  return {
-    artifact_ref: "artifacts/technical-brief.md",
-    artifact_hash: sha256File(artifactPath),
-    parent_step_status: String(step.status),
-    parent_step_attempts: step.attempts,
-    max_retries: maxRetries,
-    remaining_attempts: maxRetries - step.attempts,
-  };
-}
-
-function continuationSeedPlan(continuation) {
-  const reuse = continuation?.planning_reuse;
-  if (!reuse || reuse.eligible !== true) {
-    const draft = continuation?.draft_spec_reuse;
-    if (draft) {
-      return { eligible: true, draft: true, reason: null, artifacts: [draft.artifact_ref], spec_review_ref: null };
-    }
-    return { eligible: false, draft: false, reason: reuse?.reason || "no reusable parent planning acceptance", artifacts: [], spec_review_ref: null };
-  }
-  const artifacts = (Array.isArray(continuation.parent_artifacts) ? continuation.parent_artifacts : [])
-    .filter((entry) => CONTINUATION_SEED_ARTIFACT_KINDS.has(entry.kind))
-    .map((entry) => entry.ref)
-    .sort((a, b) => a.localeCompare(b));
-  return { eligible: true, draft: false, reason: null, artifacts, spec_review_ref: reuse.child_spec_review_ref || CHILD_SPEC_REVIEW_REF };
-}
-
-// Adopt the parent's DURABLY ACCEPTED planning output into the child run so a
-// continuation reuses the approved story/research/design/brief instead of
-// regenerating them, and carries the approving spec review into child state as
-// resolvable acceptance provenance. Seeding is gated by `continuationPlanningReuse`
-// (never adopts a rejected/unapproved brief) and is transactional/fail-closed:
-// every source is validated (containment, no symlinks, is-file, hash) and read into
-// memory BEFORE anything is written, so a missing source or a later hash mismatch
-// aborts the whole seed with no partial child run directory left behind.
-export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuation, options = {}) {
-  if (continuation?.schema_version === 2) throw new Error("v2 carry-forward allocation is not available before the B1.3 resource transaction");
-  assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false });
-  const reuse = continuation?.planning_reuse;
-  const draft = continuation?.draft_spec_reuse;
-  if ((!reuse || reuse.eligible !== true) && !draft) {
-    return { eligible: false, draft: false, reason: reuse?.reason || "no reusable parent planning acceptance", artifacts: [], spec_review_ref: null };
-  }
-  const parentRoot = resolve(parentRunDir);
-  const parentArtifactsDir = join(parentRoot, "artifacts");
-  const parentReviewsDir = join(parentRoot, "reviews");
-  const targetRunDir = join(factoryRoot(repo), continuation.target.run_id);
-  const targetArtifactsDir = join(targetRunDir, "artifacts");
-  const targetReviewsDir = join(targetRunDir, "reviews");
-
-  const plan = reuse?.eligible === true
-    ? (Array.isArray(continuation.parent_artifacts) ? continuation.parent_artifacts : [])
-      .filter((entry) => CONTINUATION_SEED_ARTIFACT_KINDS.has(entry.kind))
-      .map((entry) => ({ label: `parent artifact '${entry.ref}'`, srcRef: entry.ref, srcRoot: parentArtifactsDir, hash: entry.hash, destRef: entry.ref, destRoot: targetArtifactsDir, isArtifact: true }))
-    : [{ label: `parent draft '${draft.artifact_ref}'`, srcRef: draft.artifact_ref, srcRoot: parentArtifactsDir, hash: draft.artifact_hash, destRef: draft.artifact_ref, destRoot: targetArtifactsDir, isArtifact: true }];
-  if (reuse?.eligible === true) {
-    // Carry the approving spec review into the child under a canonical ref so the
-    // adopted spec-writer step's review_ref resolves in child state.
-    plan.push({ label: `spec review '${reuse.spec_review_ref}'`, srcRef: reuse.spec_review_ref, srcRoot: parentReviewsDir, hash: reuse.spec_review_hash, destRef: CHILD_SPEC_REVIEW_REF, destRoot: targetReviewsDir, isArtifact: false });
-  }
-
-  // Phase 1 — validate and stage every entry before writing anything.
-  const staged = [];
-  for (const item of plan) {
-    const src = resolve(parentRoot, item.srcRef);
-    if (!isLogicalContainedPath(item.srcRoot, src, { allowEqual: false })) {
-      throw new Error(`continuation seed source escapes its root: ${item.srcRef}`);
-    }
-    const entry = lstatOptionalNoSymlinks(parentRoot, src, item.label, `${item.label} must not contain symlinks`);
-    if (!entry || !entry.isFile()) {
-      throw new Error(`continuation ${item.label} is missing or not a regular file (seed aborted; nothing written)`);
-    }
-    const bytes = readFileSync(src);
-    if (sha256Buffer(bytes) !== item.hash) {
-      throw new Error(`continuation ${item.label} changed since payload build (hash mismatch)`);
-    }
-    const dest = resolve(targetRunDir, item.destRef);
-    if (!isLogicalContainedPath(item.destRoot, dest, { allowEqual: false })) {
-      throw new Error(`continuation seed dest escapes its root: ${item.destRef}`);
-    }
-    staged.push({ dest, bytes, destRef: item.destRef, isArtifact: item.isArtifact });
-  }
-
-  // Phase 2 — build the complete child seed as a sibling of the target, then make
-  // it visible with one atomic directory rename. A crash before rename leaves no
-  // partial child run; a crash after rename leaves the complete seed set. A
-  // concurrent/non-empty target makes rename fail without clobbering its state.
-  const stagingRoot = join(dirname(factoryRoot(repo)), `.continuation-seed-${continuation.target.run_id}-${randomUUID()}`);
-  try {
-    mkdirSync(stagingRoot, { recursive: false });
-    for (const item of staged) {
-      const stagedDest = resolve(stagingRoot, item.destRef);
-      if (!isLogicalContainedPath(stagingRoot, stagedDest, { allowEqual: false })) {
-        throw new Error(`continuation staged destination escapes staging root: ${item.destRef}`);
-      }
-      mkdirSync(dirname(stagedDest), { recursive: true });
-      writeFileSync(stagedDest, item.bytes, { flag: "wx" });
-    }
-    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false });
-    if (options.beforePublish) options.beforePublish({ stagingRoot, targetRunDir });
-    renameSync(stagingRoot, targetRunDir);
-  } catch (error) {
-    try {
-      rmSync(stagingRoot, { recursive: true, force: true });
-    } catch {
-      // Preserve the publication failure; an orphan staging tree is never child state.
-    }
-    throw error;
-  }
-  return {
-    eligible: true,
-    draft: reuse?.eligible !== true,
-    reason: null,
-    artifacts: staged.filter((item) => item.isArtifact).map((item) => item.destRef).sort((a, b) => a.localeCompare(b)),
-    spec_review_ref: reuse?.eligible === true ? CHILD_SPEC_REVIEW_REF : null,
-    spec_artifact_ref: reuse?.spec_artifact_ref || draft?.artifact_ref || "artifacts/technical-brief.md",
-  };
-}
-
-function sha256Buffer(bytes) {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-}
-
-// Checked continuation-adoption transition. Instead of a model-driven generic
-// `factory step ... accepted`, this verifies the seeded child files against the
-// parent's durable acceptance binding (carried in `continuation.planning_reuse`)
-// and atomically records an inherited-acceptance provenance record on the child
-// spec-writer step. Fails closed if the seeded brief/review are missing, altered,
-// or the continuation is not reuse-eligible.
-export async function adoptContinuation(childRunId, opts = {}) {
-  const repo = repoRoot(opts.cwd || process.cwd());
-  const childRunDir = resolveRunDir(childRunId, { ...opts, cwd: repo });
-  const childRunFile = join(childRunDir, "run.json");
-  const unvalidatedRun = JSON.parse(readFileSync(childRunFile, "utf8"));
-  if (unvalidatedRun?.continuation?.schema_version === 2) throw new Error("v2 carry-forward adoption is not available before B1.4 publication");
-  const run = validateRun(unvalidatedRun);
-  const continuation = run?.continuation;
-  if (!continuation || continuation.kind !== "blocked-run-continuation") {
-    throw new Error(`run '${childRunId}' has no blocked-run-continuation metadata to adopt`);
-  }
-  const reuse = continuation.planning_reuse;
-  if (!reuse || reuse.eligible !== true) {
-    throw new Error(`continuation '${childRunId}' has no reuse-eligible parent acceptance to adopt${reuse?.reason ? ` (${reuse.reason})` : ""}`);
-  }
-  if (!SHA256_HASH_PATTERN.test(String(reuse.spec_artifact_hash || "")) || !SHA256_HASH_PATTERN.test(String(reuse.spec_review_hash || ""))) {
-    throw new Error(`continuation '${childRunId}' planning_reuse is missing artifact/review acceptance hashes`);
-  }
-  const childRoot = resolve(childRunDir);
-  verifySeededChildFile(childRoot, "artifacts", "artifacts/technical-brief.md", reuse.spec_artifact_hash);
-  verifySeededChildFile(childRoot, "reviews", CHILD_SPEC_REVIEW_REF, reuse.spec_review_hash);
-
-  const parentRunDir = resolve(repo, dirname(continuation.parent.run_ref));
-  assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: true, childRunDir });
-  const result = await transitionContinuationAdoption(childRunDir, { ...opts, repoRoot: repo });
-  return { status: "adopted", run_id: childRunId, step: result.step };
-}
-
-function verifySeededChildFile(childRoot, root, ref, expectedHash) {
-  const path = resolve(childRoot, ref);
-  if (!isLogicalContainedPath(join(childRoot, root), path, { allowEqual: false })) {
-    throw new Error(`continuation adoption ref escapes ${root}/: ${ref}`);
-  }
-  const entry = lstatOptionalNoSymlinks(childRoot, path, `seeded ${ref}`, `seeded ${ref} must not contain symlinks`);
-  if (!entry || !entry.isFile()) {
-    throw new Error(`continuation adoption requires seeded ${ref}; it is missing (run 'factory continue' first)`);
-  }
-  if (sha256File(path) !== expectedHash) {
-    throw new Error(`continuation adoption: seeded ${ref} does not match the parent acceptance binding (altered or spoofed)`);
-  }
-}
-
 function collectContinuationParentArtifacts(parentRunDir) {
   const parentRun = resolve(parentRunDir);
   const artifactsDir = join(parentRun, "artifacts");
@@ -5951,7 +5699,7 @@ function startDetached(repo, commandArgs, opts = {}) {
   if (recordsProcessEvidence) {
     assertDetachedProcessEvidenceWritable(scopedRunDir, {
       runId: opts.runId,
-      inspectorFn: opts.inspectorFn || opts.processInspectorFn,
+      ...canonicalProcessInspectionOptions(opts),
     });
   }
   const processes = scopedRunDir ? join(scopedRunDir, "processes") : join(factoryRoot(repo), "processes");
@@ -5971,6 +5719,15 @@ function startDetached(repo, commandArgs, opts = {}) {
     repo, commandArgs, env, scopedRunDir, recordsProcessEvidence, executionId, log,
     runId: opts.runId || null, now: opts.now, readyTimeoutMs: opts.readyTimeoutMs,
   });
+}
+
+function canonicalProcessInspectionOptions(options) {
+  const keys = ["platform", "hostname", "livenessProbe", "procReadFile", "procReadlink", "commandRunner", "commandTimeoutMs", "commandMaxBuffer"];
+  return Object.fromEntries(keys.filter((key) => options[key] !== undefined).map((key) => [key, options[key]]));
+}
+
+function sha256Buffer(bytes) {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 function awaitDetachedReadiness(supervisor, init) {
@@ -6412,9 +6169,6 @@ function hasExplicitPostPrOptions(opts = {}) {
 function resumeEligibility(runDir, run, opts = {}) {
   const reasons = [];
   if (run.status !== "running") reasons.push(TERMINAL_STATUSES.has(run.status) ? "terminal-run" : "run-not-running");
-  const repairFence = mergedSliceRepairFence(run);
-  if (repairFence?.status === "blocked") reasons.push("merged-slice-repair-blocked");
-  else if (repairFence) reasons.push("merged-slice-repair-active");
   const diagnostics = diagnoseRunObject(run, { ...publicDiagnosticOptions(opts, opts.repoRoot || factoryRepoFromRunDir(runDir)), runDir, runFile: join(runDir, "run.json") });
   if (diagnosticsFailClosed(diagnostics)) reasons.push("invalid-run-state");
   const steeringChecks = steeringConsistencyChecks(runDir, run);
@@ -6435,7 +6189,6 @@ function resumeEligibility(runDir, run, opts = {}) {
     diagnostics,
     steering_checks: steeringChecks,
     heartbeat: heartbeat.value ? withHeartbeatLiveness(heartbeat.value, opts) : null,
-    merged_slice_repair: repairFence ? { status: repairFence.status, owner_slice_id: repairFence.owner_slice_id, consumer_slice_id: repairFence.consumer_slice_id, attempts: repairFence.attempts } : null,
   };
 }
 
@@ -6519,7 +6272,6 @@ function featureCommandPayload(prompt, opts) {
   };
   const postPrPolicy = postPrDriverOverride(opts);
   if (postPrPolicy !== null) driver.post_pr_ci = postPrPolicy;
-  else if (opts.continuation?.post_pr?.policy) driver.post_pr_ci = Object.fromEntries(Object.entries(cloneJson(opts.continuation.post_pr.policy)).filter(([key]) => key !== "review"));
   if (stringValue(opts.requestedRunId)) driver.run_id = opts.requestedRunId;
   const payload = {
     operator_request: String(prompt),
@@ -6530,7 +6282,6 @@ function featureCommandPayload(prompt, opts) {
 }
 
 function resolveCarryForwardConfiguration(repo, opts = {}) {
-  if (opts.newPr === true) throw new Error("factory continue --carry-forward is mutually exclusive with --new-pr");
   if (opts.autonomous === true && (opts.headless === true || opts.detached === true)) {
     throw new Error("factory continue --carry-forward accepts only one execution mode");
   }
@@ -7704,23 +7455,6 @@ async function executePostPrGitOperation(run, operation, opts, gitOperation) {
   const exitCode = proc?.ok === false ? Number.isInteger(proc.status) && proc.status !== 0 ? proc.status : 1 : Number.isInteger(proc?.exitCode) ? proc.exitCode : 0;
   if (exitCode !== 0) throw classifyGitHubFailure({ ...proc, exitCode });
   return { stdout: proc?.stdout || "", stderr: proc?.stderr || "", exitCode };
-}
-
-function assertPostPrContinuationParent(run) {
-  if (run.post_pr?.phase !== "blocked" || run.terminal_result?.reason !== "post-pr-retry-exhausted" || !run.post_pr?.continuation_review?.ref) throw new Error("--new-pr requires a retry-exhausted blocked post-PR parent with continuation review");
-}
-
-function continuationPostPrBinding(run, runDir) {
-  const remediation = run.post_pr.remediation;
-  const latestEvidence = latestPostPrFailure(runDir, run);
-  const continuationReview = readBoundRunJson(runDir, run.post_pr.continuation_review.ref, "reviews");
-  if (continuationReview.hash !== run.post_pr.continuation_review.hash || continuationReview.value.head_sha !== latestEvidence.failedHeadSha) throw new Error("post-PR continuation review does not bind the latest failed head");
-  const postPrForHash = cloneJson(run.post_pr); delete postPrForHash.continuation_review;
-  const identity = persistedPrIdentity(run);
-  return { pr_url: run.pr_url, repository: identity.repository, pr_number: identity.number,
-    head_sha: latestEvidence.failedHeadSha, disposition: "leave-unchanged",
-    policy: cloneJson(run.post_pr.policy), post_pr_hash: hashJson(postPrForHash), evidence_ref: latestEvidence.binding.ref, evidence_hash: latestEvidence.binding.hash,
-    continuation_review_ref: run.post_pr.continuation_review.ref, continuation_review_hash: run.post_pr.continuation_review.hash };
 }
 
 function latestPostPrFailure(runDir, run) {

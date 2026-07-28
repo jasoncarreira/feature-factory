@@ -111,20 +111,21 @@ describe("cli pr-created", () => {
     } finally { cleanup(fixture.repo); }
   });
 
-  it("terminalizes legacy identity-less fences through pr-created and clear", () => {
+  it("rejects identity-less fences through pr-created and clear without mutation or observation", () => {
     for (const command of ["pr-created", "clear"]) {
-      const fixture = createFixture(`legacy-${command}`);
+      const fixture = createFixture(`invalid-${command}`);
       try {
         const fence = establish(fixture);
         const run = readJson(fixture.runPath);
         for (const key of ["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]) delete run.steering.pr_fence[key];
         writeJson(fixture.runPath, run);
+        const before = readFileSync(fixture.runPath);
         const args = command === "clear" ? ["factory", "pr-fence", fixture.runId, "--clear", "--fence-token", fence.token, "--json"] : ["factory", "pr-created", fixture.runId, "--fence-token", fence.token, "--json"];
         const proc = runCli(fixture.repo, args);
         assert.notEqual(proc.status, 0);
-        const terminal = readJson(fixture.runPath);
-        assert.equal(terminal.terminal_result.reason, "legacy-pr-fence-operation-identity-missing");
-        assert.equal(terminal.steering.pr_fence.token, fence.token);
+        assert.match(proc.stderr, /pr_fence.*must all be present|invalid run state/u);
+        assert.deepEqual(readFileSync(fixture.runPath), before);
+        assert.deepEqual(readObservations(fixture), []);
       } finally { cleanup(fixture.repo); }
     }
   });
