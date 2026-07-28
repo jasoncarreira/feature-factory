@@ -366,6 +366,13 @@ describe("run schema and consistency", () => {
       () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { observed: "github_pat_123456789012345678901234567890" } }) }),
       (error) => error instanceof ValidationError && error.message.includes("must be redacted"),
     );
+    assert.throws(
+      () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { api_token: "safe" } }) }),
+      (error) => error instanceof ValidationError && error.message.includes("env.api_token: is not allowed"),
+    );
+    assert.doesNotThrow(
+      () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { api_token: REDACTED_ENV_VALUE } }) }),
+    );
   });
 
   it("treats review_tier as optional opaque display text", () => {

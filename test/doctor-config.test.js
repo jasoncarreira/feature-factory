@@ -131,6 +131,35 @@ describe("doctor output projection", () => {
       cleanup(fixture.dir);
     }
   });
+
+  it("keeps opaque CLI identity bytes out of human and JSON output", () => {
+    const fixture = doctorFixture();
+    const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+    const versionSecret = "N8R2V6C0X4M9L3K7P1Y5T9B2Q6W0F4J8";
+    const packageRoot = join(fixture.dir, sourceSecret, "node_modules", "opencode-feature-factory");
+    const bin = join(packageRoot, "bin");
+    try {
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "opencode-feature-factory", version: versionSecret }), "utf8");
+      writeExecutable(join(bin, "feature-factory"), "#!/bin/sh\nexit 0\n");
+      const env = { PATH: `${bin}:${fixture.bin}:${process.env.PATH}` };
+
+      const human = runDoctorFixture(fixture, [], env);
+      const json = runDoctorFixture(fixture, ["--json"], env);
+      const payload = JSON.parse(json.stdout);
+      for (const output of [human.stdout, human.stderr, json.stdout, json.stderr]) {
+        assert.doesNotMatch(output, new RegExp(`${sourceSecret}|${versionSecret}`, "u"));
+      }
+      assert.deepEqual(payload.env.cli_identity, {
+        source: REDACTED_ENV_VALUE,
+        version: REDACTED_ENV_VALUE,
+        hash: payload.env.cli_identity.hash,
+      });
+      assert.match(payload.env.cli_identity.hash, /^sha256:[0-9a-f]{64}$/u);
+    } finally {
+      cleanup(fixture.dir);
+    }
+  });
 });
 
 describe("doctor telemetry readiness helpers", () => {

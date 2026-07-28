@@ -3,7 +3,7 @@ import { accessSync, constants, readFileSync, realpathSync, statSync } from "nod
 import { delimiter, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync as defaultSpawnSync } from "node:child_process";
-import { isRecognizedSensitiveValue } from "./hardening/sensitive-data.js";
+import { containsRecognizedSensitiveFragment, isSensitiveValue } from "./hardening/sensitive-data.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const PACKAGE_NAME = "opencode-feature-factory";
@@ -37,10 +37,10 @@ export function normalizeRuntimeIdentity(value = {}) {
 }
 
 export function normalizeCliIdentity(value = {}) {
-  const source = normalizeIdentityText(value?.source, RUNTIME_IDENTITY_SOURCE_MAX);
+  const source = normalizeIdentityText(value?.source, RUNTIME_IDENTITY_SOURCE_MAX, { pathSegments: true });
   const hash = HASH_PATTERN.test(value?.hash ?? "") ? value.hash : null;
   if (source === null || hash === null) return { source: null, version: null, hash: null };
-  return { source, version: normalizeIdentityText(value?.version, RUNTIME_IDENTITY_VERSION_MAX, true), hash };
+  return { source, version: normalizeIdentityText(value?.version, RUNTIME_IDENTITY_VERSION_MAX, { trim: true }), hash };
 }
 
 export function formatCliIdentity(value) {
@@ -61,7 +61,7 @@ function fileIdentity(path, version) {
     const source = realpathSync(path);
     return { source, version, hash: hashFile(source) };
   } catch {
-    return { source: null, version: normalizeIdentityText(version, RUNTIME_IDENTITY_VERSION_MAX, true), hash: null };
+    return { source: null, version: normalizeIdentityText(version, RUNTIME_IDENTITY_VERSION_MAX, { trim: true }), hash: null };
   }
 }
 
@@ -79,10 +79,10 @@ function commandIdentity(command, options, probeVersion) {
 function resolveCommand(command, options) {
   const env = options.env ?? process.env;
   const cwd = resolve(options.cwd ?? process.cwd());
-  const path = Object.hasOwn(env, "PATH")
+  const path = Object.hasOwn(env, "PATH") && typeof env.PATH === "string"
     ? env.PATH
     : process.platform === "win32" ? process.env.PATH ?? "" : DEFAULT_UNIX_EXECUTABLE_PATH;
-  for (const component of String(path).split(delimiter)) {
+  for (const component of path.split(delimiter)) {
     const directory = component ? (isAbsolute(component) ? component : resolve(cwd, component)) : cwd;
     const suffixes = process.platform === "win32" ? String(env?.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";") : [""];
     for (const suffix of suffixes) {
@@ -152,12 +152,20 @@ function readPackage(directory) {
   }
 }
 
-function normalizeIdentityText(value, maxLength, trim = false) {
+function normalizeIdentityText(value, maxLength, { trim = false, pathSegments = false } = {}) {
   if (typeof value !== "string") return null;
   let normalized = value.normalize("NFC").replace(UNSAFE_TERMINAL_TEXT_GLOBAL, "?");
   if (trim) normalized = normalized.trim();
   if (!normalized || normalized.length > maxLength) return "[redacted]";
-  return isRecognizedSensitiveValue(normalized) ? "[redacted]" : normalized;
+  const sensitive = isSensitiveValue(pathSegments ? `${normalized}#` : normalized)
+    || (pathSegments && normalized.split(/[\\/]/u).some(sensitivePathSegment));
+  return sensitive ? "[redacted]" : normalized;
+}
+
+function sensitivePathSegment(segment) {
+  if (!segment || !isSensitiveValue(segment)) return false;
+  return containsRecognizedSensitiveFragment(segment)
+    || segment.split(/[-_.]+/u).some((part) => part && isSensitiveValue(part));
 }
 
 function firstLine(value) {

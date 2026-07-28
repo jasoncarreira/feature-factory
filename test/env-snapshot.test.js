@@ -138,6 +138,22 @@ describe("environment snapshot redaction", () => {
     assert.equal(snapshot.provenance, undefined);
   });
 
+  it("keeps opaque CLI identity bytes out of run snapshots", async () => {
+    const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+    const versionSecret = "N8R2V6C0X4M9L3K7P1Y5T9B2Q6W0F4J8";
+    const hash = `sha256:${"b".repeat(64)}`;
+    const snapshot = await collectRunDebugSnapshot({
+      cwd: process.cwd(),
+      runtimeIdentity: {
+        cli: { source: `/tmp/benign/${sourceSecret}/feature-factory`, version: versionSecret, hash },
+      },
+    });
+    const serialized = JSON.stringify(snapshot);
+
+    assert.deepEqual(snapshot.env.cli_identity, { source: REDACTED_ENV_VALUE, version: REDACTED_ENV_VALUE, hash });
+    assert.doesNotMatch(serialized, new RegExp(`${sourceSecret}|${versionSecret}`, "u"));
+  });
+
   it("hashes effective prompts, skills, plugin bytes, and git state without raw prompt content", async () => {
     const secretPrompt = "review prompt containing sensitive operator text";
     const promptHash = `sha256:${(await import("node:crypto")).createHash("sha256").update(secretPrompt).digest("hex")}`;

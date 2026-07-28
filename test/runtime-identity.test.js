@@ -122,6 +122,25 @@ describe("runtime identity observation", () => {
     }
   });
 
+  it("treats an own undefined or non-string PATH as absent instead of searching its string value", { skip: process.platform === "win32" }, () => {
+    const root = mkdtempSync(join(tmpdir(), "runtime-identity-undefined-path-"));
+    const undefinedCandidate = join(root, "undefined", "opencode");
+    const numericCandidate = join(root, "7", "opencode");
+    try {
+      writeExecutable(undefinedCandidate, "cwd-undefined-opencode");
+      writeExecutable(numericCandidate, "cwd-numeric-opencode");
+      const env = { ...process.env, PATH: undefined };
+      const executed = spawnSync("opencode", ["--version"], { cwd: root, env, encoding: "utf8" });
+      const observed = resolveRuntimeIdentity({ cwd: root, env }).opencode;
+
+      assert.notEqual((executed.stdout || executed.stderr || "").trim(), "cwd-undefined-opencode");
+      assert.notEqual(observed.source, realpathSync(undefinedCandidate));
+      assert.notEqual(resolveRuntimeIdentity({ cwd: root, env: { ...process.env, PATH: 7 } }).opencode.source, realpathSync(numericCandidate));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("redacts sensitive identity text and removes terminal controls before reuse", () => {
     const identity = normalizeRuntimeIdentity({
       cli: { source: "/tmp/secret-cli\u001b[2J", version: "token-version\u202e", hash: `sha256:${"a".repeat(64)}`, ignored: true },
@@ -132,6 +151,18 @@ describe("runtime identity observation", () => {
     assert.deepEqual(identity.opencode, { source: null, version: null, hash: null });
     assert.doesNotMatch(JSON.stringify(identity), /[\u001b\u009b\u202e]/u);
     assert.equal(JSON.stringify(identity).includes("ignored\":true"), false);
+  });
+
+  it("redacts opaque identity versions and high-entropy source path segments", () => {
+    const sourceSecret = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+    const versionSecret = "N8R2V6C0X4M9L3K7P1Y5T9B2Q6W0F4J8";
+    const identity = normalizeRuntimeIdentity({
+      cli: { source: `/tmp/benign/${sourceSecret}/feature-factory`, version: versionSecret, hash: `sha256:${"b".repeat(64)}` },
+    });
+    const serialized = JSON.stringify(identity);
+
+    assert.deepEqual(identity.cli, { source: "[redacted]", version: "[redacted]", hash: `sha256:${"b".repeat(64)}` });
+    assert.doesNotMatch(serialized, new RegExp(`${sourceSecret}|${versionSecret}`, "u"));
   });
 });
 

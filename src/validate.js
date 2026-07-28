@@ -2897,7 +2897,10 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
   }
   if (Object.hasOwn(payload, "cli_identity")) validateCliIdentity(errors, payload.cli_identity, `${path}.env.cli_identity`);
   for (const [key, value] of Object.entries(payload)) {
-    if (key !== "cli_identity") validateRedactedEnv(errors, value, `${path}.env.${key}`);
+    if (key === "cli_identity") continue;
+    const valuePath = `${path}.env.${key}`;
+    if (isSensitiveEnvKey(key) && value !== REDACTED_ENV_VALUE) errors.push({ path: valuePath, message: "is not allowed in debug snapshot" });
+    validateRedactedEnv(errors, value, valuePath);
   }
 }
 
