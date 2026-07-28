@@ -1,8 +1,7 @@
 # Durable Authority Boundary-Retention Ledger
 
-Status: finite design ledger established by B0.4 and consumed by B0MR.1. B0.4 made no
-production change; B0MR.1 implements only the reviewed-code successor exception
-recorded in the compatibility section below.
+Status: current finite boundary-retention ledger. Only current record shapes are
+authoritative; old or partial shapes reject fail-closed and require re-seeding.
 
 This ledger decides which facts must survive an authority boundary and which facts
 must be observed again. It is closed over the nine authority classes in the B0.3
@@ -43,15 +42,15 @@ boundary; they are not cryptographic authentication.
 | 6 | Validator, security, and PR-created result | Authority class 6 |
 | 7 | Continuation and planning/draft reuse | Authority class 7 |
 | 8 | Post-PR nested records | Authority class 8 |
-| 9 | PR79 merged slice repair | Authority class 9 |
+| 9 | Generic integration amendment | Authority class 9 |
 
 ## 1. Authority class: Plan and slices graph
 
 | Authority-bearing field or fact | Disposition | Canonical boundary or replacement |
 |---|---|---|
 | `plan/slices.json` slice `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`; graph ordering, lane ownership, and acceptance coverage | `RETAIN` | Retain the accepted plan bytes and descriptor binding at `factory slices-seed`; the seeded `run.json.slices[]` identity is the execution manifest. |
-| Root `integration_gate.required_commands` ordered closed `{program,args}` entries and exact final `npm` / `["run","check"]` identity | `RETAIN` | Retain in exact `plan/slices.json` bytes. Creation-mode seed validates it; schema-v2 carry-forward construction, publication, adoption, local mutation, and replay revalidate it while `carry_forward.plan_hash` binds exact bytes and order. Legacy v1 reads may omit it but cannot claim v2 authority. |
-| Required current-plan `delivery_envelope` schema v1 delivery-unit/family/obligation/artifact graph and exact test-plan bindings | `RETAIN` | Retain only inside the already hash-bound exact `plan/slices.json` bytes. Current plans with `integration_gate` require it; legacy plans without that gate remain readable but grant no B4 authority. Seed and accepted-decomposition observation validate and re-observe it; do not create a second plan root or hash chain. |
+| Root `integration_gate.required_commands` ordered closed `{program,args}` entries and exact final `npm` / `["run","check"]` identity | `RETAIN` | Retain in exact `plan/slices.json` bytes. Every plan reader, creation-mode seed, and schema-v2 carry-forward construction, publication, adoption, local mutation, and replay validates it while `carry_forward.plan_hash` binds exact bytes and order. Missing current authority rejects and requires re-seeding. |
+| Required current-plan `delivery_envelope` schema v1 delivery-unit/family/obligation/artifact graph and exact test-plan bindings | `RETAIN` | Retain only inside the already hash-bound exact `plan/slices.json` bytes. Every plan requires it. Seed and accepted-decomposition observation validate and re-observe it; missing or partial envelopes reject and require re-seeding. Do not create a second plan root or hash chain. |
 | Accepted work-decomposer plan and decomposition review refs/hashes | `RETAIN` | Reuse the existing closed step `acceptance` object with `artifact_ref: "plan/slices.json"` and current review ref/hash. Seed resolves only exact run-relative regular non-symlink plan bytes; test-verifier and every schema-v2 construction/publication/adoption/replay/resume/downstream consumer rehash both files, including immediately before child no-replace publication. |
 | Explicit `delivery_envelope.checkpoint_plan`, typed valid admission probe, same-attempt `APPROVE-CHECKPOINT` identity, and ordered child dispositions | `RETAIN` | Retain in exact accepted plan/review bytes. The order is plan write, nonmutating `factory slices-probe`, reviewer dispositions, then parent acceptance/routing. `validateReviewedCheckpointPlan`, `buildDeliveryPlanAdmissionProbe`, accepted-decomposition observation, and `buildCheckpointRoutingManifest` consume these facts; invalid probes are complete typed diagnostics and grant no authority. |
 | Content-addressed checkpoint-routing manifest source plan/review/probe/disposition binding, ordered requests, and whole-story gates | `RETAIN` | Publish only from exact accepted plan plus same-attempt `APPROVE-CHECKPOINT` review. The checked oversized terminal transition re-observes source bytes before artifact creation and terminal replacement; replay rebuilds the deterministic manifest rather than trusting retained prose. |
@@ -59,7 +58,7 @@ boundary; they are not cryptographic authentication.
 | Child publication claim and immutable child `checkpoint_source` | `RETAIN` | `checkpoint-start` writes the canonical `delivery-checkpoint-child-publication` blob, then `reconcileCheckpointPublication` create-publishes its one claim ref plus branch and complete normal child directory without replacement. `validateCheckpointChildPublication`, publication replay, and `validateCheckpointSource` consume the exact bindings. The claim prevents conflicting creation only; ordinary child lifecycle continues after publication, while `checkpoint_source` remains byte-identical through same-checkpoint B1 recovery. |
 | Merged checkpoint completion and final closure | `RETAIN` | `factory checkpoint-record-merged` resolves and locks the normal child plus same-checkpoint B1 lineage, reobserves continuation claims, canonical merged PR, ancestry, immutable source, and full configuration, then writes the merged progress entry. `factory checkpoint-close` first records a launched final child when needed, then publishes a reservation-free content-addressed closure artifact and atomically records its ref/hash/time in closed parent progress. |
 | Checkpoint cleanup authorization | `REOBSERVE` | Under the routing-parent lock, require exactly one merged progress lineage row with the exact child run ID and run hash before ordinary cleanup. Published/launched, stale, duplicate, missing, or cross-checkpoint lineage grants no cleanup authority. |
-| Target continuation reservation under `refs/opencode/continuation-targets/<sha256-child-run-id>` | `RETAIN` | Create once by Git zero-OID CAS before schema-v1 publication or schema-v2 allocation. Bind route schema, crash-stable creation time, and the complete continuation hash; payload, resume, allocation, and publication consumers require exact replay and reject cross-schema or cross-authority reuse. |
+| Target continuation reservation under `refs/opencode/continuation-targets/<sha256-child-run-id>` | `RETAIN` | Create once by Git zero-OID CAS before schema-v2 allocation. Bind route schema 2, crash-stable creation time, and the complete continuation hash; payload, resume, allocation, and publication consumers require exact replay and reject cross-authority reuse. |
 | `final.plan.json` descriptor ref, hash, byte binding, and descriptor key shape | `RETAIN` | Retain at the planning acceptance/slice-seed boundary and validate the exact descriptor bytes before consumption. |
 | Current Git path existence and the effective paths changed by a candidate commit | `REOBSERVE` | Use Git plumbing with rename detection disabled at the consuming transition; neither plan text nor evidence `changed_paths` is mutation authority. |
 | A later repair's second hash of the whole plan, when it exists only to restate owner-lane authority | `CONSOLIDATE/REMOVE` | Replace with the accepted canonical `plan/slices.json`/`factory slices-seed` binding plus one owner/effective-path snapshot in the canonical amendment manifest, written by the canonical amendment admission transition. |
@@ -69,7 +68,7 @@ boundary; they are not cryptographic authentication.
 | Authority-bearing field or fact | Disposition | Canonical boundary or replacement |
 |---|---|---|
 | Run `schema_version`, `run_id`, `external_ref`, `base_ref`, exact `base_commit`, `branch`, `worktree`, lifecycle `status`, retry/parallel limits, effective `pr_mode`, and configured GitHub account identity | `RETAIN` | Retain in `run.json` at bootstrap and through checked locked transitions. Exact commits are never shortened or replaced by branch names. |
-| Terminal `status`, `run_id`, reason/reason code, summary, artifact refs, and the universal PR operation/node/head/base tuple | `RETAIN` | Retain once in `run.json.terminal_result` through `factory terminal`, checked `factory pr-created`, or the class-specific checked terminal transition. New completed PR results require `{pr_url,pr_number,pr_node_id,repository,operation_id,head_ref,head_sha,base_ref,base_sha,draft}`; legacy completed tuples remain readable but read-only. |
+| Terminal `status`, `run_id`, reason/reason code, summary, artifact refs, and the universal PR operation/node/head/base tuple | `RETAIN` | Retain once in `run.json.terminal_result` through `factory terminal`, checked `factory pr-created`, or the class-specific checked terminal transition. Completed PR results require `{pr_url,pr_number,pr_node_id,repository,operation_id,head_ref,head_sha,base_ref,base_sha,draft}`; old-shape or partial completed tuples reject. |
 | Oversized checkpoint terminal variant | `RETAIN` | The class-specific transition writes exactly pre-PR `blocked`, reason `oversized-plan-checkpoint-routing-required`, null PR identity, and one content-addressed `checkpoint_routing` artifact. Generic or malformed terminal records cannot claim this route. |
 | Current branch ref, worktree identity, HEAD, commit existence, trees, and required ancestry | `REOBSERVE` | Query Git at resume, merge, repair, push, and terminal consumption boundaries; a mutable `run.json` branch/worktree string cannot substitute. |
 | A free-standing producer or model terminal-success claim | `CONSOLIDATE/REMOVE` | Replace with `run.json.terminal_result` written by `factory terminal` or `factory pr-created` after their checked preconditions. |
@@ -91,10 +90,10 @@ boundary; they are not cryptographic authentication.
 | Schema-v2 test-verifier `execution_claim` active/completed/unknown variants and fixed factory receipt ref/hash | `RETAIN` | `factory test-execute <run-id> --json` writes the nonce-bound active claim before spawn and completes it only after create-only receipt publication. Generic transitions cannot clear or manufacture it. |
 | Exact accepted commands, clean child HEAD, merged ancestry, process exit/signal/timeout/output-limit/launch result, stream prefix lengths/hashes, and receipt bytes | `REOBSERVE` | Recheck plan/decomposition/Git authority before claim and publication; derive the closed receipt from shell-free bounded process events. Never trust caller result fields or persist raw output. |
 | Active/unknown claim disposition | `RETAIN` | Every supported CLI and exported transition retains the exact claim/hash and rejects unchanged: all `factory recover` reasons (including former magic text), generic terminal, steering conflict, step mutation, and `test-execute` retry. Caller/model text and fake flags grant no authority. B1R has no autonomous terminal/retry/clear path; trusted out-of-band operator/process reconciliation is required. |
-| Caller-authored schema-v2 test evidence or proof booleans | `CONSOLIDATE/REMOVE` | Replace with the completed passing factory receipt plus `artifacts/test-report.md` and an independent same-attempt/same-HEAD APPROVE review. V1 generic evidence remains compatible. |
-| Child `inherited_acceptance.from_run_id`, parent review ref, artifact hash, and review hash | `RETAIN` | Retain only through `factory adopt-continuation`, which verifies the parent acceptance and child copies. |
-| Current accepted artifact/review bytes and parent binding at adoption | `REOBSERVE` | Resolve contained refs and hash exact bytes at step consumption and continuation adoption. File presence is insufficient. |
-| A child copy of the entire parent acceptance chain or a fresh claim that seeded files are accepted | `CONSOLIDATE/REMOVE` | Replace with the parent step `acceptance` plus child `inherited_acceptance` written by `factory adopt-continuation`. |
+| Caller-authored test evidence or proof booleans | `CONSOLIDATE/REMOVE` | Replace with the completed passing factory receipt plus `artifacts/test-report.md` and an independent same-attempt/same-HEAD APPROVE review. |
+| Schema-v2 child accepted planning and immutable accepted slice rows | `RETAIN` | Retain only through checked full-plan carry-forward publication, which verifies parent acceptance and copies exact plan/review/slice sidecar bytes. |
+| Current accepted artifact/review bytes and parent binding at carry-forward publication | `REOBSERVE` | Resolve contained refs and hash exact bytes at construction, publication, replay, resume, and downstream consumption. File presence is insufficient. |
+| A child copy of the entire parent acceptance chain or a fresh claim that seeded files are accepted | `CONSOLIDATE/REMOVE` | Replace with the parent step `acceptance` plus the schema-v2 `carry_forward` plan hash and immutable accepted rows written by checked publication. |
 
 ## 5. Authority class: Slices and review/evidence bindings
 
@@ -112,8 +111,8 @@ boundary; they are not cryptographic authentication.
 
 | Authority-bearing field or fact | Disposition | Canonical boundary or replacement |
 |---|---|---|
-| Validator subject/attempt/verdict/report/review refs plus successor `report_hash`/`review_hash`/`reviewed_head_sha`, and security subject/attempt/verdict/review ref plus successor `review_hash`/`reviewed_head_sha` | `RETAIN` | Retain atomically through `factory verdicts`; both rows are successor or both legacy, and PR readiness consumes the passing bound panel result. |
-| Successor PR fence identity `{operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft}` plus token, generation, state hash, and creation time | `RETAIN` | Derive all-or-none from canonical GitHub origin, exact clean local/worktree/remote head, exact remote base equal to `run.base_commit`, base ancestry, and persisted `run.pr_mode`. `operation_id` is the specified `ffpr-v1` canonical-JSON SHA-256 identity. |
+| Validator subject/attempt/verdict/report/review refs plus current `report_hash`/`review_hash`/`reviewed_head_sha`, and security subject/attempt/verdict/review ref plus current `review_hash`/`reviewed_head_sha` | `RETAIN` | Retain atomically through `factory verdicts`; both complete current rows are required, and PR readiness consumes the passing bound panel result. Missing or partial tuples reject. |
+| Current PR fence identity `{operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft}` plus token, generation, state hash, and creation time | `RETAIN` | Derive all-or-none from canonical GitHub origin, exact clean local/worktree/remote head, exact remote base equal to `run.base_commit`, base ancestry, and persisted `run.pr_mode`. `operation_id` is the specified `ffpr-v1` canonical-JSON SHA-256 identity. A present zero/partial tuple rejects validation and requires re-seeding. |
 | PR/GitHub external identities: canonical URL, number, node identity, repository, head/base refs and SHAs, draft state, and external creation operation identity | `RETAIN` | Retain at checked reconciliation in the completed terminal result and, when enabled, `post_pr.pr_operation`. New direct and post-PR completion use the same universal tuple. |
 | Actual PR existence/state and exact operation marker, including an unknown create outcome | `REOBSERVE` | Account-switch, then perform the shell-free bounded `state=all`, exact owner/head and base query. Strictly normalize all tuple fields and follow only valid Link pagination for at most 10 pages. After a PR exists, reconcile it and never create another. |
 | A second PR-success or passing-panel attestation in an internal wrapper | `CONSOLIDATE/REMOVE` | Replace with `run.json.validator`, `run.json.security_review`, and `run.json.terminal_result` written by `factory verdicts` and fenced `factory pr-created`. |
@@ -122,18 +121,18 @@ The external body carries exactly one standalone
 `<!-- opencode-feature-factory:pr-operation=<operation_id> -->` marker. Unique exact open
 normally records; unique exact merged completes without polling; closed-unmerged is
 `needs-human`; absent, ambiguous, and unknown retain the fence. Only complete checked
-absence authorizes clear. An identity-less legacy fence mutation terminalizes
-`needs-human` with `legacy-pr-fence-operation-identity-missing` while retaining the fence.
+absence authorizes clear. Every present fence requires the complete current identity
+tuple; invalid or partial fences reject rather than reconcile.
 An unknown external outcome is always re-observed before retry.
 
-## 7. Authority class: Continuation and planning/draft reuse
+## 7. Authority class: Schema-v2 full-plan continuation
 
 | Authority-bearing field or fact | Disposition | Canonical boundary or replacement |
 |---|---|---|
-| Continuation schema/kind/time/summary; parent run/status/ref/hash/branch/exact commit/worktree; selected review kind/ref/hash/subject/verdict/source/fixes; and target run/branch/worktree/base ref/exact base commit | `RETAIN` | Retain in child `run.json.continuation` through `factory continue`; parent identity remains read-only. |
-| Every parent artifact/evidence/review kind/ref/hash binding and planning-reuse or draft-reuse fields, attempt ceiling, and remaining budget | `RETAIN` | Retain through `factory continue`; accepted reuse is finalized only by `factory adopt-continuation`. |
-| Parent manifest, selected review, context bytes, parent/target Git identities, and target base ancestry | `REOBSERVE` | Resolve/hash contained refs and query Git during continuation admission and again when adoption consumes them. |
-| A second whole parent proof chain in the child, or acceptance inferred from copied mutable files | `CONSOLIDATE/REMOVE` | Replace with `run.json.continuation`, parent step `acceptance`, and child `inherited_acceptance` written by `factory continue` plus `factory adopt-continuation`. |
+| Continuation schema/kind/time/summary; parent run/status/ref/hash/branch/exact commit/worktree; selected review; target identity; closed configuration; and `scope: "full-remaining-plan"` carry-forward partition | `RETAIN` | Retain in child `run.json.continuation` through explicit checked `factory continue ... --carry-forward`; parent identity remains unchanged. |
+| Exact accepted plan hash, immutable accepted rows and sidecars, and nonempty disjoint remaining slice IDs | `RETAIN` | Retain through schema-v2 child publication. The accepted and remaining IDs are PLAN-ordered and their set union is the complete plan. |
+| Parent manifest, selected review, accepted plan/review/sidecar bytes, parent/target Git identities, and target base ancestry | `REOBSERVE` | Resolve/hash contained refs and query Git during construction, allocation, publication, replay, resume, and downstream consumption. |
+| A second whole parent proof chain in the child, or acceptance inferred from copied mutable files | `CONSOLIDATE/REMOVE` | Replace with the closed schema-v2 continuation, exact `carry_forward.plan_hash`, and immutable accepted rows written by checked publication. |
 
 Parent and child continuation identity is never reduced to a prompt, branch label, or
 mutable path. The exact parent/child run ids, commits, hashes, and review bytes survive
@@ -153,44 +152,26 @@ the handoff.
 | Current local commit/tree/changed paths and remote-before/local/remote-after equality | `REOBSERVE` | Query Git immediately before review binding and push, and after push before remote confirmation. |
 | Duplicate job summaries, panel summaries, push-success booleans, or model-reported external status | `CONSOLIDATE/REMOVE` | Replace with `run.json.post_pr` records written by `transitionPostPrState`, `transitionPostPrFailure`, and `transitionPostPrTerminal`. |
 
-## 9. Authority class: PR79 merged slice repair
+## 9. Authority class: Generic integration amendment
 
-This is the explicit disposition for the PR #79 `run.json.merged_slice_repair`
-record. It governs successor consolidation; persisted legacy records keep their
-original schema and are not rewritten, stripped, or reinterpreted by this ledger.
+Generic integration amendment is the sole in-place repair authority. It is admitted
+only for a factory-observed baseline failure in one pristine pending direct consumer
+of an independently approved merged owner. Continuation, checkpoint, non-pristine,
+old-shape, or otherwise ineligible cases reject before effects and proceed only after
+checked terminalization through a fresh schema-v2 full-plan carry-forward child.
 
-| PR #79 field or fact | Disposition | Canonical boundary or replacement |
+| Authority-bearing field or fact | Disposition | Canonical boundary or replacement |
 |---|---|---|
-| `plan_hash` | `CONSOLIDATE/REMOVE` for a successor authority; `RETAIN` unchanged in persisted legacy records | Replace a second whole-plan chain with accepted `plan/slices.json`/`factory slices-seed` authority and a canonical owner/effective-path snapshot in the canonical amendment manifest, written by the canonical amendment admission transition. Re-observe that snapshot at every consuming lane check. |
-| Canonical owner/effective-path snapshot at each consuming lane check | `REOBSERVE` | Resolve owner authority from the accepted plan binding and derive effective changed paths from Git; neither a copied plan hash nor mutable local path claims may substitute. |
-| Owner slice, consumer slice, defect path, status, attempt, and fixed attempt ceiling | `RETAIN` | Retain as incident identity/lifecycle at repair admission; do not infer them from a prompt or mutable path. |
-| Original reproduction `evidence_ref` and `evidence_hash`, including exact failing command/result bytes, subject, attempt, and head | `RETAIN` | Retain at report/admission and re-hash the exact evidence bytes at each later transition. |
-| `baseline_commit` | `RETAIN` | Retain the exact feature-head commit observed when the attempt starts; re-observe existence and ancestry from Git at review/merge. |
-| `reviewed_commit`, `review_ref`, and `review_hash`, including independent review bytes, attempt, verdict, and required fixes | `RETAIN` | Retain at review; merge re-hashes the review and re-observes the exact reviewed commit/tree. |
-| `repair_evidence_ref` and `repair_evidence_hash` | `CONSOLIDATE/REMOVE` only when the repair facts exist exactly once in the canonical amendment manifest; otherwise `RETAIN` | Canonical replacement is the amendment attempt evidence binding written by the canonical amendment evidence transition. Consumption must re-observe its bytes, candidate commit/tree, and Git-derived changed paths; a summary or copied hash is insufficient. Legacy PR #79 records retain the field. |
-| `verification_ref` and `verification_hash`, including exact passing reproduction command/result bytes and verified head | `RETAIN` | Retain at repair merge/verification and re-hash before downstream consumption. |
-| `merge_commit` and the equality `merge_commit^{tree} = reviewed_commit^{tree}` | `RETAIN` | Retain the exact merge commit and exact reviewed tree relation at merge; re-observe both trees, feature-head equality, ancestry, and owner-lane changed paths from Git. |
-| A local/model statement that the repair was reviewed, merged, or verified | `CONSOLIDATE/REMOVE` | Replace with the canonical amendment manifest and its admission, evidence, review, merge, and verification transitions; for legacy records, use the existing checked `factory repair` transitions. |
+| Factory-owned failing execution claim and receipt | `RETAIN` | Create-publish the singleton report claim before shell-free execution, then bind the exact receipt and outcome at amendment admission. Active or unknown outcomes remain fail-closed. |
+| Admission baseline and pristine consumer snapshot | `RETAIN` | Bind the exact clean feature ref/commit/tree/worktree, merged owner authority, pristine consumer, selected verification artifact, and amendment identity at report admission. |
+| Accepted plan and owner/effective-path authority | `REOBSERVE` | Rehash the strict current `plan/slices.json` and accepted review, then derive current owner authority and changed paths from Git at every consuming boundary. Do not persist a second whole-plan hash. |
+| Append-only amendment attempts | `RETAIN` | Retain attempt baseline, branch/worktree, dispatch claim/closure, candidate commit/tree, changed paths, and review binding through checked build/review transitions. |
+| Independent review and reviewer callback provenance | `RETAIN` | Bind the fresh exact-commit seven-disposition review plus immutable callback claim and closure. Review without closure, active claim, and orphan/cross-bound state reject. |
+| Staged integration, passing verification, and feature publication | `RETAIN` | Retain distinct integration, verification, and publication boundaries; final feature movement uses old-OID CAS and exact worktree reconciliation. |
+| Current Git commits, trees, paths, refs, worktrees, and accepted sidecar bytes | `REOBSERVE` | Recheck immediately before every state replacement or external effect; caller/model summaries never substitute. |
+| A local/model statement that the amendment was reviewed, integrated, verified, or published | `CONSOLIDATE/REMOVE` | Replace with the canonical amendment manifest and its checked claim, receipt, review, integration, verification, and publication bindings. |
 
-The retained PR #79 failure, review, and verification hashes and all baseline,
-reviewed, and merge commit/tree identities are boundary controls, not duplicate proof
-ceremony. They must not be removed by a simplification pass.
-
-### B5 canonical integration-amendment successor
-
-B5 expands authority class 9 rather than creating a tenth class: the generic record
-protects the same merged-owner acceptance asset. The canonical successor retains one
-owner/consumer incident, a factory-owned failing execution binding, the observed
-baseline, a byte-identical pristine-pending consumer snapshot, append-only bounded
-attempts, exact special-dispatch claim/closure, fresh
-review ref/hash/commit/tree, Git-observed changed paths, staged integration
-commit/tree, factory-owned passing verification, and exact feature-ref/worktree
-publication. It reobserves accepted plan and owner/effective-path authority rather
-than persisting another whole-plan hash. The attempt record is the canonical
-replacement for legacy `repair_evidence_ref`/`repair_evidence_hash`; those fields
-remain unchanged in persisted legacy records.
-
-The successor states are separately cataloged as reported, building attempts 1/2,
+The current states are separately cataloged as reported, building attempts 1/2,
 reviewed APPROVE/REJECT attempts 1/2, integrated, verified, merged, and blocked from
 reported/building/reviewed-approve/reviewed-reject/integrated/verified. Failure and
 verification claims/receipts, APPROVE/REJECT reviews, and dispatch binding/claim/
@@ -200,7 +181,7 @@ all twelve target-or-reasoned-exclusion dispositions from the finite mutation ca
 The fixed per-run report claim is the pre-manifest singleton tombstone: ordinary
 writers classify active, unknown, settled, unconsumed, consumed, and orphan states
 before mutation and never infer absence from a missing manifest. The canonical B5.1
-contract registers exactly 48 planned rows: 16 manifests, 12 execution claims, 12
+contract registers exactly 48 current rows: 16 manifests, 12 execution claims, 12
 receipts, two reviews, four builder-dispatch rows, and two production reviewer-
 dispatch claim/closure rows. The reviewer rows are immutable class-9 provenance:
 the claim binds the checked fresh callback context before Task execution and the
@@ -208,8 +189,8 @@ closure binds exact callback review bytes. Active claim, review without closure,
 closed-unconsumed observations fence semantic work; only exact review consumption
 converts closed-unconsumed to immutable consumed provenance. Orphan/cross-bound
 observations reject, and callback replay verifies existing bytes without overwrite.
-Under B5.4 all 48 rows are active production catalog entries. Together with the
-preexisting catalog they produce exactly 196 total variants and 195 production-covered
+All 48 rows are active production catalog entries. Together with the remaining
+catalog they produce exactly 188 total variants and 187 production-covered
 variants; `final-plan-descriptor` remains the sole future-only row.
 
 The existing durable slice variants now include optional immutable
@@ -218,13 +199,9 @@ consequential field in those rows, not a new catalog variant. Checked start deri
 from the exact clean feature HEAD, and dispatch, history, ownership review, merge proof,
 and post-merge consistency all reobserve it and its exact path-set equality.
 
-New generic and legacy records never coexist. Persisted legacy records keep their
-original route. After the generic route passes every PR #79 adversarial category,
-new legacy report admission is retired only for pristine-pending baseline-substrate
-incidents covered by the generic route. Blocked, previously attempted, and branch-only
-consumers remain a disjoint narrowed legacy/recovery class; a generic tombstone never
-falls back to it. Any generic record makes v1/v2 continuation unsupported until a
-later design supplies explicit sidecar copying and first-parent proof semantics.
+Any generic record makes schema-v2 continuation unsupported. There is no fallback
+repair route, sidecar-copy authority, first-parent salvage route, compatibility
+reader, or replacement repair state machine.
 
 ## External-effect ownership and idempotency controls
 
@@ -240,25 +217,18 @@ authority class.
 | PR fence token and deterministic PR-create operation/external identity | `RETAIN` until checked `factory pr-created` reconciliation or complete checked absence | The observation and mutation remain under the run lock with a second pre-publication observation. Never clear after a PR exists; ambiguous/unknown retains the fence. |
 | Post-PR dispatch, push, check, review, and publication operation ids/tokens | `RETAIN` through their terminal observation | A retry addresses the same operation or begins only after checked absence/failure; success booleans do not replace external identity. |
 
-## Compatibility and single-authority rule
+## Current-shape and single-authority rule
 
-- Persisted legacy records keep their original schema. Readers validate and consume
-  them under the schema/version that wrote them; there is no eager rewrite, field
-  stripping, synthetic backfill, or reinterpretation of missing successor fields.
-- Slice review and merged rows have no compatibility upgrade: legacy, marker-less, or
-  incomplete current bindings/history reject without mutation. Exact dual-panel verdict replays
-  remain the narrow reviewed-code successor exception and may atomically add only their
-  complete hash/head tuples after current bytes, Git identities, attempts, subjects,
-  refs, and cleanliness prove the binding. Partial tuples, mismatched replays, and all
-  legacy completed mutations fail closed.
-- A successor may consolidate a legacy duplicate only at a checked transition that
-  writes the named canonical replacement and preserves every unique retained fact.
-- No two repair authorities may be active for one run. Admission and resume must
-  reject concurrent active/nonterminal overlap among a legacy `merged_slice_repair`,
-  a canonical amendment repair, and post-PR remediation. Complete/terminalize the
-  active authority or start the prescribed recovery/continuation run; never mirror
-  one repair into a second active state machine.
-- The original B0.4 ledger milestone changed documentation and tests only. B0MR.1 is
-  the narrow successor exception: it adds only the reviewed-code tuple fields and
-  checked replay/merge/panel/fence consumers described above, without adding a second
-  authority class or rewriting legacy records eagerly.
+- Readers accept only the current closed shape. Old, marker-less, partial, unknown,
+  or incompatible records reject before semantic mutation or external effect and
+  require abandonment and re-seeding.
+- Slice review and merged rows require complete current bindings/history. Validator
+  and security panels require their complete current tuples together. Present PR
+  fences require the complete current identity tuple. There is no upgrade, backfill,
+  read-only completion, or reconciliation path.
+- Generic integration amendment is the sole in-place repair authority. Post-PR
+  remediation remains a separate phase-specific state machine, not a fallback for
+  amendment-ineligible pre-PR state.
+- Ordinary slice closure has exactly two current forms: capability-authenticated
+  callback closure or checked candidate adoption. No compatibility closure kind or
+  widened key set is authoritative.
