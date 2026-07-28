@@ -255,7 +255,11 @@ describe("factory disrupted run recovery", () => {
       runGit(repo, ["branch", runId]);
       const runDir = join(repo, ".opencode", "factory", runId);
       const runFile = join(runDir, "run.json");
-      mkdirSync(runDir, { recursive: true });
+      mkdirSync(join(runDir, "artifacts"), { recursive: true });
+      mkdirSync(join(runDir, "reviews"), { recursive: true });
+      writeFileSync(join(runDir, "artifacts", "validation.md"), "GO-WITH-NITS\n", "utf8");
+      writeJson(join(runDir, "reviews", "validator.json"), { subject: runId, attempt: 1, reviewed_head_sha: baseCommit, verdict: "GO-WITH-NITS", required_fixes: [] });
+      writeJson(join(runDir, "reviews", "security.json"), { subject: runId, attempt: 1, reviewed_head_sha: baseCommit, verdict: "PASS", required_fixes: [] });
       const original = {
         schema_version: 1,
         run_id: runId,
@@ -290,8 +294,13 @@ describe("factory disrupted run recovery", () => {
           { id: "backend", stack: "backend", depends_on: ["research"], declared_paths: ["backend.txt"], effective_paths: ["backend.txt"], status: "running", attempts: 2, evidence_ref: "evidence/backend.md" },
         ],
         steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md", evidence_ref: "evidence/story.md", review_ref: "reviews/story.json" }],
-        validator: { verdict: "GO-WITH-NITS", report: "artifacts/validation.md", loops: 1 },
-        security_review: { verdict: "PASS", review_ref: "reviews/security.json", loops: 1 },
+        validator: {
+          verdict: "GO-WITH-NITS", report: "artifacts/validation.md", report_hash: fileHash(join(runDir, "artifacts", "validation.md")),
+          review_ref: "reviews/validator.json", review_hash: fileHash(join(runDir, "reviews", "validator.json")), reviewed_head_sha: baseCommit,
+        },
+        security_review: {
+          verdict: "PASS", review_ref: "reviews/security.json", review_hash: fileHash(join(runDir, "reviews", "security.json")), reviewed_head_sha: baseCommit,
+        },
         terminal_result: null,
       };
       writeJson(runFile, original);

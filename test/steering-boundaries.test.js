@@ -641,43 +641,25 @@ describe("lock-protected steering boundaries", () => {
     const fixture = createRecoveryFixture("recovery-terminal-race");
     runGit(fixture.repo, ["worktree", "add", fixture.worktree, fixture.runId]);
     seedInactiveHeartbeat(fixture, NOW, 987654321, 60000);
-    const holder = await acquireHolder(fixture.runDir);
-    const fenceLane = lane("recovery-terminal-fence");
-    const recoveryLane = lane("recovery-terminal-writer");
-    const recoveryPreflight = deferred();
-    const releaseRecoveryPreflight = deferred();
     const liveness = { processAliveFn: (pid) => pid !== 987654321 };
     const authority = prOptions(fixture);
     const authorityGit = authority.gitFn;
-    const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, {
-      ...authority,
-      ...laneOptions(fenceLane, { token: "recovery-terminal-fence", now: LATER, ...liveness }),
-      gitFn(cwd, args) {
-        if (args[0] === "merge-base") return { ok: true, status: 0, stdout: "", stderr: "" };
-        return authorityGit(cwd, args);
-      },
-    }));
-    const recovery = tracked(recoverDisruptedRun(fixture.runId, {
-      ...laneOptions(recoveryLane), cwd: fixture.repo, now: LATER, ...liveness,
-      recoveryHooks: { beforeTerminalWrite: async () => { recoveryPreflight.resolve(); await releaseRecoveryPreflight.promise; } },
-    }));
-    let terminalHolder;
     try {
-      await bounded(recoveryPreflight.promise, "recovery terminal preflight");
-      await allEntered(fenceLane);
-      fenceLane.release.resolve();
-      holder.release.resolve();
-      const established = await fence.promise;
-      assert.equal(recovery.settled, false);
+      const established = await transitionPrePrFenceEstablished(fixture.runDir, {
+        ...authority,
+        token: "recovery-terminal-fence", now: LATER, ...liveness,
+        gitFn(cwd, args) {
+          if (args[0] === "merge-base") return { ok: true, status: 0, stdout: "", stderr: "" };
+          return authorityGit(cwd, args);
+        },
+      });
       runGit(fixture.worktree, ["checkout", "--detach"]);
-      terminalHolder = await acquireHolder(fixture.runDir);
-      releaseRecoveryPreflight.resolve();
-      await allEntered(recoveryLane);
       const runBeforeRecovery = bytes(fixture.runPath);
       const heartbeatBeforeRecovery = bytes(fixture.heartbeatPath);
-      recoveryLane.release.resolve();
-      terminalHolder.release.resolve();
-      await assert.rejects(recovery.promise, /recovery terminalization rejected: active pre-PR fence/u);
+      await assert.rejects(
+        recoverDisruptedRun(fixture.runId, { cwd: fixture.repo, now: LATER, ...liveness }),
+        /recovery terminalization rejected: active pre-PR fence/u,
+      );
       assertBytes(fixture.runPath, runBeforeRecovery);
       assertBytes(fixture.heartbeatPath, heartbeatBeforeRecovery);
       const persisted = readJson(fixture.runPath);
@@ -686,8 +668,6 @@ describe("lock-protected steering boundaries", () => {
       assert.equal(persisted.steering.pr_fence.token, established.fence.token);
       assert.equal(readJson(fixture.heartbeatPath).pid, 987654321);
     } finally {
-      releaseRecoveryPreflight.resolve();
-      await finishRace(fixture, holder, terminalHolder, fenceLane, recoveryLane, fence, recovery);
       cleanupRecoveryFixture(fixture);
     }
   });

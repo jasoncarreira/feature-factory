@@ -12,6 +12,7 @@ import { runAttributes, sanitizeOtlpEnv, validateTracestate } from "../src/telem
 import { collectProtectedSteeringState } from "../src/steering-conflicts.js";
 import { cancelFactoryRun, cleanupRun, continueFactory, recordCostUsage, startFactory } from "../src/factory.js";
 import { SLICE_FIX_CLASSIFICATIONS, SLICE_FIX_SCOPE_EFFECTS, sliceReviewTaskContext, validateSliceReviewFeasibility, validateSliceReviewResult } from "../src/validate.js";
+import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
 
 const NOW = "2026-07-09T15:00:00.000Z";
 
@@ -263,12 +264,13 @@ describe("slice remediation task context", () => {
 });
 
 function feasibilityPlan({ overlap = false } = {}) {
-  return {
+  return withDeliveryEnvelope({
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [
       { id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["slice works"], test_plan: ["test slice"] },
       { id: "sibling", stack: "backend", paths: ["test/**", ...(overlap ? ["src/**"] : [])], depends_on: [], acceptance: ["sibling works"], test_plan: ["test sibling"] },
     ],
-  };
+  });
 }
 
 describe("cost attribution hardening", () => {
@@ -493,7 +495,9 @@ describe("continuation and named-start git preflight", () => {
       mkdirSync(join(runDir, "artifacts"), { recursive: true });
       mkdirSync(join(runDir, "reviews"), { recursive: true });
       writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
+      writeFileSync(join(runDir, "artifacts", "validation.md"), "NO-GO\n", "utf8");
       writeJson(join(runDir, "reviews", "reviewer.json"), { subject: runId, summary: "needs continuation" });
+      writeJson(join(runDir, "reviews", "security.json"), { subject: runId, summary: "security blocks continuation" });
       writeJson(join(runDir, "run.json"), {
         schema_version: 1,
         run_id: runId,
@@ -501,13 +505,19 @@ describe("continuation and named-start git preflight", () => {
         branch: runId,
         base_commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         worktree: join(repo, ".opencode", "worktrees", runId),
-        validator: { verdict: "NO-GO", review_ref: "reviews/reviewer.json" },
+        validator: {
+          verdict: "NO-GO", report: "artifacts/validation.md", report_hash: jsonHashText("NO-GO\n"),
+          review_ref: "reviews/reviewer.json", review_hash: jsonHash({ subject: runId, summary: "needs continuation" }), reviewed_head_sha: gitOutput(repo, ["rev-parse", runId]),
+        },
+        security_review: {
+          verdict: "BLOCK", review_ref: "reviews/security.json", review_hash: jsonHash({ subject: runId, summary: "security blocks continuation" }), reviewed_head_sha: gitOutput(repo, ["rev-parse", runId]),
+        },
         gates: {},
         terminal_result: { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} },
       });
 
       assert.throws(
-        () => continueFactory(runId, { cwd: repo, review: "reviewer.json", runId: `${runId}-next`, dryRun: true }),
+        () => continueFactory(runId, { cwd: repo, review: "reviewer.json", runId: `${runId}-next`, carryForward: true, dryRun: true }),
         /parent base commit/u,
       );
     } finally {
@@ -534,7 +544,9 @@ describe("continuation and named-start git preflight", () => {
       mkdirSync(join(runDir, "artifacts"), { recursive: true });
       mkdirSync(join(runDir, "reviews"), { recursive: true });
       writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
+      writeFileSync(join(runDir, "artifacts", "validation.md"), "NO-GO\n", "utf8");
       writeJson(join(runDir, "reviews", "reviewer.json"), { subject: runId, summary: "needs continuation" });
+      writeJson(join(runDir, "reviews", "security.json"), { subject: runId, summary: "security blocks continuation" });
       writeJson(join(runDir, "run.json"), {
         schema_version: 1,
         run_id: runId,
@@ -542,13 +554,19 @@ describe("continuation and named-start git preflight", () => {
         branch: runId,
         base_commit: orphanSha,
         worktree: join(repo, ".opencode", "worktrees", runId),
-        validator: { verdict: "NO-GO", review_ref: "reviews/reviewer.json" },
+        validator: {
+          verdict: "NO-GO", report: "artifacts/validation.md", report_hash: jsonHashText("NO-GO\n"),
+          review_ref: "reviews/reviewer.json", review_hash: jsonHash({ subject: runId, summary: "needs continuation" }), reviewed_head_sha: gitOutput(repo, ["rev-parse", runId]),
+        },
+        security_review: {
+          verdict: "BLOCK", review_ref: "reviews/security.json", review_hash: jsonHash({ subject: runId, summary: "security blocks continuation" }), reviewed_head_sha: gitOutput(repo, ["rev-parse", runId]),
+        },
         gates: {},
         terminal_result: { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} },
       });
 
       assert.throws(
-        () => continueFactory(runId, { cwd: repo, review: "reviewer.json", runId: `${runId}-next`, dryRun: true }),
+        () => continueFactory(runId, { cwd: repo, review: "reviewer.json", runId: `${runId}-next`, carryForward: true, dryRun: true }),
         /not an ancestor of parent branch/u,
       );
     } finally {
@@ -610,6 +628,16 @@ function writeJson(file, value) {
 
 function jsonHash(value) {
   return `sha256:${createHash("sha256").update(`${JSON.stringify(value, null, 2)}\n`).digest("hex")}`;
+}
+
+function jsonHashText(value) {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function gitOutput(repo, args) {
+  const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+  return proc.stdout.trim();
 }
 
 function cleanupDir(runDir) {

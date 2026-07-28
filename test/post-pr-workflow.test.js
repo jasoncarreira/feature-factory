@@ -6,7 +6,6 @@ import { spawnSync } from "./helpers/git-fixture.js";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, resumeFactory, startHeartbeat, status, stopHeartbeat, writeSteering } from "../src/factory.js";
-import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
 import { computePrOperationId } from "../src/github.js";
 import { completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionPostPrState } from "../src/run-state.js";
@@ -969,7 +968,7 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
-  it("builds a hash-bound new-PR continuation without mutating the parent and rejects tampering", async () => {
+  it("rejects post-PR continuation through the pre-PR-only carry-forward route without mutating the parent", async () => {
     const fixture = createRevalidationFixture("post-pr-continuation");
     try {
       updateRunFile(fixture, (run) => { run.max_retries = 1; });
@@ -977,14 +976,10 @@ describe("post-PR workflow orchestration", () => {
       await postPrRemediation(fixture.runId, 1, "failed", { cwd: fixture.repo, failureEvidenceRef: "evidence/post-pr-local-failure.attempt-2.json", now: "2026-07-12T12:10:00.000Z" });
       const parentBefore = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       const parent = readRun(fixture);
-      const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: parent.post_pr.continuation_review.ref, runId: "post-pr-continuation-child", newPr: true, dryRun: true, now: "2026-07-12T12:11:00.000Z" });
-      assert.doesNotThrow(() => decodeFeatureCommandPayload(encodeFeatureCommandPayload(result.payload)));
-      assert.equal(result.payload.continuation.post_pr.disposition, "leave-unchanged");
-      assert.equal(result.payload.continuation.post_pr.evidence_ref, "evidence/post-pr-local-failure.attempt-2.json");
-      assert.equal(result.payload.continuation.post_pr.head_sha, fixture.candidate);
-      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), parentBefore);
-      writeFileSync(join(fixture.runDir, parent.post_pr.continuation_review.ref), "{}\n");
-      assert.throws(() => continueFactory(fixture.runId, { cwd: fixture.repo, review: parent.post_pr.continuation_review.ref, runId: "post-pr-continuation-tampered", newPr: true, dryRun: true }), /hash mismatch|invalid evidence\/review bindings/u);
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: parent.post_pr.continuation_review.ref, runId: "post-pr-continuation-child", carryForward: true, dryRun: true, now: "2026-07-12T12:11:00.000Z" }),
+        /available only before PR creation/u,
+      );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), parentBefore);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });

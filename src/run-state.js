@@ -665,7 +665,6 @@ function observeBaseAdvanceEligibility(runDir, run, options) {
         : isRecord(testClaim) ? "settled-historical" : "absent",
     special_dispatch: specialDispatch,
     amendment: classifyBaseAdvanceAmendment(amendment, amendmentInventory),
-    repair: "absent",
     panels: isRecord(run.validator) && isRecord(run.security_review) ? "both"
       : isRecord(run.validator) ? "validator" : isRecord(run.security_review) ? "security" : "absent",
     heartbeat,
@@ -2382,7 +2381,7 @@ export function assertPublishedCarryForwardRun(repoInput, expectedContinuation, 
   const planPath = resolve(runDir, planRef);
   assertNoSymlinkPath(runDir, planPath, "published carry-forward plan");
   if (!existsSync(planPath) || !lstatSync(planPath).isFile() || hashFile(planPath) !== expectedContinuation.carry_forward.plan_hash) throw new Error("published carry-forward plan bytes do not match continuation authority");
-  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
+  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true });
   assertPublishedCarryForwardSlices(runDir, run, plan, expectedContinuation.carry_forward, {
     runDir: dirname(parent.parentFile),
     run: parent.parentRun,
@@ -3833,7 +3832,6 @@ function validateObservedPlanSource(source, slices, options = {}) {
     label: PLAN_SLICES_REF,
     enforceDependencyDepth: options.enforceDependencyDepth !== false,
     requireIntegrationGate: options.requireIntegrationGate === true,
-    allowLegacyExecutionTimeouts: options.allowLegacyExecutionTimeouts === true,
   });
   const admissionExtension = validateAdmissionExtensionResult(evaluateDeliveryEnvelopeAdmission({ plan }));
   const admissionProbe = buildDeliveryPlanAdmissionProbe({ plan, planHash: source.plan_hash, admissionResult: admissionExtension });
@@ -3883,7 +3881,6 @@ export function observeAcceptedDecompositionAuthority(runDir, run, options = {})
     ...options,
     enforceDependencyDepth: false,
     requireIntegrationGate: options.requireIntegrationGate === true,
-    allowLegacyExecutionTimeouts: true,
   });
   if (source.plan.integration_gate === undefined && options.requireForIntegrationGatePlan === true) return null;
   const matches = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
@@ -4103,7 +4100,7 @@ export function assertV2LocalPublishedAuthority(runDir, run, options = {}, expec
   const planPath = resolve(runDir, run.continuation.carry_forward.plan_ref);
   assertNoSymlinkPath(runDir, planPath, "published carry-forward plan");
   if (!existsSync(planPath) || !lstatSync(planPath).isFile() || hashFile(planPath) !== run.continuation.carry_forward.plan_hash) throw new Error("published carry-forward plan bytes do not match continuation authority");
-  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true, allowLegacyExecutionTimeouts: true });
+  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true });
   const parent = observeV2ParentAuthority(runDir, run, options);
   assertPublishedCarryForwardSlices(runDir, run, plan, run.continuation.carry_forward,
     readV2ParentAuthoritySource(runDir, run, options));
