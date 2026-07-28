@@ -13,7 +13,7 @@ import { withDeliveryEnvelope, passingInvariantFamilyLedger, writeVerificationAr
 import { createSliceAttemptReview, createSliceReviewRecord } from "../review-record-fixture.js";
 import { computePrOperationId } from "../../../src/github.js";
 import { hashFile, hashValue } from "../../../src/refs.js";
-import { completeIntegrationAmendmentReviewTaskDispatch, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, createPostPrState, hasInFlightHeartbeatWork, heartbeatOnce, prepareIntegrationAmendmentReviewTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionPanelVerdicts, transitionPostPrState, transitionPrCreated, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../../../src/run-state.js";
+import { observeIntegrationAmendmentExecutionAuthority, completeIntegrationAmendmentReviewTaskDispatch, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, createPostPrState, hasInFlightHeartbeatWork, heartbeatOnce, prepareIntegrationAmendmentReviewTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionPanelVerdicts, transitionPostPrState, transitionPrCreated, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../../../src/run-state.js";
 import { checkRunConsistency, inspectIntegrationAmendmentInventory, integrationAmendmentId, validateIntegrationAmendment, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateRun } from "../../../src/validate.js";
 import { executeIntegrationAmendment, resumeFactory } from "../../../src/factory.js";
 import { executeCheckedTestExecution } from "../../../src/test-execution.js";
@@ -943,30 +943,57 @@ export function createFixture({ managedFeatureWorktree = false, publishReport = 
   return { repo, featureWorktree, runDir, base, baseline, baselineTree, reviewedCommit, amendmentId };
 }
 
+// Publishes the amendment report sidecar for a run this module did not build.
+// createFixture bakes in its own run id, feature branch, and owner/consumer
+// slice ids; a carry-forward parent from createV2Fixture uses different ones,
+// and without a published report `transitionIntegrationAmendment({action:
+// "report"})` fails with `integration amendment report cannot consume
+// all-absent`.
+//
+// The admission is taken from the production observer rather than rebuilt with
+// admissionFixture. Report admission re-derives the admission and rejects any
+// claim whose identity, probe, head, tree, or cwd differs, so reconstructing it
+// by hand means guessing five values correctly; deriving it cannot drift.
+export function publishAmendmentReportFor({ runDir, run, request, exitCode = 1 }) {
+  const authority = observeIntegrationAmendmentExecutionAuthority(runDir, run, "report", request, { repoRoot: run.worktree });
+  writeExecution(runDir, {
+    phase: "report",
+    identity: authority.identity,
+    amendmentId: authority.amendment_id,
+    probe: authority.probe,
+    head: authority.head_sha,
+    tree: authority.tree_sha,
+    cwd: authority.cwd,
+    exitCode,
+    runId: run.run_id,
+  });
+  return authority;
+}
+
 export function carryForwardTerminalResult() {
   return { status: "blocked", reason: "carry-forward-required", summary: CARRY_FORWARD_REQUIRED_SUMMARY, artifacts: {} };
 }
 
-export function admissionFixture({ repo, baseline, baselineTree, owner, consumer, plan }) {
-  const unit = plan.delivery_envelope.delivery_units.find((entry) => entry.slice_id === "consumer");
+export function admissionFixture({ repo, baseline, baselineTree, owner, consumer, plan, consumerSliceId = "consumer", featureBranch = FEATURE_BRANCH }) {
+  const unit = plan.delivery_envelope.delivery_units.find((entry) => entry.slice_id === consumerSliceId);
   const artifact = unit.verification_artifacts[0];
   return {
-    baseline_ref: `refs/heads/${FEATURE_BRANCH}`, baseline_commit: baseline, baseline_tree: baselineTree, worktree: repo,
-    probe: { schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: unit.id, consumer_slice_id: "consumer", verification_artifact_id: artifact.id, test_plan_index: artifact.test_plan_index, test_plan_entry: artifact.test_plan_entry, program: "node", args: ["--test", "test/consumer.test.js"], timeout_ms: artifact.timeout_ms, substrate: "feature-baseline" },
+    baseline_ref: `refs/heads/${featureBranch}`, baseline_commit: baseline, baseline_tree: baselineTree, worktree: repo,
+    probe: { schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: unit.id, consumer_slice_id: consumerSliceId, verification_artifact_id: artifact.id, test_plan_index: artifact.test_plan_index, test_plan_entry: artifact.test_plan_entry, program: "node", args: ["--test", "test/consumer.test.js"], timeout_ms: artifact.timeout_ms, substrate: "feature-baseline" },
     owner: pick(owner, ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]),
     consumer: pick(consumer, ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts"]),
   };
 }
 
-export function writeOwnerDispatch(runDir, head, completionHead, worktree) {
-  const name = `${createHash("sha256").update(`${RUN_ID}\0owner\0${1}`).digest("hex")}.json`;
+export function writeOwnerDispatch(runDir, head, completionHead, worktree, { runId = RUN_ID, sliceId = "owner", branch = "owner-build", attempt = 1 } = {}) {
+  const name = `${createHash("sha256").update(`${runId}\0${sliceId}\0${attempt}`).digest("hex")}.json`;
   const claimRef = `dispatch/${name}`;
   const closureRef = `dispatch/${name.slice(0, -5)}.closed.json`;
   const token = "owner-token";
-  const claim = { schema_version: 1, kind: "checked-slice-builder-dispatch-claim", run_id: RUN_ID, slice_id: "owner", attempt: 1, agent: "backend-builder", branch: "owner-build", worktree, head, context_hash: hashValue({ owner: true }), completion_token_hash: sha(token), claimed_at: NOW, closure_ref: closureRef };
+  const claim = { schema_version: 1, kind: "checked-slice-builder-dispatch-claim", run_id: runId, slice_id: sliceId, attempt, agent: "backend-builder", branch, worktree, head, context_hash: hashValue({ owner: true }), completion_token_hash: sha(token), claimed_at: NOW, closure_ref: closureRef };
   writeJson(join(runDir, claimRef), claim);
   const claimHash = hashFile(join(runDir, claimRef));
-  const closure = { schema_version: 1, kind: "checked-slice-builder-dispatch-closure", claim_ref: claimRef, claim_hash: claimHash, run_id: RUN_ID, slice_id: "owner", attempt: 1, agent: "backend-builder", branch: "owner-build", worktree, head, completion_head: completionHead, context_hash: claim.context_hash, completion_token: token, returned_at: NOW };
+  const closure = { schema_version: 1, kind: "checked-slice-builder-dispatch-closure", claim_ref: claimRef, claim_hash: claimHash, run_id: runId, slice_id: sliceId, attempt, agent: "backend-builder", branch, worktree, head, completion_head: completionHead, context_hash: claim.context_hash, completion_token: token, returned_at: NOW };
   writeJson(join(runDir, closureRef), closure);
   return { dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash, dispatch_closure_ref: closureRef, dispatch_closure_hash: hashFile(join(runDir, closureRef)) };
 }
@@ -1302,13 +1329,13 @@ export function rewriteReportAsForeignRun(fixture) {
   writeJson(claimPath, claim);
 }
 
-export function writeExecution(runDir, { phase, identity, amendmentId, probe, head, tree, cwd, exitCode }) {
+export function writeExecution(runDir, { phase, identity, amendmentId, probe, head, tree, cwd, exitCode, runId = RUN_ID }) {
   const nonce = `${phase}-nonce`;
   const timeoutMs = probe.timeout_ms ?? 300_000;
   const receiptRef = `evidence/integration-amendment-${amendmentId}.${phase}.receipt.json`;
-  const receipt = { schema_version: 1, kind: "integration-amendment-execution-receipt", phase, subject: `integration-amendment:${amendmentId}:${phase}`, run_id: RUN_ID, amendment_id: amendmentId, claim_nonce: nonce, probe, head_sha: head, tree_sha: tree, cwd, timeout_ms: timeoutMs, started_at: NOW, completed_at: NOW, duration_ms: 1, status: exitCode === 0 ? "pass" : "fail", review_ready: phase === "verify" ? exitCode === 0 : exitCode !== 0, commands: [{ index: 0, program: probe.program, args: probe.args, outcome: "exited", status: exitCode === 0 ? "pass" : "fail", exit_code: exitCode, signal: null, error_code: null, duration_ms: 1, stdout: stream(), stderr: stream() }] };
+  const receipt = { schema_version: 1, kind: "integration-amendment-execution-receipt", phase, subject: `integration-amendment:${amendmentId}:${phase}`, run_id: runId, amendment_id: amendmentId, claim_nonce: nonce, probe, head_sha: head, tree_sha: tree, cwd, timeout_ms: timeoutMs, started_at: NOW, completed_at: NOW, duration_ms: 1, status: exitCode === 0 ? "pass" : "fail", review_ready: phase === "verify" ? exitCode === 0 : exitCode !== 0, commands: [{ index: 0, program: probe.program, args: probe.args, outcome: "exited", status: exitCode === 0 ? "pass" : "fail", exit_code: exitCode, signal: null, error_code: null, duration_ms: 1, stdout: stream(), stderr: stream() }] };
   writeJson(join(runDir, receiptRef), receipt);
-  const claim = { schema_version: 1, kind: "integration-amendment-execution-claim", phase, subject: receipt.subject, state: "completed", nonce, amendment_id: amendmentId, identity, run_id: RUN_ID, probe, head_sha: head, tree_sha: tree, cwd, timeout_ms: timeoutMs, receipt_ref: receiptRef, claimed_at: NOW, completed_at: NOW, status: receipt.status, receipt_hash: hashFile(join(runDir, receiptRef)) };
+  const claim = { schema_version: 1, kind: "integration-amendment-execution-claim", phase, subject: receipt.subject, state: "completed", nonce, amendment_id: amendmentId, identity, run_id: runId, probe, head_sha: head, tree_sha: tree, cwd, timeout_ms: timeoutMs, receipt_ref: receiptRef, claimed_at: NOW, completed_at: NOW, status: receipt.status, receipt_hash: hashFile(join(runDir, receiptRef)) };
   const claimRef = phase === "report" ? "evidence/integration-amendment.report.claim.json" : `evidence/integration-amendment-${amendmentId}.${phase}.claim.json`;
   writeJson(join(runDir, claimRef), claim);
 }
