@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "./helpers/git-fixture.js";
-import { createReviewRecord } from "./helpers/review-record-fixture.js";
 import { publishSyntheticV2Parent } from "./helpers/v2-parent-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
@@ -26,20 +25,18 @@ import {
   createIssue128DurableRunBaseline,
   createDurableCatalogBaseline,
   createPostPrCatalogBaseline,
-  createRepairCatalogBaseline,
   emitDurableRecordMutations,
   emitIssue128FinishAndDiscloseMutations,
   issue128FinishAndDiscloseAuthorityOracle,
   renderDurableAuthorityOracleReviewSnapshot,
 } from "./helpers/durable-record-mutations.js";
 import { assertIntegrationAmendmentConsistency, checkRunConsistency, integrationAmendmentId, validateCheckpointChildPublication, validateCheckpointProgress, validateCheckpointSource, validateDeliveryCheckpointFinalClosure, validateIntegrationAmendment, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateIntegrationAmendmentReviewDispatchClaim, validateIntegrationAmendmentReviewDispatchClosure, validateRun, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "../src/validate.js";
-import { cleanupRun, continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
+import { cleanupRun } from "../src/factory.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
 import { evaluateInvariantFamilyReview } from "../src/delivery-envelope/review-extension.js";
 import { buildCheckpointRoutingManifest, validateCheckpointRoutingManifest, validateReviewedCheckpointPlan } from "../src/delivery-envelope/checkpoint-routing.js";
 import {
-  assertContinuationAuthorityCurrent,
   assertNoUnresolvedSliceDispatches,
   assertSliceAttemptHistoryCurrent,
   claimCheckedTestExecution,
@@ -49,10 +46,7 @@ import {
   observeAcceptedDecompositionAuthority,
   observeReviewedMergeProof,
   prepareSpecialBuilderTaskDispatch,
-  transitionMergedSliceRepair,
-  mergedSliceRepairFence,
   transitionPanelVerdicts,
-  transitionContinuationAdoption,
   transitionGateDecision,
   transitionIntegrationAmendment,
   transitionPostPrState,
@@ -144,40 +138,6 @@ const FAMILIES_WITH_EXCLUSIONS = Object.freeze([
   "wrong-hash",
   "wrong-bytes",
   "descriptor-key-shape-drift",
-]);
-
-const B0M3_CONTINUATION_EXACT_CASES = Object.freeze([
-  { name: "continuation-envelope: cross-bound-identity (cross-bound operator_summary)", record_id: "continuation-envelope", family: "cross-bound-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation operator_summary is stale or cross-bound" },
-  { name: "continuation-parent-binding: wrong-hash (parent-run hash)", record_id: "continuation-parent-binding", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent run.json changed since observation" },
-  { name: "continuation-parent-binding: wrong-bytes (parent-run sidecar bytes)", record_id: "continuation-parent-binding", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent run.json changed since observation" },
-  { name: "continuation-parent-binding: stale-identity (stale commit)", record_id: "continuation-parent-binding", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent branch/commit binding is stale" },
-  { name: "continuation-selected-review: wrong-bytes (selected-review sidecar bytes)", record_id: "continuation-selected-review", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation selected review hash mismatch" },
-  { name: "continuation-selected-review: stale-identity (stale verdict)", record_id: "continuation-selected-review", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation selected review identity is stale or cross-bound" },
-  { name: "continuation-selected-review: cross-bound-identity (cross-bound subject)", record_id: "continuation-selected-review", family: "cross-bound-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation selected review identity is stale or cross-bound" },
-  { name: "continuation-target-binding: stale-identity (stale base_commit)", record_id: "continuation-target-binding", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation target base binding is stale" },
-  { name: "continuation-parent-artifact-sidecar: wrong-hash (artifact hash)", record_id: "continuation-parent-artifact-sidecar", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_artifacts binding is stale" },
-  { name: "continuation-parent-artifact-sidecar: wrong-bytes (artifact sidecar bytes)", record_id: "continuation-parent-artifact-sidecar", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_artifacts binding is stale" },
-  { name: "continuation-parent-artifact-sidecar: stale-identity (stale hash)", record_id: "continuation-parent-artifact-sidecar", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_artifacts binding is stale" },
-  { name: "continuation-parent-evidence-sidecar: wrong-hash (evidence hash)", record_id: "continuation-parent-evidence-sidecar", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_evidence binding is stale" },
-  { name: "continuation-parent-evidence-sidecar: wrong-bytes (evidence sidecar bytes)", record_id: "continuation-parent-evidence-sidecar", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_evidence binding is stale" },
-  { name: "continuation-parent-evidence-sidecar: stale-identity (stale hash)", record_id: "continuation-parent-evidence-sidecar", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_evidence binding is stale" },
-  { name: "continuation-parent-review-sidecar: wrong-hash (review hash)", record_id: "continuation-parent-review-sidecar", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_reviews binding is stale" },
-  { name: "continuation-parent-review-sidecar: wrong-bytes (review sidecar bytes)", record_id: "continuation-parent-review-sidecar", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_reviews binding is stale" },
-  { name: "continuation-parent-review-sidecar: stale-identity (stale hash)", record_id: "continuation-parent-review-sidecar", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_reviews binding is stale" },
-  { name: "continuation-parent-review-sidecar: cross-bound-identity (cross-bound ref)", record_id: "continuation-parent-review-sidecar", family: "cross-bound-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_reviews binding is stale" },
-  { name: "continuation-planning-reuse-eligible: wrong-hash (review hash)", record_id: "continuation-planning-reuse-eligible", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation planning_reuse binding is stale" },
-  { name: "continuation-planning-reuse-eligible: wrong-hash (artifact hash)", record_id: "continuation-planning-reuse-eligible", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation planning_reuse binding is stale" },
-  { name: "continuation-planning-reuse-eligible: wrong-bytes (review sidecar bytes)", record_id: "continuation-planning-reuse-eligible", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_reviews binding is stale" },
-  { name: "continuation-planning-reuse-eligible: wrong-bytes (artifact sidecar bytes)", record_id: "continuation-planning-reuse-eligible", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_artifacts binding is stale" },
-  { name: "continuation-planning-reuse-eligible: cross-bound-identity (cross-bound spec_review_ref)", record_id: "continuation-planning-reuse-eligible", family: "cross-bound-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation planning_reuse binding is stale" },
-  { name: "continuation-draft-reuse: wrong-hash (draft hash)", record_id: "continuation-draft-reuse", family: "wrong-hash", consumer: "seedContinuationPlanningArtifacts", rejector: "Error :: continuation draft_spec_reuse binding is stale" },
-  { name: "continuation-draft-reuse: wrong-bytes (draft sidecar bytes)", record_id: "continuation-draft-reuse", family: "wrong-bytes", consumer: "seedContinuationPlanningArtifacts", rejector: "Error :: continuation parent_artifacts bindings changed since payload build" },
-  { name: "continuation-post-pr-binding: wrong-hash (evidence hash)", record_id: "continuation-post-pr-binding", family: "wrong-hash", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation post-PR evidence hash mismatch" },
-  { name: "continuation-post-pr-binding: wrong-hash (review hash)", record_id: "continuation-post-pr-binding", family: "wrong-hash", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation post-PR review hash mismatch" },
-  { name: "continuation-post-pr-binding: wrong-hash (hash post_pr_hash)", record_id: "continuation-post-pr-binding", family: "wrong-hash", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation post_pr state hash is stale" },
-  { name: "continuation-post-pr-binding: wrong-bytes (evidence sidecar bytes)", record_id: "continuation-post-pr-binding", family: "wrong-bytes", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation parent_evidence binding is stale" },
-  { name: "continuation-post-pr-binding: wrong-bytes (review sidecar bytes)", record_id: "continuation-post-pr-binding", family: "wrong-bytes", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation selected review hash mismatch" },
-  { name: "continuation-post-pr-binding: stale-identity (stale head_sha)", record_id: "continuation-post-pr-binding", family: "stale-identity", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation post_pr failed head binding is stale" },
 ]);
 
 const B0M4_EXACT_CASES = Object.freeze([
@@ -610,156 +570,6 @@ const B0M4_EXACT_CASES = Object.freeze([
   { name: "post-pr-terminal-fact-panel-attribution-unsafe: wrong-type (typed field)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
   { name: "post-pr-terminal-fact-panel-attribution-unsafe: stale-identity (stale attempt)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
   { name: "post-pr-terminal-fact-panel-attribution-unsafe: cross-bound-identity (cross-bound panel)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "cross-bound-identity", target_label: "cross-bound panel", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'needs-human'" },
-  { name: "repair-reported: missing-key (required field)", record_id: "repair-reported", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
-  { name: "repair-reported: unknown-key (record root)", record_id: "repair-reported", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
-  { name: "repair-reported: wrong-schema (schema version)", record_id: "repair-reported", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
-  { name: "repair-reported: wrong-time (timestamp updated_at)", record_id: "repair-reported", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
-  { name: "repair-reported: wrong-type (typed field)", record_id: "repair-reported", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
-  { name: "repair-reported: wrong-ref (plan ref)", record_id: "repair-reported", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
-  { name: "repair-reported: wrong-ref (original-evidence ref)", record_id: "repair-reported", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-reported: wrong-hash (plan hash)", record_id: "repair-reported", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-reported: wrong-hash (original-evidence hash)", record_id: "repair-reported", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-reported: wrong-bytes (plan sidecar bytes)", record_id: "repair-reported", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-reported: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-reported", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-reported: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-reported", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
-  { name: "repair-reported: stale-identity (stale attempts)", record_id: "repair-reported", family: "stale-identity", target_label: "stale attempts", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: repair attempt must advance from 1 to 2" },
-  { name: "repair-reported: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-reported", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
-  { name: "repair-repairing: missing-key (required field)", record_id: "repair-repairing", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
-  { name: "repair-repairing: unknown-key (record root)", record_id: "repair-repairing", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
-  { name: "repair-repairing: wrong-schema (schema version)", record_id: "repair-repairing", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
-  { name: "repair-repairing: wrong-time (timestamp updated_at)", record_id: "repair-repairing", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
-  { name: "repair-repairing: wrong-type (typed field)", record_id: "repair-repairing", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
-  { name: "repair-repairing: wrong-ref (plan ref)", record_id: "repair-repairing", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
-  { name: "repair-repairing: wrong-ref (original-evidence ref)", record_id: "repair-repairing", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-repairing: wrong-hash (plan hash)", record_id: "repair-repairing", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-repairing: wrong-hash (original-evidence hash)", record_id: "repair-repairing", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-repairing: wrong-bytes (plan sidecar bytes)", record_id: "repair-repairing", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-repairing: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-repairing", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-repairing: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-repairing", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
-  { name: "repair-repairing: stale-identity (stale attempts)", record_id: "repair-repairing", family: "stale-identity", target_label: "stale attempts", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be at least 1 once an attempt starts" },
-  { name: "repair-repairing: stale-identity (stale baseline_commit)", record_id: "repair-repairing", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: repair reviewed commit must contain new work on top of the observed attempt baseline" },
-  { name: "repair-repairing: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-repairing", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
-  { name: "repair-review-approve: missing-key (required field)", record_id: "repair-review-approve", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
-  { name: "repair-review-approve: unknown-key (record root)", record_id: "repair-review-approve", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
-  { name: "repair-review-approve: wrong-schema (schema version)", record_id: "repair-review-approve", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
-  { name: "repair-review-approve: wrong-time (timestamp updated_at)", record_id: "repair-review-approve", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
-  { name: "repair-review-approve: wrong-type (typed field)", record_id: "repair-review-approve", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
-  { name: "repair-review-approve: wrong-ref (plan ref)", record_id: "repair-review-approve", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
-  { name: "repair-review-approve: wrong-ref (original-evidence ref)", record_id: "repair-review-approve", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-review-approve: wrong-ref (repair-evidence ref)", record_id: "repair-review-approve", family: "wrong-ref", target_label: "repair-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-review-approve: wrong-ref (review ref)", record_id: "repair-review-approve", family: "wrong-ref", target_label: "review ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_ref :: reviews ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-review-approve: wrong-hash (plan hash)", record_id: "repair-review-approve", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-review-approve: wrong-hash (original-evidence hash)", record_id: "repair-review-approve", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-review-approve: wrong-hash (repair-evidence hash)", record_id: "repair-review-approve", family: "wrong-hash", target_label: "repair-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
-  { name: "repair-review-approve: wrong-hash (review hash)", record_id: "repair-review-approve", family: "wrong-hash", target_label: "review hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
-  { name: "repair-review-approve: wrong-bytes (plan sidecar bytes)", record_id: "repair-review-approve", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-review-approve: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-review-approve", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-review-approve: wrong-bytes (repair-evidence sidecar bytes)", record_id: "repair-review-approve", family: "wrong-bytes", target_label: "repair-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
-  { name: "repair-review-approve: wrong-bytes (review sidecar bytes)", record_id: "repair-review-approve", family: "wrong-bytes", target_label: "review sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
-  { name: "repair-review-approve: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-review-approve", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
-  { name: "repair-review-approve: stale-identity (stale attempts)", record_id: "repair-review-approve", family: "stale-identity", target_label: "stale attempts", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be at least 1 once an attempt starts" },
-  { name: "repair-review-approve: stale-identity (stale baseline_commit)", record_id: "repair-review-approve", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: repair merge commit must contain new work on top of the observed attempt baseline" },
-  { name: "repair-review-approve: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-review-approve", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
-  { name: "repair-review-approve: cross-bound-identity (cross-bound reviewed_commit)", record_id: "repair-review-approve", family: "cross-bound-identity", target_label: "cross-bound reviewed_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: repair review must bind the exact reviewed commit; the recorded commit does not match the observed repair" },
-  { name: "repair-review-reject: missing-key (required field)", record_id: "repair-review-reject", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
-  { name: "repair-review-reject: unknown-key (record root)", record_id: "repair-review-reject", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
-  { name: "repair-review-reject: wrong-schema (schema version)", record_id: "repair-review-reject", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
-  { name: "repair-review-reject: wrong-time (timestamp updated_at)", record_id: "repair-review-reject", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
-  { name: "repair-review-reject: wrong-type (typed field)", record_id: "repair-review-reject", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
-  { name: "repair-review-reject: wrong-ref (plan ref)", record_id: "repair-review-reject", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
-  { name: "repair-review-reject: wrong-ref (original-evidence ref)", record_id: "repair-review-reject", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-review-reject: wrong-ref (repair-evidence ref)", record_id: "repair-review-reject", family: "wrong-ref", target_label: "repair-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-review-reject: wrong-ref (review ref)", record_id: "repair-review-reject", family: "wrong-ref", target_label: "review ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_ref :: reviews ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-review-reject: wrong-hash (plan hash)", record_id: "repair-review-reject", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-review-reject: wrong-hash (original-evidence hash)", record_id: "repair-review-reject", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-review-reject: wrong-hash (repair-evidence hash)", record_id: "repair-review-reject", family: "wrong-hash", target_label: "repair-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
-  { name: "repair-review-reject: wrong-hash (review hash)", record_id: "repair-review-reject", family: "wrong-hash", target_label: "review hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
-  { name: "repair-review-reject: wrong-bytes (plan sidecar bytes)", record_id: "repair-review-reject", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-review-reject: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-review-reject", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-review-reject: wrong-bytes (repair-evidence sidecar bytes)", record_id: "repair-review-reject", family: "wrong-bytes", target_label: "repair-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
-  { name: "repair-review-reject: wrong-bytes (review sidecar bytes)", record_id: "repair-review-reject", family: "wrong-bytes", target_label: "review sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
-  { name: "repair-review-reject: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-review-reject", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
-  { name: "repair-review-reject: stale-identity (stale attempts)", record_id: "repair-review-reject", family: "stale-identity", target_label: "stale attempts", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be at least 1 once an attempt starts" },
-  { name: "repair-review-reject: stale-identity (stale baseline_commit)", record_id: "repair-review-reject", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: rejected repair review must bind work after the observed attempt baseline" },
-  { name: "repair-review-reject: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-review-reject", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
-  { name: "repair-review-reject: cross-bound-identity (cross-bound reviewed_commit)", record_id: "repair-review-reject", family: "cross-bound-identity", target_label: "cross-bound reviewed_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: repair review must bind the exact reviewed commit; the recorded commit does not match the observed repair" },
-  { name: "repair-merged: missing-key (required field)", record_id: "repair-merged", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
-  { name: "repair-merged: unknown-key (record root)", record_id: "repair-merged", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
-  { name: "repair-merged: wrong-schema (schema version)", record_id: "repair-merged", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
-  { name: "repair-merged: wrong-time (timestamp updated_at)", record_id: "repair-merged", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
-  { name: "repair-merged: wrong-type (typed field)", record_id: "repair-merged", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
-  { name: "repair-merged: wrong-ref (plan ref)", record_id: "repair-merged", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
-  { name: "repair-merged: wrong-ref (original-evidence ref)", record_id: "repair-merged", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-merged: wrong-ref (repair-evidence ref)", record_id: "repair-merged", family: "wrong-ref", target_label: "repair-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-merged: wrong-ref (review ref)", record_id: "repair-merged", family: "wrong-ref", target_label: "review ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_ref :: reviews ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-merged: wrong-ref (verification ref)", record_id: "repair-merged", family: "wrong-ref", target_label: "verification ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.verification_ref :: run.merged_slice_repair.verification_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-merged: wrong-hash (plan hash)", record_id: "repair-merged", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-merged: wrong-hash (original-evidence hash)", record_id: "repair-merged", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-merged: wrong-hash (repair-evidence hash)", record_id: "repair-merged", family: "wrong-hash", target_label: "repair-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
-  { name: "repair-merged: wrong-hash (review hash)", record_id: "repair-merged", family: "wrong-hash", target_label: "review hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
-  { name: "repair-merged: wrong-hash (verification hash)", record_id: "repair-merged", family: "wrong-hash", target_label: "verification hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.verification_ref :: run.merged_slice_repair.verification_hash :: must match verification_ref bytes" },
-  { name: "repair-merged: wrong-bytes (plan sidecar bytes)", record_id: "repair-merged", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-merged: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-merged", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-merged: wrong-bytes (repair-evidence sidecar bytes)", record_id: "repair-merged", family: "wrong-bytes", target_label: "repair-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
-  { name: "repair-merged: wrong-bytes (review sidecar bytes)", record_id: "repair-merged", family: "wrong-bytes", target_label: "review sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
-  { name: "repair-merged: wrong-bytes (verification sidecar bytes)", record_id: "repair-merged", family: "wrong-bytes", target_label: "verification sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.verification_ref :: run.merged_slice_repair.verification_hash :: must match verification_ref bytes" },
-  { name: "repair-merged: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-merged", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
-  { name: "repair-merged: stale-identity (stale attempts)", record_id: "repair-merged", family: "stale-identity", target_label: "stale attempts", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be at least 1 once an attempt starts" },
-  { name: "repair-merged: stale-identity (stale baseline_commit)", record_id: "repair-merged", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('merged'); a further defect requires a recovery run" },
-  { name: "repair-merged: stale-identity (stale merge_commit)", record_id: "repair-merged", family: "stale-identity", target_label: "stale merge_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('merged'); a further defect requires a recovery run" },
-  { name: "repair-merged: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-merged", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
-  { name: "repair-merged: cross-bound-identity (cross-bound reviewed_commit)", record_id: "repair-merged", family: "cross-bound-identity", target_label: "cross-bound reviewed_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('merged'); a further defect requires a recovery run" },
-  { name: "repair-blocked-from-reported: missing-key (required field)", record_id: "repair-blocked-from-reported", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
-  { name: "repair-blocked-from-reported: unknown-key (record root)", record_id: "repair-blocked-from-reported", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
-  { name: "repair-blocked-from-reported: wrong-schema (schema version)", record_id: "repair-blocked-from-reported", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
-  { name: "repair-blocked-from-reported: wrong-time (timestamp updated_at)", record_id: "repair-blocked-from-reported", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
-  { name: "repair-blocked-from-reported: wrong-type (typed field)", record_id: "repair-blocked-from-reported", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
-  { name: "repair-blocked-from-reported: wrong-ref (plan ref)", record_id: "repair-blocked-from-reported", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
-  { name: "repair-blocked-from-reported: wrong-ref (original-evidence ref)", record_id: "repair-blocked-from-reported", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-blocked-from-reported: wrong-hash (plan hash)", record_id: "repair-blocked-from-reported", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-blocked-from-reported: wrong-hash (original-evidence hash)", record_id: "repair-blocked-from-reported", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-blocked-from-reported: wrong-bytes (plan sidecar bytes)", record_id: "repair-blocked-from-reported", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-blocked-from-reported: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-blocked-from-reported", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-blocked-from-reported: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-blocked-from-reported", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
-  { name: "repair-blocked-from-reported: stale-identity (stale attempts)", record_id: "repair-blocked-from-reported", family: "stale-identity", target_label: "stale attempts", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
-  { name: "repair-blocked-from-reported: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-blocked-from-reported", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
-  { name: "repair-blocked-from-repairing: missing-key (required field)", record_id: "repair-blocked-from-repairing", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
-  { name: "repair-blocked-from-repairing: unknown-key (record root)", record_id: "repair-blocked-from-repairing", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
-  { name: "repair-blocked-from-repairing: wrong-schema (schema version)", record_id: "repair-blocked-from-repairing", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
-  { name: "repair-blocked-from-repairing: wrong-time (timestamp updated_at)", record_id: "repair-blocked-from-repairing", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
-  { name: "repair-blocked-from-repairing: wrong-type (typed field)", record_id: "repair-blocked-from-repairing", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
-  { name: "repair-blocked-from-repairing: wrong-ref (plan ref)", record_id: "repair-blocked-from-repairing", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
-  { name: "repair-blocked-from-repairing: wrong-ref (original-evidence ref)", record_id: "repair-blocked-from-repairing", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-blocked-from-repairing: wrong-hash (plan hash)", record_id: "repair-blocked-from-repairing", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-blocked-from-repairing: wrong-hash (original-evidence hash)", record_id: "repair-blocked-from-repairing", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-blocked-from-repairing: wrong-bytes (plan sidecar bytes)", record_id: "repair-blocked-from-repairing", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-blocked-from-repairing: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-blocked-from-repairing", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-blocked-from-repairing: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-blocked-from-repairing", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
-  { name: "repair-blocked-from-repairing: stale-identity (stale attempts)", record_id: "repair-blocked-from-repairing", family: "stale-identity", target_label: "stale attempts", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
-  { name: "repair-blocked-from-repairing: stale-identity (stale baseline_commit)", record_id: "repair-blocked-from-repairing", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
-  { name: "repair-blocked-from-repairing: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-blocked-from-repairing", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
-  { name: "repair-blocked-from-review: missing-key (required field)", record_id: "repair-blocked-from-review", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
-  { name: "repair-blocked-from-review: unknown-key (record root)", record_id: "repair-blocked-from-review", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
-  { name: "repair-blocked-from-review: wrong-schema (schema version)", record_id: "repair-blocked-from-review", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
-  { name: "repair-blocked-from-review: wrong-time (timestamp updated_at)", record_id: "repair-blocked-from-review", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
-  { name: "repair-blocked-from-review: wrong-type (typed field)", record_id: "repair-blocked-from-review", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
-  { name: "repair-blocked-from-review: wrong-ref (plan ref)", record_id: "repair-blocked-from-review", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
-  { name: "repair-blocked-from-review: wrong-ref (original-evidence ref)", record_id: "repair-blocked-from-review", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-blocked-from-review: wrong-ref (repair-evidence ref)", record_id: "repair-blocked-from-review", family: "wrong-ref", target_label: "repair-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-blocked-from-review: wrong-ref (review ref)", record_id: "repair-blocked-from-review", family: "wrong-ref", target_label: "review ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_ref :: reviews ref must not contain empty, '.' or '..' path segments" },
-  { name: "repair-blocked-from-review: wrong-hash (plan hash)", record_id: "repair-blocked-from-review", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-blocked-from-review: wrong-hash (original-evidence hash)", record_id: "repair-blocked-from-review", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-blocked-from-review: wrong-hash (repair-evidence hash)", record_id: "repair-blocked-from-review", family: "wrong-hash", target_label: "repair-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
-  { name: "repair-blocked-from-review: wrong-hash (review hash)", record_id: "repair-blocked-from-review", family: "wrong-hash", target_label: "review hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
-  { name: "repair-blocked-from-review: wrong-bytes (plan sidecar bytes)", record_id: "repair-blocked-from-review", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
-  { name: "repair-blocked-from-review: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-blocked-from-review", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
-  { name: "repair-blocked-from-review: wrong-bytes (repair-evidence sidecar bytes)", record_id: "repair-blocked-from-review", family: "wrong-bytes", target_label: "repair-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
-  { name: "repair-blocked-from-review: wrong-bytes (review sidecar bytes)", record_id: "repair-blocked-from-review", family: "wrong-bytes", target_label: "review sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
-  { name: "repair-blocked-from-review: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-blocked-from-review", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
-  { name: "repair-blocked-from-review: stale-identity (stale attempts)", record_id: "repair-blocked-from-review", family: "stale-identity", target_label: "stale attempts", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
-  { name: "repair-blocked-from-review: stale-identity (stale baseline_commit)", record_id: "repair-blocked-from-review", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
-  { name: "repair-blocked-from-review: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-blocked-from-review", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
-  { name: "repair-blocked-from-review: cross-bound-identity (cross-bound reviewed_commit)", record_id: "repair-blocked-from-review", family: "cross-bound-identity", target_label: "cross-bound reviewed_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
 ]);
 
 const B0M4_LITERAL_ROW_COUNTS = Object.freeze({
@@ -823,17 +633,8 @@ const B0M4_LITERAL_ROW_COUNTS = Object.freeze({
   "post-pr-terminal-fact-panel-runner-result-malformed": 8,
   "post-pr-terminal-fact-push-failed": 8,
   "post-pr-terminal-fact-panel-attribution-unsafe": 8,
-  "repair-reported": 14,
-  "repair-repairing": 15,
-  "repair-review-approve": 22,
-  "repair-review-reject": 22,
-  "repair-merged": 26,
-  "repair-blocked-from-reported": 14,
-  "repair-blocked-from-repairing": 15,
-  "repair-blocked-from-review": 22,
 });
 const B0M4_LITERAL_POST_PR_COUNT = 429;
-const B0M4_LITERAL_REPAIR_COUNT = 150;
 
 const B0M4_PREREQUISITE_VALID_SCENARIOS = Object.freeze({
   "post-pr-revalidation-empty: missing-key (required field)": "post-pr",
@@ -865,12 +666,6 @@ const B0M4_PREREQUISITE_VALID_SCENARIOS = Object.freeze({
   "post-pr-push-last-error: wrong-type (typed field)": "post-pr",
   "post-pr-push-last-error: stale-identity (stale next_retry_at)": "post-pr",
   "post-pr-push-last-error: cross-bound-identity (cross-bound candidate_head_sha)": "post-pr",
-  "repair-reported: stale-identity (stale attempts)": "repair-reported",
-  "repair-repairing: stale-identity (stale baseline_commit)": "repair-repairing",
-  "repair-review-approve: stale-identity (stale baseline_commit)": "repair-review-approve-baseline",
-  "repair-review-approve: cross-bound-identity (cross-bound reviewed_commit)": "repair-review-approve-reviewed",
-  "repair-review-reject: stale-identity (stale baseline_commit)": "repair-review-reject-baseline",
-  "repair-review-reject: cross-bound-identity (cross-bound reviewed_commit)": "repair-review-reject-reviewed",
 });
 
 describe("durable record mutation helper", () => {
@@ -951,7 +746,7 @@ describe("durable record mutation helper", () => {
 });
 
 describe("finite durable-authority catalog", () => {
-  it("preflights the independently literal exact 579-case B0M.4 inventory and exact-name dispositions", () => {
+  it("preflights the independently literal exact 429-case B0M.4 inventory and exact-name dispositions", () => {
     const dispositionByName = exactB0m4DispositionMap(B0M4_EXACT_CASES);
     const emitted = [];
     const emittedNames = new Set();
@@ -967,19 +762,18 @@ describe("finite durable-authority catalog", () => {
         emitted.push({ name: mutationCase.name, record_id: recordId, family: mutationCase.family, target_label: disposition.target_label, consumer: disposition.consumer, rejector: disposition.rejector });
       }
     }
-    assert.equal(B0M4_EXACT_CASES.length, 579);
+    assert.equal(B0M4_EXACT_CASES.length, 429);
     assert.equal(B0M4_LITERAL_POST_PR_COUNT, 429);
-    assert.equal(B0M4_LITERAL_REPAIR_COUNT, 150);
-    assert.equal(Object.keys(B0M4_PREREQUISITE_VALID_SCENARIOS).length, 35);
+    assert.equal(Object.keys(B0M4_PREREQUISITE_VALID_SCENARIOS).length, 29);
     for (const name of Object.keys(B0M4_PREREQUISITE_VALID_SCENARIOS)) assert.equal(dispositionByName.has(name), true, `unknown prerequisite-valid case ${name}`);
-    assert.equal(dispositionByName.size, 579);
+    assert.equal(dispositionByName.size, 429);
     assert.deepEqual(emitted, B0M4_EXACT_CASES, "missing, duplicate, unknown, reordered, or mismatched tuple/consumer/rejector must fail preflight");
     const duplicateDisposition = B0M4_EXACT_CASES.slice();
     duplicateDisposition.push(B0M4_EXACT_CASES[0]);
     assert.throws(() => exactB0m4DispositionMap(duplicateDisposition), /duplicate exact B0M\.4 case/u);
     assert.throws(() => exactB0m4DispositionMap([{ ...B0M4_EXACT_CASES[0], consumer: "" }]), /literal consumer|concrete consumer and rejector/u);
-    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 195);
-    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 196);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 187);
+    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 188);
     for (const id of [
       "verification-artifact-claim-active", "verification-artifact-claim-completed-pass", "verification-artifact-claim-completed-fail",
       "verification-artifact-claim-unknown-process", "verification-artifact-claim-unknown-receipt", "verification-artifact-execution-receipt-pass",
@@ -1000,7 +794,7 @@ describe("finite durable-authority catalog", () => {
     );
   });
 
-  it("executes every one of the exact 579 B0M.4 cases once through its literal concrete consumer", async () => {
+  it("executes every one of the exact 429 B0M.4 cases once through its literal concrete consumer", async () => {
     const root = mkdtempSync(join(tmpdir(), "b0m4-exact-consumers-"));
     const executed = new Set();
     try {
@@ -1012,17 +806,17 @@ describe("finite durable-authority catalog", () => {
         if (Object.hasOwn(B0M4_PREREQUISITE_VALID_SCENARIOS, expected.name)) {
           await consumePrerequisiteValidB0M4Case(expected, record, mutationCase, B0M4_PREREQUISITE_VALID_SCENARIOS[expected.name]);
         } else if (expected.consumer === "validateRun") {
-          const fixture = expected.record_id.startsWith("repair-") ? createRepairCatalogBaseline(record) : createPostPrCatalogBaseline(record);
+          const fixture = createPostPrCatalogBaseline(record);
           const mutatedRun = replaceCanonicalRecord(fixture.run, record.canonicalPath, mutationCase.record);
           assert.throws(() => validateRun(mutatedRun), (error) => {
             assert.equal(error?.name, "ValidationError", `${expected.name} must reach ${expected.rejector}`);
             const [rejector, path, message] = expected.rejector.split(" :: ");
-            assert.equal(["validatePostPr", "validateMergedSliceRepair"].includes(rejector), true, expected.name);
+            assert.equal(rejector, "validatePostPr", expected.name);
             assert.equal(error.errors.some((item) => item.path === path && item.message === message), true, `${expected.name} exact nested path/message`);
             return true;
           });
         } else if (expected.consumer === "checkRunConsistency") {
-          const fixture = expected.record_id.startsWith("repair-") ? createRepairCatalogBaseline(record) : createPostPrCatalogBaseline(record);
+          const fixture = createPostPrCatalogBaseline(record);
           const mutatedRun = replaceCanonicalRecord(fixture.run, record.canonicalPath, mutationCase.record);
           const runDir = join(root, String(executed.size));
           materializeCatalogSources(runDir, mutationCase.externalSources, fixture.supportSources);
@@ -1042,25 +836,13 @@ describe("finite durable-authority catalog", () => {
           const [, errorName, errorMessage] = expected.rejector.split(" :: ");
           await assert.rejects(transitionPostPrState(runDir, mutatedRun.post_pr, { now: "2026-07-16T12:06:00.000Z" }), (error) => error.name === errorName && error.message === errorMessage, `${expected.name} must reach ${expected.rejector}`);
           assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before, `${expected.name} protected bytes`);
-        } else if (expected.consumer === "transitionMergedSliceRepair") {
-          const fixture = createRepairCatalogBaseline(record);
-          const runDir = join(root, String(executed.size));
-          materializeCatalogSources(runDir, mutationCase.externalSources, fixture.supportSources);
-          const mutatedRun = replaceCanonicalRecord(fixture.run, record.canonicalPath, mutationCase.record);
-          writeJson(join(runDir, "run.json"), mutatedRun);
-          const before = readFileSync(join(runDir, "run.json"), "utf8");
-          const fence = structuredClone(mergedSliceRepairFence(mutatedRun));
-          const [, errorName, errorMessage] = expected.rejector.split(" :: ");
-          await assert.rejects(transitionMergedSliceRepair(runDir, repairProbeRequest(mutationCase.record), { repoRoot: runDir, now: "2026-07-16T12:06:00.000Z" }), (error) => error.name === errorName && error.message === errorMessage, `${expected.name} must reach ${expected.rejector}`);
-          assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before, `${expected.name} protected bytes`);
-          assert.deepEqual(mergedSliceRepairFence(JSON.parse(before)), fence, `${expected.name} repair fence`);
         } else assert.fail(`unknown literal consumer for ${expected.name}: ${expected.consumer}`);
         executed.add(expected.name);
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-    assert.equal(executed.size, 579);
+    assert.equal(executed.size, 429);
     assert.deepEqual([...executed], B0M4_EXACT_CASES.map(({ name }) => name));
   });
 
@@ -1093,7 +875,7 @@ describe("finite durable-authority catalog", () => {
         }
       }
     }
-    assert.equal(recordCount, 196);
+    assert.equal(recordCount, 188);
   });
 
   it("executes every amendment reviewer claim and closure mutation through production validators", () => {
@@ -1538,10 +1320,10 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("uses an independent closed descriptor oracle for all 196 exact target/exclusion definitions", () => {
+  it("uses an independent closed descriptor oracle for all 188 exact target/exclusion definitions", () => {
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
     assert.deepEqual(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), requiredIds);
-    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 196);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 188);
     assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*descriptor/u, "descriptor expectations must not be produced from catalog records");
@@ -1885,7 +1667,7 @@ describe("finite durable-authority catalog", () => {
   it("binds every catalog row's source identity, placement, facts, and external bytes with an independent manifest", () => {
     const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
-    assert.equal(canonicalIds.length, 196);
+    assert.equal(canonicalIds.length, 188);
     assert.deepEqual(canonicalIds, requiredIds);
     assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
@@ -1984,7 +1766,7 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("routes exactly the adopted canonical baselines through production validation and keeps final.plan descriptor-only", () => {
+  it("routes current baselines through production validation and rejects retired continuation baselines", () => {
     const observedConsumers = new Map();
     for (const id of [...DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS, "final-plan-descriptor"]) {
       const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
@@ -2050,11 +1832,15 @@ describe("finite durable-authority catalog", () => {
         assert.match(sidecar.kind, /^checked-special-builder-dispatch-(?:claim|closure)$/u);
       } else {
         assert.match(baseline.consumer, /^validateRun(?:\/checkRunConsistency)?$/u);
-        assert.equal(validateRun(baseline.run), baseline.run, `${id} must use an actual validateRun-compatible persisted shape`);
+        if (baseline.run.continuation?.schema_version === 1) {
+          assert.throws(() => validateRun(baseline.run), /run\.continuation\.schema_version: must equal 2/u, `${id} retired continuation shape`);
+        } else {
+          assert.equal(validateRun(baseline.run), baseline.run, `${id} must use an actual validateRun-compatible persisted shape`);
+        }
       }
     }
-    assert.equal(observedConsumers.size, 196);
-    assert.deepEqual([...observedConsumers.keys()].slice(0, 195), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
+    assert.equal(observedConsumers.size, 188);
+    assert.deepEqual([...observedConsumers.keys()].slice(0, 187), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
     assert.equal(observedConsumers.get("final-plan-descriptor"), "final-plan-descriptor-contract", "future-only final.plan is a descriptor contract, not claimed as current validateRun input");
   });
 
@@ -2142,7 +1928,7 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("preserves the prior B0M.1-B0M.3 production-consumer regression matrix", async () => {
+  it("preserves the current B0M.1-B0M.3 production-consumer regression matrix", async () => {
     const expectedIds = [
       "plan-slices-json",
       "run-envelope-running",
@@ -2161,17 +1947,6 @@ describe("finite durable-authority catalog", () => {
       "step-blocked",
       "step-accepted",
       "step-inherited-acceptance",
-      "continuation-envelope",
-      "continuation-parent-binding",
-      "continuation-selected-review",
-      "continuation-target-binding",
-      "continuation-parent-artifact-sidecar",
-      "continuation-parent-evidence-sidecar",
-      "continuation-parent-review-sidecar",
-      "continuation-planning-reuse-ineligible",
-      "continuation-planning-reuse-eligible",
-      "continuation-draft-reuse",
-      "continuation-post-pr-binding",
       "slice-pending",
       "slice-running",
       "slice-review",
@@ -2185,10 +1960,8 @@ describe("finite durable-authority catalog", () => {
       "steering-pr-fence",
       "pr-created-result",
     ];
-    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "plan-delivery-envelope-v1", "review-invariant-family-ledger-v1", "checkpoint-routing-artifact-v1", "checkpoint-reviewed-plan-v1", "checkpoint-admission-probe-valid", "checkpoint-child-disposition-v1", "checkpoint-child-publication-v1", "checkpoint-source-v1", "checkpoint-progress-reserved", "checkpoint-progress-child-published", "checkpoint-progress-launched", "checkpoint-progress-merged", "checkpoint-progress-closed", "checkpoint-merged-completion-v1", "checkpoint-final-closure-v1", "terminal-result-blocked-checkpoint-routing", "step-work-decomposer-accepted-plan", "terminal-result-blocked-nonconvergence", "slice-blocked-ordinary"].includes(id) && !id.startsWith("test-execution-") && !id.startsWith("verification-artifact-")).slice(0, 40), expectedIds);
+    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "plan-delivery-envelope-v1", "review-invariant-family-ledger-v1", "checkpoint-routing-artifact-v1", "checkpoint-reviewed-plan-v1", "checkpoint-admission-probe-valid", "checkpoint-child-disposition-v1", "checkpoint-child-publication-v1", "checkpoint-source-v1", "checkpoint-progress-reserved", "checkpoint-progress-child-published", "checkpoint-progress-launched", "checkpoint-progress-merged", "checkpoint-progress-closed", "checkpoint-merged-completion-v1", "checkpoint-final-closure-v1", "terminal-result-blocked-checkpoint-routing", "step-work-decomposer-accepted-plan", "terminal-result-blocked-nonconvergence", "slice-blocked-ordinary"].includes(id) && !id.startsWith("test-execution-") && !id.startsWith("verification-artifact-") && !id.startsWith("continuation-")).slice(0, 29), expectedIds);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
-    const continuationDispositions = exactB0m3ContinuationDispositionMap(B0M3_CONTINUATION_EXACT_CASES);
-    const executedContinuationCases = [];
     const results = {};
     const root = mkdtempSync(join(tmpdir(), "b0m-production-consumers-"));
     try {
@@ -2240,16 +2013,6 @@ describe("finite durable-authority catalog", () => {
             results[id].consumers.add("transitionRunStep");
             continue;
           }
-          if (id.startsWith("continuation-")) {
-            const disposition = continuationDispositions.get(mutationCase.name);
-            assert.ok(disposition, `schema-valid continuation case requires an exact disposition: ${mutationCase.name}`);
-            assert.equal(disposition.record_id, id, mutationCase.name);
-            assert.equal(disposition.family, mutationCase.family, mutationCase.name);
-            await consumeContinuationMutation(root, record, mutationCase, disposition, executedContinuationCases.length);
-            executedContinuationCases.push(mutationCase.name);
-            results[id].consumers.add(disposition.consumer);
-            continue;
-          }
           if (id.startsWith("slice-") || id.endsWith("-verdict-binding") || ["terminal-result-completed", "pr-created-result"].includes(id)) {
             const consumer = await consumeB0M3Mutation(root, record, mutationCase);
             results[id].consumers.add(consumer);
@@ -2267,8 +2030,6 @@ describe("finite durable-authority catalog", () => {
     }));
     assert.deepEqual(Object.fromEntries(Object.entries(results).map(([id, value]) => [id, value.count])), expectedCounts);
     assert.equal(Object.values(results).every(({ consumers }) => consumers.size > 0), true);
-    assert.equal(executedContinuationCases.length, 31, "all 31 schema-valid continuation mutations must execute a checked production consumer");
-    assert.deepEqual(executedContinuationCases, B0M3_CONTINUATION_EXACT_CASES.map(({ name }) => name));
     const expectedB0M3Consumers = {
       "slice-pending": "transitionSlicesSeed",
       "slice-running": "assertNoUnresolvedSliceDispatches",
@@ -2618,166 +2379,6 @@ describe("finite durable-authority catalog", () => {
     assert.equal(entries[0].source.github_account, "acme");
     assert.equal(entries[1].source.operation, "fast-forward-push");
     assert.equal(entries[1].source.classification, "permanent");
-  });
-
-  it("registers all PR79 repair states as canonical persisted sources with external authority facts", () => {
-    const repairClass = DURABLE_AUTHORITY_CATALOG.find(({ id }) => id === "pr79-merged-slice-repair");
-    const repairRecords = repairClass.records.filter(({ id }) => id.startsWith("repair-"));
-    assert.deepEqual(repairRecords.map(({ id }) => id), ["repair-reported", "repair-repairing", "repair-review-approve", "repair-review-reject", "repair-merged", "repair-blocked-from-reported", "repair-blocked-from-repairing", "repair-blocked-from-review"]);
-    assert.deepEqual(repairRecords.map(({ variant }) => variant), ["reported", "repairing", "review:APPROVE", "review:REJECT", "merged", "blocked-from-reported", "blocked-from-repairing", "blocked-from-review"]);
-    const repairStart = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.findIndex(([id]) => id === "repair-reported");
-    assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.slice(repairStart, repairStart + 8).every(([id], index) => id === repairRecords[index].id), true);
-    assert.deepEqual(repairRecords.map(({ canonicalPath }) => canonicalPath), Array.from({ length: 8 }, () => ["merged_slice_repair"]));
-    assert.deepEqual(repairRecords.map(({ source }) => source.status), ["reported", "repairing", "review", "review", "merged", "blocked", "blocked", "blocked"]);
-    assert.deepEqual(repairRecords.map(({ source }) => source.attempts), [0, 1, 1, 1, 1, 0, 1, 1]);
-    const requiredReportedKeys = ["schema_version", "plan_hash", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "created_at", "updated_at"];
-    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-reported").source), requiredReportedKeys);
-    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-repairing").source).sort(), [...requiredReportedKeys, "baseline_commit", "branch", "worktree"].sort());
-    for (const id of ["repair-review-approve", "repair-review-reject"]) {
-      assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, id).source).sort(), [...requiredReportedKeys, "baseline_commit", "reviewed_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash"].sort());
-    }
-    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-merged").source).sort(), [...requiredReportedKeys, "baseline_commit", "reviewed_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "verification_ref", "verification_hash", "merge_commit"].sort());
-    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-blocked-from-reported").source).sort(), [...requiredReportedKeys, "reason"].sort());
-    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-blocked-from-repairing").source).sort(), [...requiredReportedKeys, "baseline_commit", "branch", "worktree", "reason"].sort());
-    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-blocked-from-review").source).sort(), [...requiredReportedKeys, "baseline_commit", "reviewed_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "reason"].sort());
-    for (const { source } of repairRecords) {
-      assert.equal(source.schema_version, 1);
-      assert.equal(source.max_attempts, 2);
-      assert.equal(source.owner_slice_id, "owner");
-      assert.equal(source.consumer_slice_id, "consumer");
-      assert.equal(source.defect_path, "src/owner/records.js");
-      for (const synthetic of ["plan_ref", "owner_snapshot", "quiescent", "review_verdict", "reviewed_tree", "merge_tree", "sidecar_bytes", "blocked_from"]) assert.equal(containsOwnKey(source, synthetic), false, `${synthetic} must never be persisted`);
-    }
-    const approve = findRecord(DURABLE_AUTHORITY_CATALOG, "repair-review-approve");
-    const reject = findRecord(DURABLE_AUTHORITY_CATALOG, "repair-review-reject");
-    assert.equal(JSON.parse(approve.externalSources.review.bytes).verdict, "APPROVE");
-    assert.equal(JSON.parse(reject.externalSources.review.bytes).verdict, "REJECT");
-    assert.equal(Object.hasOwn(approve.source, "review_verdict"), false);
-    assert.equal(Object.hasOwn(reject.source, "review_verdict"), false);
-    const merged = findRecord(DURABLE_AUTHORITY_CATALOG, "repair-merged");
-    assert.deepEqual(merged.sidecars.map(({ name }) => name), ["plan", "original-evidence", "repair-evidence", "review", "verification"]);
-    assert.equal(Object.hasOwn(merged.source, "reviewed_tree"), false);
-    assert.equal(Object.hasOwn(merged.source, "merge_tree"), false);
-    assert.equal(merged.observations.some(({ name, source, expected, consumer }) => name === "reviewed-merge-tree-equality" && source === "re-observed" && expected === true && consumer.includes("transitionMergedSliceRepair merged")), true);
-    assert.equal(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-repairing").observations.some(({ name, expected }) => name === "quiescence" && expected === true), true);
-    assert.deepEqual(["repair-blocked-from-reported", "repair-blocked-from-repairing", "repair-blocked-from-review"].map((id) => inferBlockedRepairOrigin(findRecord(DURABLE_AUTHORITY_CATALOG, id).source)), ["reported", "repairing", "review"]);
-  });
-
-  it("places every canonical PR79 repair source in a validator- and consistency-accepted run with separate fixture files", () => {
-    const root = mkdtempSync(join(tmpdir(), "repair-catalog-"));
-    try {
-      for (const id of DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"].filter((recordId) => recordId.startsWith("repair-"))) {
-        const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
-        const fixture = createRepairCatalogBaseline(record);
-        assert.equal(validateRun(fixture.run), fixture.run, `${id} must use the production persisted schema`);
-        const runDir = join(root, id);
-        materializeCatalogSources(runDir, fixture.externalSources, fixture.supportSources);
-        const consistency = checkRunConsistency(runDir, fixture.run);
-        assert.equal(consistency.ok, true, `${id}: ${failedConsistencyMessages(consistency)}`);
-      }
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("mutates every PR79 plan/evidence/review/verification ref, hash, and file independently at the actual consistency seam", () => {
-    const root = mkdtempSync(join(tmpdir(), "repair-sidecar-mutations-"));
-    try {
-      const record = findRecord(DURABLE_AUTHORITY_CATALOG, "repair-merged");
-      const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources)
-        .filter(({ family }) => ["wrong-ref", "wrong-hash", "wrong-bytes"].includes(family));
-      assert.equal(cases.length, 15, "five external bindings must each expose independent ref/hash/bytes drift");
-      for (const mutationCase of cases) {
-        const fixture = createRepairCatalogBaseline(record);
-        fixture.run.merged_slice_repair = mutationCase.record;
-        const runDir = join(root, mutationCase.name.replaceAll(/[^a-z0-9]+/giu, "-"));
-        materializeCatalogSources(runDir, mutationCase.externalSources, fixture.supportSources);
-        const consistency = checkRunConsistency(runDir, fixture.run);
-        assert.equal(consistency.ok, false, `${mutationCase.name} must fail a production consistency binding`);
-        assert.match(failedConsistencyMessages(consistency), /merged_slice_repair\.(?:plan(?:_hash)?|evidence_(?:ref|hash)|review_(?:ref|hash)|repair_evidence_(?:ref|hash)|verification_(?:ref|hash))/u, mutationCase.name);
-      }
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects PR79 source deletion, relocation, contradiction, external-byte substitution, and every synthetic persisted field", () => {
-    const mutations = [
-      ["source deletion", (record) => { delete record.source.plan_hash; }],
-      ["record relocation", (record) => { record.record = "run.json.repair"; }],
-      ["variant relocation", (record) => { record.variant = `${record.variant}-relocated`; }],
-      ["canonical relocation", (record) => { record.canonicalPath = ["repair"]; }],
-      ["fact deletion", (record) => { record.facts.pop(); }],
-      ["fact relocation", (record) => { record.facts[0].path = ["attempts"]; }],
-      ["fact contradiction", (record) => { record.facts[0].expected = { contradiction: true }; }],
-      ["external deletion", (record) => { delete record.externalSources.plan; }],
-      ["external bytes", (record) => { record.externalSources["original-evidence"].bytes += "tampered"; }],
-      ...["plan_ref", "owner_snapshot", "quiescent", "review_verdict", "reviewed_tree", "merge_tree", "sidecar_bytes", "blocked_from"].map((key) => [`synthetic ${key}`, (record) => { record.source[key] = true; }]),
-    ];
-    for (const id of DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"].filter((recordId) => recordId.startsWith("repair-"))) {
-      for (const [label, mutate] of mutations) {
-        const catalog = structuredClone(DURABLE_AUTHORITY_CATALOG);
-        mutate(findRecord(catalog, id));
-        assert.throws(() => assertDurableAuthorityCatalogComplete(catalog), /canonical source|contradicts|synthetic|bound external source|does not resolve|metadata manifest/u, `${id}: ${label}`);
-      }
-    }
-  });
-
-  it("routes reported, repairing attempts 1 and 2, both review verdicts, merged, and all blocked origins through production consumers", async () => {
-    const fixtures = [];
-    try {
-      const reportedBlocked = createRepairTransitionFixture(); fixtures.push(reportedBlocked);
-      const reported = await transitionRepairReport(reportedBlocked);
-      assert.deepEqual(Object.keys(reported.merged_slice_repair), ["schema_version", "plan_hash", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "created_at", "updated_at"]);
-      const blockedReported = await transitionMergedSliceRepair(reportedBlocked.runDir, { status: "blocked", reason: "reported blocker" });
-      assert.equal(inferBlockedRepairOrigin(blockedReported.merged_slice_repair), "reported");
-
-      const repairingBlocked = createRepairTransitionFixture(); fixtures.push(repairingBlocked);
-      await transitionRepairReport(repairingBlocked);
-      const repairing = await transitionMergedSliceRepair(repairingBlocked.runDir, { status: "repairing", attempts: 1, branch: "repair-owner", worktree: "/tmp/repair-owner" }, { repoRoot: repairingBlocked.repo });
-      assert.equal(repairing.merged_slice_repair.attempts, 1);
-      assert.equal(repairing.merged_slice_repair.baseline_commit, repairingBlocked.baselineCommit);
-      const blockedRepairing = await transitionMergedSliceRepair(repairingBlocked.runDir, { status: "blocked", reason: "repairing blocker" });
-      assert.equal(inferBlockedRepairOrigin(blockedRepairing.merged_slice_repair), "repairing");
-
-      const rejected = createRepairTransitionFixture(); fixtures.push(rejected);
-      await transitionRepairReport(rejected);
-      await transitionMergedSliceRepair(rejected.runDir, { status: "repairing", attempts: 1 }, { repoRoot: rejected.repo });
-      const rejectedHead = await commitTransitionRepair(rejected, "reject");
-      writeTransitionReview(rejected, "REJECT", rejectedHead);
-      const rejectedReview = await transitionRepairReview(rejected, rejectedHead);
-      assert.equal(JSON.parse(readFileSync(join(rejected.runDir, rejectedReview.merged_slice_repair.review_ref), "utf8")).verdict, "REJECT");
-      assert.equal(Object.hasOwn(rejectedReview.merged_slice_repair, "review_verdict"), false);
-      const secondAttempt = await transitionMergedSliceRepair(rejected.runDir, { status: "repairing", attempts: 2 }, { repoRoot: rejected.repo });
-      assert.equal(secondAttempt.merged_slice_repair.attempts, 2);
-
-      const reviewBlocked = createRepairTransitionFixture(); fixtures.push(reviewBlocked);
-      await transitionRepairReport(reviewBlocked);
-      await transitionMergedSliceRepair(reviewBlocked.runDir, { status: "repairing", attempts: 1 }, { repoRoot: reviewBlocked.repo });
-      const reviewBlockedHead = await commitTransitionRepair(reviewBlocked, "blocked");
-      writeTransitionReview(reviewBlocked, "REJECT", reviewBlockedHead);
-      await transitionRepairReview(reviewBlocked, reviewBlockedHead);
-      const blockedReview = await transitionMergedSliceRepair(reviewBlocked.runDir, { status: "blocked", reason: "review blocker" });
-      assert.equal(inferBlockedRepairOrigin(blockedReview.merged_slice_repair), "review");
-
-      const approved = createRepairTransitionFixture(); fixtures.push(approved);
-      await transitionRepairReport(approved);
-      await transitionMergedSliceRepair(approved.runDir, { status: "repairing", attempts: 1 }, { repoRoot: approved.repo });
-      const approvedHead = await commitTransitionRepair(approved, "approve");
-      writeTransitionReview(approved, "APPROVE", approvedHead);
-      const approvedReview = await transitionRepairReview(approved, approvedHead);
-      assert.equal(Object.hasOwn(approvedReview.merged_slice_repair, "review_verdict"), false);
-      writeJson(join(approved.runDir, "evidence", "verification.json"), { subject: "consumer", status: "pass" });
-      const merged = await transitionMergedSliceRepair(approved.runDir, { status: "merged", merge_commit: approvedHead, verification_ref: "evidence/verification.json" }, { repoRoot: approved.repo });
-      assert.equal(merged.merged_slice_repair.status, "merged");
-      assert.equal(merged.merged_slice_repair.reviewed_commit, approvedHead);
-      assert.equal(merged.merged_slice_repair.merge_commit, approvedHead);
-      assert.equal(Object.hasOwn(merged.merged_slice_repair, "reviewed_tree"), false);
-      assert.equal(Object.hasOwn(merged.merged_slice_repair, "merge_tree"), false);
-      assert.equal(checkRunConsistency(approved.runDir, merged.run).ok, true);
-    } finally {
-      for (const fixture of fixtures) rmSync(fixture.repo, { recursive: true, force: true });
-    }
   });
 
   it("explicitly excludes diagnostics and liveness, lock, and process records with reasons", () => {
@@ -3885,94 +3486,6 @@ function failedConsistencyMessages(result) {
   return result.checks.filter(({ ok }) => !ok).flatMap(({ name, errors }) => errors.map(({ path, message }) => `${name} ${path}: ${message}`)).join("; ");
 }
 
-function inferBlockedRepairOrigin(source) {
-  assert.equal(source.status, "blocked");
-  if (source.review_ref !== undefined || source.repair_evidence_ref !== undefined) return "review";
-  if (source.baseline_commit !== undefined) return "repairing";
-  return "reported";
-}
-
-function createRepairTransitionFixture() {
-  const repo = mkdtempSync(join(tmpdir(), "repair-transition-catalog-"));
-  const runDir = join(repo, ".opencode", "factory", "repair-run");
-  for (const dir of ["evidence", "reviews", "plan"]) mkdirSync(join(runDir, dir), { recursive: true });
-  fixtureGit(repo, ["init", "-q", "-b", "repair-feature"]);
-  fixtureGit(repo, ["config", "user.email", "test@example.com"]);
-  fixtureGit(repo, ["config", "user.name", "Test"]);
-  writeFileSync(join(repo, "README.md"), "fixture\n");
-  fixtureGit(repo, ["add", "README.md"]);
-  fixtureGit(repo, ["commit", "-q", "-m", "baseline"]);
-  const baselineCommit = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
-  writeJson(join(runDir, "plan", "slices.json"), {
-    slices: [
-      { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["unit"] },
-      { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["AC2"], test_plan: ["unit"] },
-    ],
-  });
-  writeJson(join(runDir, "evidence", "consumer-failure.json"), { subject: "consumer", status: "fail" });
-  writeJson(join(runDir, "evidence", "owner.json"), { subject: "owner", attempt: 1, status: "pass", review_ready: true, head_sha: baselineCommit });
-  writeJson(join(runDir, "reviews", "owner.json"), { subject: "owner", attempt: 1, reviewed_commit: baselineCommit, verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] } });
-  writeJson(join(runDir, "run.json"), createRunRecord({
-    run_id: "repair-run",
-    branch: "repair-feature",
-    worktree: repo,
-    steps: [],
-    slices: [
-      { ...modernMergedSlice(runDir, "owner", baselineCommit), stack: "backend", depends_on: [] },
-      { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
-    ],
-  }));
-  return { repo, runDir, baselineCommit };
-}
-
-function transitionRepairReport(fixture) {
-  return transitionMergedSliceRepair(fixture.runDir, {
-    status: "reported",
-    owner_slice_id: "owner",
-    consumer_slice_id: "consumer",
-    defect_path: "src/owner/records.js",
-    evidence_ref: "evidence/consumer-failure.json",
-  }, { repoRoot: fixture.repo });
-}
-
-async function commitTransitionRepair(fixture, label) {
-  const context = await prepareSpecialBuilderTaskDispatch(fixture.repo, {
-    run_id: "repair-run", route: "merged-slice-repair", agent: "backend-builder",
-  }, { claimDispatch: true, completionToken: `repair-${label}-completion-token` });
-  const path = join(fixture.repo, "src", "owner", "records.js");
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `repair ${label}\n`);
-  fixtureGit(fixture.repo, ["add", "src/owner/records.js"]);
-  fixtureGit(fixture.repo, ["commit", "-q", "-m", `repair ${label}`]);
-  const commit = fixtureGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
-  writeJson(join(fixture.runDir, "evidence", "repair-attempt.json"), { subject: "repair:owner", changed_paths: ["src/owner/records.js"] });
-  await completeSpecialBuilderTaskDispatch(fixture.repo, {
-    run_id: "repair-run", route: "merged-slice-repair", agent: "backend-builder",
-    claim_ref: context.dispatch_claim.ref, claim_hash: context.dispatch_claim.hash,
-    completion_token: `repair-${label}-completion-token`,
-  });
-  return commit;
-}
-
-function writeTransitionReview(fixture, verdict, commit) {
-  writeJson(join(fixture.runDir, "reviews", "repair.json"), createReviewRecord({
-    subject: "repair:owner",
-    verdict,
-    required_fixes: verdict === "REJECT" ? ["correct owner record"] : [],
-    attempt: 1,
-    commit,
-  }));
-}
-
-function transitionRepairReview(fixture, commit) {
-  return transitionMergedSliceRepair(fixture.runDir, {
-    status: "review",
-    review_ref: "reviews/repair.json",
-    repair_evidence_ref: "evidence/repair-attempt.json",
-    reviewed_commit: commit,
-  }, { repoRoot: fixture.repo });
-}
-
 function fixtureGit(repo, args) {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" });
 }
@@ -3992,178 +3505,6 @@ function modernMergedSlice(runDir, id, reviewedCommit) {
     reviewed_commit: reviewedCommit, merge_commit: reviewedCommit,
     attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 }],
   };
-}
-
-function exactB0m3ContinuationDispositionMap(cases) {
-  const dispositions = new Map();
-  for (const exactCase of cases) {
-    if (dispositions.has(exactCase.name)) throw new Error(`duplicate exact B0M.3 continuation case ${exactCase.name}`);
-    for (const key of ["name", "record_id", "family", "consumer", "rejector"]) {
-      if (typeof exactCase[key] !== "string" || exactCase[key].length === 0) throw new Error(`exact B0M.3 continuation case requires literal ${key}`);
-    }
-    dispositions.set(exactCase.name, exactCase);
-  }
-  assert.equal(dispositions.size, 31, "exactly 31 schema-valid continuation dispositions are required");
-  return dispositions;
-}
-
-async function consumeContinuationMutation(root, record, mutationCase, disposition, index) {
-  const fixture = createContinuationMutationFixture(root, record.id, index);
-  const childRunDir = join(fixture.repo, ".opencode", "factory", fixture.childRunId);
-  try {
-    if (disposition.consumer === "seedContinuationPlanningArtifacts") {
-      const continuation = structuredClone(fixture.continuation);
-      const actualRecord = continuationRecordAtPath(continuation, record);
-      applyMutationDifference(actualRecord, record.source, mutationCase.record);
-      injectContinuationExternalMutation(fixture, record, mutationCase, actualRecord);
-      const parentRunBefore = readFileSync(join(fixture.parentRunDir, "run.json"));
-      const parentSourcesBefore = continuationSourceSnapshot(fixture.parentRunDir, continuation, record.id);
-      assert.throws(
-        () => seedContinuationPlanningArtifacts(fixture.repo, fixture.parentRunDir, continuation),
-        (error) => isExactNamedRejection(error, disposition.rejector),
-        `${mutationCase.name} must reach ${disposition.rejector}`,
-      );
-      assert.equal(existsSync(childRunDir), false, `${mutationCase.name} must not publish child seed bytes`);
-      assert.deepEqual(readFileSync(join(fixture.parentRunDir, "run.json")), parentRunBefore, `${mutationCase.name} protected parent run bytes`);
-      assert.deepEqual(continuationSourceSnapshot(fixture.parentRunDir, continuation, record.id), parentSourcesBefore, `${mutationCase.name} protected parent source bytes`);
-      return;
-    }
-
-    const seeded = seedContinuationPlanningArtifacts(fixture.repo, fixture.parentRunDir, fixture.continuation);
-    if (disposition.consumer === "transitionContinuationAdoption") assert.equal(seeded.eligible, true, `${mutationCase.name} adoption fixture must seed accepted planning authority`);
-    else assert.equal(seeded.eligible, false, `${mutationCase.name} authority-reader fixture must remain reuse-ineligible`);
-    writeJson(join(childRunDir, "run.json"), continuationChildRun(fixture.continuation));
-    const childRun = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
-    const actualRecord = continuationRecordAtPath(childRun.continuation, record);
-    applyMutationDifference(actualRecord, record.source, mutationCase.record);
-    writeJson(join(childRunDir, "run.json"), childRun);
-    injectContinuationExternalMutation(fixture, record, mutationCase, actualRecord);
-    const runBefore = readFileSync(join(childRunDir, "run.json"));
-    const seedBefore = childSeedSnapshot(childRunDir, seeded);
-
-    if (disposition.consumer === "assertContinuationAuthorityCurrent") {
-      assert.throws(
-        () => assertContinuationAuthorityCurrent(childRunDir, childRun, { repoRoot: fixture.repo }),
-        (error) => isExactNamedRejection(error, disposition.rejector),
-        `${mutationCase.name} must reach ${disposition.rejector}`,
-      );
-    } else if (disposition.consumer === "transitionContinuationAdoption") {
-      await assert.rejects(
-        transitionContinuationAdoption(childRunDir, { repoRoot: fixture.repo }),
-        (error) => isExactNamedRejection(error, disposition.rejector),
-        `${mutationCase.name} must reach ${disposition.rejector}`,
-      );
-    } else {
-      assert.fail(`unknown exact continuation consumer ${disposition.consumer}`);
-    }
-    assert.deepEqual(readFileSync(join(childRunDir, "run.json")), runBefore, `${mutationCase.name} protected child run bytes`);
-    assert.deepEqual(childSeedSnapshot(childRunDir, seeded), seedBefore, `${mutationCase.name} protected child seed bytes`);
-  } finally {
-    rmSync(fixture.repo, { recursive: true, force: true });
-  }
-}
-
-function createContinuationMutationFixture(root, recordId, index) {
-  const requestedRepo = join(root, "continuation-consumers", String(index));
-  initCatalogGit(requestedRepo);
-  const repo = fixtureGit(requestedRepo, ["rev-parse", "--show-toplevel"]).trim();
-  const parentRunId = `continuation-parent-${index}`;
-  const childRunId = `continuation-child-${index}`;
-  fixtureGit(repo, ["branch", parentRunId]);
-  const parentRunDir = join(repo, ".opencode", "factory", parentRunId);
-  for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(parentRunDir, dir), { recursive: true });
-  writeFileSync(join(parentRunDir, "artifacts", "story.md"), "story\n");
-  writeJson(join(parentRunDir, "reviews", "reviewer.json"), createReviewRecord({ subject: parentRunId, verdict: undefined, required_fixes: undefined, summary: "needs continuation" }));
-  writeJson(join(parentRunDir, "reviews", "security.json"), createReviewRecord({ subject: parentRunId, verdict: "BLOCK", summary: "security context", required_fixes: [] }));
-  writeJson(join(parentRunDir, "evidence", "context.json"), { subject: "spec-writer", status: "fail" });
-
-  const spec = recordId === "continuation-draft-reuse"
-    ? { status: "rejected", verdict: "REJECT" }
-    : recordId === "continuation-post-pr-binding"
-      ? null
-      : { status: "accepted", verdict: "APPROVE" };
-  let selectedReview = "reviewer.json";
-  let parentRun = createRunRecord({
-    run_id: parentRunId,
-    status: "blocked",
-    branch: parentRunId,
-    worktree: join(repo, ".opencode", "worktrees", parentRunId),
-    validator: { verdict: "NO-GO", review_ref: "reviews/reviewer.json" },
-    security_review: { verdict: "BLOCK", review_ref: "reviews/security.json" },
-    terminal_result: { status: "blocked", run_id: parentRunId, reason: "review blocked", summary: "blocked", artifacts: {} },
-  });
-  if (recordId === "continuation-post-pr-binding") {
-    const postPrRecord = findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-continuation-review-bound");
-    parentRun = structuredClone(createPostPrCatalogBaseline(postPrRecord).run);
-    parentRun.run_id = parentRunId;
-    parentRun.branch = parentRunId;
-    parentRun.worktree = join(repo, ".opencode", "worktrees", parentRunId);
-    parentRun.terminal_result.run_id = parentRunId;
-    const failureRef = parentRun.post_pr.evidence_refs.at(-1).ref;
-    writeJson(join(parentRunDir, failureRef), { kind: "post-pr-failure", failed_head_sha: parentRun.post_pr.remediation.failed_head_sha, verdict: "red" });
-    const failureHash = hashFileBytes(join(parentRunDir, failureRef));
-    parentRun.post_pr.evidence_refs.at(-1).hash = failureHash;
-    parentRun.post_pr.remediation.failure_evidence_hash = failureHash;
-    selectedReview = parentRun.post_pr.continuation_review.ref;
-    writeJson(join(parentRunDir, selectedReview), createReviewRecord({
-      subject: parentRunId,
-      verdict: "BLOCKED",
-      summary: "Post-PR remediation retry budget exhausted.",
-      required_fixes: ["Continue remediation on a fresh PR."],
-      head_sha: parentRun.post_pr.remediation.failed_head_sha,
-    }));
-    parentRun.post_pr.continuation_review.hash = hashFileBytes(join(parentRunDir, selectedReview));
-  } else if (spec) {
-    writeFileSync(join(parentRunDir, "artifacts", "technical-brief.md"), "brief\n");
-    writeJson(join(parentRunDir, "reviews", "spec-writer.json"), createReviewRecord({ subject: "spec-writer", verdict: spec.verdict, summary: "spec review", required_fixes: [] }));
-    const step = { agent: "spec-writer", status: spec.status, attempts: 1, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json", evidence_ref: "evidence/context.json" };
-    if (spec.status === "accepted") {
-      step.acceptance = {
-        artifact_ref: "artifacts/technical-brief.md",
-        artifact_hash: hashFileBytes(join(parentRunDir, "artifacts", "technical-brief.md")),
-        review_ref: "reviews/spec-writer.json",
-        review_hash: hashFileBytes(join(parentRunDir, "reviews", "spec-writer.json")),
-      };
-    }
-    parentRun.steps = [step];
-  } else {
-    parentRun.steps = [{ agent: "context-reader", status: "blocked", attempts: 1, evidence_ref: "evidence/context.json" }];
-  }
-  writeJson(join(parentRunDir, "run.json"), parentRun);
-  const { payload } = continueFactory(parentRunId, {
-    cwd: repo,
-    review: selectedReview,
-    runId: childRunId,
-    dryRun: true,
-    newPr: recordId === "continuation-post-pr-binding",
-    now: "2026-07-16T12:00:00.000Z",
-  });
-  return { repo, parentRunDir, parentRunId, childRunId, continuation: payload.continuation };
-}
-
-function continuationChildRun(continuation) {
-  return createRunRecord({
-    run_id: continuation.target.run_id,
-    branch: continuation.target.branch,
-    worktree: continuation.target.worktree,
-    ...(continuation.draft_spec_reuse ? { max_retries: continuation.draft_spec_reuse.max_retries } : {}),
-    continuation,
-  });
-}
-
-function continuationRecordAtPath(continuation, record) {
-  if (record.id === "continuation-parent-review-sidecar") {
-    const contextualReview = continuation.parent_reviews.find(({ ref }) => ref !== continuation.review.ref && ref !== continuation.planning_reuse?.spec_review_ref);
-    assert.ok(contextualReview, "continuation parent-review mutation requires a non-selected contextual review");
-    return contextualReview;
-  }
-  const { canonicalPath, source } = record;
-  if (canonicalPath.length === 1) return continuation;
-  let current = continuation;
-  for (const segment of canonicalPath.slice(1, -1)) current = current[segment];
-  const key = canonicalPath.at(-1);
-  if (current[key] === undefined) current[key] = structuredClone(source);
-  return current[key];
 }
 
 function applyMutationDifference(actual, source, mutated) {
@@ -4187,39 +3528,6 @@ function applyMutationDifference(actual, source, mutated) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function injectContinuationExternalMutation(fixture, record, mutationCase, actualRecord) {
-  const externalSources = record.externalSources ?? {};
-  const changed = Object.keys(externalSources).filter((key) => JSON.stringify(externalSources[key]) !== JSON.stringify(mutationCase.externalSources[key]));
-  if (changed.length === 0) return;
-  assert.equal(changed.length, 1, `${mutationCase.name} must mutate exactly one external source`);
-  const externalKey = changed[0];
-  let ref;
-  if (record.id === "continuation-parent-binding" && externalKey === "parent-run") {
-    const parentFile = join(fixture.parentRunDir, "run.json");
-    writeFileSync(parentFile, `${readFileSync(parentFile, "utf8")} `);
-    return;
-  }
-  if (record.id === "continuation-selected-review" && externalKey === "selected-review") ref = fixture.continuation.review.ref;
-  else if (record.id === "continuation-planning-reuse-eligible" && externalKey === "review") ref = fixture.continuation.planning_reuse.spec_review_ref;
-  else if (record.id === "continuation-planning-reuse-eligible" && externalKey === "artifact") ref = fixture.continuation.planning_reuse.spec_artifact_ref;
-  else if (record.id === "continuation-draft-reuse" && externalKey === "draft") ref = fixture.continuation.draft_spec_reuse.artifact_ref;
-  else if (["continuation-parent-artifact-sidecar", "continuation-parent-evidence-sidecar", "continuation-parent-review-sidecar"].includes(record.id)) ref = actualRecord.ref;
-  else if (record.id === "continuation-post-pr-binding" && externalKey === "evidence") ref = actualRecord.evidence_ref;
-  else if (record.id === "continuation-post-pr-binding" && externalKey === "review") ref = actualRecord.continuation_review_ref;
-  else throw new Error(`no external mutation injector for ${record.id}/${externalKey}`);
-  writeFileSync(join(fixture.parentRunDir, ref), `tampered bytes for ${mutationCase.name}\n`);
-}
-
-function childSeedSnapshot(childRunDir, seeded) {
-  const refs = [...seeded.artifacts, ...(seeded.spec_review_ref ? [seeded.spec_review_ref] : [])].sort();
-  return Object.fromEntries(refs.map((ref) => [ref, readFileSync(join(childRunDir, ref))]));
-}
-
-function continuationSourceSnapshot(parentRunDir, continuation, recordId) {
-  const refs = recordId === "continuation-draft-reuse" ? [continuation.draft_spec_reuse.artifact_ref] : [];
-  return Object.fromEntries(refs.map((ref) => [ref, readFileSync(join(parentRunDir, ref))]));
 }
 
 function hashFileBytes(file) {
@@ -4289,32 +3597,17 @@ function exactB0m4DispositionMap(cases) {
 }
 
 async function consumePrerequisiteValidB0M4Case(expected, record, mutationCase, scenario) {
-  if (scenario === "post-pr") {
-    const control = await createPrerequisitePostPrFixture(record, mutationCase, false);
-    try {
-      const result = await transitionPostPrState(control.runDir, control.next.post_pr, { worktree: control.repo, now: "2026-07-16T12:06:00.000Z" });
-      assert.deepEqual(result.run.post_pr, control.next.post_pr, `${expected.name} canonical control`);
-    } finally { rmSync(control.repo, { recursive: true, force: true }); }
-    const mutated = await createPrerequisitePostPrFixture(record, mutationCase, true);
-    try {
-      const before = readFileSync(join(mutated.runDir, "run.json"), "utf8");
-      await assertExactB0M4Rejection(transitionPostPrState(mutated.runDir, mutated.next.post_pr, { worktree: mutated.repo, now: "2026-07-16T12:06:00.000Z" }), expected);
-      assert.equal(readFileSync(join(mutated.runDir, "run.json"), "utf8"), before, `${expected.name} protected bytes`);
-    } finally { rmSync(mutated.repo, { recursive: true, force: true }); }
-    return;
-  }
-  const control = await createPrerequisiteRepairFixture(scenario);
+  assert.equal(scenario, "post-pr");
+  const control = await createPrerequisitePostPrFixture(record, mutationCase, false);
   try {
-    const result = await advancePrerequisiteRepairFixture(control, scenario);
-    assert.equal(result.updated, true, `${expected.name} canonical control`);
+    const result = await transitionPostPrState(control.runDir, control.next.post_pr, { worktree: control.repo, now: "2026-07-16T12:06:00.000Z" });
+    assert.deepEqual(result.run.post_pr, control.next.post_pr, `${expected.name} canonical control`);
   } finally { rmSync(control.repo, { recursive: true, force: true }); }
-  const mutated = await createPrerequisiteRepairFixture(scenario);
+  const mutated = await createPrerequisitePostPrFixture(record, mutationCase, true);
   try {
-    mutatePrerequisiteRepairAuthority(mutated, scenario);
     const before = readFileSync(join(mutated.runDir, "run.json"), "utf8");
-    await assertExactB0M4Rejection(advancePrerequisiteRepairFixture(mutated, scenario), expected);
+    await assertExactB0M4Rejection(transitionPostPrState(mutated.runDir, mutated.next.post_pr, { worktree: mutated.repo, now: "2026-07-16T12:06:00.000Z" }), expected);
     assert.equal(readFileSync(join(mutated.runDir, "run.json"), "utf8"), before, `${expected.name} protected bytes`);
-    assert.deepEqual(mergedSliceRepairFence(JSON.parse(before)), mutated.mutatedFence, `${expected.name} repair fence`);
   } finally { rmSync(mutated.repo, { recursive: true, force: true }); }
 }
 
@@ -4349,49 +3642,9 @@ function translateCatalogCommitIdentities(value, replacements) {
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, translateCatalogCommitIdentities(item, replacements)]));
 }
 
-async function createPrerequisiteRepairFixture(scenario) {
-  const fixture = createRepairTransitionFixture();
-  await transitionRepairReport(fixture);
-  if (scenario === "repair-reported") return fixture;
-  await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 }, { repoRoot: fixture.repo });
-  fixture.repairHead = await commitTransitionRepair(fixture, scenario);
-  fixture.reviewVerdict = scenario.startsWith("repair-review-reject") ? "REJECT" : "APPROVE";
-  writeTransitionReview(fixture, fixture.reviewVerdict, fixture.repairHead);
-  if (scenario !== "repair-repairing") await transitionRepairReview(fixture, fixture.repairHead);
-  return fixture;
-}
-
-function advancePrerequisiteRepairFixture(fixture, scenario) {
-  if (scenario === "repair-reported") return transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 }, { repoRoot: fixture.repo });
-  if (scenario === "repair-repairing") return transitionRepairReview(fixture, fixture.repairHead);
-  if (scenario.startsWith("repair-review-approve")) {
-    writeJson(join(fixture.runDir, "evidence", "verification-pass.json"), { subject: "consumer", status: "pass" });
-    return transitionMergedSliceRepair(fixture.runDir, { status: "merged", merge_commit: fixture.repairHead, verification_ref: "evidence/verification-pass.json" }, { repoRoot: fixture.repo });
-  }
-  return transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 2 }, { repoRoot: fixture.repo });
-}
-
-function mutatePrerequisiteRepairAuthority(fixture, scenario) {
-  const runPath = join(fixture.runDir, "run.json");
-  const run = JSON.parse(readFileSync(runPath, "utf8"));
-  const repair = run.merged_slice_repair;
-  if (scenario === "repair-reported") repair.attempts = 1;
-  else if (scenario === "repair-repairing" || scenario.endsWith("baseline")) repair.baseline_commit = fixture.repairHead;
-  else if (scenario.endsWith("reviewed")) repair.reviewed_commit = repair.baseline_commit;
-  writeJson(runPath, run);
-  fixture.mutatedFence = structuredClone(mergedSliceRepairFence(run));
-}
-
 async function assertExactB0M4Rejection(promise, expected) {
   const [, errorName, errorMessage] = expected.rejector.split(" :: ");
   await assert.rejects(promise, (error) => error.name === errorName && error.message === errorMessage, `${expected.name} must reach ${expected.rejector}`);
-}
-
-function repairProbeRequest(repair) {
-  if (repair.status === "reported") return { status: "repairing", attempts: repair.attempts + 1 };
-  if (repair.status === "repairing") return { status: "review", review_ref: "reviews/repair.json", repair_evidence_ref: "evidence/repair.json", reviewed_commit: "b".repeat(40) };
-  if (repair.status === "review") return { status: "review", review_ref: repair.review_ref, repair_evidence_ref: repair.repair_evidence_ref, reviewed_commit: repair.reviewed_commit };
-  return { status: "blocked", reason: "terminal repair mutation probe" };
 }
 
 function findRecord(catalog, id) {

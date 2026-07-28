@@ -167,14 +167,6 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "post-pr-terminal-fact-panel-runner-result-malformed",
   "post-pr-terminal-fact-push-failed",
   "post-pr-terminal-fact-panel-attribution-unsafe",
-  "repair-reported",
-  "repair-repairing",
-  "repair-review-approve",
-  "repair-review-reject",
-  "repair-merged",
-  "repair-blocked-from-reported",
-  "repair-blocked-from-repairing",
-  "repair-blocked-from-review",
   "amendment-reported",
   "amendment-building-attempt-1",
   "amendment-building-attempt-2",
@@ -249,7 +241,16 @@ const POST_PR_EXTERNAL = Object.freeze({
   continuation: { ref: "reviews/post-pr-continuation.attempt-1.json", bytes: "{\"kind\":\"post-pr-continuation\",\"verdict\":\"BLOCKED\"}\n" },
 });
 const PLAN_EXTERNAL = Object.freeze({
-  plan: { ref: "plan/slices.json", bytes: "{\"slices\":[{\"id\":\"B0.2\",\"stack\":\"backend\",\"paths\":[\"src/**\"],\"depends_on\":[],\"acceptance\":[\"AC2\"],\"test_plan\":[\"node --test\"]},{\"id\":\"B0.3\",\"stack\":\"backend\",\"paths\":[\"test/**\"],\"depends_on\":[\"B0.2\"],\"acceptance\":[\"AC3\"],\"test_plan\":[\"node --test\"]}]}\n" },
+  plan: {
+    ref: "plan/slices.json",
+    bytes: `${JSON.stringify(withDeliveryEnvelope({
+      slices: [
+        { id: "B0.2", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC2"], test_plan: ["node --test"] },
+        { id: "B0.3", stack: "backend", paths: ["test/**"], depends_on: ["B0.2"], acceptance: ["AC3"], test_plan: ["node --test"] },
+      ],
+      integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    }, { explicitExecutionTimeouts: true }))}\n`,
+  },
 });
 const PLAN_V2 = withDeliveryEnvelope({
   slices: [{ id: "B1C", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/acceptance.test.js"] }],
@@ -597,20 +598,6 @@ const PANEL_EXTERNAL = Object.freeze({
   validator: { ref: "reviews/implementation-validator.json", bytes: `{"subject":"feature--catalog","attempt":1,"verdict":"GO","reviewed_head_sha":"${SHA_B}"}\n` },
   security: { ref: "reviews/security-reviewer.json", bytes: `{"subject":"feature--catalog","attempt":1,"verdict":"PASS","reviewed_head_sha":"${SHA_B}"}\n` },
 });
-const REPAIR_PLAN_BYTES = `${JSON.stringify({
-  slices: [
-    { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["unit"] },
-    { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["AC2"], test_plan: ["unit"] },
-  ],
-}, null, 2)}\n`;
-const REPAIR_EXTERNAL = Object.freeze({
-  plan: { ref: "plan/slices.json", bytes: REPAIR_PLAN_BYTES },
-  originalEvidence: { ref: "evidence/consumer-failure.json", bytes: `{"subject":"consumer","status":"fail","command":"node --test test/consumer.test.js","head":"${SHA_A}"}\n` },
-  repairEvidence: { ref: "evidence/repair-attempt-1.json", bytes: "{\"subject\":\"repair:owner\",\"changed_paths\":[\"src/owner/records.js\"]}\n" },
-  reviewApprove: { ref: "reviews/repair-attempt-1-approve.json", bytes: `{"subject":"repair:owner","verdict":"APPROVE","required_fixes":[],"attempt":1,"commit":"${SHA_B}"}\n` },
-  reviewReject: { ref: "reviews/repair-attempt-1-reject.json", bytes: `{"subject":"repair:owner","verdict":"REJECT","required_fixes":["correct owner record"],"attempt":1,"commit":"${SHA_B}"}\n` },
-  verification: { ref: "evidence/repair-verification.json", bytes: `{"subject":"consumer","status":"pass","command":"node --test test/consumer.test.js","head":"${SHA_C}"}\n` },
-});
 const AMENDMENT_REVIEW_ID = "A".repeat(43);
 const AMENDMENT_REVIEW_CLAIM_REF = `dispatch/${"d".repeat(64)}.amendment-review.json`;
 const AMENDMENT_REVIEW_CLOSURE_REF = `dispatch/${"d".repeat(64)}.amendment-review.closed.json`;
@@ -889,14 +876,6 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "post-pr-terminal-fact-panel-attribution-unsafe",
   ],
   "pr79-merged-slice-repair": [
-    "repair-reported",
-    "repair-repairing",
-    "repair-review-approve",
-    "repair-review-reject",
-    "repair-merged",
-    "repair-blocked-from-reported",
-    "repair-blocked-from-repairing",
-    "repair-blocked-from-review",
     "amendment-reported",
     "amendment-building-attempt-1",
     "amendment-building-attempt-2",
@@ -1093,14 +1072,6 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "post-pr-terminal-fact-panel-runner-result-malformed": "rhbd",
   "post-pr-terminal-fact-push-failed": "rhbd",
   "post-pr-terminal-fact-panel-attribution-unsafe": "rhbd",
-  "repair-reported": "k",
-  "repair-repairing": "k",
-  "repair-review-approve": "k",
-  "repair-review-reject": "k",
-  "repair-merged": "k",
-  "repair-blocked-from-reported": "k",
-  "repair-blocked-from-repairing": "k",
-  "repair-blocked-from-review": "k",
   "amendment-reported": "",
   "amendment-building-attempt-1": "",
   "amendment-building-attempt-2": "",
@@ -1154,7 +1125,7 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
 // Hashes are independent, immutable exact-value snapshots over writer, all readers, named tests,
 // authority facts, and complete sidecar descriptors, in that order. They are not derived from RECORDS.
 export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
-  ["plan-slices-json", "989039b0b23d8bef1c9c50b80f4f80da94bb3c982834804154e688ae72e2790a"],
+  ["plan-slices-json", "9df4c015456f1a3e7df8f7c5ab6d646e59b55d718b28514cec41ec082ee433e3"],
   ["plan-v2-integration-gate", "5af20fb944661b40cf225b9ca0ccf1489f64cf62f06efd8c813dafadf9a6b781"],
   ["plan-delivery-envelope-v1", "3f197e85283502ae65c5236a8a68fe4948657dfbd9c2b523d624486587b8cc33"],
   ["checkpoint-reviewed-plan-v1", "c9971fbcc7abc04bb7cf6bba21728347e7e6e949b80f2f9e641ce68d3eeed48a"],
@@ -1170,7 +1141,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["checkpoint-progress-closed", "0720c7e4322f0d13b514abb2af07f7a618381f1193f1da0aef992bcc2ac110fe"],
   ["checkpoint-merged-completion-v1", "0052306d0c53fc9a886370200fd7a9059a0de130d32617a553a3a91c559fca88"],
   ["checkpoint-final-closure-v1", "18d5d61dd734f836e562520166de8e47bad8c4d6ad97cb416d2f5cda51f46cc3"],
-  ["final-plan-descriptor", "28d0d6753da27ed172de3e89d5257c2bac238ed4f93f9a124411e6c1f80d7943"],
+  ["final-plan-descriptor", "f6148197c8baa1f9662a399cd4eca3d3ea713d9bc95f77b30bf608d2c784bac1"],
   ["run-envelope-running", "707c057f31eeb1213ea82cf16229bb1de2097c2961956eee0a6d0c32bccc6b3d"],
   ["run-envelope-terminal", "d0199700f70c4f08427631780dae93cf197fd46ab3e0ed78d001020b7c7ee1f4"],
   ["terminal-result-completed", "624dd6c0050e64037c95aca7904c9841656bd09684c3d8548b05e15601ba094c"],
@@ -1294,14 +1265,6 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["post-pr-terminal-fact-panel-runner-result-malformed", "1b13f36bec4e54b12aff5730cd564a6911d0a17dc935d38b588380215316ee17"],
   ["post-pr-terminal-fact-push-failed", "ddc110607d329d5398fefba3120102128a3311a51788bfb4e7d8a9af04c2a19d"],
   ["post-pr-terminal-fact-panel-attribution-unsafe", "cf177ac488305d7daccaefa5cd1051cce2cfb7163c233cb1611b14bddcad9b42"],
-  ["repair-reported", "75d46924435748c84f87621dd9fe75a9a5e935d601ae13e58f573b3783610788"],
-  ["repair-repairing", "6bf5572c19410569567cf77691ca05e783159f48ac526b05893945fef5ec168b"],
-  ["repair-review-approve", "ce8747ee55810ba484c922025e130b26d8c7dbde2e9970d70f40b81611b07084"],
-  ["repair-review-reject", "0365bc5638a629fa31a03fd1570bc3a034c93ef938ff439cb714fa1be0029103"],
-  ["repair-merged", "c41a78a4add7261f75669a5cfba1f5dabf2839f9ab0f967ed7891fb89d64c561"],
-  ["repair-blocked-from-reported", "b1e49fae077e3e1bee835e9a5d4ff54e7bd9043709bb21f664743154b31fc64f"],
-  ["repair-blocked-from-repairing", "d48498b89f41b36ea13d860498363524d6a699c6594926e58515d46acd710a87"],
-  ["repair-blocked-from-review", "f6e0a9dc4a891ca6b77cc2ec6d76a4feaa0bae72739a01d84ff608e70ee56c93"],
   ...AMENDMENT_ORACLE_DIGESTS.map(([id, metadata]) => [id, metadata]),
   ["amendment-review-dispatch-claim", "917f82b7c79d76eec77d19e00021a16aaccd6a0990b157eb8c2439e0239a4b64"],
   ["amendment-review-dispatch-closure", "c1fa91187cea6bbb6c8b8d0684f5f81060c55c10b8b59f2480fcdf707f9be915"],
@@ -1452,14 +1415,6 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["post-pr-terminal-fact-panel-runner-result-malformed", "78c5bc14d1c19f8bd3b449d2ba59160173d05698cbc61a6fab5f2b3e76e1ac2a"],
   ["post-pr-terminal-fact-push-failed", "2d49a423c4c8a2f70c1af4f3d598afdf6f22fad34df57b5cc323d4ac01c49511"],
   ["post-pr-terminal-fact-panel-attribution-unsafe", "7681ab4e932991797750ed39c61569748ed8690a291f27f6f0a4f91a5cd65844"],
-  ["repair-reported", "729c932f001d44a8f896fbafea9b1daa1db6458b061c5111bec748abcdbfc33e"],
-  ["repair-repairing", "944bfd281e98e55853cc0062af34ebd255ec72d272721ee7b371bc23a863107d"],
-  ["repair-review-approve", "34d5bfaf3f1e27307bc05974b2e7ffbf0c0aeadc997c64f79190c5425068ab84"],
-  ["repair-review-reject", "1a220612b19cde72dbd20a39fbea5d53a5a3994de4bf2a13a3facb401a8cc7a7"],
-  ["repair-merged", "902b94618560fc3b8c3ec73af14cbd572205673ec09142ba88ff3ab050fefae1"],
-  ["repair-blocked-from-reported", "05835c182adf9d4372c39f6d0cc82cdac19b21017c928ded54047e7ea9eceea0"],
-  ["repair-blocked-from-repairing", "79ff873a4b30a77b303fc29658b2ec1dc1cd86ad35bed9092f087c6b572e44ee"],
-  ["repair-blocked-from-review", "ffacf779eacdf96ec9e9deaf94f350f386b02946f910a321ee7ce82eccad117b"],
   ...AMENDMENT_ORACLE_DIGESTS.map(([id, , descriptor]) => [id, descriptor]),
   ["amendment-review-dispatch-claim", "b6fb871bb80fe23f8810e53c2a1a3053a1537d3d138f9d0dffb2e1f2875bfb7a"],
   ["amendment-review-dispatch-closure", "3eea5e9b4d020f60782edced5bab1e92c1130f5b5022e77d646f61aa7a8f0cda"],
@@ -1474,7 +1429,7 @@ const CANONICAL_SOURCE_RECORD_ID_SET = new Set(CANONICAL_SOURCE_RECORD_IDS);
 // fact declarations, and separately modeled external source bytes. These digests are
 // literals rather than values derived from RECORDS or DURABLE_AUTHORITY_CATALOG.
 export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
-  ["plan-slices-json", "dd6fabc7def0955d82f37d30a53fc19e4e8cc8fa69fa445badbc3c051d4dd7b9"],
+  ["plan-slices-json", "16896892b7010ddf41ba8d8fbdd72564e1ad5f98724ff60de6d2adb75aa11988"],
   ["plan-v2-integration-gate", "591e877c46d2bceb598775cf19e83f49379c62e3911291f33bf5899c8b595fad"],
   ["plan-delivery-envelope-v1", "1d8ee7be00fedfa973646ad465831a398db446e378bd6f577546a1484348dafc"],
   ["checkpoint-reviewed-plan-v1", "bf3611b6140afc7cf630e77e597bcf492a1841baa5d501742c7dc276fc0b633f"],
@@ -1490,7 +1445,7 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["checkpoint-progress-closed", "50529713d8c192fcd1df1d08967893879e9a176430e70dbb0af58b4a119df321"],
   ["checkpoint-merged-completion-v1", "d53c1705f8e93992d8d16533ee57e80bdbf2a2df730a06550668a92fc2efac7b"],
   ["checkpoint-final-closure-v1", "6a931bdf49c42feab51f0ae1a671ff88b08c1ce21d68012e60f17ada96d46292"],
-  ["final-plan-descriptor", "13b61642b831dd2fba59dd83bf897de443216d567b56ee8a952080d9f81a7568"],
+  ["final-plan-descriptor", "56fbcdaf9dd4e9b243535c46ef7725bbe9ed783dafff96fcdafe03f077f863a5"],
   ["run-envelope-running", "f98a34215fdd5d0b2c4861bab4c6e6be104439e358a8e737095618955f227594"],
   ["run-envelope-terminal", "0e8365b1d3e99b2db1038cf9a2939fc6f4c421f199236307a1e1f4c300260e04"],
   ["terminal-result-completed", "67cc3ac4f4bc522a7e48be30ea4b1cdfcba2016a309ba99224197641cfcb059e"],
@@ -1614,14 +1569,6 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["post-pr-terminal-fact-panel-runner-result-malformed", "beed81bad84f5734e6da8fb9044685de9f4939e93fb061f241759305ea5d97df"],
   ["post-pr-terminal-fact-push-failed", "83425c5f79198714cd764be913ac0deb3f93b87510e9aa66599d405eb0456f09"],
   ["post-pr-terminal-fact-panel-attribution-unsafe", "f3a27a8a2f12f532be7a44e0521da95a309b8bda559a850a96dd21f5d9b38c38"],
-  ["repair-reported", "2ed03b55eaf8375148a6b2e0373481b9a7a5880b4d81f6a01b346c709d06635b"],
-  ["repair-repairing", "7242ff535da8057dcbd5b4c64e046f7b4cac02690d9aa05cf492c6c78083f7b4"],
-  ["repair-review-approve", "b0a2473d6870943222c3723ea4a3f487a35d3b7b03ebe50e6140d46bc9f65d53"],
-  ["repair-review-reject", "4d2ec74d7585d8701cd9b2d5b1de36e1b5bfaf097443f6a34f4c41bf545cfda4"],
-  ["repair-merged", "7088b60cbbe1f683f987e365af633b09ba64c528590bfb2b24000967d473c45f"],
-  ["repair-blocked-from-reported", "9f706c75ff6e2cbd90a898406aa9be9c8258ee0e533adaea3c5675e9a9faf6ca"],
-  ["repair-blocked-from-repairing", "fc79c812079bd9acf7b60aacb304ef47e0dd12b4f531e801191dead4ccefe66a"],
-  ["repair-blocked-from-review", "3caeb87996031485b92a1b6a0b0167608ece7fe0f0f62760cbfa7ba055e121a0"],
   ...AMENDMENT_ORACLE_DIGESTS.map(([id, , , source]) => [id, source]),
   ["amendment-review-dispatch-claim", "b51371578cccf189480241170f4628364442be7d76a077c925ffdce322b7516c"],
   ["amendment-review-dispatch-closure", "e687f0960cdffa32397c72b098352e7e8f07d9ee11b87dac75af0e953bdfbb1b"],
@@ -1770,7 +1717,7 @@ const RECORDS = [
   recordEntry({
     authorityClassId: "plan-slices-graph", id: "plan-slices-json", record: "plan/slices.json", variant: "accepted graph",
     writer: "factory slices-seed (checked plan validation and seed transition)",
-    readers: ["validateSlicesPlan", "factory slices-seed", "transitionRunSlice and transitionSliceMerged", "transitionMergedSliceRepair owner-lane checks"],
+    readers: ["validateSlicesPlan", "factory slices-seed", "transitionRunSlice and transitionSliceMerged"],
     canonicalPath: ["plan/slices.json"], source: JSON.parse(PLAN_EXTERNAL.plan.bytes), externalSources: PLAN_EXTERNAL,
     facts: exactFacts(JSON.parse(PLAN_EXTERNAL.plan.bytes)),
     requiredPath: ["slices"], typePath: ["slices"],
@@ -2069,46 +2016,6 @@ const RECORDS = [
   postPrTerminalFactEntry("push-failed"),
   postPrTerminalFactEntry("panel-attribution-unsafe"),
 
-  repairEntry("repair-reported", "reported", 0, {
-    facts: [fact(["status"], "reported"), fact(["attempts"], 0), fact(["defect_path"], "src/owner/records.js"), fact(["owner_slice_id"], "owner"), fact(["consumer_slice_id"], "consumer")],
-    observations: [repairObservation("owner-lane", "plan", ["slices", 0, "paths"], ["src/owner/**"], "transitionMergedSliceRepair reported lane admission")],
-    record: {}, sidecars: ["plan", "original-evidence"],
-  }),
-  repairEntry("repair-repairing", "repairing", 1, {
-    facts: [fact(["status"], "repairing"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["branch"], "repair-owner"), fact(["worktree"], "/tmp/repair-owner")],
-    observations: [repairReobservation("quiescence", true, "transitionMergedSliceRepair repairing quiescence check")],
-    record: { baseline_commit: SHA_A, branch: "repair-owner", worktree: "/tmp/repair-owner" }, sidecars: ["plan", "original-evidence"],
-  }),
-  repairEntry("repair-review-approve", "review:APPROVE", 1, {
-    facts: [fact(["status"], "review"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["reviewed_commit"], SHA_B), fact(["review_ref"], REPAIR_EXTERNAL.reviewApprove.ref), fact(["repair_evidence_ref"], REPAIR_EXTERNAL.repairEvidence.ref)],
-    observations: [repairObservation("review-verdict", "review", ["verdict"], "APPROVE", "transitionMergedSliceRepair merged review consumer"), repairReobservation("owner-lane", true, "transitionMergedSliceRepair review Git diff lane check")],
-    record: repairReviewFields(REPAIR_EXTERNAL.reviewApprove), sidecars: ["plan", "original-evidence", "repair-evidence", "review"], reviewExternal: REPAIR_EXTERNAL.reviewApprove,
-  }),
-  repairEntry("repair-review-reject", "review:REJECT", 1, {
-    facts: [fact(["status"], "review"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["reviewed_commit"], SHA_B), fact(["review_ref"], REPAIR_EXTERNAL.reviewReject.ref), fact(["repair_evidence_ref"], REPAIR_EXTERNAL.repairEvidence.ref)],
-    observations: [repairObservation("review-verdict", "review", ["verdict"], "REJECT", "transitionMergedSliceRepair repairing retry consumer"), repairReobservation("owner-lane", true, "transitionMergedSliceRepair review Git diff lane check")],
-    record: repairReviewFields(REPAIR_EXTERNAL.reviewReject), sidecars: ["plan", "original-evidence", "repair-evidence", "review"], reviewExternal: REPAIR_EXTERNAL.reviewReject,
-  }),
-  repairEntry("repair-merged", "merged", 1, {
-    facts: [fact(["status"], "merged"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["reviewed_commit"], SHA_B), fact(["merge_commit"], SHA_C), fact(["verification_ref"], REPAIR_EXTERNAL.verification.ref)],
-    observations: [repairObservation("review-verdict", "review", ["verdict"], "APPROVE", "transitionMergedSliceRepair merged review consumer"), repairReobservation("reviewed-merge-tree-equality", true, "transitionMergedSliceRepair merged Git tree re-observation"), repairReobservation("quiescence", true, "transitionMergedSliceRepair merged quiescence check")],
-    record: { ...repairReviewFields(REPAIR_EXTERNAL.reviewApprove), verification_ref: REPAIR_EXTERNAL.verification.ref, verification_hash: hashBytes(REPAIR_EXTERNAL.verification.bytes), merge_commit: SHA_C }, sidecars: ["plan", "original-evidence", "repair-evidence", "review", "verification"], reviewExternal: REPAIR_EXTERNAL.reviewApprove,
-  }),
-  repairEntry("repair-blocked-from-reported", "blocked-from-reported", 0, {
-    facts: [fact(["status"], "blocked"), fact(["attempts"], 0), fact(["reason"], "repair rejected")],
-    observations: [repairReobservation("blocked-origin", "reported", "transitionMergedSliceRepair blocked retention from reported")],
-    record: { reason: "repair rejected" }, sidecars: ["plan", "original-evidence"],
-  }),
-  repairEntry("repair-blocked-from-repairing", "blocked-from-repairing", 1, {
-    facts: [fact(["status"], "blocked"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["reason"], "repair failed")],
-    observations: [repairReobservation("blocked-origin", "repairing", "transitionMergedSliceRepair blocked retention from repairing")],
-    record: { baseline_commit: SHA_A, branch: "repair-owner", worktree: "/tmp/repair-owner", reason: "repair failed" }, sidecars: ["plan", "original-evidence"],
-  }),
-  repairEntry("repair-blocked-from-review", "blocked-from-review", 1, {
-    facts: [fact(["status"], "blocked"), fact(["attempts"], 1), fact(["baseline_commit"], SHA_A), fact(["reviewed_commit"], SHA_B), fact(["reason"], "review rejected")],
-    observations: [repairObservation("review-verdict", "review", ["verdict"], "REJECT", "transitionMergedSliceRepair blocked retention from review"), repairReobservation("blocked-origin", "review", "transitionMergedSliceRepair blocked retention from review")],
-    record: { ...repairReviewFields(REPAIR_EXTERNAL.reviewReject), reason: "review rejected" }, sidecars: ["plan", "original-evidence", "repair-evidence", "review"], reviewExternal: REPAIR_EXTERNAL.reviewReject,
-  }),
   ...AMENDMENT_MANIFEST_VARIANTS.map(([id, variant]) => amendmentManifestEntry(id, variant)),
   ...AMENDMENT_CLAIM_VARIANTS.map(([id, phase, state, outcome]) => amendmentExecutionClaimEntry(id, phase, state, outcome)),
   ...AMENDMENT_RECEIPT_VARIANTS.map(([id, phase, outcome]) => amendmentExecutionReceiptEntry(id, phase, outcome)),
@@ -3299,7 +3206,7 @@ export function createDurableCatalogBaseline(record) {
         ...AMENDMENT_REVIEW_CLOSURE, completion_token_hash: AMENDMENT_REVIEW_CLAIM.completion_token_hash,
       }, externalSources: {} });
     }
-    return { consumer: "validateRun/checkRunConsistency", ...createRepairCatalogBaseline(record) };
+    throw new TypeError(`unrecognized integration amendment catalog row ${record.id}`);
   }
   if (record.authorityClassId === "continuation-planning-draft-reuse") {
     const fixture = continuationCatalogFixture(record.id);
@@ -3307,37 +3214,6 @@ export function createDurableCatalogBaseline(record) {
     return structuredClone({ consumer: "validateRun", run: fixture.run, externalSources: fixture.externalSources });
   }
   return structuredClone({ consumer: "validateRun", run: canonicalRunFixture(record), externalSources: record.externalSources ?? {} });
-}
-
-export function createRepairCatalogBaseline(record) {
-  if (record?.authorityClassId !== "pr79-merged-slice-repair") throw new TypeError("repair fixture requires a registered PR79 repair record");
-  if (canonicalJson(record.canonicalPath) !== canonicalJson(["merged_slice_repair"])) throw new TypeError(`${record.id} must bind run.json.merged_slice_repair`);
-  const ownerEvidence = { ref: "evidence/owner.json", bytes: `{"subject":"owner","attempt":1,"status":"pass","review_ready":true,"head_sha":"${SHA_A}"}\n` };
-  const ownerReview = { ref: "reviews/owner.json", bytes: `{"subject":"owner","attempt":1,"verdict":"APPROVE","convergence":"converging","late_discovery_strike":false,"remaining_fix_count":0,"required_fixes":[],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[]},"reviewed_commit":"${SHA_A}"}\n` };
-  const ownerEvidenceHash = hashBytes(ownerEvidence.bytes);
-  const ownerReviewHash = hashBytes(ownerReview.bytes);
-  const ownerAttemptReview = { attempt: 1, evidence_ref: ownerEvidence.ref, evidence_hash: ownerEvidenceHash, review_ref: ownerReview.ref, review_hash: ownerReviewHash, reviewed_commit: SHA_A, diff_base_commit: SHA_A, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 };
-  const run = {
-    schema_version: 1,
-    run_id: "repair-catalog-run",
-    branch: "repair-feature",
-    status: "running",
-    gates: {},
-    steps: [],
-    slices: [
-      { id: "owner", stack: "backend", depends_on: [], declared_paths: ["src/owner/**"], effective_paths: ["src/owner/**"], status: "merged", attempts: 1, branch: "repair-feature--owner", worktree: "/tmp/repair-feature--owner", evidence_ref: ownerEvidence.ref, evidence_hash: ownerEvidenceHash, review_ref: ownerReview.ref, review_hash: ownerReviewHash, reviewed_commit: SHA_A, attempt_reviews: [ownerAttemptReview], merge_commit: SHA_A, updated_at: NOW },
-      { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
-    ],
-    merged_slice_repair: structuredClone(record.source),
-  };
-  return structuredClone({
-    run,
-    externalSources: record.externalSources,
-    supportSources: {
-      ownerEvidence,
-      ownerReview,
-    },
-  });
 }
 
 export const ISSUE128_FINISH_AND_DISCLOSE_RECORD_IDS = Object.freeze([
@@ -4765,73 +4641,14 @@ function amendmentReviewProvenanceEntry(id, variant) {
     typePath: ["attempt"],
     facts: exactFacts(source),
     observations: [
-      repairReobservation("reviewer-effect-states", ["absent", "active-claim-only", "review-published-without-closure", "closed-unconsumed", "consumed", "orphan-or-cross-bound"], "inspectIntegrationAmendmentInventory"),
-      repairReobservation("compatibility", "immutable create-only sidecar; no run schema bump and no overwrite/backfill", "completeIntegrationAmendmentReviewTaskDispatch and downstream consistency"),
+      reobservation("reviewer-effect-states", ["absent", "active-claim-only", "review-published-without-closure", "closed-unconsumed", "consumed", "orphan-or-cross-bound"], "inspectIntegrationAmendmentInventory"),
+      reobservation("compatibility", "immutable create-only sidecar; no run schema bump and no overwrite/backfill", "completeIntegrationAmendmentReviewTaskDispatch and downstream consistency"),
     ],
     targets,
   });
 }
 
-function repairEntry(id, status, attempts, options) {
-  const source = {
-    schema_version: 1,
-    plan_hash: hashBytes(REPAIR_EXTERNAL.plan.bytes),
-    owner_slice_id: "owner",
-    consumer_slice_id: "consumer",
-    defect_path: "src/owner/records.js",
-    evidence_ref: REPAIR_EXTERNAL.originalEvidence.ref,
-    evidence_hash: hashBytes(REPAIR_EXTERNAL.originalEvidence.bytes),
-    status: status.startsWith("review:") ? "review" : status.startsWith("blocked-from-") ? "blocked" : status,
-    attempts,
-    max_attempts: 2,
-    created_at: NOW,
-    updated_at: NOW,
-    ...options.record,
-  };
-  const externalSources = {
-    plan: structuredClone(REPAIR_EXTERNAL.plan),
-    "original-evidence": structuredClone(REPAIR_EXTERNAL.originalEvidence),
-    ...(options.sidecars.includes("repair-evidence") ? { "repair-evidence": structuredClone(REPAIR_EXTERNAL.repairEvidence) } : {}),
-    ...(options.sidecars.includes("review") ? { review: structuredClone(options.reviewExternal) } : {}),
-    ...(options.sidecars.includes("verification") ? { verification: structuredClone(REPAIR_EXTERNAL.verification) } : {}),
-  };
-  const definitions = {
-    plan: sidecar("plan", ["$external", "plan", "ref"], ["plan_hash"], ["$external", "plan", "bytes"]),
-    "original-evidence": externalSidecar("original-evidence", ["evidence_ref"], ["evidence_hash"]),
-    "repair-evidence": externalSidecar("repair-evidence", ["repair_evidence_ref"], ["repair_evidence_hash"]),
-    review: externalSidecar("review", ["review_ref"], ["review_hash"]),
-    verification: externalSidecar("verification", ["verification_ref"], ["verification_hash"]),
-  };
-  const sidecars = options.sidecars.map((name) => definitions[name]);
-  const targets = sidecars.flatMap((binding) => sidecarTargets(binding.name, binding.refPath, binding.hashPath, binding.bytesPath));
-  targets.push(schema(["schema_version"]), time(["updated_at"]), stale(["attempts"], attempts === 0 ? 1 : attempts - 1), cross(["consumer_slice_id"], "owner"), drift([], "evidence_ref", "reproduction_ref"));
-  if (source.baseline_commit) targets.push(stale(["baseline_commit"], SHA_C));
-  if (source.reviewed_commit) targets.push(cross(["reviewed_commit"], SHA_C));
-  if (source.merge_commit) targets.push(stale(["merge_commit"], SHA_B));
-  return recordEntry({
-    authorityClassId: "pr79-merged-slice-repair", id, record: "run.json.merged_slice_repair", variant: status,
-    writer: `transitionMergedSliceRepair ${status} transition`,
-    readers: ["validateMergedSliceRepair", "transitionMergedSliceRepair next-state checks", "mergedSliceRepairFence and resume eligibility", "slice/step/panel/gate/PR lifecycle fences"],
-    source, canonicalPath: ["merged_slice_repair"], externalSources, requiredPath: ["status"], typePath: ["attempts"], sidecars, facts: options.facts, observations: options.observations, targets,
-  });
-}
-
-function repairReviewFields(reviewExternal) {
-  return {
-    baseline_commit: SHA_A,
-    reviewed_commit: SHA_B,
-    review_ref: reviewExternal.ref,
-    review_hash: hashBytes(reviewExternal.bytes),
-    repair_evidence_ref: REPAIR_EXTERNAL.repairEvidence.ref,
-    repair_evidence_hash: hashBytes(REPAIR_EXTERNAL.repairEvidence.bytes),
-  };
-}
-
-function repairObservation(name, source, path, expected, consumer) {
-  return { name, source, path, expected, consumer };
-}
-
-function repairReobservation(name, expected, consumer) {
+function reobservation(name, expected, consumer) {
   return { name, source: "re-observed", expected, consumer };
 }
 
@@ -4935,9 +4752,6 @@ function validateCanonicalCoreRecord(record, path) {
 function rejectSyntheticCanonicalKeys(record, path) {
   const forbidden = new Set(["sidecar_bytes"]);
   if (record.authorityClassId === "post-pr-nested-records") forbidden.add("run_status");
-  if (record.id.startsWith("repair-")) {
-    for (const key of ["plan_ref", "owner_snapshot", "quiescent", "review_verdict", "reviewed_tree", "merge_tree", "sidecar_bytes", "blocked_from"]) forbidden.add(key);
-  }
   if (record.authorityClassId === "slices-review-evidence-bindings") {
     forbidden.add("review_binding");
   }
