@@ -3887,19 +3887,14 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   }
   assertSpecialDispatches();
 
-  assertV2ImmutablePublicationTransition(current, nextValue);
-  assertPostPrGenericMutation(current, nextValue, hooks);
-  assertScopedAuthorityTransitions(current, nextValue, hooks);
-  assertGateDecisionTransitions(current, nextValue, hooks);
-  assertStepTransitions(current, nextValue, hooks);
-  const next = validateRun(nextValue);
-  assertRunIdentityTransition(current, next);
-  assertV2ImmutablePublicationTransition(current, next);
-  assertScopedAuthorityTransitions(current, next, hooks);
-  assertGateDecisionTransitions(current, next, hooks);
-  assertStepTransitions(current, next, hooks);
-  assertTerminalTransition(current, next, hooks);
-  assertIntegrationAmendmentTransition(current, next, hooks);
+  let next;
+  try {
+    next = validateRun(nextValue);
+  } catch (error) {
+    assertRunTransitionPolicy(current, nextValue, hooks);
+    throw error;
+  }
+  assertRunTransitionPolicy(current, next, hooks);
   const terminalizing = current.status !== next.status && TERMINAL_RUN_STATUSES.has(next.status);
   if (terminalizing) assertNoUnresolvedSliceDispatches(runDir, current);
   const v2PublicationAuthority = assertV2LocalPublishedAuthority(runDir, next, options);
@@ -3922,15 +3917,19 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
         if (terminalizing) assertNoUnresolvedSliceDispatches(runDir, current);
       }
     : null;
-  const protectedOptions = {
-    ...options,
-    ...(hooks.consumeSpecialDispatch === true ? { allowPendingSpecialDispatch: true } : {}),
-    ...(hooks.integrationAmendment === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY ? { integrationAmendmentAuthority: INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY } : {}),
-    ...(hooks.integrationAmendmentAction ? { integrationAmendmentAction: hooks.integrationAmendmentAction } : {}),
-    ...(hooks.terminal === true && current.integration_amendment?.status === "blocked" ? { blockedAmendmentTerminal: true } : {}),
-  };
-  await writeProtectedRunJson(runDir, next, protectedOptions, beforeReplace);
+  await writeRunJsonAtomic(runDir, next, options, beforeReplace);
   return { updated: true, status: next.status, run: next };
+}
+
+function assertRunTransitionPolicy(current, next, hooks) {
+  assertRunIdentityTransition(current, next);
+  assertV2ImmutablePublicationTransition(current, next);
+  assertPostPrGenericMutation(current, next, hooks);
+  assertScopedAuthorityTransitions(current, next, hooks);
+  assertGateDecisionTransitions(current, next, hooks);
+  assertStepTransitions(current, next, hooks);
+  assertTerminalTransition(current, next, hooks);
+  assertIntegrationAmendmentTransition(current, next, hooks);
 }
 
 export function assertV2LocalPublishedAuthority(runDir, run, options = {}, expected = null) {
@@ -4245,10 +4244,14 @@ async function writeProtectedRunJson(runDir, next, options = {}, beforeReplace =
       });
     }
   } : null;
-  const fsOps = typeof protectedBeforeReplace === "function"
+  await writeRunJsonAtomic(runDir, next, options, protectedBeforeReplace);
+}
+
+async function writeRunJsonAtomic(runDir, next, options = {}, beforeReplace = null) {
+  const fsOps = typeof beforeReplace === "function"
     ? {
         rename: (source, destination) => {
-          const observed = protectedBeforeReplace();
+          const observed = beforeReplace();
           if (observed && typeof observed.then === "function") return Promise.resolve(observed).then(() => rename(source, destination));
           return rename(source, destination);
         },

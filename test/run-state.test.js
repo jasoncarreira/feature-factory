@@ -439,6 +439,73 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("runs one generic policy pass and one next-state validation", async () => {
+    const fixture = createFixture("generic-single-policy-pass");
+    let sliceReads = 0;
+    try {
+      await transitionRunJson(fixture.runDir, (draft) => {
+        const slices = draft.slices;
+        draft.updated_at = NOW;
+        Object.defineProperty(draft, "slices", {
+          configurable: true,
+          enumerable: true,
+          get() {
+            sliceReads += 1;
+            return slices;
+          },
+        });
+        return draft;
+      });
+
+      assert.equal(sliceReads, 3, "schema validation, one policy pass, and serialization each read slices once");
+      assert.equal(readJson(join(fixture.runDir, "run.json")).updated_at, NOW);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects malformed state and still rejects protected generic mutation", async () => {
+    for (const [label, mutate, expected] of [
+      ["malformed", (draft) => { draft.updated_at = "not-a-timestamp"; }, /run\.updated_at: must be an ISO timestamp/u],
+      ["protected", (draft) => { draft.slices[0].attempts = 2; }, /slices can only be changed by checked slice transitions/u],
+    ]) {
+      const fixture = createFixture(`generic-validated-policy-${label}`);
+      try {
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(transitionRunJson(fixture.runDir, mutate), expected, label);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, label);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("rechecks generic V2 authority immediately before run.json replacement", async () => {
+    const fixture = createFixture("generic-pre-replace-v2-race");
+    try {
+      const branch = `${fixture.runId}-branch`;
+      initGitRepo(fixture.repo, [branch]);
+      runGit(fixture.repo, ["checkout", branch]);
+      const run = makeSyntheticV2Run(fixture.runDir, { ...baseRun(fixture.runId), branch, worktree: fixture.repo }, { remaining: ["slice"] });
+      writeJson(join(fixture.runDir, "run.json"), run);
+      const parentPath = join(fixture.repo, run.continuation.parent.run_ref);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(transitionRunJson(fixture.runDir, (draft) => {
+        draft.updated_at = NOW;
+      }, {
+        atomicWriteHooks: {
+          beforeCommit() {
+            writeFileSync(parentPath, `${readFileSync(parentPath, "utf8")}\n`);
+          },
+        },
+      }), (error) => error?.message === "protected file commit failed" && /parent run\.json hash is stale/u.test(error.cause?.message));
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("allows changes_requested gate decisions through transitionGateDecision", async () => {
     const fixture = createFixture("changes-gate");
     try {
