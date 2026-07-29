@@ -2262,23 +2262,47 @@ export function handoffEnvelope(runId, gate, reasonCode, details = {}) {
 // indeterminate, which routes to the pre-existing head-mismatch stop. Every
 // failure path returns indeterminate rather than a guess, because "I could not
 // establish this" must not read as "not a descendant".
-function observePrHeadAncestry(repo, run, expectedHead, observedHead, options = {}) {
+export function observePrHeadAncestry(repo, run, expectedHead, observedHead, options = {}) {
   if (!/^[0-9a-f]{40}$/u.test(String(expectedHead)) || !/^[0-9a-f]{40}$/u.test(String(observedHead))) return "indeterminate";
   if (observedHead === expectedHead) return "exact";
-  const headRef = stringValue(run.post_pr?.pr_operation?.head_ref);
-  if (!headRef) return "indeterminate";
-  const localRef = `refs/opencode/post-pr-head/${run.run_id}`;
+  // stringValue is a predicate, not an extractor - it answers "is this a
+  // non-empty string", so using its result as the ref name fetches refs/heads/true.
+  const headRef = run.post_pr?.pr_operation?.head_ref;
+  if (!stringValue(headRef)) return "indeterminate";
+  const gitRunner = options.gitRunner || git;
   const gitOptions = options.gitOptions || {};
-  const fetched = git(repo, [
+  const probeRef = `refs/opencode/post-pr-head-probe/${run.run_id}`;
+
+  let relationship = "indeterminate";
+  const fetched = gitRunner(repo, [
     "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--refmap=", "--force",
-    "origin", `+refs/heads/${headRef}:${localRef}`,
+    "origin", `+refs/heads/${headRef}:${probeRef}`,
   ], gitOptions);
-  if (!fetched.ok) return "indeterminate";
-  const resolved = git(repo, ["rev-parse", "--verify", `${localRef}^{commit}`], gitOptions);
-  if (!resolved.ok) return "indeterminate";
-  const advertised = resolved.stdout.trim();
-  if (advertised !== observedHead) return "indeterminate";
-  return git(repo, ["merge-base", "--is-ancestor", expectedHead, advertised], gitOptions).ok ? "descendant" : "unrelated";
+  if (fetched.ok) {
+    const resolved = gitRunner(repo, ["rev-parse", "--verify", `${probeRef}^{commit}`], gitOptions);
+    if (resolved.ok) {
+      const advertised = resolved.stdout.trim();
+      if (advertised === observedHead) {
+        relationship = gitRunner(repo, ["merge-base", "--is-ancestor", expectedHead, advertised], gitOptions).ok ? "descendant" : "unrelated";
+      }
+    }
+  }
+
+  // The probe ref exists only for the duration of this observation. Leaving it
+  // behind would accumulate one ref per run that ever saw an advanced head and
+  // pin its object graph against collection, so removal is part of the
+  // observation rather than best-effort cleanup. If removal cannot be proven the
+  // answer degrades to indeterminate: a ref we failed to clean up is not a basis
+  // for merging past the reviewed commit.
+  return removeHeadProbeRef(repo, probeRef, gitRunner, gitOptions) ? relationship : "indeterminate";
+}
+
+function removeHeadProbeRef(repo, probeRef, gitRunner, gitOptions) {
+  const present = gitRunner(repo, ["rev-parse", "--verify", "--quiet", probeRef], gitOptions);
+  if (!present.ok || !present.stdout.trim()) return true;
+  gitRunner(repo, ["update-ref", "-d", probeRef, present.stdout.trim()], gitOptions);
+  const after = gitRunner(repo, ["rev-parse", "--verify", "--quiet", probeRef], gitOptions);
+  return !after.ok || !after.stdout.trim();
 }
 
 export async function postPrObserve(runId, opts = {}) {
