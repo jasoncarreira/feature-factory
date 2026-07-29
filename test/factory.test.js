@@ -387,13 +387,11 @@ describe("factory public state operations", { concurrency: false }, () => {
       assert.deepEqual(run.debug_snapshot.last_resumed_with.env.cli_identity, resumeIdentity);
       assert.deepEqual(Object.keys(creationIdentity), ["source", "version", "hash"]);
       assert.deepEqual(Object.keys(resumeIdentity), ["source", "version", "hash"]);
-      assert.deepEqual(Object.keys(run).filter((key) => !initialKeys.includes(key)).sort(), ["debug_snapshot", "provenance"]);
+      assert.deepEqual(Object.keys(run).filter((key) => !initialKeys.includes(key)).sort(), ["debug_snapshot"]);
       assert.equal(Object.hasOwn(run, "cli_identity"), false);
       const topLevelAuthority = JSON.stringify(Object.fromEntries(Object.entries(run).filter(([key]) => key !== "debug_snapshot")));
-      const provenanceAuthority = JSON.stringify(run.provenance);
       for (const value of Object.values(resumeIdentity)) {
         assert.equal(topLevelAuthority.includes(value), false, `top-level authority contains resume identity value ${value}`);
-        assert.equal(provenanceAuthority.includes(value), false, `provenance authority contains resume identity value ${value}`);
       }
     } finally {
       cleanup(fixture.repo);

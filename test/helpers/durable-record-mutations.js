@@ -1996,7 +1996,7 @@ export const DURABLE_AUTHORITY_CATALOG = deepFreeze(mutableCatalog);
 
 export const DURABLE_AUTHORITY_EXCLUSIONS = deepFreeze([
   {
-    records: ["run.json.debug_snapshot", "run.json.provenance", "run.json.cost_attribution"],
+    records: ["run.json.debug_snapshot", "run.json.cost_attribution"],
     reason: "Diagnostic records do not authorize workflow decisions and are outside the durable-authority integrity catalog.",
   },
   {
