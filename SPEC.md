@@ -492,10 +492,39 @@ feature-factory factory cost-record <run-id> \
   [--cost-cache-creation N] \
   [--cost-cache-read N] \
   [--currency CODE] \
+  [--opencode-usage JSON] \
   [--recorded-at ISO] \
   [--entry-id ID] \
   [--json]
 ```
+
+Supported provider metadata shape:
+
+- OpenCode normalizes provider usage before the factory ever sees it, so there is one supported shape rather than a per-provider table. `--opencode-usage` accepts either payload that carries usage, verbatim:
+
+```jsonc
+// AssistantMessage
+{ "id": "msg_01", "providerID": "anthropic", "modelID": "claude-opus-4", "mode": "build",
+  "cost": 0.0123,
+  "tokens": { "input": 1000, "output": 200, "reasoning": 50, "cache": { "read": 900, "write": 100 } } }
+
+// StepFinishPart
+{ "id": "prt_01", "type": "step-finish", "messageID": "msg_09",
+  "cost": 0.5,
+  "tokens": { "input": 12, "output": 34, "reasoning": 0, "cache": { "read": 0, "write": 0 } } }
+```
+
+- Mapping into the entry contract: `providerID`→`provider`, `modelID`→`model`, `messageID` or `id`→`request_id`, `mode`→`operation`, `tokens.input`→`input_tokens`, `tokens.output`→`output_tokens`, `tokens.reasoning`→`reasoning_tokens`, `tokens.cache.read`→`cache_read_input_tokens`, `tokens.cache.write`→`cache_creation_input_tokens`, `cost`→`cost_total`. `source` is set to `opencode` so normalized values stay distinguishable from operator-supplied ones.
+- `total_tokens` is left absent. OpenCode reports no total, and which components a total spans is a provider-specific question this contract does not answer on the provider's behalf.
+- Unknown fields are ignored, not rejected, so a future OpenCode release that adds a usage field cannot break recording.
+- Explicit flags override the payload, so correcting one field never requires restating it.
+- Malformed numbers (negative, non-finite, non-numeric) are rejected before any `run.json` write.
+
+Currency:
+
+- OpenCode reports `cost` as a bare number with no currency anywhere in the payload. That cost is recorded as provider-supplied and `cost_currency` is reported through `missing`, which downgrades the entry to `partial`.
+- An entry or rollup may therefore carry `cost_total` without `cost_currency` **only** when it names `cost_currency` in `missing`. `available` still requires a currency, because `available` forbids a non-empty `missing`.
+- Do not substitute a default currency for an unlabeled provider cost. A guessed currency and a discarded figure are both worse than a cost marked partial.
 
 Persistence and exposure:
 

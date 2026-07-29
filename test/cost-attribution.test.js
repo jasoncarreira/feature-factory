@@ -1,10 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { validateCostAttributionEntries } from "../src/validate.js";
 import {
   MAX_COST_ATTRIBUTION_ENTRIES,
   appendCostAttributionEntry,
   formatCostAttributionSummary,
   normalizeCostUsageEntry,
+  normalizeOpencodeUsage,
   publicCostAttributionSummary,
   recomputeCostAttribution,
   rollupBy,
@@ -240,3 +242,133 @@ describe("cost attribution helpers", () => {
 function hasTerminalControl(value) {
   return /[\u0000-\u001F\u007F-\u009F]/u.test(value);
 }
+
+// OpenCode reports one usage shape across every provider it supports, so these
+// fixtures are the shape itself rather than a per-provider table. Sources:
+// AssistantMessage and StepFinishPart in the opencode SDK session/type reference.
+const OPENCODE_ASSISTANT_MESSAGE = Object.freeze({
+  id: "msg_01",
+  role: "assistant",
+  sessionID: "ses_01",
+  providerID: "anthropic",
+  modelID: "claude-opus-4",
+  mode: "build",
+  cost: 0.0123,
+  tokens: Object.freeze({ input: 1000, output: 200, reasoning: 50, cache: Object.freeze({ read: 900, write: 100 }) }),
+});
+
+const OPENCODE_STEP_FINISH_PART = Object.freeze({
+  id: "prt_01",
+  type: "step-finish",
+  messageID: "msg_09",
+  sessionID: "ses_01",
+  cost: 0.5,
+  tokens: Object.freeze({ input: 12, output: 34, reasoning: 0, cache: Object.freeze({ read: 0, write: 0 }) }),
+});
+
+describe("opencode usage normalization", () => {
+  it("maps an assistant message onto the cost entry contract", () => {
+    const input = normalizeOpencodeUsage(OPENCODE_ASSISTANT_MESSAGE);
+
+    assert.deepEqual(input, {
+      source: "opencode",
+      request_id: "msg_01",
+      provider: "anthropic",
+      model: "claude-opus-4",
+      operation: "build",
+      input_tokens: 1000,
+      output_tokens: 200,
+      reasoning_tokens: 50,
+      cache_read_input_tokens: 900,
+      cache_creation_input_tokens: 100,
+      cost_total: 0.0123,
+    });
+    // OpenCode reports no total, and which components a total spans is a
+    // provider question. Absent beats a number the provider never sent.
+    assert.equal(input.total_tokens, undefined);
+  });
+
+  it("maps a step-finish part through its messageID", () => {
+    const input = normalizeOpencodeUsage(OPENCODE_STEP_FINISH_PART);
+
+    assert.equal(input.request_id, "msg_09");
+    assert.equal(input.input_tokens, 12);
+    assert.equal(input.cache_read_input_tokens, 0);
+    assert.equal(input.cost_total, 0.5);
+    // A step part carries no provider/model; they stay absent rather than blank.
+    assert.equal(input.provider, undefined);
+    assert.equal(input.model, undefined);
+  });
+
+  it("records a provider cost that carries no currency instead of rejecting or guessing it", () => {
+    // OpenCode's `cost` is a bare number with no currency in the payload. The
+    // normalizer reports the gap through `missing`; validation must accept that
+    // rather than force a guessed currency or a discarded figure.
+    const entry = normalizeCostUsageEntry({ ...normalizeOpencodeUsage(OPENCODE_ASSISTANT_MESSAGE), agent: "backend-builder" }, { runId: "run", now: NOW });
+
+    assert.equal(entry.status, "partial");
+    assert.deepEqual(entry.missing, ["cost_currency"]);
+    assert.equal(entry.cost_total, 0.0123);
+    assert.equal(entry.cost_currency, undefined);
+    assert.deepEqual(validateCostAttributionEntries([entry], "run"), [entry]);
+  });
+
+  it("keeps a currency-less cost through the rollup", () => {
+    const entry = normalizeCostUsageEntry({ ...normalizeOpencodeUsage(OPENCODE_ASSISTANT_MESSAGE), agent: "backend-builder" }, { runId: "run", now: NOW });
+    const attribution = recomputeCostAttribution({ entries: [entry] }, { now: NOW });
+
+    assert.equal(attribution.totals.cost_total, 0.0123);
+    assert.equal(attribution.totals.cost_currency, undefined);
+    assert.ok(attribution.totals.missing.includes("cost_currency"));
+    assert.equal(attribution.totals.status, "partial");
+  });
+
+  it("still requires a currency before calling an entry available", () => {
+    // The relaxation must not let a cost figure masquerade as fully attributed.
+    const claimed = normalizeCostUsageEntry({ ...normalizeOpencodeUsage(OPENCODE_ASSISTANT_MESSAGE), agent: "backend-builder", status: "available" }, { runId: "run", now: NOW });
+    assert.equal(claimed.status, "partial");
+
+    const forged = { ...claimed, status: "available", missing: [] };
+    assert.throws(() => validateCostAttributionEntries([forged], "run"), (error) => {
+      const paths = (error.errors ?? []).map((item) => item.path);
+      assert.ok(paths.some((path) => path.endsWith(".status") || path.endsWith(".cost_currency")), `expected a status/currency rejection, got ${JSON.stringify(paths)}`);
+      return true;
+    });
+  });
+
+  it("rejects malformed usage numbers before anything is recorded", () => {
+    for (const tokens of [
+      { input: -1, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      { input: Number.NaN, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      { input: Number.POSITIVE_INFINITY, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      { input: "not-a-number", output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    ]) {
+      assert.throws(() => normalizeOpencodeUsage({ ...OPENCODE_ASSISTANT_MESSAGE, tokens }), /input_tokens must be a finite non-negative number/u);
+    }
+    assert.throws(() => normalizeOpencodeUsage({ ...OPENCODE_ASSISTANT_MESSAGE, cost: -0.5 }), /cost_total must be a finite non-negative number/u);
+    assert.throws(() => normalizeOpencodeUsage(null), /opencode usage payload must be an object/u);
+  });
+
+  it("tolerates absent, partial, and unknown-forward usage metadata", () => {
+    // No tokens at all: nothing invented, and the entry says so.
+    const bare = normalizeCostUsageEntry({ ...normalizeOpencodeUsage({ id: "msg_02", providerID: "anthropic", modelID: "claude-opus-4" }), agent: "backend-builder" }, { runId: "run", now: NOW });
+    assert.equal(bare.status, "unavailable");
+    assert.deepEqual(bare.missing, ["cost_total", "cost_currency", "usage"].sort());
+
+    // Only some token fields present: the rest stay absent, not zero.
+    const partial = normalizeOpencodeUsage({ id: "msg_03", providerID: "anthropic", modelID: "m", tokens: { input: 5 } });
+    assert.equal(partial.input_tokens, 5);
+    assert.equal(partial.output_tokens, undefined);
+    assert.equal(partial.cache_read_input_tokens, undefined);
+
+    // Fields a future OpenCode release adds must not break recording.
+    const forward = normalizeOpencodeUsage({
+      ...OPENCODE_ASSISTANT_MESSAGE,
+      tokens: { ...OPENCODE_ASSISTANT_MESSAGE.tokens, audio: 12, cache: { ...OPENCODE_ASSISTANT_MESSAGE.tokens.cache, refresh: 3 } },
+      usage_v2: { anything: true },
+    });
+    assert.equal(forward.input_tokens, 1000);
+    assert.equal(forward.cache_read_input_tokens, 900);
+    assert.ok(!Object.keys(forward).some((key) => key.includes("audio") || key.includes("refresh") || key.includes("usage_v2")));
+  });
+});

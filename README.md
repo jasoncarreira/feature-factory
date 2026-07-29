@@ -626,9 +626,22 @@ feature-factory factory cost-record <run-id> \
   --json
 ```
 
+OpenCode already normalizes provider usage before the factory sees it, so its payload can be handed over verbatim instead of decomposed into flags. `--opencode-usage` accepts an `AssistantMessage` or a `StepFinishPart`:
+
+```sh
+feature-factory factory cost-record <run-id> \
+  --agent implementation-validator \
+  --opencode-usage '{"id":"msg_01","providerID":"anthropic","modelID":"claude-opus-4","mode":"build","cost":0.0123,
+                     "tokens":{"input":1000,"output":200,"reasoning":50,"cache":{"read":900,"write":100}}}' \
+  --json
+```
+
+`tokens.cache.read`/`tokens.cache.write` become `cache_read_input_tokens`/`cache_creation_input_tokens`, `source` is set to `opencode`, unknown fields are ignored so a future OpenCode release cannot break recording, and explicit flags override the payload. `total_tokens` stays absent because OpenCode reports no total. OpenCode's `cost` carries no currency, so such an entry records `cost_total`, lists `cost_currency` in `missing`, and is `partial` — pass `--currency` only if you actually know it.
+
 Semantics:
 
 - Persist provider-supplied usage/cost metadata only. The factory must not use pricing tables, pricing APIs, local price estimates, currency conversion, or missing-to-zero coercion.
+- A `cost_total` may be present without `cost_currency` only when the entry or rollup lists `cost_currency` in `missing`. `available` still requires a currency.
 - `available` means provider, model, usage, `cost_total`, and `cost_currency` are present.
 - `partial` means some usage/cost data is present but provider/model/usage/cost_total/cost_currency is incomplete; missing fields stay missing and are listed in `missing`.
 - `unavailable` means the provider exposed no usage or cost data. It does not mean zero cost.
