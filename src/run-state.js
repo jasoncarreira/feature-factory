@@ -3914,22 +3914,29 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   assertV2AuthorityExtends(v2PublicationAuthority, v2AdmissionAuthority);
   if (typeof hooks.beforeWrite === "function") await hooks.beforeWrite(next, current);
   const postPrPublicationAuthority = hooks.postPr === true ? observePostPrPublicationAuthority(runDir, next, options) : null;
-  const beforeReplace = hooks.beforeReplace || postPrPublicationAuthority || v2PublicationAuthority || amendmentAuthority || terminalizing || existsSync(join(runDir, "dispatch"))
-    ? async () => {
-        if (hooks.beforeReplace) await hooks.beforeReplace(next, current);
-        assertSpecialDispatches();
-        if (v2PublicationAuthority) assertV2LocalPublishedAuthority(runDir, next, options, v2PublicationAuthority);
-        if (postPrPublicationAuthority) assertPostPrPublicationAuthorityCurrent(runDir, next, options, postPrPublicationAuthority);
-        assertIntegrationAmendmentWriterAuthorityCurrent(runDir, current, amendmentAuthority, {
-          dedicated: hooks.integrationAmendment === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
-          blockedTerminal: hooks.terminal === true,
-          action: hooks.integrationAmendmentAction,
-          integrationAmendmentDownstreamMergeAuthority: options.integrationAmendmentDownstreamMergeAuthority,
-          integrationAmendmentPendingSliceMerge: options.integrationAmendmentPendingSliceMerge,
-        });
-        if (terminalizing) assertNoUnresolvedSliceDispatches(runDir, current);
-      }
-    : null;
+  // Installed unconditionally. The condition this replaces read as though the
+  // commit boundary were optional - and worse, as though it could be skipped
+  // based on `existsSync(dispatch)`, a sample taken before the mutator ran. It
+  // could not: `amendmentAuthority` is assigned unconditionally at the top of
+  // this function from a function that never returns falsy, so every term after
+  // it, including the directory check, was unreachable and the callback was
+  // always installed. Nothing observable changes here; what goes away is a
+  // guard whose own text invited the reader to believe a write could reach the
+  // atomic rename without re-observing special dispatches.
+  const beforeReplace = async () => {
+    if (hooks.beforeReplace) await hooks.beforeReplace(next, current);
+    assertSpecialDispatches();
+    if (v2PublicationAuthority) assertV2LocalPublishedAuthority(runDir, next, options, v2PublicationAuthority);
+    if (postPrPublicationAuthority) assertPostPrPublicationAuthorityCurrent(runDir, next, options, postPrPublicationAuthority);
+    assertIntegrationAmendmentWriterAuthorityCurrent(runDir, current, amendmentAuthority, {
+      dedicated: hooks.integrationAmendment === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
+      blockedTerminal: hooks.terminal === true,
+      action: hooks.integrationAmendmentAction,
+      integrationAmendmentDownstreamMergeAuthority: options.integrationAmendmentDownstreamMergeAuthority,
+      integrationAmendmentPendingSliceMerge: options.integrationAmendmentPendingSliceMerge,
+    });
+    if (terminalizing) assertNoUnresolvedSliceDispatches(runDir, current);
+  };
   await writeRunJsonAtomic(runDir, next, options, beforeReplace);
   return { updated: true, status: next.status, run: next };
 }

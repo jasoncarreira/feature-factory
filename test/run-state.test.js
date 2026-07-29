@@ -480,6 +480,63 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("re-observes special dispatches at the commit boundary when dispatch/ was absent at entry", async () => {
+    const fixture = createFixture("generic-pre-replace-dispatch-race");
+    try {
+      writeJson(join(fixture.runDir, "run.json"), baseRun(fixture.runId));
+      const dispatchDir = join(fixture.runDir, "dispatch");
+      assert.equal(existsSync(dispatchDir), false, "the race requires dispatch/ to be absent when the write begins");
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      // A structurally valid claim with no closure. It has to be valid: a
+      // malformed one is rejected by claim parsing regardless of where the guard
+      // is installed, which would let this test pass against the very code it
+      // exists to catch.
+      const claimName = `${createHash("sha256").update(`${fixture.runId}\0special\0panel-remediation\0race`, "utf8").digest("hex")}.special.json`;
+      const hash = `sha256:${"a".repeat(64)}`;
+      const claim = {
+        schema_version: 1,
+        kind: "checked-special-builder-dispatch-claim",
+        run_id: fixture.runId,
+        route: "panel-remediation",
+        instance: "race",
+        agent: "backend-builder",
+        branch: `${fixture.runId}-branch`,
+        worktree: fixture.repo,
+        head: "b".repeat(40),
+        run_hash: hash,
+        context_hash: hash,
+        completion_token_hash: hash,
+        claimed_at: NOW,
+        closure_ref: `dispatch/${claimName.slice(0, -5)}.closed.json`,
+      };
+
+      // Pins the invariant, not a race fix. The condition that previously chose
+      // whether to install this callback listed `existsSync(dispatch)` last in an
+      // `||` chain behind `amendmentAuthority`, which `transitionRunJsonLocked`
+      // assigns unconditionally from a function that never returns falsy - so the
+      // callback was always installed and the directory check was dead. Making it
+      // unconditional removes a condition that reads as though it can disable a
+      // commit boundary but cannot. This test therefore passes against both
+      // shapes by construction; it exists so that if someone later makes the
+      // callback conditional for real, the boundary is still asserted.
+      await assert.rejects(transitionRunJson(fixture.runDir, (draft) => {
+        draft.updated_at = NOW;
+      }, {
+        atomicWriteHooks: {
+          beforeCommit() {
+            mkdirSync(dispatchDir, { recursive: true });
+            writeJson(join(dispatchDir, claimName), claim);
+          },
+        },
+      }), (error) => /is not exactly closed|remains active/u.test(`${error?.message} ${error?.cause?.message ?? ""}`));
+
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, "the original run.json bytes must survive the rejection");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rechecks generic V2 authority immediately before run.json replacement", async () => {
     const fixture = createFixture("generic-pre-replace-v2-race");
     try {
