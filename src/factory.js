@@ -2246,6 +2246,82 @@ export function handoffEnvelope(runId, gate, reasonCode, details = {}) {
 }
 
 /** Perform at most one due verdict query (or one pending reviewer request). */
+// Classifies the observed PR head against the reviewed one. Only this layer can
+// run git, so the pure projection in post-pr-ci.js takes the answer rather than
+// deriving it.
+//
+// The observed head frequently does not exist locally - an operator resolving
+// drift with GitHub's update-branch button creates a commit this checkout has
+// never seen - so the branch is fetched into a per-run tracking ref using the
+// same safe flags as canonical-main observation: no tags, no submodules, no
+// FETCH_HEAD write, no refmap.
+//
+// The advertised head must equal what GitHub reported before ancestry is even
+// considered. Two independent observations of the same external fact have to
+// agree; if they disagree the run is being told two stories and the answer is
+// indeterminate, which routes to the pre-existing head-mismatch stop. Every
+// failure path returns indeterminate rather than a guess, because "I could not
+// establish this" must not read as "not a descendant".
+export function observePrHeadAncestry(repo, run, expectedHead, observedHead, options = {}) {
+  if (!/^[0-9a-f]{40}$/u.test(String(expectedHead)) || !/^[0-9a-f]{40}$/u.test(String(observedHead))) return "indeterminate";
+  if (observedHead === expectedHead) return "exact";
+  // stringValue is a predicate, not an extractor - it answers "is this a
+  // non-empty string", so using its result as the ref name fetches refs/heads/true.
+  const headRef = run.post_pr?.pr_operation?.head_ref;
+  if (!stringValue(headRef)) return "indeterminate";
+  const gitRunner = options.gitRunner || git;
+  const gitOptions = options.gitOptions || {};
+  const probeRef = `refs/opencode/post-pr-head-probe/${run.run_id}`;
+
+  let relationship = "indeterminate";
+  const fetched = gitRunner(repo, [
+    "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--refmap=", "--force",
+    "origin", `+refs/heads/${headRef}:${probeRef}`,
+  ], gitOptions);
+  if (fetched.ok) {
+    const resolved = gitRunner(repo, ["rev-parse", "--verify", `${probeRef}^{commit}`], gitOptions);
+    if (resolved.ok) {
+      const advertised = resolved.stdout.trim();
+      if (advertised === observedHead) {
+        // git distinguishes the two negatives by exit status: 1 means "proven not
+        // an ancestor", anything else means the probe itself failed. Collapsing
+        // them would record an unproven relationship - harmless today because
+        // both stop on head-mismatch, but it is the same conflation this
+        // function exists to avoid.
+        const ancestry = gitRunner(repo, ["merge-base", "--is-ancestor", expectedHead, advertised], gitOptions);
+        relationship = ancestry.ok ? "descendant" : ancestry.status === 1 ? "unrelated" : "indeterminate";
+      }
+    }
+  }
+
+  // The probe ref exists only for the duration of this observation. Leaving it
+  // behind would accumulate one ref per run that ever saw an advanced head and
+  // pin its object graph against collection, so removal is part of the
+  // observation rather than best-effort cleanup. If removal cannot be proven the
+  // answer degrades to indeterminate: a ref we failed to clean up is not a basis
+  // for merging past the reviewed commit.
+  return removeHeadProbeRef(repo, probeRef, gitRunner, gitOptions) ? relationship : "indeterminate";
+}
+
+// Tri-state on purpose: absent, present, or unknown. `rev-parse --verify
+// --quiet` exits 1 for a ref that is genuinely gone and something else when the
+// inspection itself failed, and only the first is evidence of a clean
+// repository. Treating an unreadable probe as "absent" would report cleanup
+// success it never established and preserve a tolerable ancestry.
+function probeRefState(repo, probeRef, gitRunner, gitOptions) {
+  const probe = gitRunner(repo, ["rev-parse", "--verify", "--quiet", probeRef], gitOptions);
+  if (probe.ok) return probe.stdout.trim() ? { state: "present", oid: probe.stdout.trim() } : { state: "unknown", oid: null };
+  return probe.status === 1 ? { state: "absent", oid: null } : { state: "unknown", oid: null };
+}
+
+function removeHeadProbeRef(repo, probeRef, gitRunner, gitOptions) {
+  const before = probeRefState(repo, probeRef, gitRunner, gitOptions);
+  if (before.state === "absent") return true;
+  if (before.state === "unknown") return false;
+  gitRunner(repo, ["update-ref", "-d", probeRef, before.oid], gitOptions);
+  return probeRefState(repo, probeRef, gitRunner, gitOptions).state === "absent";
+}
+
 export async function postPrObserve(runId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
@@ -2292,7 +2368,9 @@ export async function postPrObserve(runId, opts = {}) {
   } catch (error) {
     return handleObserverError(runDir, run, error, { ...opts, expectedCurrentHash: action?.state_hash });
   }
+  const headRelationship = observePrHeadAncestry(repo, run, observation.expected_head_sha, response.headRefOid, opts);
   const normalized = normalizePullRequestResponse(response, {
+    headRelationship,
     startedAt: observation.started_at,
     now,
     checkStartGraceMs: postPr.policy.check_start_grace_ms,
