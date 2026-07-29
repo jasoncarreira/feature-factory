@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, advanceFactoryRunBase, assertHeartbeatStartable, attachCheckpointCompletionRecovery, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, executeIntegrationAmendment, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordFactoryCheckpointMerged, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
-import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
+import { formatCostAttributionSummary, normalizeOpencodeUsage, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
@@ -30,7 +30,7 @@ const root = dirname(dirname(cliPath));
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear", "--post-pr-ci", "--no-post-pr-ci", "--carry-forward"]);
-const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--commit", "--owner-slice", "--consumer-slice", "--defect-path", "--verification-ref", "--pr-url", "--pr-number", "--repository", "--head-sha", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate", "--post-pr-wait-minutes", "--post-pr-poll-seconds", "--post-pr-max-poll-seconds", "--post-pr-check-start-grace-seconds", "--post-pr-max-transient-errors", "--remediation-evidence-ref", "--failure-evidence-ref", "--test-evidence-ref", "--validator-report-ref", "--validator-review-ref", "--security-review-ref"]);
+const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--commit", "--owner-slice", "--consumer-slice", "--defect-path", "--verification-ref", "--pr-url", "--pr-number", "--repository", "--head-sha", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--opencode-usage", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate", "--post-pr-wait-minutes", "--post-pr-poll-seconds", "--post-pr-max-poll-seconds", "--post-pr-check-start-grace-seconds", "--post-pr-max-transient-errors", "--remediation-evidence-ref", "--failure-evidence-ref", "--test-evidence-ref", "--validator-report-ref", "--validator-review-ref", "--security-review-ref"]);
 const COST_REPORT_BOOLEAN_FLAGS = new Set(["--json", "--telemetry"]);
 const COST_REPORT_VALUE_FLAGS = new Set(["--repo"]);
 const COST_NUMERIC_FLAGS = new Map([
@@ -74,7 +74,7 @@ Commands:
   factory action-started <run-id> <dispatch|remediation> --action-token TOKEN [--json]
   factory action-abort <run-id> <dispatch|remediation> --action-token TOKEN [--json]
   factory pr-fence <run-id> [--clear --fence-token TOKEN] [--json]
-  factory cost-record <run-id> --agent AGENT [--step STEP] [--slice-id ID] [--provider PROVIDER] [--model MODEL] [--source SOURCE] [--operation OP] [--request-id ID] [--input-tokens N] [--output-tokens N] [--total-tokens N] [--cache-creation-input-tokens N] [--cache-read-input-tokens N] [--reasoning-tokens N] [--cost-total N] [--cost-input N] [--cost-output N] [--cost-cache-creation N] [--cost-cache-read N] [--currency CODE] [--recorded-at ISO] [--entry-id ID] [--json]
+  factory cost-record <run-id> --agent AGENT [--step STEP] [--slice-id ID] [--provider PROVIDER] [--model MODEL] [--source SOURCE] [--operation OP] [--request-id ID] [--input-tokens N] [--output-tokens N] [--total-tokens N] [--cache-creation-input-tokens N] [--cache-read-input-tokens N] [--reasoning-tokens N] [--cost-total N] [--cost-input N] [--cost-output N] [--cost-cache-creation N] [--cost-cache-read N] [--currency CODE] [--opencode-usage JSON] [--recorded-at ISO] [--entry-id ID] [--json]
   factory cost-report <run-id> [--json] [--telemetry]
   factory resume <run-id> [--headless|--autonomous|--detached] [--dry-run] [--json] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory list                  List local factory runs
@@ -732,6 +732,7 @@ function options(args) {
     if (args[index] === "--operation") opts.operation = args[++index];
     if (args[index] === "--request-id") opts.requestId = args[++index];
     if (args[index] === "--currency") opts.currency = args[++index];
+    if (args[index] === "--opencode-usage") opts.opencodeUsage = args[++index];
     if (args[index] === "--recorded-at") opts.recordedAt = args[++index];
     if (args[index] === "--entry-id") opts.entryId = args[++index];
     if (args[index] === "--parent-span-id") opts.parentSpanId = args[++index];
@@ -1027,7 +1028,11 @@ function assertOnlyCommandOptions(args, allowed, command) {
 }
 
 function costRecordInput(opts) {
-  const input = {};
+  // --opencode-usage carries the provider metadata in the shape OpenCode actually
+  // emits (nested tokens, no currency). It seeds the input so the explicit flags
+  // below still win: an operator correcting one field should not have to restate
+  // the payload. Parse failures throw before any run.json write.
+  const input = opencodeUsageInput(opts);
   for (const [key, field] of [
     ["agent", "agent"],
     ["step", "step"],
@@ -1058,6 +1063,21 @@ function costRecordInput(opts) {
     if (opts[key] !== undefined) input[field] = opts[key];
   }
   return input;
+}
+
+function opencodeUsageInput(opts) {
+  if (!stringValue(opts.opencodeUsage)) return {};
+  let payload;
+  try {
+    payload = JSON.parse(opts.opencodeUsage);
+  } catch {
+    throw staticCliError("factory cost-record --opencode-usage requires valid JSON");
+  }
+  try {
+    return normalizeOpencodeUsage(payload);
+  } catch (error) {
+    throw staticCliError(`factory cost-record --opencode-usage rejected: ${error.message}`);
+  }
 }
 
 function requiredOption(value, flag, command = "factory pr-created") {

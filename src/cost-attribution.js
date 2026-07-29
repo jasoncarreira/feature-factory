@@ -85,6 +85,53 @@ export function normalizeCostUsageEntry(input, options = {}) {
   return entry;
 }
 
+// OpenCode reports usage in one shape for every provider it supports, so the
+// normalization this contract needs is a single mapping rather than a per-provider
+// table. Both payloads that carry usage are accepted:
+//
+//   AssistantMessage { id, providerID, modelID, mode, cost, tokens }
+//   StepFinishPart   { id, messageID, cost, tokens }
+//   tokens           { input, output, reasoning, cache: { read, write } }
+//
+// `cost` is a bare number with no currency anywhere in the payload, so cost is
+// recorded as provider-supplied and `cost_currency` is reported through `missing`
+// instead of being guessed. Unknown keys are ignored rather than rejected, so a
+// future OpenCode release that adds a usage field cannot break recording.
+export function normalizeOpencodeUsage(payload, options = {}) {
+  if (!isRecord(payload)) throw new Error("opencode usage payload must be an object");
+  const tokens = isRecord(payload.tokens) ? payload.tokens : {};
+  const cache = isRecord(tokens.cache) ? tokens.cache : {};
+  const input = { source: nonEmptyString(options.source) || "opencode" };
+
+  // StepFinishPart identifies its message through messageID; AssistantMessage is
+  // its own id. Either way the recorded request_id points at the message.
+  const requestId = nonEmptyString(payload.messageID) || nonEmptyString(payload.id);
+  if (requestId) input.request_id = requestId;
+  const provider = nonEmptyString(payload.providerID);
+  if (provider) input.provider = provider;
+  const model = nonEmptyString(payload.modelID);
+  if (model) input.model = model;
+  const operation = nonEmptyString(options.operation) || nonEmptyString(payload.mode);
+  if (operation) input.operation = operation;
+
+  for (const [field, value] of [
+    ["input_tokens", tokens.input],
+    ["output_tokens", tokens.output],
+    ["reasoning_tokens", tokens.reasoning],
+    ["cache_read_input_tokens", cache.read],
+    ["cache_creation_input_tokens", cache.write],
+    ["cost_total", payload.cost],
+  ]) {
+    if (value === undefined || value === null) continue;
+    input[field] = normalizeNonNegativeFiniteNumber(value, field);
+  }
+
+  // total_tokens is deliberately absent: OpenCode does not report a total, and
+  // which of input/output/reasoning/cache a sum should span is a provider-specific
+  // question this contract refuses to answer on the provider's behalf.
+  return input;
+}
+
 export function appendCostAttributionEntry(costAttribution, input, options = {}) {
   const entries = Array.isArray(costAttribution?.entries) ? costAttribution.entries : [];
   return recomputeCostAttribution({ entries: [...entries, input] }, options);

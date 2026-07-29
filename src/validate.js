@@ -4990,7 +4990,7 @@ function validateCostAttributionEntry(errors, entry, path, knownSlices, runId) {
   for (const field of COST_ATTRIBUTION_ENTRY_OPTIONAL_STRINGS) optionalString(errors, entry, field, `${path}.${field}`);
   optionalCostCurrency(errors, entry, "cost_currency", `${path}.cost_currency`);
   validateCostAttributionNumbers(errors, entry, path);
-  if (hasCostNumber(entry) && !stringValue(entry.cost_currency)) errors.push({ path: `${path}.cost_currency`, message: "is required when cost fields are present" });
+  if (hasCostNumber(entry) && !stringValue(entry.cost_currency) && !declaresMissingCurrency(entry)) errors.push({ path: `${path}.cost_currency`, message: "is required when cost fields are present unless reported in missing" });
   if (runId && stringValue(entry.run_id) && entry.run_id !== runId) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
   validateCostAttributionAvailability(errors, entry, path);
   if ((entry.status === "partial" || entry.status === "unavailable") && Array.isArray(entry.missing) && !hasNonEmptyStringItem(entry.missing)) errors.push({ path: `${path}.missing`, message: `is required when status is ${entry.status}` });
@@ -5046,7 +5046,7 @@ function validateCostAttributionRollup(errors, rollup, path, options = {}) {
   optionalCostCurrency(errors, rollup, "cost_currency", `${path}.cost_currency`);
   validateCostAttributionNumbers(errors, rollup, path);
   if (rollup.mixed_currency === true && rollup.cost_total !== undefined && rollup.cost_total !== null) errors.push({ path: `${path}.cost_total`, message: "must be omitted when mixed_currency is true" });
-  if (hasCostNumber(rollup) && rollup.mixed_currency !== true && rollup.cost_total !== undefined && !stringValue(rollup.cost_currency)) errors.push({ path: `${path}.cost_currency`, message: "is required when cost_total is present" });
+  if (hasCostNumber(rollup) && rollup.mixed_currency !== true && rollup.cost_total !== undefined && !stringValue(rollup.cost_currency) && !declaresMissingCurrency(rollup)) errors.push({ path: `${path}.cost_currency`, message: "is required when cost_total is present unless reported in missing" });
 }
 
 function validateCostAttributionNumbers(errors, value, path) {
@@ -5065,6 +5065,18 @@ function knownRunSliceIds(run) {
 
 function hasCostNumber(value) {
   return COST_NUMERIC_FIELDS.some((field) => value[field] !== undefined && value[field] !== null);
+}
+
+// A provider can report a cost figure without naming its currency - OpenCode's
+// per-message `cost` is exactly that. Both producers already model this: the entry
+// normalizer and the rollup add "cost_currency" to `missing` and downgrade the
+// status. Rejecting the result here would have made the only honest
+// representation of provider-supplied cost unwritable, forcing either a guessed
+// currency or a discarded figure, and SPEC section 8 forbids both ("Missing stays
+// missing and is surfaced through `missing`"). `available` still requires a
+// currency, because `available` forbids a non-empty `missing` outright.
+function declaresMissingCurrency(value) {
+  return Array.isArray(value?.missing) && value.missing.includes("cost_currency");
 }
 
 function hasUsageNumber(value) {

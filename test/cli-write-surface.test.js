@@ -435,6 +435,56 @@ describe("cli write surface", () => {
     }
   });
 
+  it("records an opencode usage payload and rejects a malformed one without mutating run.json", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-cost-opencode-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      initGitRepo(repo);
+      seedRun(runDir);
+      const before = readFileSync(join(runDir, "run.json"), "utf8");
+
+      // Malformed JSON and an out-of-contract number must both fail before the write.
+      for (const [payload, pattern] of [
+        ["{not json", /--opencode-usage requires valid JSON/u],
+        [JSON.stringify({ id: "m", tokens: { input: -1 } }), /input_tokens must be a finite non-negative number/u],
+      ]) {
+        const failed = runFactoryFail(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", "--opencode-usage", payload, "--json"]);
+        assert.match(failed.stderr, pattern);
+        assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
+      }
+
+      // The shape OpenCode actually emits, verbatim, including a currency-less cost.
+      const usage = JSON.stringify({
+        id: "msg_01", providerID: "anthropic", modelID: "claude-opus-4", mode: "build", cost: 0.0123,
+        tokens: { input: 1000, output: 200, reasoning: 50, cache: { read: 900, write: 100 } },
+      });
+      const recorded = JSON.parse(runFactory(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", "--opencode-usage", usage, "--json"]).stdout);
+
+      assert.equal(recorded.entry.provider, "anthropic");
+      assert.equal(recorded.entry.model, "claude-opus-4");
+      assert.equal(recorded.entry.request_id, "msg_01");
+      assert.equal(recorded.entry.source, "opencode");
+      assert.equal(recorded.entry.input_tokens, 1000);
+      assert.equal(recorded.entry.cache_read_input_tokens, 900);
+      assert.equal(recorded.entry.cache_creation_input_tokens, 100);
+      assert.equal(recorded.entry.cost_total, 0.0123);
+      // No currency in the payload, so the gap is reported rather than guessed.
+      assert.equal(recorded.entry.cost_currency, undefined);
+      assert.equal(recorded.entry.status, "partial");
+      assert.deepEqual(recorded.entry.missing, ["cost_currency"]);
+      validateFactory(repo);
+
+      // An explicit flag corrects one field without restating the payload.
+      const corrected = JSON.parse(runFactory(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", "--opencode-usage", usage, "--currency", "USD", "--json"]).stdout);
+      assert.equal(corrected.entry.cost_currency, "USD");
+      assert.equal(corrected.entry.cost_total, 0.0123);
+      assert.equal(corrected.entry.status, "available");
+      validateFactory(repo);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("resolves state commands from a managed git worktree cwd without --repo", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-worktree-cwd-"));
     const runDir = join(repo, ".opencode", "factory", RUN_ID);
