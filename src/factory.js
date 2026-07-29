@@ -4625,7 +4625,7 @@ function acquireContinuationTargetReservation(repo, continuation) {
   const claims = observePermanentContinuationClaims(repo, runId);
   if (claims.length === 1) {
     const expected = carryForwardRegistration(continuation);
-    if (claims[0].ref !== expected.claimRef || claims[0].oid !== expected.claimOid || claims[0].bytes !== expected.claimBytes.toString("utf8")) {
+    if (claims[0].ref !== expected.claimRef || claims[0].oid !== expected.claimOid) {
       throw new Error(`continuation target '${runId}' has a foreign schema-v2 claim`);
     }
   }
@@ -5031,7 +5031,7 @@ function sortCanonicalJson(value) {
 
 function inspectCarryForwardRefs(repo, expected) {
   const targetClaims = observePermanentContinuationClaims(repo, expected.claim?.child_run_id || expected.childRunId || claimTargetRunId(expected.claimBytes));
-  if (targetClaims.length === 1 && (targetClaims[0].ref !== expected.claimRef || targetClaims[0].oid !== expected.claimOid || targetClaims[0].bytes !== expected.claimBytes.toString("utf8"))) {
+  if (targetClaims.length === 1 && (targetClaims[0].ref !== expected.claimRef || targetClaims[0].oid !== expected.claimOid)) {
     throw new Error("continuation claim conflict: another permanent claim already targets the child run");
   }
   const claimOid = readExactRefOid(repo, expected.claimRef);
