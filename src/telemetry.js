@@ -34,10 +34,24 @@ const B6_SPAN_NAMES = new Set([
   "feature_factory.factory.start",
   "feature_factory.factory.continue",
   "feature_factory.factory.resume",
+  // Operator and control-plane spans. The taxonomy in SPEC section 14 writes
+  // these as `factory.gate <gate>`, but a dynamic span name cannot pass this
+  // allowlist, so the subject travels as an identifier attribute instead and the
+  // name stays fixed.
+  "feature_factory.factory.validate",
+  "feature_factory.factory.cleanup",
+  "feature_factory.factory.gate",
+  "feature_factory.factory.heartbeat",
 ]);
 const B6_IDENTIFIER_ATTRIBUTES = new Set([
   "feature_factory.run_id",
   "feature_factory.slice_id",
+  // Plan-defined and operator-supplied subjects. Identifier handling is the right
+  // home for them: it pattern-validates, bounds the byte length, and pseudonymizes
+  // anything sensitive or high-entropy, which a fixed enum could not do for names
+  // this contract does not choose.
+  "feature_factory.gate",
+  "feature_factory.heartbeat_phase",
   "feature_factory.session_id",
   "feature_factory.parent_session_id",
   "feature_factory.call_id",
@@ -63,6 +77,18 @@ const B6_ENUM_ATTRIBUTES = new Map([
   ["feature_factory.continuation_kind", new Set(["full-plan-carry-forward"])],
   ["gen_ai.agent.name", new Set(["feature-factory", "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer", "work-decomposer", "backend-builder", "frontend-builder", "test-verifier", "work-reviewer", "implementation-validator", "security-reviewer"])],
   ["gen_ai.operation.name", new Set(["invoke_agent", "execute_tool"])],
+  ["feature_factory.gate_decision", new Set(["pending", "approved", "changes_requested", "stopped"])],
+  ["feature_factory.heartbeat_operation", new Set(["start", "stop", "tick", "status"])],
+]);
+// Counts are bounded non-negative integers rather than enums. They are the only
+// numeric payload these spans carry, and they answer the questions the taxonomy
+// asks of `factory.validate` and `factory.cleanup` ("validation ok/error counts",
+// "removed/skipped counts") without naming a single run, path, or artifact.
+const B6_COUNT_ATTRIBUTES = new Set([
+  "feature_factory.run_count",
+  "feature_factory.error_count",
+  "feature_factory.removed_count",
+  "feature_factory.skipped_count",
 ]);
 // @opentelemetry/api SpanStatusCode.ERROR is the stable enum value 2. Inlined so
 // this module never needs a static import of an optional runtime dependency.
@@ -406,6 +432,10 @@ export function b6Attributes(input = {}) {
         continue;
       }
       if (key === "feature_factory.attempt" && Number.isSafeInteger(value) && value >= 1 && value <= 3) {
+        output[key] = value;
+        continue;
+      }
+      if (B6_COUNT_ATTRIBUTES.has(key) && Number.isSafeInteger(value) && value >= 0) {
         output[key] = value;
       }
     }

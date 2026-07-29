@@ -630,3 +630,46 @@ function fakeOtel({ failAt = null } = {}) {
     },
   };
 }
+
+describe("operator span attribute gating", () => {
+  it("admits the operator span families and drops everything else", () => {
+    assert.deepEqual(b6Attributes({
+      "feature_factory.gate": "gate-3",
+      "feature_factory.gate_decision": "changes_requested",
+      "feature_factory.heartbeat_operation": "tick",
+      "feature_factory.heartbeat_phase": "builders",
+      "feature_factory.run_count": 4,
+      "feature_factory.error_count": 0,
+      "feature_factory.removed_count": 2,
+      "feature_factory.skipped_count": 0,
+    }), {
+      "feature_factory.gate": "gate-3",
+      "feature_factory.gate_decision": "changes_requested",
+      "feature_factory.heartbeat_operation": "tick",
+      "feature_factory.heartbeat_phase": "builders",
+      "feature_factory.run_count": 4,
+      "feature_factory.error_count": 0,
+      "feature_factory.removed_count": 2,
+      "feature_factory.skipped_count": 0,
+    });
+  });
+
+  it("never admits a raw gate answer or an out-of-contract decision", () => {
+    // SPEC section 14: never attach a raw gate answer, regardless of any content
+    // capture setting. The allowlist is what enforces that, so it is asserted here
+    // rather than trusted at the call site.
+    assert.deepEqual(b6Attributes({
+      "feature_factory.gate_answer": "changes: rewrite the auth module",
+      "feature_factory.answer": "approve",
+      "feature_factory.gate_decision": "approve-with-notes",
+      "feature_factory.reason": "operator typed this",
+    }), {});
+  });
+
+  it("rejects counts that are negative, fractional, or unbounded", () => {
+    for (const value of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "3", null, undefined]) {
+      assert.deepEqual(b6Attributes({ "feature_factory.error_count": value }), {}, `count ${String(value)} must be dropped`);
+    }
+    assert.deepEqual(b6Attributes({ "feature_factory.error_count": 0 }), { "feature_factory.error_count": 0 }, "zero is a real count, not absence");
+  });
+});
