@@ -2283,7 +2283,13 @@ export function observePrHeadAncestry(repo, run, expectedHead, observedHead, opt
     if (resolved.ok) {
       const advertised = resolved.stdout.trim();
       if (advertised === observedHead) {
-        relationship = gitRunner(repo, ["merge-base", "--is-ancestor", expectedHead, advertised], gitOptions).ok ? "descendant" : "unrelated";
+        // git distinguishes the two negatives by exit status: 1 means "proven not
+        // an ancestor", anything else means the probe itself failed. Collapsing
+        // them would record an unproven relationship - harmless today because
+        // both stop on head-mismatch, but it is the same conflation this
+        // function exists to avoid.
+        const ancestry = gitRunner(repo, ["merge-base", "--is-ancestor", expectedHead, advertised], gitOptions);
+        relationship = ancestry.ok ? "descendant" : ancestry.status === 1 ? "unrelated" : "indeterminate";
       }
     }
   }
@@ -2297,12 +2303,23 @@ export function observePrHeadAncestry(repo, run, expectedHead, observedHead, opt
   return removeHeadProbeRef(repo, probeRef, gitRunner, gitOptions) ? relationship : "indeterminate";
 }
 
+// Tri-state on purpose: absent, present, or unknown. `rev-parse --verify
+// --quiet` exits 1 for a ref that is genuinely gone and something else when the
+// inspection itself failed, and only the first is evidence of a clean
+// repository. Treating an unreadable probe as "absent" would report cleanup
+// success it never established and preserve a tolerable ancestry.
+function probeRefState(repo, probeRef, gitRunner, gitOptions) {
+  const probe = gitRunner(repo, ["rev-parse", "--verify", "--quiet", probeRef], gitOptions);
+  if (probe.ok) return probe.stdout.trim() ? { state: "present", oid: probe.stdout.trim() } : { state: "unknown", oid: null };
+  return probe.status === 1 ? { state: "absent", oid: null } : { state: "unknown", oid: null };
+}
+
 function removeHeadProbeRef(repo, probeRef, gitRunner, gitOptions) {
-  const present = gitRunner(repo, ["rev-parse", "--verify", "--quiet", probeRef], gitOptions);
-  if (!present.ok || !present.stdout.trim()) return true;
-  gitRunner(repo, ["update-ref", "-d", probeRef, present.stdout.trim()], gitOptions);
-  const after = gitRunner(repo, ["rev-parse", "--verify", "--quiet", probeRef], gitOptions);
-  return !after.ok || !after.stdout.trim();
+  const before = probeRefState(repo, probeRef, gitRunner, gitOptions);
+  if (before.state === "absent") return true;
+  if (before.state === "unknown") return false;
+  gitRunner(repo, ["update-ref", "-d", probeRef, before.oid], gitOptions);
+  return probeRefState(repo, probeRef, gitRunner, gitOptions).state === "absent";
 }
 
 export async function postPrObserve(runId, opts = {}) {

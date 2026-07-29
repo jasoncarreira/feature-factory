@@ -127,12 +127,57 @@ describe("post-PR head ancestry observation", () => {
     assert.equal(f.probeRefs(), f.probeRef);
     git(f.repo, "update-ref", "-d", f.probeRef);
   });
+
+  it("withholds a proven descendant when the cleanup inspection itself fails", () => {
+    const f = fixture("inspect");
+    const advanced = advanceRemote(f, "operator-merge");
+    // Distinct from a delete that is refused: here the presence probe cannot be
+    // read at all. git exits 1 for a ref that is genuinely gone, so any other
+    // status is an unreadable repository, not an empty one, and reporting
+    // cleanup success from it would preserve a tolerable ancestry on a ref that
+    // may still exist.
+    let inspections = 0;
+    const gitRunner = (repo, args, options) => {
+      if (args[0] === "rev-parse" && args.includes("--quiet")) {
+        inspections += 1;
+        return { ok: false, status: 128, stdout: "", stderr: "fatal: not a git repository" };
+      }
+      return realRunner(repo, args, options);
+    };
+    assert.equal(observePrHeadAncestry(f.repo, f.run, f.reviewed, advanced, { gitRunner }), "indeterminate");
+    assert.ok(inspections > 0, "the presence probe must actually run");
+    // The ref is genuinely still there, which is what the withheld answer protects.
+    assert.equal(f.probeRefs(), f.probeRef);
+    git(f.repo, "update-ref", "-d", f.probeRef);
+  });
+
+  it("separates a failed ancestry probe from a proven non-ancestor", () => {
+    const f = fixture("probe-error");
+    const advanced = advanceRemote(f, "operator-merge");
+    // Exit 1 from merge-base means "proven not an ancestor"; anything else means
+    // the probe failed. Collapsing them records a relationship never established.
+    const failing = (status) => (repo, args, options) => (args[0] === "merge-base"
+      ? { ok: false, status, stdout: "", stderr: "probe failure" }
+      : realRunner(repo, args, options));
+
+    assert.equal(observePrHeadAncestry(f.repo, f.run, f.reviewed, advanced, { gitRunner: failing(1) }), "unrelated");
+    assert.equal(observePrHeadAncestry(f.repo, f.run, f.reviewed, advanced, { gitRunner: failing(128) }), "indeterminate");
+    assert.equal(f.probeRefs(), "", "either way the probe ref is cleaned up");
+  });
 });
 
+// Must carry `status`, not just `ok`: the observer distinguishes git's exit 1
+// ("proven no") from any other nonzero ("probe failed"), so a runner that drops
+// the status turns every real negative into an indeterminate.
 function realRunner(cwd, args, options = {}) {
   try {
-    return { ok: true, stdout: execFileSync("git", args, { ...options, cwd, encoding: "utf8" }), stderr: "" };
+    return { ok: true, status: 0, stdout: execFileSync("git", args, { ...options, cwd, encoding: "utf8" }), stderr: "" };
   } catch (error) {
-    return { ok: false, stdout: "", stderr: String(error?.message ?? error) };
+    return {
+      ok: false,
+      status: Number.isInteger(error?.status) ? error.status : null,
+      stdout: "",
+      stderr: String(error?.message ?? error),
+    };
   }
 }
