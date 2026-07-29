@@ -439,6 +439,130 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("runs one generic policy pass and one next-state validation", async () => {
+    const fixture = createFixture("generic-single-policy-pass");
+    let sliceReads = 0;
+    try {
+      await transitionRunJson(fixture.runDir, (draft) => {
+        const slices = draft.slices;
+        draft.updated_at = NOW;
+        Object.defineProperty(draft, "slices", {
+          configurable: true,
+          enumerable: true,
+          get() {
+            sliceReads += 1;
+            return slices;
+          },
+        });
+        return draft;
+      });
+
+      assert.equal(sliceReads, 3, "schema validation, one policy pass, and serialization each read slices once");
+      assert.equal(readJson(join(fixture.runDir, "run.json")).updated_at, NOW);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects malformed state and still rejects protected generic mutation", async () => {
+    for (const [label, mutate, expected] of [
+      ["malformed", (draft) => { draft.updated_at = "not-a-timestamp"; }, /run\.updated_at: must be an ISO timestamp/u],
+      ["protected", (draft) => { draft.slices[0].attempts = 2; }, /slices can only be changed by checked slice transitions/u],
+    ]) {
+      const fixture = createFixture(`generic-validated-policy-${label}`);
+      try {
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(transitionRunJson(fixture.runDir, mutate), expected, label);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, label);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("re-observes special dispatches at the commit boundary when dispatch/ was absent at entry", async () => {
+    const fixture = createFixture("generic-pre-replace-dispatch-race");
+    try {
+      writeJson(join(fixture.runDir, "run.json"), baseRun(fixture.runId));
+      const dispatchDir = join(fixture.runDir, "dispatch");
+      assert.equal(existsSync(dispatchDir), false, "the race requires dispatch/ to be absent when the write begins");
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      // A structurally valid claim with no closure. It has to be valid: a
+      // malformed one is rejected by claim parsing regardless of where the guard
+      // is installed, which would let this test pass against the very code it
+      // exists to catch.
+      const claimName = `${createHash("sha256").update(`${fixture.runId}\0special\0panel-remediation\0race`, "utf8").digest("hex")}.special.json`;
+      const hash = `sha256:${"a".repeat(64)}`;
+      const claim = {
+        schema_version: 1,
+        kind: "checked-special-builder-dispatch-claim",
+        run_id: fixture.runId,
+        route: "panel-remediation",
+        instance: "race",
+        agent: "backend-builder",
+        branch: `${fixture.runId}-branch`,
+        worktree: fixture.repo,
+        head: "b".repeat(40),
+        run_hash: hash,
+        context_hash: hash,
+        completion_token_hash: hash,
+        claimed_at: NOW,
+        closure_ref: `dispatch/${claimName.slice(0, -5)}.closed.json`,
+      };
+
+      // Pins the invariant, not a race fix. The condition that previously chose
+      // whether to install this callback listed `existsSync(dispatch)` last in an
+      // `||` chain behind `amendmentAuthority`, which `transitionRunJsonLocked`
+      // assigns unconditionally from a function that never returns falsy - so the
+      // callback was always installed and the directory check was dead. Making it
+      // unconditional removes a condition that reads as though it can disable a
+      // commit boundary but cannot. This test therefore passes against both
+      // shapes by construction; it exists so that if someone later makes the
+      // callback conditional for real, the boundary is still asserted.
+      await assert.rejects(transitionRunJson(fixture.runDir, (draft) => {
+        draft.updated_at = NOW;
+      }, {
+        atomicWriteHooks: {
+          beforeCommit() {
+            mkdirSync(dispatchDir, { recursive: true });
+            writeJson(join(dispatchDir, claimName), claim);
+          },
+        },
+      }), (error) => /is not exactly closed|remains active/u.test(`${error?.message} ${error?.cause?.message ?? ""}`));
+
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, "the original run.json bytes must survive the rejection");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rechecks generic V2 authority immediately before run.json replacement", async () => {
+    const fixture = createFixture("generic-pre-replace-v2-race");
+    try {
+      const branch = `${fixture.runId}-branch`;
+      initGitRepo(fixture.repo, [branch]);
+      runGit(fixture.repo, ["checkout", branch]);
+      const run = makeSyntheticV2Run(fixture.runDir, { ...baseRun(fixture.runId), branch, worktree: fixture.repo }, { remaining: ["slice"] });
+      writeJson(join(fixture.runDir, "run.json"), run);
+      const parentPath = join(fixture.repo, run.continuation.parent.run_ref);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(transitionRunJson(fixture.runDir, (draft) => {
+        draft.updated_at = NOW;
+      }, {
+        atomicWriteHooks: {
+          beforeCommit() {
+            writeFileSync(parentPath, `${readFileSync(parentPath, "utf8")}\n`);
+          },
+        },
+      }), (error) => error?.message === "protected file commit failed" && /parent run\.json hash is stale/u.test(error.cause?.message));
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("allows changes_requested gate decisions through transitionGateDecision", async () => {
     const fixture = createFixture("changes-gate");
     try {
