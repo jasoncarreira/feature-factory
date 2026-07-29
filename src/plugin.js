@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeFeatureCommandPayload, safePayloadValue } from "./feature-command-payload.js";
