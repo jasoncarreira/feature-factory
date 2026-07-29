@@ -657,6 +657,94 @@ function expectedOwnershipPayload(runId, driverMode, payloadKind) {
   return expected;
 }
 
+describe("gate decision telemetry", () => {
+  // Regression: the gate span derived its bounded enum by reading `decision` as a
+  // string, but every call site passes a structured record, so the attribute was
+  // always dropped. Asserted at the call site because the allowlist-only telemetry
+  // tests cannot see this wiring.
+  function captureSpans() {
+    const spans = [];
+    const api = { context: { active: () => ({}) }, trace: { getTracer: () => ({
+      startActiveSpan(name, options, context, callback) {
+        const span = { name, attributes: { ...(options?.attributes || {}) }, statuses: [], ended: false,
+          setAttribute(key, value) { this.attributes[key] = value; }, addEvent() {}, recordException() {},
+          setStatus(value) { this.statuses.push(value); }, end() { this.ended = true; } };
+        spans.push(span);
+        return callback(span);
+      },
+    }) } };
+    return { spans, telemetry: { enabled: true, importer: async () => api } };
+  }
+
+  async function settle() {
+    for (let index = 0; index < 4; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  function assertGateSpan(spans, decision) {
+    const span = spans.find((item) => item.name === "feature_factory.factory.gate");
+    assert.ok(span, `expected a gate span, saw ${JSON.stringify(spans.map((item) => item.name))}`);
+    assert.equal(span.attributes["feature_factory.gate"], "story");
+    assert.equal(span.attributes["feature_factory.gate_decision"], decision.status);
+    // The answer text and artifact refs are never exported, whatever the decision was.
+    assert.equal(Object.values(span.attributes).includes(decision.answer), false);
+    assert.ok(!Object.keys(span.attributes).some((key) => /answer|artifact|question/u.test(key)));
+    return span;
+  }
+
+  it("emits an approved gate decision status on the gate span", async () => {
+    const fixture = await createApprovedHandoffFixture("gate-span-ok");
+    try {
+      const { spans, telemetry } = captureSpans();
+      const result = await transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, { cwd: fixture.repo, telemetry });
+      await settle();
+
+      assert.equal(result.gate_accepted, true, "the wrapped operation must still behave");
+      assertGateSpan(spans, fixture.decision);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("emits a changes_requested gate decision status on the gate span", async () => {
+    // A distinct fixture: the approved-handoff fixture leaves the gate already
+    // decided, and a further decision requires a pending gate.
+    const fixture = await createPendingGateFixture("gate-span-changes");
+    try {
+      const { spans, telemetry } = captureSpans();
+      const result = await transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, {
+        cwd: fixture.repo,
+        boundaryToken: fixture.boundaryToken,
+        telemetry,
+      });
+      await settle();
+
+      assert.equal(result.gate_accepted, false, "a non-approved decision must not accept the gate");
+      assert.equal(result.handoff, null);
+      assertGateSpan(spans, fixture.decision);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+});
+
+async function createPendingGateFixture(runId) {
+  const fixture = createFixture(runId);
+  mkdirSync(join(fixture.runDir, "artifacts"), { recursive: true });
+  mkdirSync(join(fixture.runDir, "gates"), { recursive: true });
+  writeFileSync(join(fixture.runDir, "artifacts", "story.md"), "story\n", "utf8");
+  writeFileSync(join(fixture.runDir, "gates", "story.question.md"), "approve?\n", "utf8");
+  const run = readJson(join(fixture.runDir, "run.json"));
+  run.mode = "interactive";
+  writeJson(join(fixture.runDir, "run.json"), run);
+  await transitionGateDecision(fixture.runDir, "story", { status: "pending", artifact: "artifacts/story.md", question_ref: "gates/story.question.md" });
+  const boundary = await transitionSteeringBoundaryOpened(fixture.runDir, "gate");
+  return {
+    ...fixture,
+    boundaryToken: boundary.boundary.token,
+    decision: { status: "changes_requested", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer: "changes: tighten the scope" },
+  };
+}
+
 async function createApprovedHandoffFixture(runId) {
   const fixture = createFixture(runId);
   mkdirSync(join(fixture.runDir, "artifacts"), { recursive: true });

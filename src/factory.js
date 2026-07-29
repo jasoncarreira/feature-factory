@@ -2045,10 +2045,14 @@ async function reconcileCheckpointLaunchAfterOwnership(repo, runDir, run, opts) 
 
 export async function transitionGateDecisionAndHandoff(runIdOrDir, gateName, decision, opts = {}) {
   // The raw gate answer is never attached, regardless of any content-capture
-  // setting: only the gate subject and the bounded decision enum travel.
+  // setting: only the gate subject and the bounded decision status travel. The
+  // decision is a structured record (`{ status, artifact, question_ref, answer... }`)
+  // at every call site, so the enum comes from `decision.status`; reading the
+  // parameter as a string produced `undefined` and silently dropped the attribute.
+  // The allowlist still discards any status outside the bounded enum.
   return traceFactoryOperation("gate", {
     "feature_factory.gate": typeof gateName === "string" ? gateName : undefined,
-    "feature_factory.gate_decision": typeof decision === "string" ? decision : undefined,
+    "feature_factory.gate_decision": decision?.status,
   }, opts, () => transitionGateDecisionAndHandoffUninstrumented(runIdOrDir, gateName, decision, opts), () => ({
     attributes: { "feature_factory.status": "completed" },
   }));
