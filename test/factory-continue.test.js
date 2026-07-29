@@ -1820,6 +1820,88 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
     } finally { cleanup(fixture.repo); }
   });
 
+  it("reads factory continuation blobs structurally without reconstructing their JSON bytes", async () => {
+    const fixture = createV2Fixture("carry-structural-git-blobs", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-structural-git-blobs-next";
+    try {
+      const published = await continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      });
+      const continuation = published.payload.continuation;
+      const claimRef = expectedClaim(continuation).claimRef;
+      const reservationRef = continuationReservationRef(childRunId);
+      const claim = JSON.parse(gitStdoutPreserve(fixture.repo, ["cat-file", "blob", claimRef]));
+      const reservation = JSON.parse(gitStdoutPreserve(fixture.repo, ["cat-file", "blob", reservationRef]));
+      const canonicalClaimOid = refOid(fixture.repo, claimRef);
+      const canonicalReservationOid = refOid(fixture.repo, reservationRef);
+      const structuralClaimOid = writeBlob(fixture.repo, `${JSON.stringify(claim, null, 2)}\n`);
+      const structuralReservationOid = writeBlob(fixture.repo, `${JSON.stringify(reservation, null, 2)}\n`);
+      updateRef(fixture.repo, claimRef, structuralClaimOid);
+      updateRef(fixture.repo, reservationRef, structuralReservationOid);
+      assert.notEqual(structuralClaimOid, canonicalClaimOid);
+      assert.notEqual(structuralReservationOid, canonicalReservationOid);
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const replay = await resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true });
+        assert.equal(replay.status, "dry-run");
+        assert.equal(refOid(fixture.repo, claimRef), structuralClaimOid);
+        assert.equal(refOid(fixture.repo, reservationRef), structuralReservationOid);
+      }
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("rejects malformed, cross-bound, conflicting, and drifted continuation Git records", async () => {
+    const fixture = createV2Fixture("carry-structural-git-rejections", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-structural-git-rejections-next";
+    try {
+      const published = await continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      });
+      const continuation = published.payload.continuation;
+      const claimRef = expectedClaim(continuation).claimRef;
+      const reservationRef = continuationReservationRef(childRunId);
+      const claim = JSON.parse(gitStdoutPreserve(fixture.repo, ["cat-file", "blob", claimRef]));
+      const reservation = JSON.parse(gitStdoutPreserve(fixture.repo, ["cat-file", "blob", reservationRef]));
+      const claimOid = refOid(fixture.repo, claimRef);
+      const reservationOid = refOid(fixture.repo, reservationRef);
+      const rejectResume = async (label, ref, oid, pattern) => {
+        updateRef(fixture.repo, ref, oid);
+        await assert.rejects(resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }), pattern, label);
+        updateRef(fixture.repo, claimRef, claimOid);
+        updateRef(fixture.repo, reservationRef, reservationOid);
+      };
+
+      await rejectResume("closed reservation shape", reservationRef, writeBlob(fixture.repo, canonicalJson({ ...reservation, extra: true })), /reservation is malformed/u);
+      await rejectResume("reservation target binding", reservationRef, writeBlob(fixture.repo, canonicalJson({ ...reservation, child_run_id: "other-child" })), /reservation is malformed/u);
+      await rejectResume("reservation authority hash", reservationRef, writeBlob(fixture.repo, canonicalJson({ ...reservation, authority_hash: `sha256:${"f".repeat(64)}` })), /route-mismatch|stale|cross-schema/u);
+      await rejectResume("reservation object type", reservationRef, continuation.target.base_commit, /reservation is malformed/u);
+      await rejectResume("closed claim shape", claimRef, writeBlob(fixture.repo, canonicalJson({ ...claim, extra: true })), /malformed permanent claim/u);
+      await rejectResume("claim object type", claimRef, continuation.target.base_commit, /malformed permanent claim/u);
+      await rejectResume("claim parent hash binding", claimRef, writeBlob(fixture.repo, canonicalJson({ ...claim, parent_identity: { ...claim.parent_identity, parent_run_hash: `sha256:${"f".repeat(64)}` } })), /malformed permanent claim|identity mismatch/u);
+      await rejectResume("claim target binding", claimRef, writeBlob(fixture.repo, canonicalJson({ ...claim, child_run_id: "other-child" })), /permanent claim is missing/u);
+
+      const conflicting = structuredClone(claim);
+      conflicting.parent_identity.parent_run_hash = `sha256:${"e".repeat(64)}`;
+      const conflictingRef = `refs/opencode/continuations/${canonicalHash(conflicting.parent_identity).slice("sha256:".length)}`;
+      updateRef(fixture.repo, conflictingRef, writeBlob(fixture.repo, canonicalJson(conflicting)));
+      await assert.rejects(resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }), /multiple permanent continuation claims/u);
+      runGit(fixture.repo, ["update-ref", "-d", conflictingRef]);
+
+      const drifted = { ...claim, child_branch_ref: "refs/heads/other-child" };
+      updateRef(fixture.repo, claimRef, writeBlob(fixture.repo, canonicalJson(drifted)));
+      await assert.rejects(resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }), /identity mismatch/u);
+      assert.notEqual(refOid(fixture.repo, claimRef), claimOid, "replay drift must remain visible and unmodified");
+    } finally { cleanup(fixture.repo); }
+  });
+
   it("rejects a foreign claim targeting an absent v2 child before allocation side effects", () => {
     const fixture = createV2Fixture("carry-foreign-child-claim", { accepted: ["A"], mergeOrder: ["A"] });
     const childRunId = "carry-foreign-child-claim-next";
@@ -1973,7 +2055,7 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
       const duplicate = JSON.parse(gitStdoutPreserve(fixture.repo, ["cat-file", "blob", existingOid]));
       duplicate.parent_identity.parent_run_hash = `sha256:${"f".repeat(64)}`;
       const duplicateOid = writeBlob(fixture.repo, canonicalJson(duplicate));
-      updateRef(fixture.repo, `refs/opencode/continuations/${"f".repeat(64)}`, duplicateOid);
+      updateRef(fixture.repo, `refs/opencode/continuations/${canonicalHash(duplicate.parent_identity).slice("sha256:".length)}`, duplicateOid);
 
       await assert.rejects(
         resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }),
