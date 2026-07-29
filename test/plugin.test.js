@@ -1520,7 +1520,7 @@ describe("B6.2 factory-owned plugin spans", () => {
     assert.equal(spans.every((span) => span.attributes["feature_factory.verdict"] === undefined), true);
   });
 
-  it("promotes an exact durable review-dispatch prompt without launch claim authority", async () => {
+  it("does not use legacy provenance as review telemetry authority", async () => {
     const fixture = createBuilderDispatchFixture();
     const fake = fakeB6Otel();
     const prompt = "review the exact checked square slice";
@@ -1552,12 +1552,7 @@ describe("B6.2 factory-owned plugin spans", () => {
         metadata: {},
       });
       await flushB6Telemetry();
-      const span = fake.spans.find((candidate) => candidate.name === "feature_factory.task");
-      assert.equal(span.attributes["feature_factory.run_id"], "run");
-      assert.equal(span.attributes["feature_factory.slice_id"], "slice");
-      assert.equal(span.attributes["feature_factory.attempt"], 1);
-      assert.equal(span.attributes["feature_factory.verdict"], "APPROVE");
-      assert.equal(span.attributes["feature_factory.convergence"], "converging");
+      assert.equal(fake.spans.some((candidate) => candidate.name === "feature_factory.task"), false);
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
     }

@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { isCarryForwardRequiredTerminal, isSettledBlockedAmendment, assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertOrdinaryResumeRunById, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, parseSlicesPlanBytes, pendingProtectedGate, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
-import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
+import { collectRunDebugSnapshot } from "./env-snapshot.js";
 import { FAIL_CLOSED_DIAGNOSTIC_CONDITIONS, diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { createTwoRefsAtomicallyNoReplace, git, repoRoot } from "./git.js";
 import { checkWorktreeIdentity, createOrRecoverWorktree, deriveExpectedWorktreePath, parseWorktreeListPorcelain } from "./worktrees.js";
@@ -3497,52 +3497,6 @@ export async function persistFactoryRunResumeEnv(runId, opts = {}) {
   return persistFactoryRunEnv(runId, "resume", opts);
 }
 
-export async function recordReviewDispatchProvenance(runId, input, opts = {}) {
-  const runDir = resolveRunDir(runId, opts);
-  const agent = String(input?.agent || "").trim();
-  const subject = String(input?.subject || "").trim();
-  const attempt = Number(input?.attempt);
-  const promptHash = String(input?.promptHash || "").trim();
-  const promptBytes = Number(input?.promptBytes);
-  if (!new Set(["work-reviewer", "implementation-validator", "security-reviewer"]).has(agent)) throw new Error("review provenance requires a known review agent");
-  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(subject) || subject.includes("..")) throw new Error("review provenance requires a bounded safe --subject");
-  if (!Number.isInteger(attempt) || attempt < 1) throw new Error("review provenance requires a positive --attempts value");
-  if (!/^sha256:[a-f0-9]{64}$/u.test(promptHash)) throw new Error("review provenance requires --hash sha256:<64-lowercase-hex>");
-  if (!Number.isInteger(promptBytes) || promptBytes < 0) throw new Error("review provenance requires non-negative --prompt-bytes");
-  return withRunJsonLock(runDir, async () => {
-    const runPath = join(runDir, "run.json");
-    const current = readRunFile(runPath);
-    assertRunJsonWriterAllowed(current, "provenance review-dispatch");
-    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, opts);
-    const event = await collectEffectiveProvenance({
-      repo: factoryRepoFromRunDir(runDir),
-      gitCwd: provenanceGitCwd(factoryRepoFromRunDir(runDir), current.worktree),
-      pluginOptions: opts.pluginOptions,
-      event: "review-dispatch",
-      agent,
-      subject,
-      attempt,
-      promptHash,
-      promptBytes,
-      now: opts.now,
-    });
-    const existing = current.provenance && typeof current.provenance === "object" ? current.provenance : {};
-    const reviewDispatches = Array.isArray(existing.review_dispatches) ? existing.review_dispatches : [];
-    const next = validateRun({
-      ...current,
-      provenance: {
-        schema_version: 1,
-        created: existing.created || null,
-        last_resumed: existing.last_resumed || null,
-        resume_count: nonNegativeInteger(existing.resume_count),
-        review_dispatches: [...reviewDispatches, event],
-      },
-    });
-    writeSemanticRunJsonAtomic(runDir, runPath, next, opts, v2Authority);
-    return event;
-  }, opts);
-}
-
 export function latestRunId(opts = {}) {
   const runs = listRuns(opts);
   return runs[0]?.run_id || null;
@@ -4703,7 +4657,7 @@ function acquireContinuationTargetReservation(repo, continuation) {
   const claims = observePermanentContinuationClaims(repo, runId);
   if (claims.length === 1) {
     const expected = carryForwardRegistration(continuation);
-    if (claims[0].ref !== expected.claimRef || claims[0].oid !== expected.claimOid || claims[0].bytes !== expected.claimBytes.toString("utf8")) {
+    if (claims[0].ref !== expected.claimRef || claims[0].oid !== expected.claimOid) {
       throw new Error(`continuation target '${runId}' has a foreign schema-v2 claim`);
     }
   }
@@ -5109,7 +5063,7 @@ function sortCanonicalJson(value) {
 
 function inspectCarryForwardRefs(repo, expected) {
   const targetClaims = observePermanentContinuationClaims(repo, expected.claim?.child_run_id || expected.childRunId || claimTargetRunId(expected.claimBytes));
-  if (targetClaims.length === 1 && (targetClaims[0].ref !== expected.claimRef || targetClaims[0].oid !== expected.claimOid || targetClaims[0].bytes !== expected.claimBytes.toString("utf8"))) {
+  if (targetClaims.length === 1 && (targetClaims[0].ref !== expected.claimRef || targetClaims[0].oid !== expected.claimOid)) {
     throw new Error("continuation claim conflict: another permanent claim already targets the child run");
   }
   const claimOid = readExactRefOid(repo, expected.claimRef);
@@ -7685,17 +7639,9 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
     assertRunJsonWriterAllowed(current, `env ${eventKind}`, { allowUncheckpointed: eventKind === "resume" });
     if (eventKind === "resume") assertResumeMutationAllowed(runDir, current, opts);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, opts);
-    const provenance = await collectEffectiveProvenance({
-      repo: factoryRepoFromRunDir(runDir),
-      gitCwd: provenanceGitCwd(factoryRepoFromRunDir(runDir), current.worktree),
-      pluginOptions: opts.pluginOptions,
-      event: eventKind === "resume" ? "resumed" : "created",
-      now: opts.now,
-    });
     const next = validateRun({
       ...current,
       debug_snapshot: nextDebugSnapshot(current.debug_snapshot, snapshot, eventKind),
-      provenance: nextProvenance(current.provenance, provenance, eventKind),
     });
     if (eventKind === "resume") {
       await opts.resumeEnvHooks?.beforeWrite?.({ runDir, run: current });
@@ -7704,31 +7650,6 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
     writeSemanticRunJsonAtomic(runDir, runPath, next, opts, v2Authority);
     return next.debug_snapshot;
   }, opts);
-}
-
-function nextProvenance(current, event, eventKind) {
-  const existing = current && typeof current === "object" && !Array.isArray(current) ? current : {};
-  if (eventKind === "resume") {
-    return {
-      schema_version: 1,
-      created: existing.created || null,
-      last_resumed: event,
-      resume_count: nonNegativeInteger(existing.resume_count) + 1,
-      review_dispatches: Array.isArray(existing.review_dispatches) ? existing.review_dispatches : [],
-    };
-  }
-  return {
-    schema_version: 1,
-    created: existing.created || event,
-    last_resumed: existing.last_resumed || null,
-    resume_count: nonNegativeInteger(existing.resume_count),
-    review_dispatches: Array.isArray(existing.review_dispatches) ? existing.review_dispatches : [],
-  };
-}
-
-function provenanceGitCwd(repo, worktree) {
-  if (!stringValue(worktree)) return repo;
-  return isAbsolute(worktree) ? worktree : resolve(repo, worktree);
 }
 
 function nextDebugSnapshot(current, snapshot, eventKind) {

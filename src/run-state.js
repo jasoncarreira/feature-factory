@@ -2414,8 +2414,7 @@ export function observeContinuationTargetReservation(repoInput, runId) {
   if (!isRecord(reservation) || Object.keys(reservation).length !== 6 || reservation.schema_version !== 1
     || reservation.kind !== "continuation-target-reservation" || reservation.child_run_id !== runId
     || reservation.route_schema !== 2 || !/^sha256:[a-f0-9]{64}$/u.test(String(reservation.authority_hash || ""))
-    || !stringValue(reservation.created_at) || !Number.isFinite(Date.parse(reservation.created_at))
-    || !Buffer.from(content.stdout).equals(canonicalJsonBytes(reservation))) {
+    || !stringValue(reservation.created_at) || !Number.isFinite(Date.parse(reservation.created_at))) {
     throw new Error("continuation target reservation is malformed");
   }
   return { ref, oid, ...reservation };
@@ -2454,16 +2453,32 @@ export function observePermanentContinuationClaims(repoInput, runId) {
       throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
     }
     const checkpointBound = Object.hasOwn(claim, "checkpoint_source_hash");
-    if (!isRecord(claim) || claim.schema_version !== 2 || claim.kind !== "blocked-run-continuation-claim"
+    const claimKeys = new Set(["schema_version", "kind", "parent_identity", "child_run_id", "child_branch_ref", "start_commit",
+      ...(checkpointBound ? ["checkpoint_source_hash", "configuration_hash"] : [])]);
+    const parentKeys = new Set(["schema_version", "kind", "parent_run_id", "parent_run_ref", "parent_run_hash", "parent_branch_ref",
+      "target_base_ref", "target_base_commit", "plan_ref", "plan_hash", "start_commit"]);
+    if (!isRecord(claim) || !sameStringSet(new Set(Object.keys(claim)), claimKeys)
+      || claim.schema_version !== 2 || claim.kind !== "blocked-run-continuation-claim"
       || !isRecord(claim.parent_identity) || !stringValue(claim.child_run_id) || !stringValue(claim.child_branch_ref)
-      || !/^[0-9a-f]{40}$/u.test(String(claim.start_commit || "")) || !content.stdout || !Buffer.from(content.stdout).equals(canonicalJsonBytes(claim))) {
+      || !sameStringSet(new Set(Object.keys(claim.parent_identity)), parentKeys)
+      || claim.parent_identity.schema_version !== 2 || claim.parent_identity.kind !== "blocked-run-continuation-parent"
+      || !stringValue(claim.parent_identity.parent_run_id) || !stringValue(claim.parent_identity.parent_run_ref)
+      || !/^sha256:[a-f0-9]{64}$/u.test(String(claim.parent_identity.parent_run_hash || ""))
+      || !/^refs\/heads\/.+/u.test(claim.parent_identity.parent_branch_ref || "")
+      || !/^refs\/.+/u.test(claim.parent_identity.target_base_ref || "")
+      || !/^[0-9a-f]{40}$/u.test(String(claim.parent_identity.target_base_commit || ""))
+      || !stringValue(claim.parent_identity.plan_ref) || !/^sha256:[a-f0-9]{64}$/u.test(String(claim.parent_identity.plan_hash || ""))
+      || !/^[0-9a-f]{40}$/u.test(String(claim.parent_identity.start_commit || ""))
+      || !/^refs\/heads\/.+/u.test(claim.child_branch_ref)
+      || !/^[0-9a-f]{40}$/u.test(String(claim.start_commit || "")) || claim.start_commit !== claim.parent_identity.start_commit
+      || ref !== `refs/opencode/continuations/${hashValue(claim.parent_identity).slice("sha256:".length)}`) {
       throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
     }
     if (checkpointBound !== Object.hasOwn(claim, "configuration_hash")
       || checkpointBound && (!/^sha256:[a-f0-9]{64}$/u.test(claim.checkpoint_source_hash) || !/^sha256:[a-f0-9]{64}$/u.test(claim.configuration_hash))) {
       throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
     }
-    if (claim.child_run_id === runId) matches.push({ ref, oid, claim, bytes: content.stdout });
+    if (claim.child_run_id === runId) matches.push({ ref, oid, claim });
   }
   if (matches.length > 1) throw new Error(`multiple permanent continuation claims target run '${runId}'`);
   return matches;
@@ -2645,13 +2660,16 @@ function assertPublishedCarryForwardClaim(repo, continuation) {
     child_branch_ref: `refs/heads/${continuation.target.branch}`, start_commit: continuation.carry_forward.start_commit,
     ...(Object.hasOwn(continuation, "checkpoint_source_hash") ? { checkpoint_source_hash: continuation.checkpoint_source_hash, configuration_hash: continuation.configuration_hash } : {}),
   };
-  const parentBytes = canonicalJsonBytes(parentIdentity);
-  const claimBytes = canonicalJsonBytes(claim);
-  const claimRef = `refs/opencode/continuations/${createHash("sha256").update(parentBytes).digest("hex")}`;
+  const claimRef = `refs/opencode/continuations/${hashValue(parentIdentity).slice("sha256:".length)}`;
   const claims = observePermanentContinuationClaims(repo, continuation.target.run_id);
   if (claims.length !== 1) throw new Error("published carry-forward permanent claim is missing");
   const [observed] = claims;
-  if (observed.ref !== claimRef || observed.bytes !== claimBytes.toString("utf8")) throw new Error("published carry-forward permanent claim bytes mismatch");
+  if (observed.ref !== claimRef || observed.claim.child_run_id !== claim.child_run_id
+    || observed.claim.child_branch_ref !== claim.child_branch_ref || observed.claim.start_commit !== claim.start_commit
+    || observed.claim.checkpoint_source_hash !== claim.checkpoint_source_hash
+    || observed.claim.configuration_hash !== claim.configuration_hash) {
+    throw new Error("published carry-forward permanent claim identity mismatch");
+  }
   const reservation = observeContinuationTargetReservation(repo, continuation.target.run_id);
   if (!reservation || reservation.route_schema !== 2 || reservation.created_at !== continuation.created_at
     || reservation.authority_hash !== hashValue(continuation)) {
@@ -2669,11 +2687,6 @@ function assertCarryForwardDriverProjection(run, driver) {
     post_pr_ci: Object.fromEntries(Object.entries(cloneJson(run.post_pr.policy)).filter(([key]) => key !== "review")),
   };
   if (!sameJson(driver, expected)) throw new Error("schema-v2 payload driver does not exactly project published child configuration");
-}
-
-function canonicalJsonBytes(value) {
-  const canonical = (input) => Array.isArray(input) ? input.map(canonical) : isRecord(input) ? Object.fromEntries(Object.keys(input).sort().map((key) => [key, canonical(input[key])])) : input;
-  return Buffer.from(JSON.stringify(canonical(value)), "utf8");
 }
 
 function parentRunDir(parentFile) {
@@ -3887,50 +3900,56 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   }
   assertSpecialDispatches();
 
-  assertV2ImmutablePublicationTransition(current, nextValue);
-  assertPostPrGenericMutation(current, nextValue, hooks);
-  assertScopedAuthorityTransitions(current, nextValue, hooks);
-  assertGateDecisionTransitions(current, nextValue, hooks);
-  assertStepTransitions(current, nextValue, hooks);
-  const next = validateRun(nextValue);
-  assertRunIdentityTransition(current, next);
-  assertV2ImmutablePublicationTransition(current, next);
-  assertScopedAuthorityTransitions(current, next, hooks);
-  assertGateDecisionTransitions(current, next, hooks);
-  assertStepTransitions(current, next, hooks);
-  assertTerminalTransition(current, next, hooks);
-  assertIntegrationAmendmentTransition(current, next, hooks);
+  let next;
+  try {
+    next = validateRun(nextValue);
+  } catch (error) {
+    assertRunTransitionPolicy(current, nextValue, hooks);
+    throw error;
+  }
+  assertRunTransitionPolicy(current, next, hooks);
   const terminalizing = current.status !== next.status && TERMINAL_RUN_STATUSES.has(next.status);
   if (terminalizing) assertNoUnresolvedSliceDispatches(runDir, current);
   const v2PublicationAuthority = assertV2LocalPublishedAuthority(runDir, next, options);
   assertV2AuthorityExtends(v2PublicationAuthority, v2AdmissionAuthority);
   if (typeof hooks.beforeWrite === "function") await hooks.beforeWrite(next, current);
   const postPrPublicationAuthority = hooks.postPr === true ? observePostPrPublicationAuthority(runDir, next, options) : null;
-  const beforeReplace = hooks.beforeReplace || postPrPublicationAuthority || v2PublicationAuthority || amendmentAuthority || terminalizing || existsSync(join(runDir, "dispatch"))
-    ? async () => {
-        if (hooks.beforeReplace) await hooks.beforeReplace(next, current);
-        assertSpecialDispatches();
-        if (v2PublicationAuthority) assertV2LocalPublishedAuthority(runDir, next, options, v2PublicationAuthority);
-        if (postPrPublicationAuthority) assertPostPrPublicationAuthorityCurrent(runDir, next, options, postPrPublicationAuthority);
-        assertIntegrationAmendmentWriterAuthorityCurrent(runDir, current, amendmentAuthority, {
-          dedicated: hooks.integrationAmendment === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
-          blockedTerminal: hooks.terminal === true,
-          action: hooks.integrationAmendmentAction,
-          integrationAmendmentDownstreamMergeAuthority: options.integrationAmendmentDownstreamMergeAuthority,
-          integrationAmendmentPendingSliceMerge: options.integrationAmendmentPendingSliceMerge,
-        });
-        if (terminalizing) assertNoUnresolvedSliceDispatches(runDir, current);
-      }
-    : null;
-  const protectedOptions = {
-    ...options,
-    ...(hooks.consumeSpecialDispatch === true ? { allowPendingSpecialDispatch: true } : {}),
-    ...(hooks.integrationAmendment === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY ? { integrationAmendmentAuthority: INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY } : {}),
-    ...(hooks.integrationAmendmentAction ? { integrationAmendmentAction: hooks.integrationAmendmentAction } : {}),
-    ...(hooks.terminal === true && current.integration_amendment?.status === "blocked" ? { blockedAmendmentTerminal: true } : {}),
+  // Installed unconditionally. The condition this replaces read as though the
+  // commit boundary were optional - and worse, as though it could be skipped
+  // based on `existsSync(dispatch)`, a sample taken before the mutator ran. It
+  // could not: `amendmentAuthority` is assigned unconditionally at the top of
+  // this function from a function that never returns falsy, so every term after
+  // it, including the directory check, was unreachable and the callback was
+  // always installed. Nothing observable changes here; what goes away is a
+  // guard whose own text invited the reader to believe a write could reach the
+  // atomic rename without re-observing special dispatches.
+  const beforeReplace = async () => {
+    if (hooks.beforeReplace) await hooks.beforeReplace(next, current);
+    assertSpecialDispatches();
+    if (v2PublicationAuthority) assertV2LocalPublishedAuthority(runDir, next, options, v2PublicationAuthority);
+    if (postPrPublicationAuthority) assertPostPrPublicationAuthorityCurrent(runDir, next, options, postPrPublicationAuthority);
+    assertIntegrationAmendmentWriterAuthorityCurrent(runDir, current, amendmentAuthority, {
+      dedicated: hooks.integrationAmendment === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
+      blockedTerminal: hooks.terminal === true,
+      action: hooks.integrationAmendmentAction,
+      integrationAmendmentDownstreamMergeAuthority: options.integrationAmendmentDownstreamMergeAuthority,
+      integrationAmendmentPendingSliceMerge: options.integrationAmendmentPendingSliceMerge,
+    });
+    if (terminalizing) assertNoUnresolvedSliceDispatches(runDir, current);
   };
-  await writeProtectedRunJson(runDir, next, protectedOptions, beforeReplace);
+  await writeRunJsonAtomic(runDir, next, options, beforeReplace);
   return { updated: true, status: next.status, run: next };
+}
+
+function assertRunTransitionPolicy(current, next, hooks) {
+  assertRunIdentityTransition(current, next);
+  assertV2ImmutablePublicationTransition(current, next);
+  assertPostPrGenericMutation(current, next, hooks);
+  assertScopedAuthorityTransitions(current, next, hooks);
+  assertGateDecisionTransitions(current, next, hooks);
+  assertStepTransitions(current, next, hooks);
+  assertTerminalTransition(current, next, hooks);
+  assertIntegrationAmendmentTransition(current, next, hooks);
 }
 
 export function assertV2LocalPublishedAuthority(runDir, run, options = {}, expected = null) {
@@ -4245,10 +4264,14 @@ async function writeProtectedRunJson(runDir, next, options = {}, beforeReplace =
       });
     }
   } : null;
-  const fsOps = typeof protectedBeforeReplace === "function"
+  await writeRunJsonAtomic(runDir, next, options, protectedBeforeReplace);
+}
+
+async function writeRunJsonAtomic(runDir, next, options = {}, beforeReplace = null) {
+  const fsOps = typeof beforeReplace === "function"
     ? {
         rename: (source, destination) => {
-          const observed = protectedBeforeReplace();
+          const observed = beforeReplace();
           if (observed && typeof observed.then === "function") return Promise.resolve(observed).then(() => rename(source, destination));
           return rename(source, destination);
         },

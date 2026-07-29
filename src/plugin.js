@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeFeatureCommandPayload, safePayloadValue } from "./feature-command-payload.js";
@@ -735,32 +735,6 @@ function verifiedLaunchSessionRunId(repo, runID, env, sessionID, inspector = ins
   return verifiedRunID;
 }
 
-function checkedReviewTelemetryContext(repo, runID, agent, prompt) {
-  const safeRunID = correlationId(runID);
-  if (!safeRunID || typeof prompt !== "string") return null;
-  try {
-    const run = JSON.parse(readFileSync(join(repo, ".opencode", "factory", safeRunID, "run.json"), "utf8"));
-    if (run?.run_id !== safeRunID || run.status !== "running") return null;
-    const dispatches = run.provenance?.review_dispatches;
-    const latest = Array.isArray(dispatches) ? dispatches.at(-1) : null;
-    const bytes = Buffer.from(prompt, "utf8");
-    const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-    if (latest?.dispatch?.agent !== agent || latest.dispatch.prompt_hash !== hash || latest.dispatch.prompt_bytes !== bytes.length) return null;
-    const attempt = latest.dispatch.attempt;
-    const subject = latest.dispatch.subject;
-    const slice = Array.isArray(run.slices) ? run.slices.find((candidate) => candidate?.id === subject) : null;
-    return {
-      runID: safeRunID,
-      attributes: {
-        ...(slice ? { "feature_factory.slice_id": slice.id } : {}),
-        ...(Number.isSafeInteger(attempt) ? { "feature_factory.attempt": attempt } : {}),
-      },
-    };
-  } catch {
-    return null;
-  }
-}
-
 function ordinaryReviewResultAttributes(agent, output) {
   if (typeof output?.output !== "string") return {};
   const verdicts = agent === "work-reviewer"
@@ -1156,11 +1130,7 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
         const callbackKey = JSON.stringify([sessionID, callID]);
         if (pendingCallbacks.find(callbackKey)) return;
         const bridge = commandSessionBinding(commandCorrelationKey, sessionID);
-        const repo = pluginInput?.directory || pluginInput?.worktree || process.cwd();
-        const candidateRunID = bridge?.runID ?? launchCandidateRunID;
-        const checkedReview = checkedReviewTelemetryContext(repo, candidateRunID, agent, output.args?.prompt);
-        if (checkedReview) promoteTelemetrySessionRun(sessionID, checkedReview.runID);
-        const verifiedRunID = checkedReview?.runID ?? (bridge?.verified && !bridge.conflict ? bridge.runID : null);
+        const verifiedRunID = bridge?.verified && !bridge.conflict ? bridge.runID : null;
         sessionCorrelation.bindSessionRun(sessionID, verifiedRunID);
         const correlation = sessionCorrelation?.observeToolBefore(input, agent);
         const runID = correlation?.runID;
@@ -1172,7 +1142,6 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
         });
         beginTaskTelemetry(input, pending, {
           "feature_factory.run_id": runID,
-          ...checkedReview?.attributes,
           "feature_factory.lane": "reviewer",
           "feature_factory.task_context": "fresh",
         }, correlation);

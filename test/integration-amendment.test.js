@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { hashFile } from "../src/refs.js";
 import { completeIntegrationAmendmentReviewTaskDispatch, completeSpecialBuilderTaskDispatch, heartbeatOnce, prepareIntegrationAmendmentReviewTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionIntegrationAmendment, transitionRunJson, transitionRunSlice, transitionSteeringBoundaryOpened, transitionTerminalResult } from "../src/run-state.js";
 import { checkRunConsistency, inspectIntegrationAmendmentInventory } from "../src/validate.js";
-import { buildContinuation, cleanupRun, collectCleanupTargets, continueFactory, executeIntegrationAmendment, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startHeartbeat, stopHeartbeat } from "../src/factory.js";
+import { buildContinuation, cleanupRun, collectCleanupTargets, continueFactory, executeIntegrationAmendment, recoverDisruptedRun, resumeFactory, startHeartbeat, stopHeartbeat } from "../src/factory.js";
 import plugin from "../src/plugin.js";
 import { FEATURE_BRANCH, NOW, RUN_ID, addPristineTestVerifier, amendmentReviewPrompt, bindAmendmentDispatch, blocked, checkedReviewPromptContext, cleanup, cleanupFixtures, commitCandidate, commitCandidatePath, createFixture, downstreamProductionConsumers, executionOptions, git, makeReportClaimActive, publishAmendmentReview, reachIntegrated, reachMerged, reachVerified, readJson, readRun, reportRequest, reviewFromContext, reviewMarker, rewriteExecutionBinding, rewriteReportAsForeignRun, sha, snapshotAmendmentGateAuthority, writeJson, writeVerification } from "./helpers/integration-amendment/fixture.js";
 
@@ -384,7 +384,7 @@ describe("generic integration amendment", () => {
     } finally { cleanup(fixture); }
   });
 
-  it("fences continuation construction, reservation/allocation/publication ingress, local resume, and provenance", async () => {
+  it("fences continuation construction, reservation/allocation/publication ingress, and local resume", async () => {
     const fixture = createFixture();
     try {
       await transitionIntegrationAmendment(fixture.runDir, reportRequest(), { repoRoot: fixture.repo, now: NOW });
@@ -393,7 +393,6 @@ describe("generic integration amendment", () => {
         () => buildContinuation(RUN_ID, { cwd: fixture.repo, runId: "amendment-child", review: "reviews/owner.json" }),
         () => continueFactory(RUN_ID, { cwd: fixture.repo, runId: "amendment-child", review: "reviews/owner.json", carryForward: true }),
         () => resumeFactory(RUN_ID, { cwd: fixture.repo, dryRun: true }),
-        () => recordReviewDispatchProvenance(RUN_ID, { agent: "work-reviewer", subject: "amendment-review", attempt: 1, promptHash: sha("prompt"), promptBytes: 6 }, { cwd: fixture.repo }),
       ]) await assert.rejects(Promise.resolve().then(operation), /integration-amendment-continuation-unsupported|integration amendment (?:is|authority is) reported|run\.json writer rejected/u);
       assert.equal(git(fixture.repo, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/opencode/continuation-targets", "refs/opencode/continuations"]), beforeRefs);
       assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "amendment-child")), false);
