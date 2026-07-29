@@ -331,6 +331,11 @@ function optionalMergeEnum(value, allowed, label) {
 // asynchronously and reports UNKNOWN for a window after every push, so treating
 // it as one would park healthy runs on a value that resolves itself seconds
 // later. Absent values fall through to the pre-existing routing.
+// Set by the caller, which is the only layer that can run git. Anything other
+// than an established descendant leaves the pre-existing head-mismatch route.
+export const HEAD_RELATIONSHIPS = Object.freeze(["exact", "descendant", "unrelated", "indeterminate"]);
+const DESCENDANT_HEAD = "DESCENDANT";
+
 const CONFLICTING_MERGEABLE = "CONFLICTING";
 const CONFLICTING_MERGE_STATE = "DIRTY";
 
@@ -344,7 +349,17 @@ export function aggregateObservation(input) {
   const state = upper(input.state);
   if (state === "MERGED") return terminal("green", "external-merge");
   if (state === "CLOSED") return terminal("blocked", "external-state");
-  if (observed !== expected) return terminal("needs-human", "head-mismatch");
+  // An advanced head is only tolerated when the caller has *observed* that the
+  // reviewed commit is an ancestor of it - the operator resolving drift with
+  // update-branch or a local merge push. The reviewed panels examined a diff that
+  // is still wholly contained in what will merge, and the operator is the
+  // standing final gate (P2), so no panel re-runs. Everything else still fails
+  // closed: an unrelated head, and equally an ancestry the caller could not
+  // establish, because "absent from the local repository" is not evidence of
+  // "not a descendant".
+  if (observed !== expected && upper(input.headRelationship) !== DESCENDANT_HEAD) {
+    return terminal("needs-human", "head-mismatch");
+  }
   const checks = input.checkVerdict;
   const review = input.reviewVerdict;
   if (review === "red") return terminal("needs-human", "review-red", "review");
@@ -383,15 +398,20 @@ export function normalizePullRequestResponse(response, options) {
     reviewerLogin: options.reviewerLogin, required: options.reviewRequired,
     expectedHeadSha: options.expectedHeadSha, isDraft: response.isDraft,
   });
+  const headRelationship = options.headRelationship === undefined ? null : optionalMergeEnum(String(options.headRelationship).toUpperCase(), new Set(HEAD_RELATIONSHIPS.map((value) => value.toUpperCase())), "headRelationship");
   const mergeable = optionalMergeEnum(response.mergeable, MERGEABLE_VALUES, "mergeable");
   const mergeStateStatus = optionalMergeEnum(response.mergeStateStatus, MERGE_STATE_VALUES, "mergeStateStatus");
   return {
     head_sha: fullSha(response.headRefOid, "headRefOid"), state, is_draft: response.isDraft,
     mergeable, merge_state_status: mergeStateStatus,
+    head_relationship: headRelationship === null ? null : headRelationship.toLowerCase(),
+    // Recorded so the durable observation shows the operator advanced the head
+    // and by how far, without the factory re-reviewing it.
+    operator_resolved_head: headRelationship === DESCENDANT_HEAD ? fullSha(response.headRefOid, "headRefOid") : null,
     checks, review,
     aggregate: aggregateObservation({ expectedHeadSha: options.expectedHeadSha, headRefOid: response.headRefOid,
       state, isDraft: response.isDraft, checkVerdict: checks.verdict, reviewVerdict: review.verdict,
-      mergeable, mergeStateStatus }),
+      mergeable, mergeStateStatus, headRelationship }),
   };
 }
 

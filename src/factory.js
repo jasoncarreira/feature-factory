@@ -2246,6 +2246,41 @@ export function handoffEnvelope(runId, gate, reasonCode, details = {}) {
 }
 
 /** Perform at most one due verdict query (or one pending reviewer request). */
+// Classifies the observed PR head against the reviewed one. Only this layer can
+// run git, so the pure projection in post-pr-ci.js takes the answer rather than
+// deriving it.
+//
+// The observed head frequently does not exist locally - an operator resolving
+// drift with GitHub's update-branch button creates a commit this checkout has
+// never seen - so the branch is fetched into a per-run tracking ref using the
+// same safe flags as canonical-main observation: no tags, no submodules, no
+// FETCH_HEAD write, no refmap.
+//
+// The advertised head must equal what GitHub reported before ancestry is even
+// considered. Two independent observations of the same external fact have to
+// agree; if they disagree the run is being told two stories and the answer is
+// indeterminate, which routes to the pre-existing head-mismatch stop. Every
+// failure path returns indeterminate rather than a guess, because "I could not
+// establish this" must not read as "not a descendant".
+function observePrHeadAncestry(repo, run, expectedHead, observedHead, options = {}) {
+  if (!/^[0-9a-f]{40}$/u.test(String(expectedHead)) || !/^[0-9a-f]{40}$/u.test(String(observedHead))) return "indeterminate";
+  if (observedHead === expectedHead) return "exact";
+  const headRef = stringValue(run.post_pr?.pr_operation?.head_ref);
+  if (!headRef) return "indeterminate";
+  const localRef = `refs/opencode/post-pr-head/${run.run_id}`;
+  const gitOptions = options.gitOptions || {};
+  const fetched = git(repo, [
+    "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--refmap=", "--force",
+    "origin", `+refs/heads/${headRef}:${localRef}`,
+  ], gitOptions);
+  if (!fetched.ok) return "indeterminate";
+  const resolved = git(repo, ["rev-parse", "--verify", `${localRef}^{commit}`], gitOptions);
+  if (!resolved.ok) return "indeterminate";
+  const advertised = resolved.stdout.trim();
+  if (advertised !== observedHead) return "indeterminate";
+  return git(repo, ["merge-base", "--is-ancestor", expectedHead, advertised], gitOptions).ok ? "descendant" : "unrelated";
+}
+
 export async function postPrObserve(runId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
@@ -2292,7 +2327,9 @@ export async function postPrObserve(runId, opts = {}) {
   } catch (error) {
     return handleObserverError(runDir, run, error, { ...opts, expectedCurrentHash: action?.state_hash });
   }
+  const headRelationship = observePrHeadAncestry(repo, run, observation.expected_head_sha, response.headRefOid, opts);
   const normalized = normalizePullRequestResponse(response, {
+    headRelationship,
     startedAt: observation.started_at,
     now,
     checkStartGraceMs: postPr.policy.check_start_grace_ms,

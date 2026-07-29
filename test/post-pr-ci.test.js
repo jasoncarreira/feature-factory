@@ -96,6 +96,64 @@ describe("post-PR normalization", () => {
     assert.deepEqual(aggregateObservation({ ...base, checkVerdict: "pass", mergeable: "CONFLICTING" }), awaiting);
   });
 
+  it("tolerates an operator-advanced head only when the caller observed it as a descendant", () => {
+    const base = { expectedHeadSha: SHA, state: "OPEN", checkVerdict: "pass", reviewVerdict: "pass" };
+
+    // The reviewed panels examined a diff still wholly contained in what will
+    // merge, and the operator is the standing final gate, so no panel re-run:
+    // evaluation continues to checks and review as if the head matched.
+    assert.deepEqual(
+      aggregateObservation({ ...base, headRefOid: OTHER_SHA, headRelationship: "descendant" }),
+      { verdict: "green", reason: "ci-green", primary: null },
+    );
+    // A descendant head does not excuse a red check or an objecting reviewer.
+    assert.equal(aggregateObservation({ ...base, headRefOid: OTHER_SHA, headRelationship: "descendant", checkVerdict: "red" }).reason, "check-red");
+    assert.equal(aggregateObservation({ ...base, headRefOid: OTHER_SHA, headRelationship: "descendant", reviewVerdict: "red" }).primary, "review");
+
+    // Everything else still fails closed. `indeterminate` matters most: the
+    // caller could not establish ancestry, which is not evidence of unrelated
+    // history, so it must not be treated as tolerable.
+    for (const relationship of ["unrelated", "indeterminate", undefined]) {
+      assert.equal(
+        aggregateObservation({ ...base, headRefOid: OTHER_SHA, headRelationship: relationship }).reason,
+        "head-mismatch",
+        String(relationship),
+      );
+    }
+    // An exact head needs no relationship at all.
+    assert.equal(aggregateObservation({ ...base, headRefOid: SHA }).reason, "ci-green");
+  });
+
+  it("records the operator-resolved head on the observation only when it advanced", () => {
+    const response = {
+      headRefOid: OTHER_SHA, isDraft: false, state: "OPEN", reviewDecision: null, reviews: [],
+      statusCheckRollup: [{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS" }],
+    };
+    const options = {
+      startedAt: "2026-07-28T00:00:00Z", now: "2026-07-28T01:00:00Z", checkStartGraceMs: 1000,
+      expectedHeadSha: SHA, reviewerLogin: null, reviewRequired: false,
+    };
+
+    const advanced = normalizePullRequestResponse(response, { ...options, headRelationship: "descendant" });
+    assert.equal(advanced.head_relationship, "descendant");
+    assert.equal(advanced.operator_resolved_head, OTHER_SHA, "the delta is recorded durably");
+    assert.equal(advanced.aggregate.reason, "ci-green");
+
+    // Nothing to record when the head never moved.
+    const exact = normalizePullRequestResponse({ ...response, headRefOid: SHA }, { ...options, headRelationship: "exact" });
+    assert.equal(exact.head_relationship, "exact");
+    assert.equal(exact.operator_resolved_head, null);
+
+    // Absent relationship keeps the field shape stable for callers that do not
+    // supply one, and does not claim an operator resolved anything.
+    const bare = normalizePullRequestResponse(response, options);
+    assert.equal(bare.head_relationship, null);
+    assert.equal(bare.operator_resolved_head, null);
+    assert.equal(bare.aggregate.reason, "head-mismatch");
+
+    assert.throws(() => normalizePullRequestResponse(response, { ...options, headRelationship: "sideways" }), /headRelationship is invalid/u);
+  });
+
   it("keeps ordinary check-red remediation for a behind PR, since BEHIND cannot attribute the failure to drift", () => {
     // GitHub defines BEHIND as nothing more than "the head ref is out of date",
     // so a behind PR can carry a genuine product regression. Parking it would
