@@ -93,12 +93,22 @@ describe("runtime identity observation", () => {
         [join(fixture.root, "relative-config", "opencode.jsonc"), configuredPlugin, { HOME: home, XDG_CONFIG_HOME: "empty-xdg", OPENCODE_CONFIG_DIR: "relative-config" }],
         [join(fixture.root, "opencode.json"), configuredRoot, { HOME: home, XDG_CONFIG_HOME: "empty-xdg" }],
       ];
+      // Discovery precedence is exactly what this case table asserts, so every
+      // variable that participates has to come from the row rather than from the
+      // ambient environment. XDG_CONFIG_HOME *replaces* $HOME/.config
+      // (`src/runtime-identity.js:330`), so a runner that happens to export it
+      // makes the first row resolve outside the fixture and fall back to the
+      // repository the test is running inside. Start from neither variable set
+      // and let each row opt in.
+      const ambient = { ...process.env };
+      delete ambient.XDG_CONFIG_HOME;
+      delete ambient.OPENCODE_CONFIG_DIR;
       for (const [configPath, registration, childEnv] of cases) {
         mkdirSync(dirname(configPath), { recursive: true });
         writeFileSync(configPath, `{\n  // local runtime\n  \"plugin\": [\"${pathToFileURL(registration).href}\"],\n}\n`);
         const identity = resolveRuntimeIdentity({
           cwd: fixture.root,
-          env: { ...process.env, ...childEnv },
+          env: { ...ambient, ...childEnv },
           commandCandidates: { "feature-factory": CLI, opencode: fixture.opencode },
         });
         assert.equal(identity.plugin.source, realpathSync(configuredPlugin));
