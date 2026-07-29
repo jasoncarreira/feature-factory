@@ -224,7 +224,6 @@ const STATE_WRITE_COMMANDS = Object.freeze([
   "factory base-advance <run-id> --json",
   "factory env record-created <run-id> --json",
   "factory env record-resume <run-id> --json",
-  "factory provenance review-dispatch <run-id> --agent AGENT --subject SUBJECT --attempts N --hash sha256:<hash> --prompt-bytes N --json",
   "factory steer <run-id> --message TEXT --json",
   "factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json",
   "factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json",
@@ -791,7 +790,6 @@ describe("class-wide planning prompt contract", () => {
 
     for (const excluded of [
       "run.json.debug_snapshot",
-      "run.json.provenance",
       "run.json.cost_attribution",
       "heartbeat.json",
       "factory.lock",
@@ -814,7 +812,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /No other catalog row gains production-integrity coverage from B0M\.1/i);
 
     const runSchema = markdownSection(SCHEMA, "run.json");
-    assert.match(runSchema, /root is closed to exactly `schema_version`, `run_id`, `mode`, `status`, `created_at`, `updated_at`, `heartbeat_at`, `base_ref`, `base_commit`, `branch`, `worktree`, `github_account`, `pr_mode`, `pr_url`, `max_parallel_slices`, `max_retries`, `review_tier`, `debug_snapshot`, `provenance`, `integration_amendment`, `special_builder_dispatch`, `continuation`, `checkpoint_source`, `checkpoint_progress`, `steering`, `post_pr`, `gates`, `slices`, `cost_attribution`, `steps`, `validator`, `security_review`, and `terminal_result`/i);
+    assert.match(runSchema, /root is closed to exactly `schema_version`, `run_id`, `mode`, `status`, `created_at`, `updated_at`, `heartbeat_at`, `base_ref`, `base_commit`, `branch`, `worktree`, `github_account`, `pr_mode`, `pr_url`, `max_parallel_slices`, `max_retries`, `review_tier`, `debug_snapshot`, `integration_amendment`, `special_builder_dispatch`, `continuation`, `checkpoint_source`, `checkpoint_progress`, `steering`, `post_pr`, `gates`, `slices`, `cost_attribution`, `steps`, `validator`, `security_review`, and `terminal_result`/i);
     assert.match(runSchema, /Unknown root keys have no fallback[\s\S]*`schema_version` is required and equals `1`/i);
     assert.match(runSchema, /Ordinary checked `run\.json` transitions keep `run_id`, `base_commit`, `branch`, and `worktree` immutable/i);
     assert.match(runSchema, /`recoverDisruptedRun` is the sole worktree-rebinding exception[\s\S]*may change only top-level `worktree`/i);
@@ -2399,7 +2397,7 @@ describe("remediation context reuse docs contract", () => {
     ]) assert.match(SKILL, fragment);
     assert.match(SKILL, /Do not run the command yourself or supply command text, result, ref, hash, HEAD, cwd, worktree, or outcome/u);
     assert.match(SKILL, /orchestrator must not edit, stage, commit, switch, or repair/u);
-    assert.match(SKILL, /checked immutable reviewer claim\/closure is the narrowly scoped nonsemantic amendment-review provenance path/u);
+    assert.match(SKILL, /checked immutable reviewer claim\/closure is the narrowly scoped amendment-review authority/u);
     assert.match(SCHEMA, /complete all-slice ownership snapshot[\s\S]*same-session\/same-call\/same-agent callback[\s\S]*never replaces bytes/u);
     assert.match(SCHEMA, /exact 48[\s\S]*reviewer-dispatch variants/u);
     assert.match(SCHEMA, /active-claim-only[\s\S]*review-published-without-closure[\s\S]*closed-unconsumed[\s\S]*consumed/u);
@@ -2756,24 +2754,37 @@ describe("cost report docs contract", () => {
 
 });
 
-describe("effective-content provenance docs contract", () => {
-  it("stamps creation, resume, and every review dispatch without persisting raw prompts", () => {
-    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README })) {
-      assert.match(text, /effective-content provenance/i, `${name} must identify effective-content provenance`);
-      assert.match(text, /creation|created/i, `${name} must cover creation`);
-      assert.match(text, /resume/i, `${name} must cover resume`);
-      assert.match(text, /review(?: Task)? dispatch/i, `${name} must cover review dispatch`);
-      assert.match(text, /rendered (?:feature )?command/i, `${name} must hash the effective command`);
-      assert.match(text, /resolved agent prompts?/i, `${name} must hash resolved agent prompts`);
-      assert.match(text, /repo-seeded (?:feature )?skills?/i, `${name} must hash selected skills`);
-      assert.match(text, /loaded plugin source/i, `${name} must identify loaded plugin source`);
-      assert.match(text, /OpenCode version/i, `${name} must record OpenCode version`);
-      assert.match(text, /Git HEAD\/dirty state|Git HEAD plus only a dirty boolean/i, `${name} must record bounded git state`);
-      assert.match(text, /never raw (?:dynamic )?prompts?|Do not persist raw prompt text|without storing raw prompts/i, `${name} must exclude raw prompts`);
-      assert.match(text, /configured model[\s\S]*(?:not|distinct)[\s\S]*actual provider|actual provider[\s\S]*(?:not|distinct)[\s\S]*configured model/i, `${name} must distinguish configured and actual models`);
+describe("retired provenance audit docs contract", () => {
+  it("keeps the deleted audit schema, commands, and effective-content claims out of active docs", () => {
+    const retired = [
+      /factory provenance/iu,
+      /provenance review-dispatch/iu,
+      /run\.json\.provenance/iu,
+      /effective-content provenance/iu,
+      /review_dispatches/u,
+      /actual_source/u,
+    ];
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      for (const pattern of retired) assert.doesNotMatch(text, pattern, `${name} must not restore retired provenance audit guidance`);
     }
-    assert.match(SKILL, /factory provenance review-dispatch <run-id>[\s\S]*--hash sha256:<hash>[\s\S]*--prompt-bytes/i);
-    assert.match(SCHEMA, /prompt_hash[\s\S]*prompt_bytes/i);
+    for (const pattern of retired.slice(0, 2)) assert.doesNotMatch(CLI, pattern, "CLI must not restore retired provenance audit commands");
+  });
+
+  it("keeps the surviving environment lifecycle command inventory exact", () => {
+    const stateWriteInventory = [
+      "feature-factory factory env record-created <run-id> --json",
+      "feature-factory factory env record-resume <run-id> --json",
+    ];
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      const block = firstFencedBlockAfter(text, /Required semantic `run\.json` .*write commands:/i);
+      assert.deepEqual(block.split("\n").filter((line) => /factory (?:env|provenance)/u.test(line)), stateWriteInventory, `${name} lifecycle command inventory must be exact`);
+    }
+    const monitorInventory = firstFencedBlockAfter(README, /Monitor local state:/i)
+      .split("\n")
+      .filter((line) => /factory (?:env|provenance)/u.test(line));
+    assert.deepEqual(monitorInventory, ["feature-factory factory env", ...stateWriteInventory]);
+    assert.match(CLI, /factory env\s+Print detected versions, models, and capabilities/u);
+    assert.match(CLI, /if \(sub === "env"\) return env\(rest\);/u);
   });
 });
 
@@ -2790,6 +2801,7 @@ describe("telemetry readiness docs contract", () => {
       assert.match(text, /cannot mutate or enrich|cannot mutate native|no supported API for mutating or enriching/i, `${name} must deny native span enrichment`);
       assert.match(text, /factory-owned spans[\s\S]*withSpan\(\)/i, `${name} must reserve adjacent spans for withSpan`);
       assert.match(text, /B6\.1[^.]*no production span emission|B6\.1 emits no production spans|B6\.1 performs no production span emission/i, `${name} must keep emission out of B6.1`);
+      assert.doesNotMatch(text, /hash-and-byte-count-bound review|review-provenance|durable review provenance|prompt bytes may be hashed to match prior durable provenance/i, `${name} must not restore the deleted review-prompt telemetry fallback`);
     }
   });
 

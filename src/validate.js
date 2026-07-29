@@ -63,8 +63,6 @@ const HANDOFF_RECEIPT_KIND = "interactive-approval-handoff";
 const DEBUG_SNAPSHOT_KEYS = new Set(["created_with", "last_resumed_with", "resume_count"]);
 const DEBUG_SNAPSHOT_EVENT_KEYS = new Set(["collected_at", "event", "diagnostic_only", "env"]);
 const CLI_IDENTITY_KEYS = new Set(["source", "version", "hash"]);
-const PROVENANCE_KEYS = new Set(["schema_version", "created", "last_resumed", "resume_count", "review_dispatches"]);
-const PROVENANCE_EVENT_KEYS = new Set(["schema_version", "event", "captured_at", "dispatch", "content", "runtime"]);
 const COST_ATTRIBUTION_STATUS_SET = new Set(COST_ATTRIBUTION_STATUSES);
 const COST_ATTRIBUTION_ENTRY_OPTIONAL_STRINGS = new Set(["step", "slice_id", "source", "operation", "provider", "model", "request_id", "cost_currency"]);
 const COST_ATTRIBUTION_NUMERIC_FIELDS = new Set([...USAGE_NUMERIC_FIELDS, ...COST_NUMERIC_FIELDS]);
@@ -78,7 +76,7 @@ const POST_PR_PHASE_SET = new Set(POST_PR_PHASES);
 const POST_PR_ACTIVE_PHASES = new Set(POST_PR_PHASES.filter((phase) => !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase)));
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "integration_amendment", "special_builder_dispatch", "continuation", "checkpoint_source", "checkpoint_progress", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
+const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "integration_amendment", "special_builder_dispatch", "continuation", "checkpoint_source", "checkpoint_progress", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
 const PLAN_KEYS = new Set(["slices", "integration_gate", "delivery_envelope"]);
 const PLANNED_SLICE_KEYS = new Set(["id", "stack", "paths", "depends_on", "acceptance", "test_plan"]);
 const INTEGRATION_GATE_KEYS = new Set(["required_commands", "timeout_ms"]);
@@ -458,7 +456,6 @@ export function validateRun(run) {
   optionalInteger(errors, run, "max_retries", "run.max_retries");
   optionalNonEmptyString(errors, run, "review_tier", "run.review_tier");
   validateDebugSnapshot(errors, run.debug_snapshot, "run.debug_snapshot");
-  validateProvenance(errors, run.provenance, "run.provenance");
   validateIntegrationAmendmentRecord(errors, run, "run.integration_amendment");
   validateSpecialBuilderDispatch(errors, run.special_builder_dispatch, "run.special_builder_dispatch");
   validateContinuation(errors, run, "run.continuation");
@@ -3333,89 +3330,6 @@ function validateConflictArtifactSnapshot(errors, snapshot, path, acceptance) {
     errors.push({ path: `${path}.ref`, message: "must be the canonical immutable integration-conflict test snapshot ref" });
   }
   if (isRecord(acceptance) && snapshot.hash !== acceptance.artifact_hash) errors.push({ path: `${path}.hash`, message: "must equal test_acceptance.artifact_hash" });
-}
-
-function validateProvenance(errors, provenance, path) {
-  if (provenance === undefined || provenance === null) return;
-  if (!isRecord(provenance)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, provenance, PROVENANCE_KEYS, path);
-  requiredInteger(errors, provenance, "schema_version", `${path}.schema_version`);
-  if (provenance.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
-  if (provenance.created !== null) validateProvenanceEvent(errors, provenance.created, `${path}.created`, "created");
-  if (provenance.last_resumed !== null) validateProvenanceEvent(errors, provenance.last_resumed, `${path}.last_resumed`, "resumed");
-  boundedInteger(errors, provenance, "resume_count", 0, Number.MAX_SAFE_INTEGER, `${path}.resume_count`);
-  if (!Array.isArray(provenance.review_dispatches)) errors.push({ path: `${path}.review_dispatches`, message: "must be an array" });
-  else for (const [index, event] of provenance.review_dispatches.entries()) validateProvenanceEvent(errors, event, `${path}.review_dispatches[${index}]`, "review-dispatch");
-}
-
-function validateProvenanceEvent(errors, event, path, expectedEvent) {
-  if (!isRecord(event)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, event, PROVENANCE_EVENT_KEYS, path);
-  requiredInteger(errors, event, "schema_version", `${path}.schema_version`);
-  if (event.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
-  requiredString(errors, event, "event", `${path}.event`);
-  if (event.event !== expectedEvent) errors.push({ path: `${path}.event`, message: `must equal ${expectedEvent}` });
-  requiredString(errors, event, "captured_at", `${path}.captured_at`);
-  validateProvenanceContent(errors, event.content, `${path}.content`);
-  validateProvenanceRuntime(errors, event.runtime, `${path}.runtime`);
-  if (expectedEvent === "review-dispatch") validateProvenanceDispatch(errors, event.dispatch, `${path}.dispatch`);
-  else if (event.dispatch !== undefined) errors.push({ path: `${path}.dispatch`, message: "is not allowed for this event" });
-}
-
-function validateProvenanceContent(errors, content, path) {
-  if (!isRecord(content)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, content, new Set(["command_hash", "agent_prompt_hashes", "skill_hashes"]), path);
-  requiredHash(errors, content, "command_hash", `${path}.command_hash`);
-  for (const key of ["agent_prompt_hashes", "skill_hashes"]) {
-    const hashes = content[key];
-    if (!isRecord(hashes)) { errors.push({ path: `${path}.${key}`, message: "must be an object" }); continue; }
-    for (const [name, hash] of Object.entries(hashes)) if (!HASH_PATTERN.test(hash)) errors.push({ path: `${path}.${key}.${name}`, message: "must be a sha256 hash" });
-  }
-}
-
-function validateProvenanceRuntime(errors, runtime, path) {
-  if (!isRecord(runtime)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, runtime, new Set(["plugin", "opencode_version", "configured_models", "configured_variants", "model", "git"]), path);
-  const plugin = runtime.plugin;
-  if (!isRecord(plugin)) errors.push({ path: `${path}.plugin`, message: "must be an object" });
-  else {
-    allowedKeys(errors, plugin, new Set(["source", "source_hash", "package_version"]), `${path}.plugin`);
-    requiredString(errors, plugin, "source", `${path}.plugin.source`);
-    requiredHash(errors, plugin, "source_hash", `${path}.plugin.source_hash`);
-    requiredString(errors, plugin, "package_version", `${path}.plugin.package_version`);
-  }
-  if (runtime.opencode_version !== null) optionalString(errors, runtime, "opencode_version", `${path}.opencode_version`);
-  for (const key of ["configured_models", "configured_variants"]) {
-    const values = runtime[key];
-    if (!isRecord(values)) { errors.push({ path: `${path}.${key}`, message: "must be an object" }); continue; }
-    for (const [name, value] of Object.entries(values)) if (value !== null && !stringValue(value)) errors.push({ path: `${path}.${key}.${name}`, message: "must be a string or null" });
-  }
-  if (runtime.model !== null) {
-    const model = runtime.model;
-    if (!isRecord(model)) errors.push({ path: `${path}.model`, message: "must be an object or null" });
-    else {
-      allowedKeys(errors, model, new Set(["configured", "variant", "actual", "actual_source"]), `${path}.model`);
-      for (const key of ["configured", "variant", "actual"]) if (model[key] !== null) optionalString(errors, model, key, `${path}.model.${key}`);
-      requiredEnum(errors, model, "actual_source", new Set(["unavailable", "opencode-runtime"]), `${path}.model.actual_source`);
-    }
-  }
-  const gitState = runtime.git;
-  if (!isRecord(gitState)) errors.push({ path: `${path}.git`, message: "must be an object" });
-  else {
-    allowedKeys(errors, gitState, new Set(["head", "dirty"]), `${path}.git`);
-    if (gitState.head !== null) optionalString(errors, gitState, "head", `${path}.git.head`);
-    if (gitState.dirty !== null && typeof gitState.dirty !== "boolean") errors.push({ path: `${path}.git.dirty`, message: "must be a boolean or null" });
-  }
-}
-
-function validateProvenanceDispatch(errors, dispatch, path) {
-  if (!isRecord(dispatch)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, dispatch, new Set(["agent", "subject", "attempt", "prompt_hash", "prompt_bytes"]), path);
-  requiredEnum(errors, dispatch, "agent", new Set(["work-reviewer", "implementation-validator", "security-reviewer"]), `${path}.agent`);
-  requiredString(errors, dispatch, "subject", `${path}.subject`);
-  boundedInteger(errors, dispatch, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
-  requiredHash(errors, dispatch, "prompt_hash", `${path}.prompt_hash`);
-  boundedInteger(errors, dispatch, "prompt_bytes", 0, Number.MAX_SAFE_INTEGER, `${path}.prompt_bytes`);
 }
 
 function validateContinuation(errors, run, path) {

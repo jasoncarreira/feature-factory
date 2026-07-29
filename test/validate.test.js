@@ -244,7 +244,7 @@ describe("run schema and consistency", () => {
   });
 
   it("enforces the closed versioned run envelope, top-level timestamps, and absolute worktree", () => {
-    const allowedRunKeys = ["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "integration_amendment", "special_builder_dispatch", "continuation", "checkpoint_source", "checkpoint_progress", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"];
+    const allowedRunKeys = ["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "integration_amendment", "special_builder_dispatch", "continuation", "checkpoint_source", "checkpoint_progress", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"];
     const canonical = { ...runningRun(), created_at: "2026-07-08T11:00:00.000Z", updated_at: "2026-07-08T11:30:00.000Z", heartbeat_at: "2026-07-08T11:59:00.000Z", worktree: "/tmp/run" };
     assert.equal(validateRun(canonical), canonical);
     assert.deepEqual(allowedRunKeys.filter((key) => Object.hasOwn(canonical, key)).sort(), Object.keys(canonical).sort());
@@ -254,6 +254,10 @@ describe("run schema and consistency", () => {
       { ...runningRun(), legacy_status: "running" },
       { ...runningRun(), merged_slice_repair: null },
     ]) assert.throws(() => validateRun(run), ValidationError);
+    assert.throws(
+      () => validateRun({ ...runningRun(), provenance: { schema_version: 1 } }),
+      (error) => error instanceof ValidationError && error.message.includes("run.provenance: is not allowed"),
+    );
     for (const key of ["created_at", "updated_at", "heartbeat_at"]) {
       assert.throws(
         () => validateRun({ ...runningRun(), [key]: "not-a-time" }),
