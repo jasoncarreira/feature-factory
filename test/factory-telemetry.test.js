@@ -6,7 +6,7 @@ import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { continueFactory, resumeFactory, startFactory } from "../src/factory.js";
+import { cleanupRun, continueFactory, resumeFactory, startFactory, stopHeartbeat, validateState } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
 import { createReviewRecord } from "./helpers/review-record-fixture.js";
@@ -641,4 +641,124 @@ function fakeB6Otel() {
 async function flushB6Telemetry() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
+}
+
+// SPEC section 14 taxonomy rows factory.validate / factory.cleanup / factory.gate /
+// factory.heartbeat. These wrap calls that already existed, so every assertion here
+// also checks the operation itself still behaves.
+describe("factory operator span taxonomy", () => {
+  it("reports validate run and error counts, and marks an invalid run as a span error", async () => {
+    const fixture = createOperatorSpanFixture("validate");
+    try {
+      const healthy = fakeB6Otel();
+      const ok = validateState(fixture.runId, { cwd: fixture.repo, telemetry: { enabled: true, importer: healthy.importer } });
+      await flushB6Telemetry();
+
+      assert.equal(ok.ok, true, "the wrapped operation must still return its result");
+      const span = healthy.spans.find((item) => item.name === "feature_factory.factory.validate");
+      assert.ok(span, `expected a validate span, saw ${JSON.stringify(healthy.spans.map((item) => item.name))}`);
+      assert.equal(span.attributes["feature_factory.run_id"], fixture.runId);
+      assert.equal(span.attributes["feature_factory.status"], "completed");
+      assert.equal(span.attributes["feature_factory.run_count"], 1);
+      assert.equal(span.attributes["feature_factory.error_count"], 0);
+      assert.equal(span.ended, true);
+      assert.deepEqual(span.statuses, [], "a passing validation must not set an error status");
+
+      // Authority/validation failures must surface as span errors for Agent
+      // Timeline failure filtering, not merely as a status attribute.
+      writeJson(join(fixture.runDir, "run.json"), { schema_version: 1, run_id: fixture.runId, status: "not-a-status" });
+      const broken = fakeB6Otel();
+      const failed = validateState(fixture.runId, { cwd: fixture.repo, telemetry: { enabled: true, importer: broken.importer } });
+      await flushB6Telemetry();
+
+      assert.equal(failed.ok, false);
+      const failedSpan = broken.spans.find((item) => item.name === "feature_factory.factory.validate");
+      assert.equal(failedSpan.attributes["feature_factory.status"], "failed");
+      assert.equal(failedSpan.attributes["feature_factory.error_count"], 1);
+      assert.ok(failedSpan.statuses.length > 0, "an invalid run must set an error status on the span");
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("carries the bounded heartbeat operation and phase", async () => {
+    const fixture = createOperatorSpanFixture("heartbeat");
+    try {
+      const fake = fakeB6Otel();
+      // No heartbeat file exists, so the operation is a no-op that still traces.
+      await stopHeartbeat(fixture.runId, { phase: "builders" }, { cwd: fixture.repo, telemetry: { enabled: true, importer: fake.importer } });
+      await flushB6Telemetry();
+
+      const span = fake.spans.find((item) => item.name === "feature_factory.factory.heartbeat");
+      assert.ok(span);
+      assert.equal(span.attributes["feature_factory.heartbeat_operation"], "stop");
+      assert.equal(span.attributes["feature_factory.heartbeat_phase"], "builders");
+      assert.equal(span.attributes["feature_factory.run_id"], fixture.runId);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("emits nothing when telemetry is disabled and never fails the operation when telemetry breaks", async () => {
+    const fixture = createOperatorSpanFixture("isolation");
+    try {
+      const disabled = fakeB6Otel();
+      const quiet = validateState(fixture.runId, { cwd: fixture.repo, telemetry: { importer: disabled.importer } });
+      await flushB6Telemetry();
+      assert.equal(quiet.ok, true);
+      assert.deepEqual(disabled.spans, [], "telemetry is opt-in; no span may be produced when it is not enabled");
+
+      // An exporter that throws is a telemetry problem, never the caller's.
+      const result = validateState(fixture.runId, {
+        cwd: fixture.repo,
+        telemetry: { enabled: true, importer: async () => { throw new Error("telemetry-only failure"); } },
+      });
+      await flushB6Telemetry();
+      assert.equal(result.ok, true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("traces a cleanup with coarse totals and propagates its failure", async () => {
+    const fixture = createOperatorSpanFixture("cleanup");
+    try {
+      const fake = fakeB6Otel();
+      // A running run is not cleanup-eligible, so this rejects. The span must
+      // record the failure rather than swallow it.
+      await assert.rejects(() => cleanupRun(fixture.runId, { cwd: fixture.repo, telemetry: { enabled: true, importer: fake.importer } }));
+      await flushB6Telemetry();
+
+      const span = fake.spans.find((item) => item.name === "feature_factory.factory.cleanup");
+      assert.ok(span, `expected a cleanup span, saw ${JSON.stringify(fake.spans.map((item) => item.name))}`);
+      assert.equal(span.attributes["feature_factory.status"], "failed");
+      assert.ok(span.statuses.length > 0);
+      // Never per-entry paths or branch names.
+      assert.ok(!Object.keys(span.attributes).some((key) => /path|branch|worktree/u.test(key)));
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+});
+
+function createOperatorSpanFixture(name) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `factory-operator-span-${name}-`)));
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  spawnSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+  // Deliberately short: `feature_factory.run_id` passes through as-is unless it
+  // looks like a secret, and a longer slug trips the high-entropy pseudonymizer,
+  // which would test the identifier hashing rather than these spans.
+  const runId = `op-${name}`;
+  const runDir = join(repo, ".opencode", "factory", runId);
+  mkdirSync(runDir, { recursive: true });
+  writeJson(join(runDir, "run.json"), {
+    schema_version: 1,
+    run_id: runId,
+    mode: "interactive",
+    status: "running",
+    created_at: "2026-07-29T00:00:00.000Z",
+    updated_at: "2026-07-29T00:00:00.000Z",
+  });
+  return { root, repo, runId, runDir };
 }

@@ -1793,6 +1793,53 @@ function startFactoryLifecycleSpan(operation, opts) {
   }
 }
 
+// Operator and control-plane spans. Unlike the lifecycle spans above these wrap a
+// call that already exists, so the helper takes the whole operation and reports
+// what it returned. Telemetry never changes the outcome: an inert span is used
+// when telemetry is disabled or unavailable, and a failure here is swallowed
+// while the operation's own error still propagates.
+function traceFactoryOperation(operation, attributes, opts, callback, classify) {
+  let span;
+  try {
+    span = startB6Span(`feature_factory.factory.${operation}`, attributes, {
+      telemetry: opts?.telemetry,
+      env: opts?.env ?? process.env,
+      importer: opts?.telemetry?.importer,
+      context: opts?.telemetry?.context,
+    });
+  } catch {
+    span = startB6Span("", {}, { env: {} });
+  }
+
+  const settle = (result) => {
+    let observed;
+    try {
+      observed = classify ? classify(result) : null;
+    } catch {
+      observed = null;
+    }
+    if (observed?.failed) span.fail();
+    span.end(observed?.attributes);
+  };
+  const reject = (error) => {
+    span.fail();
+    span.end({ "feature_factory.status": "failed" });
+    throw error;
+  };
+
+  let result;
+  try {
+    result = callback();
+  } catch (error) {
+    reject(error);
+  }
+  // Mirrors observeFactoryLifecycleResult: one helper serves the sync and async
+  // call sites rather than duplicating the span bookkeeping for each.
+  if (result && typeof result.then === "function") return result.then((value) => { settle(value); return value; }, reject);
+  settle(result);
+  return result;
+}
+
 function observeFactoryLifecycleResult(telemetry, result) {
   if (result && typeof result.then === "function") {
     result.then(
@@ -1997,6 +2044,17 @@ async function reconcileCheckpointLaunchAfterOwnership(repo, runDir, run, opts) 
 }
 
 export async function transitionGateDecisionAndHandoff(runIdOrDir, gateName, decision, opts = {}) {
+  // The raw gate answer is never attached, regardless of any content-capture
+  // setting: only the gate subject and the bounded decision enum travel.
+  return traceFactoryOperation("gate", {
+    "feature_factory.gate": typeof gateName === "string" ? gateName : undefined,
+    "feature_factory.gate_decision": typeof decision === "string" ? decision : undefined,
+  }, opts, () => transitionGateDecisionAndHandoffUninstrumented(runIdOrDir, gateName, decision, opts), () => ({
+    attributes: { "feature_factory.status": "completed" },
+  }));
+}
+
+async function transitionGateDecisionAndHandoffUninstrumented(runIdOrDir, gateName, decision, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const runDir = isExplicitRunPath(String(runIdOrDir))
     ? resolve(String(runIdOrDir))
@@ -3374,6 +3432,14 @@ export function assertHeartbeatStartable(run) {
 }
 
 export async function startHeartbeat(runId, config = {}, opts = {}) {
+  return traceFactoryOperation("heartbeat", {
+    "feature_factory.run_id": typeof runId === "string" ? runId : undefined,
+    "feature_factory.heartbeat_operation": "start",
+    "feature_factory.heartbeat_phase": typeof config?.phase === "string" ? config.phase : undefined,
+  }, opts, () => startHeartbeatUninstrumented(runId, config, opts), () => ({ attributes: { "feature_factory.status": "started" } }));
+}
+
+async function startHeartbeatUninstrumented(runId, config = {}, opts = {}) {
   const runDir = resolveHeartbeatRunDir(runId, opts);
   const heartbeatFile = heartbeatPath(runDir);
   const phase = normalizeHeartbeatPhase(config.phase);
@@ -3435,8 +3501,14 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
 }
 
 export async function stopHeartbeat(runId, config = {}, opts = {}) {
-  const runDir = resolveHeartbeatRunDir(runId, opts);
-  return stopHeartbeatInRunDir(runDir, opts);
+  return traceFactoryOperation("heartbeat", {
+    "feature_factory.run_id": typeof runId === "string" ? runId : undefined,
+    "feature_factory.heartbeat_operation": "stop",
+    "feature_factory.heartbeat_phase": typeof config?.phase === "string" ? config.phase : undefined,
+  }, opts, () => {
+    const runDir = resolveHeartbeatRunDir(runId, opts);
+    return stopHeartbeatInRunDir(runDir, opts);
+  }, () => ({ attributes: { "feature_factory.status": "completed" } }));
 }
 
 export async function stopHeartbeatInRunDir(runDir, opts = {}) {
@@ -3541,6 +3613,19 @@ export function watchRun(runId, opts = {}) {
 }
 
 export function validateState(runId, opts = {}) {
+  return traceFactoryOperation("validate", { "feature_factory.run_id": runId || undefined }, opts, () => validateStateUninstrumented(runId, opts), (result) => ({
+    // SPEC section 14 requires authority validation failures to appear as span
+    // errors so Agent Timeline failure filtering catches them.
+    failed: result?.ok !== true,
+    attributes: {
+      "feature_factory.status": result?.ok === true ? "completed" : "failed",
+      "feature_factory.run_count": Array.isArray(result?.runs) ? result.runs.length : undefined,
+      "feature_factory.error_count": Array.isArray(result?.runs) ? result.runs.filter((item) => item?.ok !== true).length : undefined,
+    },
+  }));
+}
+
+function validateStateUninstrumented(runId, opts = {}) {
   const runDirs = runId ? [resolveRunDir(runId, opts)] : allRunDirs(opts);
   const runs = runDirs.map((dir) => {
     const repo = factoryRepoFromRunDir(dir);
@@ -3652,6 +3737,28 @@ function fallbackRunId(runId, runDir) {
 }
 
 export async function cleanupRun(runId, opts = {}) {
+  return traceFactoryOperation("cleanup", { "feature_factory.run_id": typeof runId === "string" ? runId : undefined }, opts, () => cleanupRunUninstrumented(runId, opts), (result) => ({
+    attributes: {
+      "feature_factory.status": "completed",
+      "feature_factory.removed_count": countCleanupPaths(result, "removed"),
+      "feature_factory.skipped_count": countCleanupPaths(result, "skipped"),
+    },
+  }));
+}
+
+// Deliberately coarse: totals only, never per-entry paths or branch names. Keeping
+// the shape this simple also keeps it stable across #111's dispatch-lease collapse,
+// which changes what cleanup enumerates underneath.
+function countCleanupPaths(result, kind) {
+  if (!result || typeof result !== "object") return undefined;
+  let total = 0;
+  for (const [key, value] of Object.entries(result)) {
+    if (key.startsWith(`${kind}_`) && Array.isArray(value)) total += value.length;
+  }
+  return total;
+}
+
+async function cleanupRunUninstrumented(runId, opts = {}) {
   let runDir;
   try {
     runDir = resolveRunDir(runId, opts);

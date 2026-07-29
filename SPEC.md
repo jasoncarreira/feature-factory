@@ -885,6 +885,17 @@ B6 correlation spans exclude raw paths and durable refs entirely. Operators can 
 
 Use OpenTelemetry error status and `error.type` on failed spans. This is required for Agent Timeline failure filtering.
 
+Emitted span names are fixed and allowlisted (`feature_factory.factory.<operation>`), so the `<gate>`, `<agent>`, and `<slice>` subjects written above travel as identifier attributes rather than in the span name. Identifier handling pattern-validates them, bounds their length, and pseudonymizes anything sensitive or high-entropy, which a fixed enum could not do for names this contract does not choose. The operator spans carry:
+
+| Span | Attributes |
+|---|---|
+| `feature_factory.factory.validate` | `feature_factory.run_id`, `feature_factory.status`, `feature_factory.run_count`, `feature_factory.error_count`; a failed validation also sets span error status |
+| `feature_factory.factory.cleanup` | `feature_factory.run_id`, `feature_factory.status`, `feature_factory.removed_count`, `feature_factory.skipped_count` — coarse totals only, never per-entry paths, branches, or worktrees |
+| `feature_factory.factory.gate` | `feature_factory.gate`, `feature_factory.gate_decision` (`pending`/`approved`/`changes_requested`/`stopped`), `feature_factory.status`. The raw gate answer is never attached, and the attribute allowlist enforces that independently of the call site |
+| `feature_factory.factory.heartbeat` | `feature_factory.run_id`, `feature_factory.heartbeat_operation` (`start`/`stop`/`tick`/`status`), `feature_factory.heartbeat_phase`, `feature_factory.status` |
+
+Counts are bounded non-negative safe integers; a negative, fractional, or non-numeric count is dropped rather than exported, and `0` is a real count rather than absence.
+
 ### B6 Factory-Owned Content Exclusion
 
 B6 factory-owned correlation spans and span events are always metadata-only. They never contain artifact, review, or evidence refs; content hashes; raw gate answers; prompts or messages; tool arguments or results; review or evidence bodies; raw paths or URLs; secrets; propagation headers; arbitrary model output; or any other captured content. General feature-factory content-capture options and native OpenCode/AI SDK settings cannot widen this policy.
@@ -1002,7 +1013,7 @@ Trace-context launch flags are non-authoritative runtime config for process corr
 4. Implemented: package smoke covers published install/import behavior with no OTel env configured; docs contract tests cover the telemetry readiness and trace-context contract.
 5. Implemented B6.1/B6.2: `src/plugin.js` binds validated factory command run identity to bounded process-local session parentage, observes Task invocation lifecycle through `tool.execute.before/after`, and emits adjacent metadata-only session and checked builder/reviewer spans through the supported correlation contract above. The standalone B6.1 probe itself emits no span.
 6. Follow-up: instrument durable state transition helpers in `src/run-state.js` so spans/events are emitted when opencode-run node scripts update gates, steps, slices, PR-created/opened state, validation, or terminal results.
-7. Partially implemented: `src/factory.js` instruments start, continue, and resume boundaries. Validate, cleanup, gate answer, and heartbeat start/stop/tick remain follow-up. If no SDK is initialized in the CLI process, these spans may be no-op; trace/context propagation into opencode is already present.
+7. Partially implemented: `src/factory.js` instruments start, continue, and resume boundaries, plus the operator and control-plane spans `feature_factory.factory.validate`, `feature_factory.factory.cleanup`, `feature_factory.factory.gate`, and `feature_factory.factory.heartbeat` (start and stop). The internal heartbeat tick remains follow-up. If no SDK is initialized in the CLI process, these spans may be no-op; trace/context propagation into opencode is already present.
 8. Implemented: in-memory span-exporter tests cover enabled session/task spans, checked builder and reviewer lifecycle, run-id correlation, terminal-safe metadata, failure isolation, and error status. Disabled mode, redaction, loadability, trace-context validation, and package smoke behavior are also covered.
 9. Implemented: completed and blocked factory run activity plus explicit full-taxonomy canaries were validated in Honeycomb and linked from `DOGFOOD-LEARNINGS.md`.
 10. Follow-up: only after phase evidence, decide whether feature-factory needs its own SDK/exporter dependency for CLI root spans.
