@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { spawnSync as runSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -204,7 +204,9 @@ function createFixture(runId, options = {}) {
 }
 
 function runCli(repo, args, bin) {
-  return runSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: bin ? { ...process.env, PATH: `${bin}:${process.env.PATH || ""}` } : process.env });
+  const env = isolatedOpenCodeEnv(repo);
+  if (bin) env.PATH = `${bin}:${process.env.PATH || ""}`;
+  return runSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env });
 }
 
 function runBehaviorGateCli(fixture, reasonCode) {
@@ -236,6 +238,8 @@ function runBehaviorGateCli(fixture, reasonCode) {
     };
     const gateDecisionOptions = {
       ...processOptions,
+      runtimeAdmissionFn: () => ({ package_cli: { source: process.execPath, hash: "sha256:" + "a".repeat(64) }, opencode: { source: process.execPath, hash: "sha256:" + "a".repeat(64) } }),
+      runtimeRevalidateFn: () => process.execPath,
       acquireLaunchClaimFn: (dir, input, opts) => {
         try { return acquireLaunchClaim(dir, input, opts); }
         catch (error) { metrics.acquireError = String(error?.stack || error); persistMetrics(); throw error; }
@@ -285,8 +289,16 @@ function runBehaviorGateCli(fixture, reasonCode) {
   return runSync(process.execPath, ["--input-type=module", "--eval", source], {
     cwd: fixture.repo,
     encoding: "utf8",
-    env: { ...process.env },
+    env: isolatedOpenCodeEnv(fixture.repo),
   });
+}
+
+function isolatedOpenCodeEnv(repo) {
+  const env = { ...process.env, HOME: join(repo, ".test-home"), XDG_CONFIG_HOME: join(repo, ".test-xdg") };
+  delete env.OPENCODE_CONFIG_DIR;
+  delete env.OPENCODE_CONFIG;
+  delete env.OPENCODE_CONFIG_CONTENT;
+  return env;
 }
 
 async function createApprovedMatrixFixture(runId) {
@@ -366,8 +378,9 @@ function installFakeOpencode(repo) {
   const bin = join(repo, "bin");
   mkdirSync(bin, { recursive: true });
   const script = join(bin, "opencode");
-  writeFileSync(script, "#!/usr/bin/env node\nconst keepAlive = setInterval(() => {}, 1000);\nprocess.once(\"SIGTERM\", () => { clearInterval(keepAlive); process.exit(0); });\n", "utf8");
+  writeFileSync(script, "#!/usr/bin/env node\nif (process.argv[2] === \"--version\") { console.log(\"opencode-test 1\"); process.exit(0); }\nconst keepAlive = setInterval(() => {}, 1000);\nprocess.once(\"SIGTERM\", () => { clearInterval(keepAlive); process.exit(0); });\n", "utf8");
   chmodSync(script, 0o755);
+  symlinkSync(CLI, join(bin, "feature-factory"));
   return bin;
 }
 

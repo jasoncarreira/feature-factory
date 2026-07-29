@@ -147,7 +147,11 @@ function runDeterministicCli(repo, args) {
       unref() { events.push("unref"); persist(); }
       disconnect() { events.push("disconnect"); persist(); }
     }
-    await runCliCommand(${JSON.stringify(args)}, { factoryOptions: { supervisorSpawnFn: () => new DeterministicSupervisor() } });
+    await runCliCommand(${JSON.stringify(args)}, { factoryOptions: {
+      runtimeAdmissionFn: () => ({ package_cli: { source: process.execPath, hash: "sha256:" + "a".repeat(64) }, opencode: { source: process.execPath, hash: "sha256:" + "a".repeat(64) } }),
+      runtimeRevalidateFn: () => process.execPath,
+      supervisorSpawnFn: () => new DeterministicSupervisor()
+    } });
     process.exit(process.exitCode || 0);
   `;
   const proc = spawnSync(process.execPath, ["--input-type=module", "--eval", source], {

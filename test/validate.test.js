@@ -14,6 +14,15 @@ import { hashValue } from "../src/refs.js";
 import { MAX_SLICE_DEPENDENCY_WAVES, ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
+const FRAGMENTED_SECRET_VARIANTS = [
+  ["mixed", "Q7M4-Z9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["uneven-1", "Q7-M4Z9N_2C8.V5B1X6:L3K 0P7R2-T9Y4_U8I5"],
+  ["uneven-2", "Q-7M4_Z9N2C.8V5:B1X6L 3K0-P7R2T_9Y4U8-I5"],
+  ["control-1", "Q7M4\u001bZ9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["control-2", "Q7M4-Z9N2\u202eC8V5.B1X6:L3K0\tP7R2-T9Y4_U8I5"],
+  ["long-fragments", "Q7M4Z9N-2C8V5_B1X6L3.K0P7R2:T9Y4U8I5"],
+  ["fragmented-bearer-path", "Bearer/Q7M4Z9N/2C8V5/B1X6L3/K0P7R2/T9Y4U8I5"],
+];
 const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
   "USD\u001b]0;pwned\u0007",
   "USD\u001b[2J",
@@ -337,18 +346,65 @@ describe("run schema and consistency", () => {
   });
 
   it("accepts debug snapshots", () => {
+    const cliIdentity = { source: "/usr/local/bin/feature-factory", version: "0.2.1", hash: HASH };
+    const pluginIdentity = { source: "/opt/factory/src/plugin.js", version: "0.2.1", hash: HASH };
     const run = validateRun({
       ...runningRun(),
-      debug_snapshot: snapshotRoot({ env: { tool: "opencode", token_value: REDACTED_ENV_VALUE } }),
+      debug_snapshot: snapshotRoot({ env: { tool: "opencode", token_value: REDACTED_ENV_VALUE, plugin_identity: pluginIdentity, cli_identity: cliIdentity } }),
     });
 
     assert.equal(run.debug_snapshot.resume_count, 0);
+    assert.deepEqual(run.debug_snapshot.created_with.env.plugin_identity, pluginIdentity);
+    assert.deepEqual(run.debug_snapshot.created_with.env.cli_identity, cliIdentity);
+  });
+
+  it("strictly validates debug snapshot CLI identity", () => {
+    const valid = { source: "/usr/local/bin/feature-factory", version: "0.2.1", hash: HASH };
+    for (const [identity, expected] of [
+      [{ ...valid, extra: true }, /cli_identity\.extra: is not allowed/u],
+      [{ ...valid, source: "relative/feature-factory" }, /source: must be an absolute path/u],
+      [{ ...valid, version: "bad\u001b[2J" }, /version: must be null or bounded terminal-safe/u],
+      [{ ...valid, hash: "sha256:nope" }, /hash: must be null or a sha256 hash/u],
+      [{ source: null, version: "0.2.1", hash: null }, /must not report version or hash without a source/u],
+      [{ source: "/usr/local/bin/feature-factory", version: null, hash: null }, /hash: is required when source is present/u],
+    ]) {
+      assert.throws(() => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { cli_identity: identity } }) }), expected);
+    }
+  });
+
+  it("rejects unsanitized mixed, uneven, and control-interrupted debug snapshot identity", () => {
+    const valid = { source: "/usr/local/bin/feature-factory", version: "0.2.1", hash: HASH };
+    for (const [name, fragmented] of FRAGMENTED_SECRET_VARIANTS) {
+      const persisted = fragmented.replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, "?");
+      for (const identity of [
+        { ...valid, source: `/tmp/home ${persisted}/feature-factory` },
+        { ...valid, version: `feature-factory 1.2.3 ${persisted}` },
+      ]) {
+        assert.throws(
+          () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { cli_identity: identity } }) }),
+          (error) => error instanceof ValidationError && error.message.includes("must be redacted in debug snapshot"),
+          name,
+        );
+      }
+      assert.throws(
+        () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { opencode_version: `opencode ${persisted}` } }) }),
+        (error) => error instanceof ValidationError && error.message.includes("must be redacted in debug snapshot"),
+        name,
+      );
+    }
   });
 
   it("rejects unredacted sensitive debug snapshot values", () => {
     assert.throws(
       () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { observed: "github_pat_123456789012345678901234567890" } }) }),
       (error) => error instanceof ValidationError && error.message.includes("must be redacted"),
+    );
+    assert.throws(
+      () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { api_token: "safe" } }) }),
+      (error) => error instanceof ValidationError && error.message.includes("env.api_token: is not allowed"),
+    );
+    assert.doesNotThrow(
+      () => validateRun({ ...runningRun(), debug_snapshot: snapshotRoot({ env: { api_token: REDACTED_ENV_VALUE } }) }),
     );
   });
 

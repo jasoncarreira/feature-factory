@@ -5,12 +5,15 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, resumeFactory, startHeartbeat, status, stopHeartbeat, writeSteering } from "../src/factory.js";
+import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, resumeFactory as resumeFactoryImpl, startHeartbeat, status, stopHeartbeat, writeSteering } from "../src/factory.js";
 import { hashValue } from "../src/refs.js";
 import { computePrOperationId } from "../src/github.js";
 import { completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionPostPrState } from "../src/run-state.js";
 import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
 import { installCurrentWholeStoryAuthority } from "./helpers/current-whole-story-fixture.js";
+import { withTestRuntimeAdmission } from "./helpers/runtime-admission.js";
+
+const resumeFactory = (runId, options) => resumeFactoryImpl(runId, withTestRuntimeAdmission(options));
 
 const SHA = "a".repeat(40);
 const EMPTY_PATHS_HASH = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";

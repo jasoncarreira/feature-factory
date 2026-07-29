@@ -2,7 +2,7 @@ import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "./helpers/git-fixture.js";
 import { createReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
@@ -10,14 +10,20 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
-import { assertContinuationBindingsCurrent, buildContinuation, continueFactory, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory, startFactory } from "../src/factory.js";
+import { assertContinuationBindingsCurrent, buildContinuation, continueFactory as continueFactoryImpl, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory as resumeFactoryImpl, startFactory as startFactoryImpl } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
 import { CARRY_FORWARD_REQUIRED_SUMMARY, assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, transitionIntegrationAmendment, transitionTerminalResult, completeSpecialBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
 import { ISSUE128_BASELINE_ROUTE_INVENTORY, ISSUE128_FINISH_AND_DISCLOSE_AUTHORITY_CATALOG, emitIssue128FinishAndDiscloseMutations } from "./helpers/durable-record-mutations.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
+import { RuntimeAdmissionError } from "../src/runtime-identity.js";
 import { deliveryEnvelopeForSlices, passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 import { publishAmendmentReportFor, writeOwnerDispatch } from "./helpers/integration-amendment/fixture.js";
+import { withTestRuntimeAdmission } from "./helpers/runtime-admission.js";
+
+const continueFactory = (runId, options) => continueFactoryImpl(runId, withTestRuntimeAdmission(options));
+const resumeFactory = (runId, options) => resumeFactoryImpl(runId, withTestRuntimeAdmission(options));
+const startFactory = (args, options) => startFactoryImpl(args, withTestRuntimeAdmission(options));
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 const currentTestPath = fileURLToPath(import.meta.url);
@@ -218,6 +224,27 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
     } finally {
       cleanup(fixture.repo);
     }
+  });
+
+  for (const detached of [false, true]) it(`fails carry-forward ${detached ? "detached" : "foreground"} runtime admission before invoking its launch seam`, async () => {
+    const fixture = createV2Fixture(`carry-runtime-admission-${detached ? "detached" : "foreground"}`, { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = `${fixture.runId}-next`;
+    const remediation = "runtime admission failed: accepted package CLI source=[redacted]; remediation: run npm with exact argv [\"install\",\"--global\",\"--\",\"[redacted]\"]";
+    let launches = 0;
+    try {
+      await assert.rejects(continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        detached,
+        headless: detached,
+        runtimeAdmissionFn: () => { throw new RuntimeAdmissionError(remediation); },
+        foregroundLaunchFn: async () => { launches += 1; },
+        detachedLaunchFn: async () => { launches += 1; },
+      }), (error) => error.message === remediation);
+      assert.equal(launches, 0);
+    } finally { cleanup(fixture.repo); }
   });
 
   it("rejects a legacy plan without integration_gate at v2 carry-forward construction", () => {
@@ -1390,47 +1417,95 @@ describe("factory continue schema-v2 carry-forward", { concurrency: 2 }, () => {
     }
   });
 
+  it("publishes a complete child with the native atomic directory rename", async () => {
+    const fixture = createV2Fixture("publication-native-rename", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "publication-native-rename-next";
+    let renames = 0;
+    try {
+      const result = await continueFactory(fixture.runId, {
+        cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
+        publicationRenameSync(source, target) {
+          renames += 1;
+          assert.equal(existsSync(source), true);
+          assert.equal(existsSync(target), false);
+          renameSync(source, target);
+        },
+        foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+      });
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      assert.equal(renames, 1);
+      assert.deepEqual(result.publication, { published: true, replayed: false });
+      assert.equal(validateRun(JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"))).run_id, childRunId);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("fails closed on native rename failure without child publication or launch", async () => {
+    const fixture = createV2Fixture("publication-rename-failure", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "publication-rename-failure-next";
+    const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+    let launches = 0;
+    try {
+      await assert.rejects(continueFactory(fixture.runId, {
+        cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
+        publicationRenameSync() { throw new Error("injected rename failure"); },
+        foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; },
+      }), /atomic no-overwrite directory move failed/u);
+      assert.equal(launches, 0);
+      assert.equal(existsSync(childRunDir), false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature")), false);
+    } finally { cleanup(fixture.repo); }
+  });
+
   it("never overwrites a publication-race winner and leaves no staged partial child", async () => {
     const fixture = createV2Fixture("publication-target-race", { accepted: ["A"], mergeOrder: ["A"] });
     const childRunId = "publication-target-race-next";
     const target = join(fixture.repo, ".opencode", "factory", childRunId);
+    let launches = 0;
     try {
       await assert.rejects(continueFactory(fixture.runId, {
         cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
         beforeCarryForwardRename() { mkdirSync(target, { recursive: true }); writeFileSync(join(target, "foreign.txt"), "foreign\n"); },
-        foregroundLaunchFn: async () => ({ status: "started" }),
+        publicationRenameSync() { assert.fail("foreign target must win before rename"); },
+        foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; },
       }), /already exists|factory run directory/u);
       assert.equal(readFileSync(join(target, "foreign.txt"), "utf8"), "foreign\n");
       assert.equal(existsSync(join(target, "run.json")), false);
       assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature")), false);
+      assert.equal(launches, 0);
     } finally { cleanup(fixture.repo); }
 
     const linked = createV2Fixture("publication-symlink-race", { accepted: ["A"], mergeOrder: ["A"] });
     const linkedRunId = "publication-symlink-race-next";
     const outside = join(linked.repo, "outside-child");
+    launches = 0;
     try {
       mkdirSync(outside);
       await assert.rejects(continueFactory(linked.runId, {
         cwd: linked.repo, review: "reviewer.json", runId: linkedRunId, carryForward: true,
         beforeCarryForwardRename({ targetRunDir }) { symlinkSync(outside, targetRunDir, "dir"); },
-        foregroundLaunchFn: async () => ({ status: "started" }),
+        publicationRenameSync() { assert.fail("symlink target must win before rename"); },
+        foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; },
       }), /already exists|factory run directory/u);
       assert.equal(existsSync(join(outside, "run.json")), false);
       assert.equal(readFileSync(join(linked.runDir, "run.json"), "utf8").includes(linked.runId), true);
+      assert.equal(launches, 0);
     } finally { cleanup(linked.repo); }
 
     const empty = createV2Fixture("publication-empty-race", { accepted: ["A"], mergeOrder: ["A"] });
     const emptyRunId = "publication-empty-race-next";
     const emptyTarget = join(empty.repo, ".opencode", "factory", emptyRunId);
+    launches = 0;
     try {
       await assert.rejects(continueFactory(empty.runId, {
         cwd: empty.repo, review: "reviewer.json", runId: emptyRunId, carryForward: true,
         afterCarryForwardTargetObservation() { mkdirSync(emptyTarget); },
-        foregroundLaunchFn: async () => ({ status: "started" }),
+        publicationRenameSync() { assert.fail("empty target must win before rename"); },
+        foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; },
       }), /already exists|will not be overwritten|factory run directory/u);
       assert.equal(existsSync(emptyTarget), true);
       assert.equal(existsSync(join(emptyTarget, "run.json")), false);
       assert.equal(existsSync(join(empty.repo, ".opencode", "skills", "feature")), false);
+      assert.equal(launches, 0);
     } finally { cleanup(empty.repo); }
   });
 

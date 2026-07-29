@@ -34,6 +34,13 @@ import { createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+const FRAGMENTED_SECRET_VARIANTS = [
+  ["mixed", "Q7M4-Z9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["uneven-1", "Q7-M4Z9N_2C8.V5B1X6:L3K 0P7R2-T9Y4_U8I5"],
+  ["uneven-2", "Q-7M4_Z9N2C.8V5:B1X6L 3K0-P7R2T_9Y4U8-I5"],
+  ["control-1", "Q7M4\u001bZ9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["control-2", "Q7M4-Z9N2\u202eC8V5.B1X6:L3K0\tP7R2-T9Y4_U8I5"],
+];
 
 describe("factory public state operations", { concurrency: false }, () => {
   it("lists and reads runs without authority proofs", () => {
@@ -353,17 +360,78 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
-  it("records redacted debug snapshots", async () => {
+  it("records the exact observed CLI identity at creation and resume without adding authority", async () => {
     const fixture = createFixture("env-run");
+    const creationIdentity = {
+      source: "/opt/feature-factory/bin/feature-factory-created",
+      version: "7.8.9-created",
+      hash: `sha256:${"a".repeat(64)}`,
+    };
+    const resumeIdentity = {
+      source: "/opt/feature-factory/bin/feature-factory-resumed",
+      version: "8.9.10-resumed",
+      hash: `sha256:${"b".repeat(64)}`,
+    };
     try {
-      const created = await persistFactoryRunCreatedEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z" });
-      const resumed = await persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T13:00:00.000Z" });
+      const initialKeys = Object.keys(readJson(join(fixture.runDir, "run.json")));
+      const created = await persistFactoryRunCreatedEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z", runtimeIdentity: { cli: creationIdentity } });
+      const resumed = await persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T13:00:00.000Z", runtimeIdentity: { cli: resumeIdentity } });
       const run = readJson(join(fixture.runDir, "run.json"));
       assert.equal(created.resume_count, 0);
       assert.equal(resumed.resume_count, 1);
       assert.equal(run.debug_snapshot.last_resumed_with.event, "run-resumed");
+      assert.deepEqual(created.created_with.env.cli_identity, creationIdentity);
+      assert.deepEqual(resumed.created_with.env.cli_identity, creationIdentity);
+      assert.deepEqual(resumed.last_resumed_with.env.cli_identity, resumeIdentity);
+      assert.deepEqual(run.debug_snapshot.created_with.env.cli_identity, creationIdentity);
+      assert.deepEqual(run.debug_snapshot.last_resumed_with.env.cli_identity, resumeIdentity);
+      assert.deepEqual(Object.keys(creationIdentity), ["source", "version", "hash"]);
+      assert.deepEqual(Object.keys(resumeIdentity), ["source", "version", "hash"]);
+      assert.deepEqual(Object.keys(run).filter((key) => !initialKeys.includes(key)).sort(), ["debug_snapshot", "provenance"]);
+      assert.equal(Object.hasOwn(run, "cli_identity"), false);
+      const topLevelAuthority = JSON.stringify(Object.fromEntries(Object.entries(run).filter(([key]) => key !== "debug_snapshot")));
+      const provenanceAuthority = JSON.stringify(run.provenance);
+      for (const value of Object.values(resumeIdentity)) {
+        assert.equal(topLevelAuthority.includes(value), false, `top-level authority contains resume identity value ${value}`);
+        assert.equal(provenanceAuthority.includes(value), false, `provenance authority contains resume identity value ${value}`);
+      }
     } finally {
       cleanup(fixture.repo);
+    }
+  });
+
+  it("keeps mixed, uneven, and control-interrupted identity credentials out of persisted factory env", async () => {
+    const hash = `sha256:${"c".repeat(64)}`;
+    for (const [index, [name, fragmented]] of FRAGMENTED_SECRET_VARIANTS.entries()) {
+      const fixture = createFixture(`env-redaction-run-${index}`);
+      try {
+        await persistFactoryRunCreatedEnv(fixture.runId, {
+          cwd: fixture.repo,
+          runtimeIdentity: {
+            cli: {
+              source: `/tmp/home ${fragmented}/feature-factory`,
+              version: `feature-factory 1.2.3 ${fragmented}`,
+              hash,
+            },
+            opencode: {
+              source: "/tmp/opencode",
+              version: `opencode ${fragmented}`,
+              hash: `sha256:${"d".repeat(64)}`,
+            },
+          },
+        });
+        const run = readJson(join(fixture.runDir, "run.json"));
+
+        assert.deepEqual(run.debug_snapshot.created_with.env.cli_identity, {
+          source: "[redacted]",
+          version: "[redacted]",
+          hash,
+        }, name);
+        assert.equal(run.debug_snapshot.created_with.env.opencode_version, "[redacted]", name);
+        assert.equal(JSON.stringify(run).includes(fragmented), false, name);
+      } finally {
+        cleanup(fixture.repo);
+      }
     }
   });
 

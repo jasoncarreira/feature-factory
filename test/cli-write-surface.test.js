@@ -558,10 +558,15 @@ function spawnFactoryStart(repo, args, bin, capture) {
     encoding: "utf8",
     env: {
       ...process.env,
+      HOME: join(repo, ".test-home"),
+      XDG_CONFIG_HOME: join(repo, ".test-xdg"),
       FEATURE_FACTORY_CAPTURE: capture,
       GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_CONFIG_NOSYSTEM: "1",
       PATH: `${bin}:${process.env.PATH || ""}`,
+      OPENCODE_CONFIG_DIR: "",
+      OPENCODE_CONFIG: "",
+      OPENCODE_CONFIG_CONTENT: "",
     },
     timeout: 15000,
   });
@@ -576,6 +581,7 @@ const { writeFileSync } = require("node:fs");
 writeFileSync(process.env.FEATURE_FACTORY_CAPTURE, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }, null, 2) + "\\n");
 `, "utf8");
   chmodSync(script, 0o755);
+  symlinkSync(CLI, join(bin, "feature-factory"));
   return bin;
 }
 

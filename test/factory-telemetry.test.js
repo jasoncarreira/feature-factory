@@ -1,16 +1,18 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { continueFactory, resumeFactory, startFactory } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
 import { createReviewRecord } from "./helpers/review-record-fixture.js";
 
 const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+const PACKAGE_CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
 describe("factory trace-context propagation", () => {
   it("launches foreground start without adding trace env by default while preserving operator OTEL env", async () => {
@@ -471,6 +473,7 @@ function createFakeOpencode(root) {
   writeFileSync(script, `#!/usr/bin/env node
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+if (process.argv[2] === "--version") { console.log("opencode-test 1"); process.exit(0); }
 const keys = [
   "OTEL_EXPORTER_OTLP_ENDPOINT",
   "TRACEPARENT",
@@ -501,12 +504,18 @@ if (process.env.OPENCODE_CREATE_RUN_ID) {
 if (process.env.OPENCODE_KEEPALIVE === "1") setInterval(() => {}, 1000);
 `, "utf8");
   chmodSync(script, 0o755);
+  symlinkSync(PACKAGE_CLI, join(bin, "feature-factory"));
   return bin;
 }
 
 async function withLaunchEnv(fixture, env, fn) {
   const keys = new Set([
     "PATH",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_CONTENT",
     "OPENCODE_CAPTURE_PATH",
     "OPENCODE_CREATE_RUN_ID",
     ...Object.keys(env),
@@ -523,6 +532,11 @@ async function withLaunchEnv(fixture, env, fn) {
       delete process.env[key];
     }
     process.env.PATH = `${fixture.bin}:${process.env.PATH}`;
+    process.env.HOME = join(fixture.root, "home");
+    process.env.XDG_CONFIG_HOME = join(fixture.root, "xdg");
+    delete process.env.OPENCODE_CONFIG_DIR;
+    delete process.env.OPENCODE_CONFIG;
+    delete process.env.OPENCODE_CONFIG_CONTENT;
     process.env.OPENCODE_CAPTURE_PATH = fixture.captureFile;
     for (const [key, value] of Object.entries(env)) process.env[key] = value;
     return await fn();

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "./helpers/git-fixture.js";
@@ -54,12 +54,9 @@ describe("foreground factory output hardening", () => {
       gates: {},
       slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1, branch: runId, worktree }],
     }) + "\n");
-    const previousPath = process.env.PATH;
     try {
-      process.env.PATH = `${fixture.bin}:${previousPath || ""}`;
-      await resumeFactory(runId, { cwd: fixture.repo });
+      await resumeFactory(runId, { cwd: fixture.repo, env: launchEnv(fixture) });
     } finally {
-      process.env.PATH = previousPath;
       rmSync(fixture.root, { recursive: true, force: true });
     }
   });
@@ -78,6 +75,7 @@ process.stderr.write("stderr Authorization: ${SECRET}\\u001b[31m boom\\u001b[0m\
 process.exitCode = ${exitCode};
 `, "utf8");
   chmodSync(script, 0o755);
+  symlinkSync(CLI, join(bin, "feature-factory"));
   return { root, repo, bin };
 }
 
@@ -85,9 +83,22 @@ function run(fixture, args) {
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd: fixture.repo,
     encoding: "utf8",
-    env: { ...process.env, PATH: `${fixture.bin}:${process.env.PATH || ""}` },
+    env: launchEnv(fixture),
     timeout: 15000,
   });
+}
+
+function launchEnv(fixture) {
+  const env = {
+    ...process.env,
+    HOME: join(fixture.root, "home"),
+    XDG_CONFIG_HOME: join(fixture.root, "xdg"),
+    PATH: `${fixture.bin}:${process.env.PATH || ""}`,
+  };
+  delete env.OPENCODE_CONFIG_DIR;
+  delete env.OPENCODE_CONFIG;
+  delete env.OPENCODE_CONFIG_CONTENT;
+  return env;
 }
 
 function assertSafe(output) {

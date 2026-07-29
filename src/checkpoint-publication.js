@@ -1,4 +1,3 @@
-import { spawnSync as defaultSpawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -6,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -538,9 +538,13 @@ function assertPublicationRuntimeIdentity(context, claim, childRun, options) {
 
 function moveDirectoryUnderPublicationLock(stagingRoot, targetRunDir, options) {
   if (basename(stagingRoot) !== basename(targetRunDir)) throw new Error("checkpoint publication staging identity differs from target");
-  const spawn = typeof options.publicationMoveSpawnSync === "function" ? options.publicationMoveSpawnSync : defaultSpawnSync;
-  const result = spawn("mv", ["-n", "--", stagingRoot, dirname(targetRunDir)], { encoding: "utf8", shell: false });
-  if (result?.error || result?.status !== 0 || existsSync(stagingRoot) || !existsSync(targetRunDir)) {
+  const rename = typeof options.publicationRenameSync === "function" ? options.publicationRenameSync : renameSync;
+  try {
+    rename(stagingRoot, targetRunDir);
+  } catch {
+    throw new Error("checkpoint child serialized no-overwrite directory publication failed");
+  }
+  if (existsSync(stagingRoot) || !existsSync(targetRunDir)) {
     throw new Error("checkpoint child serialized no-overwrite directory publication failed");
   }
 }

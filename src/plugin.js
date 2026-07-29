@@ -7,6 +7,8 @@ import { normalizePostPrCiConfig } from "./config.js";
 import { completeIntegrationAmendmentReviewTaskDispatch, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, isReplayableIntegrationAmendmentReviewCompletionError, prepareIntegrationAmendmentReviewTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, revalidateSliceBuilderTaskDispatchContext } from "./run-state.js";
 import { inspectLaunchClaim } from "./process-evidence.js";
 import { emitB6Span, isB6TelemetryEnabled, startB6Span } from "./telemetry.js";
+import { assertGlobalDefinitionsCurrent } from "./global-definitions.js";
+import { DIAGNOSTIC_PLUGIN_CONFIG_INVOCATION } from "./plugin-diagnostics.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const assets = join(root, "assets");
@@ -843,6 +845,11 @@ function newCompletionToken(options) {
 }
 
 export default async function featureFactoryPlugin(pluginInput, options = {}) {
+  const diagnosticConfigInvocation = options[DIAGNOSTIC_PLUGIN_CONFIG_INVOCATION] === true;
+  const runtimeCwd = resolve(String(pluginInput?.directory || pluginInput?.worktree || process.cwd()));
+  if (!diagnosticConfigInvocation) {
+    assertGlobalDefinitionsCurrent({ env: process.env, cwd: runtimeCwd });
+  }
   const pendingCallbacks = createPendingCallbackStore();
   const builderTaskBindings = new Map();
   const activeSliceDispatches = new Set();
@@ -851,7 +858,7 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
   const sliceChildSessions = new Map();
   const telemetryOptions = b6PluginOptions(options);
   const telemetryEnabled = telemetryOptions.telemetry.enabled;
-  const commandCorrelationKey = resolve(String(pluginInput?.directory || pluginInput?.worktree || process.cwd()));
+  const commandCorrelationKey = runtimeCwd;
   const runtimeEnv = options.env ?? process.env;
   const launchCandidateRunID = correlationId(runtimeEnv?.[FEATURE_FACTORY_RUN_ID_ENV]);
   const abandonTaskTelemetry = (call) => {
@@ -1057,6 +1064,7 @@ export default async function featureFactoryPlugin(pluginInput, options = {}) {
       }, telemetryOptions);
     },
     config(cfg) {
+      if (!diagnosticConfigInvocation) assertGlobalDefinitionsCurrent({ env: process.env, cwd: runtimeCwd });
       registerCommand(cfg, options);
       registerAgents(cfg);
       applyProfileOptions(cfg, options);

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { isCarryForwardRequiredTerminal, isSettledBlockedAmendment, assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertOrdinaryResumeRunById, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, parseSlicesPlanBytes, pendingProtectedGate, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
@@ -32,6 +32,8 @@ import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
 import { checkedExecutionEnvironment, executeCheckedCommand } from "./test-execution.js";
 import { BASE_ADVANCE_ERROR_CODES } from "./base-advance/state-model.js";
 import { effectiveCheckedExecutionTimeoutMs } from "./checked-execution-timeout.js";
+import { admitRuntimeLaunch, isRuntimeAdmissionError, revalidateRuntimeLaunchBinding, RuntimeAdmissionError } from "./runtime-identity.js";
+import { assertGlobalDefinitionsCurrent, StaleGlobalDefinitionsError } from "./global-definitions.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -174,6 +176,7 @@ export async function startFactory(args, opts = {}) {
 async function startFactoryImplementation(args, opts = {}, telemetry) {
   if (!args.length) throw new Error("factory start requires a feature prompt");
   const repo = repoRoot(opts.cwd || process.cwd());
+  assertLaunchDefinitionsCurrent({ ...opts, cwd: repo });
   telemetry.repo = repo;
   const resumeRunId = resumePromptRunId(args, opts);
   if (resumeRunId) assertPostPrCliOptions(opts, { command: "factory start resume", resume: true });
@@ -226,8 +229,8 @@ async function startFactoryImplementation(args, opts = {}, telemetry) {
       launchEnv,
       launchKind: opts.detached ? "start-resume-detached" : "start-resume-foreground",
       launch: ({ env, executionId }) => opts.detached
-        ? (opts.detachedLaunchFn || startDetached)(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: resumedRun.run_id, runDir: resumedRunDir, executionId }), env })
-        : (opts.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...opts, env }),
+        ? startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: resumedRun.run_id, runDir: resumedRunDir, executionId }), env })
+        : runForegroundFactory(repo, commandArgs, { ...opts, env }),
     });
   }
   if (opts.detached) {
@@ -239,6 +242,7 @@ async function startFactoryImplementation(args, opts = {}, telemetry) {
 
 export async function startFactoryCheckpoint(parentRunId, checkpointId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
+  assertLaunchDefinitionsCurrent({ ...opts, cwd: repo });
   const childRunId = normalizeRequestedStartRunId(opts.runId);
   if (!childRunId) throw new Error("factory checkpoint-start requires --run-id <child-run-id>");
   if (!stringValue(parentRunId) || !stringValue(checkpointId)) throw new Error("factory checkpoint-start requires parent run and checkpoint ids");
@@ -1658,6 +1662,7 @@ export function continueFactory(parentRunId, opts = {}) {
 
 function continueFactoryImplementation(parentRunId, opts = {}, telemetry) {
   const repo = repoRoot(opts.cwd || process.cwd());
+  assertLaunchDefinitionsCurrent({ ...opts, cwd: repo });
   telemetry.repo = repo;
   const allocationReplay = !opts.dryRun;
   const { continuation, carryForwardConfig } = buildContinuationCandidate(parentRunId, { ...opts, cwd: repo, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
@@ -1715,6 +1720,7 @@ export async function resumeFactory(runId, opts = {}) {
 async function resumeFactoryImplementation(runId, opts = {}, telemetry) {
   assertPostPrCliOptions(opts, { command: "factory resume", resume: true });
   const repo = repoRoot(opts.cwd || process.cwd());
+  assertLaunchDefinitionsCurrent({ ...opts, cwd: repo });
   telemetry.repo = repo;
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
   const beforeRecovery = readRunFile(join(runDir, "run.json"));
@@ -1755,8 +1761,8 @@ async function resumeFactoryImplementation(runId, opts = {}, telemetry) {
     repo,
     launchKind: opts.detached ? "resume-detached" : "resume-foreground",
     launch: ({ env, executionId }) => opts.detached
-      ? (opts.detachedLaunchFn || startDetached)(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: run.run_id, runDir, executionId }), env })
-      : (opts.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...opts, env }),
+      ? startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: run.run_id, runDir, executionId }), env })
+      : runForegroundFactory(repo, commandArgs, { ...opts, env }),
     launchEnv,
   });
 }
@@ -1926,6 +1932,12 @@ async function coordinateExistingRunLaunch(runDir, run, opts) {
     }
     return result;
   } catch (error) {
+    if (detached && isRuntimeAdmissionError(error)) {
+      const current = claimFns.inspect(runDir, { ...opts, runId: run.run_id });
+      if (current.ok && current.claim.nonce === token && current.claim.phase === "spawning"
+        && claimFns.release(runDir, token, { ...opts, expectedPhase: "spawning", runId: run.run_id })) throw error;
+      return { status: "recovery-required", reason_code: "launch-evidence-mismatch", reason: error.message, launch_claim_ref: LAUNCH_CLAIM_REF };
+    }
     if (detached) return { status: "recovery-required", reason_code: /readiness|timed out/iu.test(error.message) ? "launch-readiness-failed" : "launch-spawn-failed", reason: error.message, launch_claim_ref: LAUNCH_CLAIM_REF };
     throw error;
   } finally {
@@ -2011,6 +2023,7 @@ export async function transitionGateDecisionAndHandoff(runIdOrDir, gateName, dec
   try {
     handoff = await handoffApprovedInteractiveRun(runDir, run, gateName, { ...opts, repo });
   } catch (error) {
+    if (isRuntimeAdmissionError(error) || error instanceof StaleGlobalDefinitionsError) throw error;
     handoff = handoffEnvelope(run.run_id, gateName, error?.handoffCode || "claim-acquisition-failed", error?.preservedClaim ? { claim: true } : {});
   }
   return { ...transition, gate_accepted: true, handoff };
@@ -2034,6 +2047,7 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
   let eligibility;
   try { eligibility = resumeEligibility(runDir, run, { ...opts, repoRoot: opts.repo || factoryRepoFromRunDir(runDir), ignoreLaunchOwnership: true }); } catch { return handoffEnvelope(runId, gateName, "resume-ineligible"); }
   if (!eligibility.eligible) return handoffEnvelope(runId, gateName, "resume-ineligible");
+  assertLaunchDefinitionsCurrent({ ...opts, cwd: opts.repo || factoryRepoFromRunDir(runDir) });
 
   const claimFunctions = launchClaimFunctions(opts);
   let claim;
@@ -2096,13 +2110,17 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
     const commandArgs = ["run", "--dir", opts.repo, "--command", "feature", "--agent", "feature-factory"];
     if (opts.model) commandArgs.push("--model", opts.model);
     commandArgs.push(encodeFeatureCommandPayload(payload));
-    const launch = typeof opts.detachedLaunchFn === "function" ? opts.detachedLaunchFn : startDetached;
     launchAttempted = true;
-    started = await launch(opts.repo, commandArgs, {
+    started = await startDetached(opts.repo, commandArgs, {
       ...detachedProcessOptions(opts.repo, { ...opts, runId, runDir, executionId: claim.claim.execution_id }),
       env: { ...factoryLaunchEnv(opts, runId), [FACTORY_LAUNCH_CLAIM_ENV]: token },
     });
   } catch (error) {
+    if (isRuntimeAdmissionError(error)) {
+      try { error.preservedClaim = !claimFunctions.release(runDir, token, { ...opts, expectedPhase: "spawning", runId }); }
+      catch { error.preservedClaim = true; }
+      throw error;
+    }
     let preservedClaim = launchAttempted;
     if (!launchAttempted) {
       try { preservedClaim = !claimFunctions.release(runDir, token, { ...opts, expectedPhase: "spawning", runId }); }
@@ -2214,7 +2232,7 @@ export function handoffEnvelope(runId, gate, reasonCode, details = {}) {
     run_id: runId,
     gate,
     reason_code: reasonCode,
-    reason,
+    reason: details.reason || reason,
     action,
     action_command: actionCommand,
     pid: evidence?.pid ?? null,
@@ -4681,8 +4699,8 @@ async function publishAndLaunchCarryForward(repo, parentRunDir, continuation, co
     repo,
     launchKind: options.detached ? "resume-detached" : "resume-foreground",
     launch: ({ env, executionId }) => options.detached
-      ? (options.detachedLaunchFn || startDetached)(repo, commandArgs, { ...detachedProcessOptions(repo, { ...options, runId: run.run_id, runDir: childRunDir, executionId }), env })
-      : (options.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...options, env }),
+      ? startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...options, runId: run.run_id, runDir: childRunDir, executionId }), env })
+      : runForegroundFactory(repo, commandArgs, { ...options, env }),
     launchEnv,
   });
   if (launched && typeof launched === "object") return { ...launched, publication: { published: publication.published, replayed: publication.replayed }, payload };
@@ -4739,9 +4757,13 @@ async function publishCarryForwardChild(repo, parentRunDir, continuation, config
 
 function moveDirectoryNoReplace(stagingRoot, targetRunDir, options = {}) {
   if (basename(stagingRoot) !== basename(targetRunDir)) throw new Error("carry-forward publication source and target identities differ");
-  const move = typeof options.publicationMoveSpawnSync === "function" ? options.publicationMoveSpawnSync : defaultSpawnSync;
-  const result = move("mv", ["-n", "--", stagingRoot, dirname(targetRunDir)], { encoding: "utf8" });
-  if (result?.error || result?.status !== 0) throw new Error("carry-forward atomic no-overwrite directory move failed");
+  if (pathExistsNoFollow(targetRunDir)) throw new Error(`carry-forward publication target already exists and will not be overwritten: ${targetRunDir}`);
+  const rename = typeof options.publicationRenameSync === "function" ? options.publicationRenameSync : renameSync;
+  try {
+    rename(stagingRoot, targetRunDir);
+  } catch {
+    throw new Error("carry-forward atomic no-overwrite directory move failed");
+  }
   if (pathExistsNoFollow(stagingRoot)) throw new Error(`carry-forward publication target already exists and will not be overwritten: ${targetRunDir}`);
   if (!pathExistsNoFollow(targetRunDir)) throw new Error("carry-forward atomic no-overwrite directory move did not publish the child");
 }
@@ -5659,7 +5681,11 @@ function allRunDirs(opts = {}) {
   return dirs;
 }
 
-function runForegroundFactory(repo, commandArgs, opts = {}) {
+export function runForegroundFactory(repo, commandArgs, opts = {}) {
+  const env = opts.env || process.env;
+  const binding = (opts.runtimeAdmissionFn || admitRuntimeLaunch)({ ...opts, cwd: repo, env });
+  const executable = (opts.runtimeRevalidateFn || revalidateRuntimeLaunchBinding)(binding, { ...opts, cwd: repo, env });
+  if (typeof opts.foregroundLaunchFn === "function") return opts.foregroundLaunchFn(repo, commandArgs, { ...opts, runtimeBinding: binding, executable });
   const spawnProcess = typeof opts.spawnFn === "function" ? opts.spawnFn : spawn;
   return new Promise((resolveRun, rejectRun) => {
     let settled = false;
@@ -5673,10 +5699,11 @@ function runForegroundFactory(repo, commandArgs, opts = {}) {
     });
     let child;
     try {
-      child = spawnProcess("opencode", commandArgs, {
+      child = spawnProcess(executable, commandArgs, {
         cwd: repo,
-        env: opts.env || process.env,
+        env,
         stdio: ["inherit", "pipe", "pipe"],
+        shell: false,
       });
     } catch (error) {
       rejectRun(new Error(`opencode failed to start: ${renderErrorForTerminal(error)}`));
@@ -5704,8 +5731,11 @@ function runForegroundFactory(repo, commandArgs, opts = {}) {
   });
 }
 
-function startDetached(repo, commandArgs, opts = {}) {
+export function startDetached(repo, commandArgs, opts = {}) {
   const env = opts.env || process.env;
+  const runtimeBinding = (opts.runtimeAdmissionFn || admitRuntimeLaunch)({ ...opts, cwd: repo, env });
+  const executable = (opts.runtimeRevalidateFn || revalidateRuntimeLaunchBinding)(runtimeBinding, { ...opts, cwd: repo, env });
+  if (typeof opts.detachedLaunchFn === "function") return opts.detachedLaunchFn(repo, commandArgs, { ...opts, runtimeBinding, executable });
   const scopedRunDir = opts.runDir || null;
   const recordsProcessEvidence = Boolean(scopedRunDir && opts.runId);
   if (recordsProcessEvidence) {
@@ -5726,9 +5756,10 @@ function startDetached(repo, commandArgs, opts = {}) {
     detached: true,
     env,
     stdio: ["ignore", "ignore", "ignore", "ipc"],
+    shell: false,
   });
   return awaitDetachedReadiness(supervisor, {
-    repo, commandArgs, env, scopedRunDir, recordsProcessEvidence, executionId, log,
+    repo, commandArgs, env, runtimeBinding, scopedRunDir, recordsProcessEvidence, executionId, log,
     runId: opts.runId || null, now: opts.now, readyTimeoutMs: opts.readyTimeoutMs,
   });
 }
@@ -5756,7 +5787,11 @@ function awaitDetachedReadiness(supervisor, init) {
         try { process.kill(supervisor.pid, "SIGTERM"); } catch { /* already exited */ }
         if (init.scopedRunDir && !existsSync(join(init.scopedRunDir, "run.json")) && !existsSync(join(init.scopedRunDir, PROCESS_EVIDENCE_FILE))) removeFailedDetachedLaunchDir(init.scopedRunDir);
       }, DETACHED_ABORT_GRACE_MS).unref?.();
-      rejectReady(new Error(`detached launch failed: ${renderErrorForTerminal(error)}`));
+      const rendered = renderErrorForTerminal(error);
+      const failure = isRuntimeAdmissionError(error)
+        ? new RuntimeAdmissionError(rendered)
+        : new Error(`detached launch failed: ${rendered}`);
+      rejectReady(failure);
     };
     const timer = setTimeout(() => finishFailure(new Error("readiness timed out")), timeoutMs);
     supervisor.once("error", finishFailure);
@@ -5764,7 +5799,12 @@ function awaitDetachedReadiness(supervisor, init) {
     supervisor.once("exit", (code) => finishFailure(new Error(`supervisor exited ${code ?? 1} before readiness`)));
     supervisor.on("message", (message) => {
       if (message?.type === "spawned" && Number.isInteger(message.pid)) actualPid = message.pid;
-      if (message?.type === "error") finishFailure(new Error(message.error || "supervisor failed safely"));
+      if (message?.type === "error") {
+        const error = message.code === "RUNTIME_ADMISSION_FAILED"
+          ? new RuntimeAdmissionError(message.error || "runtime admission failed safely")
+          : new Error(message.error || "supervisor failed safely");
+        finishFailure(error);
+      }
       if (message?.type !== "ready" || settled) return;
       if (!Number.isInteger(message.pid) || message.pid <= 0 || (actualPid && actualPid !== message.pid)) {
         finishFailure(new Error("supervisor returned invalid child pid evidence"));
@@ -5781,6 +5821,7 @@ function awaitDetachedReadiness(supervisor, init) {
       repo: init.repo,
       commandArgs: init.commandArgs,
       env: init.env,
+      runtimeBinding: init.runtimeBinding,
       runDir: init.scopedRunDir,
       runId: init.runId,
       executionId: init.executionId,
@@ -5794,7 +5835,7 @@ function awaitDetachedReadiness(supervisor, init) {
 
 export function factoryLaunchEnv(opts = {}, runId = null) {
   try {
-    const env = prepareTelemetryEnv(process.env, {
+    const env = prepareTelemetryEnv(factoryBaseEnv(opts), {
       parentSpanId: opts.parentSpanId,
       traceparent: opts.traceparent,
       tracestate: opts.tracestate,
@@ -5962,6 +6003,19 @@ export function seedRepoSkill(repo, opts = {}) {
   writeManagedSeedFileAtomic(repo, dest, seedHashPath, `${JSON.stringify(nextHashes, null, 2)}\n`);
   ensureGitInfoExclude(repo, ".opencode/skills/feature/");
   return dest;
+}
+
+function assertLaunchDefinitionsCurrent(opts = {}) {
+  return assertGlobalDefinitionsCurrent({
+    env: factoryBaseEnv(opts),
+    cwd: opts.cwd || process.cwd(),
+    inspect: opts.inspectGlobalDefinitionsFn,
+  });
+}
+
+function factoryBaseEnv(opts) {
+  if (!opts.home) return opts.env ?? process.env;
+  return { ...(opts.env ?? process.env), HOME: resolve(opts.home) };
 }
 
 function ensureRepoSeedSkillDirectory(repo) {
@@ -7543,6 +7597,7 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
     driverKind: opts.driverKind,
     pluginSpec: opts.pluginSpec,
     pluginOptions: opts.pluginOptions,
+    runtimeIdentity: opts.runtimeIdentity,
     event: opts.event || (eventKind === "resume" ? "run-resumed" : "run-created"),
     now: opts.now,
   });

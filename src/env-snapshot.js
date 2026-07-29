@@ -8,6 +8,8 @@ import { git } from "./git.js";
 import plugin from "./plugin.js";
 import { readJsoncConfig } from "./config.js";
 import { timestamp } from "./utils.js";
+import { normalizeRuntimeIdentity, resolveRuntimeIdentity } from "./runtime-identity.js";
+import { DIAGNOSTIC_PLUGIN_CONFIG_INVOCATION } from "./plugin-diagnostics.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const SENSITIVE_ENV_KEY_PATTERN = /(?:secret|token|password|passwd|pwd|api[_-]?key|private[_-]?key|credential|authorization|auth[_-]?header|access[_-]?key|bearer|cookie)/iu;
@@ -34,10 +36,13 @@ export const REDACTED_ENV_VALUE = "[redacted]";
 export async function collectEnv(options = {}) {
   const pluginOptions = options.pluginOptions ?? installedPluginOptions();
   const resolvedConfig = await resolvePluginConfig(pluginOptions);
+  const runtimeIdentity = normalizeRuntimeIdentity(options.runtimeIdentity ?? resolveRuntimeIdentity(options));
   return {
     feature_factory_version: packageVersion(),
-    opencode_version: commandOutput("opencode", ["--version"]),
+    opencode_version: runtimeIdentity.opencode.version,
     plugin_spec: options.pluginSpec || "opencode-feature-factory",
+    plugin_identity: runtimeIdentity.plugin,
+    cli_identity: runtimeIdentity.cli,
     resolved_models: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.model || null])),
     resolved_variants: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.variant || null])),
     driver: {
@@ -49,12 +54,19 @@ export async function collectEnv(options = {}) {
   };
 }
 
-export async function collectRunDebugSnapshot({ cwd, driverKind, pluginSpec, pluginOptions, event, now } = {}) {
+export async function collectRunDebugSnapshot(options = {}) {
+  const { event, now } = options;
+  const collected = await collectEnv(options);
+  const env = scrubSecretEnv(collected);
+  // These closed projections were already normalized for secrets and terminal
+  // controls; preserve their diagnostic hashes from generic entropy redaction.
+  env.plugin_identity = collected.plugin_identity;
+  env.cli_identity = collected.cli_identity;
   return {
     collected_at: timestamp(now, "environment snapshot timestamp"),
     event: stringValue(event) ? event.trim() : "run-created",
     diagnostic_only: true,
-    env: scrubSecretEnv(await collectEnv({ cwd, driverKind, pluginSpec, pluginOptions })),
+    env,
   };
 }
 
@@ -97,7 +109,7 @@ export async function collectEffectiveProvenance({ repo, gitCwd, pluginOptions, 
 }
 
 export async function resolvePluginConfig(pluginOptions = {}) {
-  const hooks = await plugin({}, pluginOptions);
+  const hooks = await plugin({}, { ...pluginOptions, [DIAGNOSTIC_PLUGIN_CONFIG_INVOCATION]: true });
   const cfg = {};
   hooks.config(cfg);
   return cfg;

@@ -12,6 +12,16 @@ const TOKEN = "ghp_11AA22BB33CC44DD55EE66FF77GG88HH";
 const ACTIVE_CONTROLS = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/u;
 
 describe("centralized CLI output", () => {
+  it("prints factory help successfully without an unknown-command diagnostic", () => {
+    const proc = spawnSync(process.execPath, [CLI, "factory", "--help"], { encoding: "utf8" });
+
+    assert.equal(proc.status, 0);
+    assert.match(proc.stdout, /^feature-factory\n/u);
+    assert.match(proc.stdout, /factory start/u);
+    assert.doesNotMatch(`${proc.stdout}\n${proc.stderr}`, /unknown command/u);
+    assert.equal(proc.stderr, "");
+  });
+
   it("projects scalar, JSON, table, and key-value results without changing their normal shapes", () => {
     const scalar = renderCliResultLines(HOSTILE, {});
     assert.equal(scalar.length, 1);

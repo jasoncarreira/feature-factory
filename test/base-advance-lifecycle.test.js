@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { advanceFactoryRunBase, resumeFactory } from "../src/factory.js";
+import { advanceFactoryRunBase, resumeFactory as resumeFactoryImpl } from "../src/factory.js";
 import { classifyWholeStoryTestRoute, completeSpecialBuilderTaskDispatch, claimCheckedTestExecution, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionSliceMerged, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 import { computePrOperationId } from "../src/github.js";
 import { captureRepresentativeAuthorityInventory, createBaseAdvanceTransitionFixture, git, installRepresentativeAuthorityInventory, output } from "./helpers/base-advance-transition/fixture.js";
 import { approvePreservedCandidate, completeFinalCheckedTest, completeIntegratedConflictCheckedTest, configureReadyPostPrReview, installApprovedLifecycleSlice, LIFECYCLE_REVIEWER, publishIndependentPanels, publishPrePrApproval, recordOpenReadyPr, requestConfiguredReviewer } from "./helpers/base-advance-lifecycle/fixture.js";
 import { spawnSync } from "./helpers/git-fixture.js";
+import { withTestRuntimeAdmission } from "./helpers/runtime-admission.js";
+
+const resumeFactory = (runId, options) => resumeFactoryImpl(runId, withTestRuntimeAdmission(options));
 
 describe("active-run base advancement lifecycle compatibility", () => {
   it("preserves an overlapping rejected candidate and leaves review, ownership, checks, and merge proof mandatory", async () => {

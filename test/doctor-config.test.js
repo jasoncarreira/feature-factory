@@ -1,9 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   collectTelemetryReadiness,
@@ -14,12 +14,22 @@ import {
   evaluatePackageInstrumentationLoadability,
   formatTelemetryEndpointDetail,
   hasTuiExport,
+  permissionFailures,
   readOpencodeConfig,
 } from "../src/doctor.js";
-import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
+import { REDACTED_ENV_VALUE, resolvePluginConfig } from "../src/env-snapshot.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const LOCAL_PLUGIN_SPEC = pathToFileURL(fileURLToPath(new URL("..", import.meta.url))).href;
+const FRAGMENTED_SECRET_VARIANTS = [
+  ["mixed", "Q7M4-Z9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["uneven-1", "Q7-M4Z9N_2C8.V5B1X6:L3K 0P7R2-T9Y4_U8I5"],
+  ["uneven-2", "Q-7M4_Z9N2C.8V5:B1X6L 3K0-P7R2T_9Y4U8-I5"],
+  ["control-1", "Q7M4\u001bZ9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["control-2", "Q7M4-Z9N2\u202eC8V5.B1X6:L3K0\tP7R2-T9Y4_U8I5"],
+  ["long-fragments", "Q7M4Z9N-2C8V5_B1X6L3.K0P7R2:T9Y4U8I5"],
+  ["fragmented-bearer-path", "Bearer/Q7M4Z9N/2C8V5/B1X6L3/K0P7R2/T9Y4U8I5"],
+];
 
 describe("doctor package.json parsing", () => {
   it("returns true when package.json has a TUI export", () => {
@@ -86,6 +96,126 @@ describe("doctor opencode config parsing", () => {
 });
 
 describe("doctor output projection", () => {
+  it("accepts task deny for subagents while requiring task allow for the primary agent", async () => {
+    const registered = await resolvePluginConfig();
+
+    assert.deepEqual(permissionFailures(registered.agent), []);
+
+    const primaryDenied = structuredClone(registered.agent);
+    primaryDenied["feature-factory"].permission.task = "deny";
+    assert.deepEqual(permissionFailures(primaryDenied), ["feature-factory.task=deny"]);
+
+    const subagentAllowed = structuredClone(registered.agent);
+    subagentAllowed["backend-builder"].permission.task = "allow";
+    assert.deepEqual(permissionFailures(subagentAllowed), ["backend-builder.task=allow"]);
+  });
+
+  it("reports the supported bounded-delegation policy as healthy", () => {
+    const fixture = doctorFixture();
+    try {
+      const proc = runDoctorFixture(fixture, ["--json"]);
+      const payload = JSON.parse(proc.stdout);
+      const permissions = payload.checks.find((check) => check.label === "factory permissions non-interactive");
+
+      assert.equal(proc.status, 0);
+      assert.equal(permissions.level, "ok");
+      assert.equal(permissions.detail, "factory agent permissions");
+    } finally {
+      cleanup(fixture.dir);
+    }
+  });
+
+  it("fails deterministically for stale global definitions in human and JSON output", () => {
+    const fixture = doctorFixture();
+    const stale = join(fixture.home, ".config", "opencode", "skills", "feature", "SKILL.md");
+    try {
+      mkdirSync(join(fixture.home, ".config", "opencode", "skills", "feature"), { recursive: true });
+      writeFileSync(stale, "stale feature instructions\n", "utf8");
+
+      const human = runDoctorFixture(fixture);
+      assert.equal(human.status, 1);
+      assert.match(human.stdout, /missing: global feature-factory definitions \(stale global feature-factory definitions detected/u);
+      assert.match(human.stdout, /replace them with exact current packaged definitions; unset unsupported OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT overrides for factory operation; then restart opencode/u);
+
+      const json = runDoctorFixture(fixture, ["--json"]);
+      const payload = JSON.parse(json.stdout);
+      const check = payload.checks.find((item) => item.label === "global feature-factory definitions");
+      const command = payload.checks.find((item) => item.label === "/feature command registered");
+      assert.equal(json.status, 1);
+      assert.equal(check.level, "missing");
+      assert.equal(command.level, "ok", "diagnostic plugin config resolution must remain available");
+      assert.match(check.detail, /stale global feature-factory definitions detected/u);
+      assert.match(check.detail, /restart opencode/u);
+    } finally {
+      cleanup(fixture.dir);
+    }
+  });
+
+  it("diagnoses stale effective config-dir definitions without publishing raw paths", () => {
+    const fixture = doctorFixture();
+    const configDir = join(fixture.dir, "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "opencode");
+    const stale = join(configDir, "agents", "backend-builder.md");
+    try {
+      mkdirSync(join(configDir, "agents"), { recursive: true });
+      writeFileSync(stale, "stale agent\n", "utf8");
+      const proc = runDoctorFixture(fixture, ["--json"], { OPENCODE_CONFIG_DIR: configDir });
+      const payload = JSON.parse(proc.stdout);
+      const check = payload.checks.find((item) => item.label === "global feature-factory definitions");
+      assert.equal(proc.status, 1);
+      assert.equal(check.level, "missing");
+      assert.match(check.detail, /stale global feature-factory definitions detected/u);
+      assert.doesNotMatch(proc.stdout, /QWxhZGRpb/u);
+      assert.doesNotMatch(proc.stdout, new RegExp(escapeRegExp(stale), "u"));
+    } finally {
+      cleanup(fixture.dir);
+    }
+  });
+
+  for (const definition of [
+    ["skill", "skills", "feature", "SKILL.md"],
+    ["agent", "agents", "backend-builder.md"],
+  ]) {
+    it(`diagnoses a stale XDG ${definition[0]} without publishing raw paths`, () => {
+      const fixture = doctorFixture();
+      const xdg = join(fixture.dir, "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "xdg");
+      const stale = join(xdg, "opencode", ...definition.slice(1));
+      try {
+        mkdirSync(dirname(stale), { recursive: true });
+        writeFileSync(stale, `stale ${definition[0]}\n`, "utf8");
+        const proc = runDoctorFixture(fixture, ["--json"], { XDG_CONFIG_HOME: xdg });
+        const payload = JSON.parse(proc.stdout);
+        const check = payload.checks.find((item) => item.label === "global feature-factory definitions");
+        assert.equal(proc.status, 1);
+        assert.equal(check.level, "missing");
+        assert.match(check.detail, /stale global feature-factory definitions detected/u);
+        assert.doesNotMatch(proc.stdout, /QWxhZGRpb/u);
+        assert.doesNotMatch(proc.stdout, new RegExp(escapeRegExp(stale), "u"));
+      } finally {
+        cleanup(fixture.dir);
+      }
+    });
+  }
+
+  it("diagnoses unsupported inline config overrides without crashing or exposing content", () => {
+    const fixture = doctorFixture();
+    const secret = "github_pat_123456789012345678901234567890";
+    try {
+      const proc = runDoctorFixture(fixture, ["--json"], {
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({ agent: { "feature-factory": { prompt: secret } } }),
+      });
+      const payload = JSON.parse(proc.stdout);
+      const check = payload.checks.find((item) => item.label === "global feature-factory definitions");
+      const command = payload.checks.find((item) => item.label === "/feature command registered");
+      assert.equal(proc.status, 1);
+      assert.equal(check.level, "missing");
+      assert.equal(command.level, "ok");
+      assert.match(check.detail, /unset unsupported OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT/u);
+      assert.doesNotMatch(proc.stdout, new RegExp(secret, "u"));
+    } finally {
+      cleanup(fixture.dir);
+    }
+  });
+
   it("projects the whole JSON payload and human profile rows", () => {
     const fixture = doctorFixture({
       profiles: {
@@ -96,14 +226,22 @@ describe("doctor output projection", () => {
     try {
       const human = runDoctorFixture(fixture, ["--profiles"]);
       assert.match(human.stdout, /profile: backend-builder -> model=provider\/safe-model variant=safe-variant/u);
+      assert.match(human.stdout, /ok: configured feature-factory plugin identity \(source=.*src\/plugin\.js version=0\.2\.1 hash=sha256:[0-9a-f]{64}\)/u);
       assert.match(human.stdout, /provider\/control\\u001B/u);
       assert.doesNotMatch(human.stdout, /[\u001B\u0007\u009B\u202E]/u);
 
       const json = runDoctorFixture(fixture, ["--json"], { FAKE_OPENCODE_VERSION: "safe\u001B[2J" });
       const payload = JSON.parse(json.stdout);
+      assert.equal(payload.env.cli_identity.source, CLI);
+      assert.equal(payload.env.cli_identity.version, "0.2.1");
+      assert.match(payload.env.cli_identity.hash, /^sha256:[0-9a-f]{64}$/u);
+      assert.equal(payload.env.plugin_identity.source, fileURLToPath(new URL("../src/plugin.js", import.meta.url)));
+      assert.equal(payload.env.plugin_identity.version, "0.2.1");
+      assert.match(payload.env.plugin_identity.hash, /^sha256:[0-9a-f]{64}$/u);
+      assert.match(payload.checks.find((check) => check.label === "configured feature-factory plugin identity").detail, /^source=.*src\/plugin\.js version=0\.2\.1 hash=sha256:[0-9a-f]{64}$/u);
       assert.equal(payload.env.resolved_models["backend-builder"], "provider/safe-model");
       assert.equal(payload.env.resolved_models["test-verifier"], "provider/control\u001B]0;pwned\u0007");
-      assert.match(json.stdout, /safe\\u001B/iu);
+      assert.equal(payload.env.opencode_version, "safe?[2J");
       assert.doesNotMatch(json.stdout, /[\u001B\u0007\u009B\u202E]/u);
     } finally {
       cleanup(fixture.dir);
@@ -126,6 +264,47 @@ describe("doctor output projection", () => {
       assert.doesNotMatch(proc.stdout, /[\u001B\u0007\u009B]/u);
     } finally {
       cleanup(fixture.dir);
+    }
+  });
+
+  it("keeps mixed, uneven, and control-interrupted identity credentials out of human and JSON output", () => {
+    for (const [name, fragmented] of FRAGMENTED_SECRET_VARIANTS) {
+      const fixture = doctorFixture();
+      const packageRoot = join(fixture.dir, `home ${fragmented}`, "node_modules", "opencode-feature-factory");
+      const effectiveCli = join(packageRoot, "feature-factory");
+      const bin = join(fixture.dir, "identity-bin");
+      try {
+        mkdirSync(bin, { recursive: true });
+        mkdirSync(packageRoot, { recursive: true });
+        writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+          name: "opencode-feature-factory",
+          version: `feature-factory 1.2.3 ${fragmented}`,
+        }), "utf8");
+        writeExecutable(effectiveCli, "#!/bin/sh\nexit 0\n");
+        symlinkSync(effectiveCli, join(bin, "feature-factory"));
+        const env = {
+          PATH: `${bin}${delimiter}${fixture.bin}${delimiter}${process.env.PATH}`,
+          FAKE_OPENCODE_VERSION: `opencode ${fragmented}`,
+        };
+
+        const human = runDoctorFixture(fixture, [], env);
+        const json = runDoctorFixture(fixture, ["--json"], env);
+        const payload = JSON.parse(json.stdout);
+        for (const output of [human.stdout, human.stderr, json.stdout, json.stderr]) {
+          assert.equal(output.includes(fragmented), false, name);
+        }
+        assert.match(human.stdout, /feature-factory CLI identity \(source=\[redacted\] version=\[redacted\] hash=sha256:[0-9a-f]{64}\)/u);
+        assert.match(human.stdout, /opencode CLI \(\[redacted\]\)/u);
+        assert.deepEqual(payload.env.cli_identity, {
+          source: REDACTED_ENV_VALUE,
+          version: REDACTED_ENV_VALUE,
+          hash: payload.env.cli_identity.hash,
+        }, name);
+        assert.match(payload.env.cli_identity.hash, /^sha256:[0-9a-f]{64}$/u);
+        assert.equal(payload.env.opencode_version, REDACTED_ENV_VALUE, name);
+      } finally {
+        cleanup(fixture.dir);
+      }
     }
   });
 });
@@ -509,6 +688,7 @@ fi
 `);
   writeExecutable(join(bin, "git"), "#!/bin/sh\nif [ \"$1\" = \"symbolic-ref\" ]; then printf '%s\\n' 'origin/main'; fi\n");
   writeExecutable(join(bin, "gh"), "#!/bin/sh\nexit 0\n");
+  symlinkSync(CLI, join(bin, "feature-factory"));
   return { dir, repo, home, bin };
 }
 

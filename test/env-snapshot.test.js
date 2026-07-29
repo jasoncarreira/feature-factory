@@ -15,6 +15,16 @@ import {
   scrubSecretEnv,
 } from "../src/env-snapshot.js";
 
+const FRAGMENTED_SECRET_VARIANTS = [
+  ["mixed", "Q7M4-Z9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["uneven-1", "Q7-M4Z9N_2C8.V5B1X6:L3K 0P7R2-T9Y4_U8I5"],
+  ["uneven-2", "Q-7M4_Z9N2C.8V5:B1X6L 3K0-P7R2T_9Y4U8-I5"],
+  ["control-1", "Q7M4\u001bZ9N2_C8V5.B1X6:L3K0 P7R2-T9Y4_U8I5"],
+  ["control-2", "Q7M4-Z9N2\u202eC8V5.B1X6:L3K0\tP7R2-T9Y4_U8I5"],
+  ["long-fragments", "Q7M4Z9N-2C8V5_B1X6L3.K0P7R2:T9Y4U8I5"],
+  ["fragmented-bearer-path", "Bearer/Q7M4Z9N/2C8V5/B1X6L3/K0P7R2/T9Y4U8I5"],
+];
+
 describe("environment snapshot redaction", () => {
   it("builds a fresh exact-account GitHub environment without inherited auth tokens", () => {
     const parent = {
@@ -122,11 +132,47 @@ describe("environment snapshot redaction", () => {
   });
 
   it("collects run snapshots under env", async () => {
-    const snapshot = await collectRunDebugSnapshot({ cwd: process.cwd(), event: "run-created", now: "2026-07-08T12:00:00.000Z" });
+    const snapshot = await collectRunDebugSnapshot({
+      cwd: process.cwd(),
+      event: "run-created",
+      now: "2026-07-08T12:00:00.000Z",
+      runtimeIdentity: {
+        plugin: { source: "/tmp/configured-plugin.js", version: "1.2.3", hash: `sha256:${"c".repeat(64)}` },
+        cli: { source: "/tmp/secret-cli\u001b[2J", version: "secret-version", hash: `sha256:${"a".repeat(64)}` },
+      },
+    });
     assert.equal(snapshot.event, "run-created");
     assert.equal(snapshot.diagnostic_only, true);
     assert.equal(typeof snapshot.env, "object");
+    assert.deepEqual(snapshot.env.plugin_identity, { source: "/tmp/configured-plugin.js", version: "1.2.3", hash: `sha256:${"c".repeat(64)}` });
+    assert.deepEqual(snapshot.env.cli_identity, { source: REDACTED_ENV_VALUE, version: REDACTED_ENV_VALUE, hash: `sha256:${"a".repeat(64)}` });
+    assert.doesNotMatch(JSON.stringify(snapshot), /[\u001b\u009b]/u);
     assert.equal(snapshot.provenance, undefined);
+  });
+
+  it("keeps mixed, uneven, and control-interrupted identity credentials out of run snapshots", async () => {
+    const hash = `sha256:${"b".repeat(64)}`;
+    for (const [name, fragmented] of FRAGMENTED_SECRET_VARIANTS) {
+      const snapshot = await collectRunDebugSnapshot({
+        cwd: process.cwd(),
+        runtimeIdentity: {
+          cli: {
+            source: `/tmp/home ${fragmented}/feature-factory`,
+            version: `feature-factory 1.2.3 ${fragmented}`,
+            hash,
+          },
+          opencode: {
+            source: "/tmp/opencode",
+            version: `opencode ${fragmented}`,
+            hash: `sha256:${"d".repeat(64)}`,
+          },
+        },
+      });
+
+      assert.deepEqual(snapshot.env.cli_identity, { source: REDACTED_ENV_VALUE, version: REDACTED_ENV_VALUE, hash }, name);
+      assert.equal(snapshot.env.opencode_version, REDACTED_ENV_VALUE, name);
+      assert.equal(JSON.stringify(snapshot).includes(fragmented), false, name);
+    }
   });
 
   it("hashes effective prompts, skills, plugin bytes, and git state without raw prompt content", async () => {
@@ -193,6 +239,34 @@ describe("environment snapshot redaction", () => {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("detects opencode run flags across combined help stdout and stderr on failure", () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-opencode-help-"));
+    const executable = join(dir, "opencode");
+    const savedPath = process.env.PATH;
+    try {
+      writeFileSync(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' 'opencode-test'
+  exit 0
+fi
+printf '%s\\n' 'Usage: opencode run --command value'
+printf '%s\\n' 'Options: --dir path' >&2
+exit 2
+`, "utf8");
+      chmodSync(executable, 0o755);
+      process.env.PATH = `${dir}:${savedPath ?? ""}`;
+
+      const capabilities = detectCapabilities(dir);
+      assert.equal(capabilities.opencode, true);
+      assert.equal(capabilities.opencode_run_command, true);
+      assert.equal(capabilities.opencode_run_dir, true);
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
       rmSync(dir, { recursive: true, force: true });
     }
   });

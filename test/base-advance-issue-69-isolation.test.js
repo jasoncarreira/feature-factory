@@ -3,11 +3,14 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { describe, it } from "node:test";
-import { advanceFactoryRunBase, resumeFactory } from "../src/factory.js";
+import { advanceFactoryRunBase, resumeFactory as resumeFactoryImpl } from "../src/factory.js";
 import { acquireLaunchClaim } from "../src/process-evidence.js";
 import { transitionRunBaseAdvance } from "../src/run-state.js";
 import { createBaseAdvanceTransitionFixture } from "./helpers/base-advance-transition/fixture.js";
 import { spawnSync } from "./helpers/git-fixture.js";
+import { withTestRuntimeAdmission } from "./helpers/runtime-admission.js";
+
+const resumeFactory = (runId, options) => resumeFactoryImpl(runId, withTestRuntimeAdmission(options));
 
 describe("base advancement selected-run and issue-69 isolation", () => {
   it("mutates only the selected fixture while preserving the real issue-69 run, refs, and worktrees byte-for-byte", async () => {
