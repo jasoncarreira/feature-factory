@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,44 +66,6 @@ export async function collectRunDebugSnapshot(options = {}) {
     event: stringValue(event) ? event.trim() : "run-created",
     diagnostic_only: true,
     env,
-  };
-}
-
-export async function collectEffectiveProvenance({ repo, gitCwd, pluginOptions, event, agent, subject, attempt, promptHash, promptBytes, now } = {}) {
-  const repository = repo || process.cwd();
-  const resolvedConfig = await resolvePluginConfig(pluginOptions ?? installedPluginOptions());
-  const selectedAgents = agent
-    ? Object.fromEntries([[agent, resolvedConfig.agent?.[agent]?.prompt || ""]])
-    : Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, value]) => [name, value.prompt || ""]));
-  const skillFiles = effectiveSkillFiles(repository);
-  const gitRoot = gitCwd && existsSync(gitCwd) ? gitCwd : repository;
-  const head = commandOutput("git", ["rev-parse", "HEAD"], gitRoot);
-  const status = commandOutput("git", ["status", "--porcelain=v1", "--untracked-files=all"], gitRoot);
-  const configuredAgent = agent ? resolvedConfig.agent?.[agent] : null;
-  const pluginSource = realpathSync(join(root, "src", "plugin.js"));
-  return {
-    schema_version: 1,
-    event: stringValue(event) ? event.trim() : "created",
-    captured_at: timestamp(now, "provenance timestamp"),
-    ...(agent ? { dispatch: { agent, subject, attempt, prompt_hash: promptHash, prompt_bytes: promptBytes } } : {}),
-    content: {
-      command_hash: hashText(resolvedConfig.command?.feature?.template || ""),
-      agent_prompt_hashes: Object.fromEntries(Object.entries(selectedAgents).map(([name, prompt]) => [name, hashText(prompt)])),
-      skill_hashes: Object.fromEntries(skillFiles.map(({ name, path }) => [name, hashFile(path)])),
-    },
-    runtime: {
-      plugin: { source: pluginSource, source_hash: hashFile(pluginSource), package_version: packageVersion() },
-      opencode_version: commandOutput("opencode", ["--version"]),
-      configured_models: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, value]) => [name, value.model || null])),
-      configured_variants: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, value]) => [name, value.variant || null])),
-      model: agent ? {
-        configured: configuredAgent?.model || null,
-        variant: configuredAgent?.variant || null,
-        actual: null,
-        actual_source: "unavailable",
-      } : null,
-      git: { head, dirty: status === null ? null : status.length > 0 },
-    },
   };
 }
 
@@ -182,43 +143,6 @@ export function isSecretShapedEnvKey(key) {
 function packageVersion() {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   return pkg.version || "unknown";
-}
-
-function effectiveSkillFiles(repo) {
-  const packaged = join(root, "assets", "skills", "feature");
-  return ["SKILL.md", "SCHEMA.md"].map((name) => {
-    const candidate = realRepoSkillFile(repo, name);
-    if (candidate) return { name: `feature/${name}`, path: candidate };
-    return { name: `feature/${name}`, path: join(packaged, name) };
-  });
-}
-
-function realRepoSkillFile(repo, name) {
-  const segments = [".opencode", "skills", "feature", name];
-  let candidate = repo;
-  for (const [index, segment] of segments.entries()) {
-    candidate = join(candidate, segment);
-    let entry;
-    try {
-      entry = lstatSync(candidate);
-    } catch (error) {
-      if (error?.code === "ENOENT") return null;
-      throw error;
-    }
-    const isFile = index === segments.length - 1;
-    if (entry.isSymbolicLink() || (isFile ? !entry.isFile() : !entry.isDirectory())) {
-      throw new Error(`repo-seeded feature skill must use a real path: ${name}`);
-    }
-  }
-  return realpathSync(candidate);
-}
-
-function hashFile(path) {
-  return `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
-}
-
-function hashText(value) {
-  return `sha256:${createHash("sha256").update(String(value), "utf8").digest("hex")}`;
 }
 
 function commandOk(command, args, cwd = process.cwd()) {

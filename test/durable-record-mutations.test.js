@@ -2370,7 +2370,6 @@ describe("finite durable-authority catalog", () => {
     const exclusions = Object.fromEntries(DURABLE_AUTHORITY_EXCLUSIONS.flatMap(({ records, reason }) => records.map((record) => [record, reason])));
     assert.deepEqual(Object.keys(exclusions), [
       "run.json.debug_snapshot",
-      "run.json.provenance",
       "run.json.cost_attribution",
       "heartbeat.json",
       "run.json.heartbeat_at",
