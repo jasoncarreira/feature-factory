@@ -12,7 +12,8 @@
 // All three are the same defect: a judgement detached from its subject.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { observeAncestry, observeTree } from "./index.js";
+import { isAbsolute, sep } from "node:path";
+import { deriveReviewReady, EVIDENCE_DIR, EVIDENCE_KEYS, observeAncestry, observeTree } from "./index.js";
 
 export const REVIEW_KEYS = Object.freeze([
   "subject", "reviewer", "verdict", "attempt", "reviewed_commit",
@@ -96,18 +97,46 @@ export function observeMergeProof(worktree, { reviewedCommit, mergeCommit, optio
 
 // Evidence records are read the same way reviews are: shape-checked, and refused
 // rather than half-trusted. `factory observe` is the only writer.
-export function readEvidence(runDir, ref) {
+// Finding 2, three parts:
+//
+//   * the ref was an unrestricted string joined to runDir, so ../app-2/evidence/... in
+//     another run's directory was accepted. Refs are now admitted canonically: run-local,
+//     no traversal, under evidence/.
+//   * evidence carried no run identity, so a foreign record with a matching subject
+//     passed. run_id is now required and must match.
+//   * review_ready was trusted as stored, so a record with review_ready: true and
+//     tests.exit: 1 was accepted. It is a *derived* field, so it is recomputed here from
+//     the record's own contents and the stored value is required to agree. A derived
+//     field read back as authority is not evidence, it is an assertion.
+export function readEvidence(runDir, ref, { runId = null } = {}) {
+  if (typeof ref !== "string" || !ref.trim()) throw new Error("evidence ref is missing");
+  if (isAbsolute(ref) || ref.split(/[\\/]/u).includes("..")) {
+    throw new Error(`evidence ref '${ref}' must be run-local without traversal`);
+  }
+  const normalized = ref.split(sep).join("/");
+  if (!normalized.startsWith(`${EVIDENCE_DIR}/`)) {
+    throw new Error(`evidence ref '${ref}' must be under ${EVIDENCE_DIR}/`);
+  }
   let value;
   try {
-    value = JSON.parse(readFileSync(join(runDir, ref), "utf8"));
+    value = JSON.parse(readFileSync(join(runDir, normalized), "utf8"));
   } catch (error) {
     throw new Error(`evidence '${ref}' could not be read: ${error.message}`);
   }
+  const unknown = Object.keys(value).filter((key) => !EVIDENCE_KEYS.includes(key));
+  if (unknown.length > 0) throw new Error(`evidence '${ref}' has unknown keys: ${unknown.sort().join(", ")}`);
   for (const key of ["subject", "status", "observed_by"]) {
     if (typeof value[key] !== "string" || !value[key].trim()) throw new Error(`evidence '${ref}' has no ${key}`);
   }
   if (value.observed_by !== "orchestrator") throw new Error(`evidence '${ref}' was not written by the orchestrator`);
   if (typeof value.review_ready !== "boolean") throw new Error(`evidence '${ref}' has no review_ready`);
   if (!Number.isSafeInteger(value.attempt) || value.attempt < 1) throw new Error(`evidence '${ref}' has no attempt`);
+  if (runId !== null && value.run_id !== runId) {
+    throw new Error(`evidence '${ref}' belongs to run '${value.run_id}', not '${runId}'`);
+  }
+  const derived = deriveReviewReady(value);
+  if (value.review_ready !== derived) {
+    throw new Error(`evidence '${ref}' claims review_ready: ${value.review_ready} but its own contents derive ${derived}`);
+  }
   return value;
 }

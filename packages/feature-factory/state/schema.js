@@ -55,6 +55,30 @@ export const VALIDATOR_VERDICTS = Object.freeze(["GO", "GO-WITH-NITS", "NO-GO"])
 export const VALIDATOR_KEYS = Object.freeze(["verdict", "report", "reviewed_head", "loops"]);
 export const TERMINAL_RESULT_KEYS = Object.freeze(["status", "reason"]);
 
+// Finding 2: an invalid evidence ref was only rejected when consumed at merge, so a
+// foreign path could be recorded into run.json and sit there looking legitimate. Refs
+// are admitted at store time: run-local, no traversal, no absolute paths, and under
+// the directory that owns them.
+const REF_DIRS = Object.freeze({ evidence_ref: "evidence", review_ref: "reviews" });
+
+function runLocalRef(errors, holder, key, path) {
+  const value = holder[key];
+  if (value === null || value === undefined) return;
+  if (typeof value !== "string" || !value.trim()) {
+    errors.push({ path: `${path}.${key}`, message: "must be a non-empty string" });
+    return;
+  }
+  const parts = value.split(/[\\/]/u);
+  if (value.startsWith("/") || parts.includes("..") || parts.includes(".")) {
+    errors.push({ path: `${path}.${key}`, message: "must be run-local without traversal" });
+    return;
+  }
+  const dir = REF_DIRS[key];
+  if (dir && !value.startsWith(`${dir}/`)) {
+    errors.push({ path: `${path}.${key}`, message: `must be under ${dir}/` });
+  }
+}
+
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
 const SHA = /^[0-9a-f]{40}$/u;
 const ID = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u;
@@ -115,7 +139,7 @@ function steps(errors, value) {
     required(errors, step, "agent", path);
     enumValue(errors, step, "status", STEP_STATUSES, path);
     positiveInt(errors, step, "attempts", path);
-    for (const key of ["review_ref", "evidence_ref"]) nullableString(errors, step, key, path);
+    for (const key of ["review_ref", "evidence_ref"]) runLocalRef(errors, step, key, path);
     if (seen.has(step.agent)) errors.push({ path: `${path}.agent`, message: "duplicate step agent" });
     seen.add(step.agent);
   });
@@ -139,10 +163,15 @@ function slices(errors, value) {
     enumValue(errors, slice, "status", SLICE_STATUSES, path);
     positiveInt(errors, slice, "attempts", path);
     for (const key of ["worktree", "branch"]) nullableString(errors, slice, key, path);
-    for (const key of ["evidence_ref", "review_ref"]) nullableString(errors, slice, key, path);
+    for (const key of ["evidence_ref", "review_ref"]) runLocalRef(errors, slice, key, path);
     if (slice.base_ref !== null && slice.base_ref !== undefined) optionalPattern(errors, slice, "base_ref", SHA, path);
-    if (slice.status === "merged" && !SHA.test(String(slice.base_ref))) {
-      errors.push({ path: `${path}.base_ref`, message: "is required when a slice is merged" });
+    // Finding 3: requiring base_ref only at "merged" let a slice run and review with
+    // none, then receive its first value on the merge transition - chosen after the
+    // fact to exclude earlier commits from the ownership diff. The branch point is a
+    // fact established when the slice is activated, so it is required from the moment
+    // the slice leaves "pending".
+    if (slice.status !== "pending" && !SHA.test(String(slice.base_ref))) {
+      errors.push({ path: `${path}.base_ref`, message: `is required once a slice is ${slice.status}` });
     }
     if (slice.merge_commit !== null && slice.merge_commit !== undefined) {
       optionalPattern(errors, slice, "merge_commit", SHA, path);

@@ -87,6 +87,31 @@ describe("package boundary", () => {
     assert.equal(opencode.bin, undefined, "the opencode package ships no CLI of its own");
   });
 
+  it("exposes exactly the read-only surface at runtime, under any alias", async () => {
+    // Finding 4: the previous check was name-based, so
+    //   export { transition as mutateRun } from "./transition.js";
+    // reintroduced the exact defect and stayed green. This imports the package root and
+    // asserts the actual export set, which an alias cannot escape: mutateRun is simply
+    // not in the allowlist.
+    const manifest = JSON.parse(readFileSync(join(factoryPkg, "package.json"), "utf8"));
+    const root = (manifest.exports?.["."] ?? manifest.main).replace(/^\.\//u, "");
+    const module = await import(new URL(`file://${join(factoryPkg, root)}`).href);
+    const allowed = [
+      "readRun", "readRunUnchecked", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION",
+      "RUN_STATUSES", "TERMINAL_STATUSES", "MODES", "GATE_NAMES", "GATE_STATUSES",
+      "STEP_STATUSES", "SLICE_STATUSES", "VALIDATOR_VERDICTS",
+    ];
+    const actual = Object.keys(module).sort();
+    assert.deepEqual(actual, [...allowed].sort(),
+      "the package root's runtime exports must be exactly the read-only surface");
+    // And nothing exported may reach the write core, whatever it is called.
+    for (const [name, value] of Object.entries(module)) {
+      if (typeof value !== "function") continue;
+      assert.equal(/coordinateRunJsonTransition|withRunJsonLock/u.test(String(value)), false,
+        `exported ${name} reaches a write primitive`);
+    }
+  });
+
   it("does not expose a mutation entry point from the factory package root", () => {
     // Finding 6: state/index.js exported `transition` while package.json exposed that
     // module as the root, so the "read-only reader plus schema" public API handed out

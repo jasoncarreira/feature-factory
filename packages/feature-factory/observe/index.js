@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 
 export const EVIDENCE_KEYS = Object.freeze([
-  "subject", "attempt", "branch", "base_ref", "worktree", "status", "blocked_reason",
+  "subject", "run_id", "attempt", "branch", "base_ref", "worktree", "status", "blocked_reason",
   "files_changed", "diff_stat", "diff_observed", "commands", "tests", "commit",
   "observed_by", "review_ready", "claim_reconciliation",
 ]);
@@ -78,7 +78,12 @@ export function observeTree(worktree, ref, options = {}) {
 // could not run it, which is not the same as a pass.
 export function runTests(worktree, command, { runner = spawnSync, skipReason = null } = {}) {
   if (!command) {
-    return { cmd: null, exit: null, observed: false, skipped_reason: skipReason ?? "no test command declared" };
+    // Finding 1: this used to default skipped_reason to "no test command declared",
+    // and deriveReviewReady accepts any nonempty reason - so omitting --test-cmd
+    // manufactured its own excuse and produced review_ready: true. viso's rule is
+    // "observed green, or explicitly skipped with a reason"; an omission is not an
+    // explicit anything. A skip reason now only exists if the caller declared one.
+    return { cmd: null, exit: null, observed: false, skipped_reason: skipReason };
   }
   const result = runner(command[0], command.slice(1), { cwd: worktree, encoding: "utf8", shell: false });
   const exit = Number.isInteger(result?.status) ? result.status : null;
@@ -150,11 +155,14 @@ export function privilegedPaths(filesChanged) {
     || PRIVILEGED_EXACT.includes(file));
 }
 
-export function buildEvidence({ subject, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, options = {} }) {
+export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, options = {} }) {
   const observation = observeWorktree(worktree, baseRef, options);
-  const tests = runTests(worktree, testCommand, options);
+  const tests = runTests(worktree, testCommand, { ...options, skipReason });
   const evidence = {
     subject,
+    // Finding 2: evidence carried no run identity, so a record from another run with a
+    // matching subject was accepted and merged.
+    run_id: runId ?? null,
     attempt,
     branch,
     base_ref: baseRef,

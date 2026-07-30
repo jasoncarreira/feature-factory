@@ -71,6 +71,30 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
+  it("refuses review_ready when no test command was given at all", () => {
+    // The skip escape hatch used to populate its own precondition: runTests defaulted
+    // skipped_reason to "no test command declared", and any nonempty reason satisfies
+    // deriveReviewReady, so omitting --test-cmd manufactured a pass. An omission is not
+    // an explicit skip.
+    const f = repo("no-test-cmd");
+    try {
+      const omitted = buildEvidence({
+        subject: "be-thing", runId: "app-1", attempt: 1, branch: "slice", baseRef: f.base,
+        worktree: f.root, status: "completed", testCommand: null,
+      });
+      assert.equal(omitted.tests.skipped_reason, null, "an omission records no reason");
+      assert.equal(omitted.review_ready, false, "omitting the test command must not produce review_ready");
+
+      // A declared skip still works, because that is a decision somebody made.
+      const declared = buildEvidence({
+        subject: "be-thing", runId: "app-1", attempt: 1, branch: "slice", baseRef: f.base,
+        worktree: f.root, status: "completed", testCommand: null,
+        skipReason: "no backend tests for a docs-only slice",
+      });
+      assert.equal(declared.review_ready, true);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
   it("refuses review_ready for an unobserved test with no recorded reason", () => {
     const base = {
       status: "completed", files_changed: ["a.ts"], diff_observed: true,

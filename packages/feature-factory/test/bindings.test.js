@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertReviewBinding, observeMergeProof, readReview } from "../observe/review.js";
+import { assertReviewBinding, observeMergeProof, readEvidence, readReview } from "../observe/review.js";
 
 const run = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
@@ -209,6 +209,81 @@ describe("attack 8 — external state changes between observation and effect", (
         "the observation must run after the commit-boundary injection, or an early check would have passed");
       assert.equal(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).slices[0].status, "review",
         "the refused merge must leave the slice unmerged");
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+});
+
+describe("evidence records are bound to their run and internally consistent", () => {
+  function writeEvidence(runDir, overrides = {}) {
+    mkdirSync(join(runDir, "evidence"), { recursive: true });
+    const record = {
+      subject: "be-thing", run_id: "app-1", attempt: 1, branch: "slice",
+      base_ref: "a".repeat(40), worktree: ".", status: "completed", blocked_reason: null,
+      files_changed: ["src/app/thing.ts"], diff_stat: " 1 file changed", diff_observed: true,
+      commands: [], tests: { cmd: "npm test", exit: 0, observed: true, skipped_reason: null },
+      commit: "b".repeat(40), observed_by: "orchestrator", review_ready: true,
+      claim_reconciliation: { claimed: false, mismatches: [] },
+      ...overrides,
+    };
+    writeFileSync(join(runDir, "evidence", "be-thing.json"), `${JSON.stringify(record, null, 2)}\n`);
+    return "evidence/be-thing.json";
+  }
+
+  it("accepts a consistent run-local record", () => {
+    const f = fixture("ev-ok");
+    try {
+      const ref = writeEvidence(f.runDir);
+      assert.equal(readEvidence(f.runDir, ref, { runId: "app-1" }).subject, "be-thing");
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a record whose stored review_ready disagrees with its own contents", () => {
+    // review_ready is derived. Read back as authority it is not evidence, it is an
+    // assertion — so it is recomputed and the stored value must agree.
+    const f = fixture("ev-tampered");
+    try {
+      const ref = writeEvidence(f.runDir, { tests: { cmd: "npm test", exit: 1, observed: true, skipped_reason: null } });
+      assert.throws(() => readEvidence(f.runDir, ref, { runId: "app-1" }),
+        /claims review_ready: true but its own contents derive false/u);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a record belonging to another run", () => {
+    const f = fixture("ev-foreign");
+    try {
+      const ref = writeEvidence(f.runDir, { run_id: "app-2" });
+      assert.throws(() => readEvidence(f.runDir, ref, { runId: "app-1" }),
+        /belongs to run 'app-2', not 'app-1'/u);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a ref that escapes the run or its directory", () => {
+    const f = fixture("ev-escape");
+    try {
+      writeEvidence(f.runDir);
+      for (const ref of ["../app-2/evidence/be-thing.json", "/etc/passwd"]) {
+        assert.throws(() => readEvidence(f.runDir, ref, { runId: "app-1" }),
+          /must be run-local without traversal/u, `must refuse ${ref}`);
+      }
+
+      // Isolates the directory rule: this file is present and perfectly valid, so a
+      // "could not be read" failure cannot be what refuses it — only the requirement
+      // that evidence live under evidence/ can.
+      const valid = JSON.parse(readFileSync(join(f.runDir, "evidence", "be-thing.json"), "utf8"));
+      mkdirSync(join(f.runDir, "reviews"), { recursive: true });
+      writeFileSync(join(f.runDir, "reviews", "be-thing.json"), `${JSON.stringify(valid, null, 2)}\n`);
+      assert.doesNotThrow(() => readEvidence(f.runDir, "evidence/be-thing.json", { runId: "app-1" }),
+        "the same contents under evidence/ must be accepted");
+      assert.throws(() => readEvidence(f.runDir, "reviews/be-thing.json", { runId: "app-1" }),
+        /must be under evidence\//u, "identical contents outside evidence/ must be refused");
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a record carrying an unknown key", () => {
+    const f = fixture("ev-unknown");
+    try {
+      const ref = writeEvidence(f.runDir, { late_discovery_strike: false });
+      assert.throws(() => readEvidence(f.runDir, ref, { runId: "app-1" }), /unknown keys: late_discovery_strike/u);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 });

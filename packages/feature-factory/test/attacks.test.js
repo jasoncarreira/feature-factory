@@ -83,6 +83,24 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
     }
   });
 
+  it("requires a slice base_ref from the moment it leaves pending", () => {
+    // Requiring it only at "merged" let a slice run and review with none, then receive
+    // its first value on the merge transition - chosen after the fact to exclude
+    // earlier commits from the ownership diff.
+    const slice = (status, baseRef) => ({
+      id: "be", stack: "backend", depends_on: [], status, worktree: null, branch: null,
+      attempts: 1, paths: ["src/"], base_ref: baseRef, evidence_ref: null, review_ref: null,
+      merge_commit: status === "merged" ? "c".repeat(40) : null,
+    });
+    // Pending may have none: the slice has not been activated yet.
+    validateRun(baseRun({ slices: [slice("pending", null)] }));
+    for (const status of ["running", "review", "merged", "blocked"]) {
+      assert.throws(() => validateRun(baseRun({ slices: [slice(status, null)] })),
+        new RegExp(`base_ref: is required once a slice is ${status}`, "u"), `must require it at ${status}`);
+    }
+    validateRun(baseRun({ slices: [slice("running", "a".repeat(40))] }));
+  });
+
   it("accepts the baseline record it is meant to accept", () => {
     assert.equal(validateRun(baseRun()).run_id, "app-1");
   });

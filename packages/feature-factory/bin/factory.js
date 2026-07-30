@@ -32,7 +32,7 @@ export const COMMANDS = Object.freeze({
   terminal: Object.freeze(["--repo", "--reason", "--now", "--json"]),
   "slices-seed": Object.freeze(["--repo", "--from", "--now", "--json"]),
   slice: Object.freeze(["--repo", "--attempts", "--worktree", "--branch", "--base", "--evidence-ref", "--review-ref", "--merge-commit", "--now", "--json"]),
-  observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
+  observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--skip-tests-reason", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
   validator: Object.freeze(["--repo", "--report", "--reviewed-head", "--worktree", "--now", "--json"]),
   pr: Object.freeze(["--repo", "--url", "--worktree", "--now", "--json"]),
 });
@@ -206,6 +206,9 @@ const HANDLERS = {
 
   async slice([runId, sliceId, status], flags) {
     if (!SLICE_STATUSES.includes(status)) throw new CliError(`status must be one of ${SLICE_STATUSES.join(" | ")}`);
+    // The branch point is established when the slice is activated, so it is required
+    // there rather than accepted later.
+    if (status === "running" && !flags.base) throw new CliError("activating a slice requires --base (the integration head it branched from)");
     const runDir = runDirFor(flags, runId);
     const repo = resolve(flags.repo ?? process.cwd());
     const at = stamp(flags);
@@ -236,7 +239,7 @@ const HANDLERS = {
         // required, must be review_ready, and must describe this slice at this attempt
         // against this base and this head.
         if (!slice.evidence_ref) throw new Error(`slice '${slice.id}' cannot merge without an evidence_ref`);
-        const evidence = readEvidence(runDir, slice.evidence_ref);
+        const evidence = readEvidence(runDir, slice.evidence_ref, { runId });
         if (evidence.subject !== slice.id) {
           throw new Error(`evidence '${slice.evidence_ref}' describes '${evidence.subject}', not '${slice.id}'`);
         }
@@ -325,7 +328,10 @@ const HANDLERS = {
       status: flags.status ?? "completed",
       blockedReason: flags.blockedReason ?? null,
       claim,
+      runId,
       testCommand: flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
+      // A skip is only a skip when the caller says so and says why.
+      skipReason: flags.skipTestsReason ?? null,
     });
 
     // Attack 7: a base that is not an ancestor of HEAD makes the diff meaningless,
@@ -428,7 +434,11 @@ const HANDLERS = {
         return emit(flags, { run_id: runId, action, ...released });
       }
       if (action === "inspect" || action === undefined) {
-        const observed = inspectSessionLock(runDir, ttlMs === undefined ? {} : { ttlMs });
+        // --now was parsed and then dropped, so inspect always used the real clock.
+        const observed = inspectSessionLock(runDir, {
+          ...(ttlMs === undefined ? {} : { ttlMs }),
+          ...(now === undefined ? {} : { now }),
+        });
         return emit(flags, { run_id: runId, action: "inspect", state: observed.state, session: observed.owner?.session ?? null, heartbeat_at: observed.owner?.heartbeat_at ?? null });
       }
     } catch (error) {

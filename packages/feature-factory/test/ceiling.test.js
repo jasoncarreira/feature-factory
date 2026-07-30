@@ -10,7 +10,8 @@
 // addition. Only Jason widens it.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMANDS } from "../bin/factory.js";
@@ -102,14 +103,35 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.deepEqual(offenders, [], "a dropped subsystem reappeared");
   });
 
-  it("counts every source file, including hidden directories and other extensions", () => {
-    // Asserts the scanner itself, since finding 7 was that it silently skipped things.
-    assert.ok(files.some((path) => path.endsWith("bin/factory.js")), "the scanner must reach bin/");
-    assert.ok(files.some((path) => path.endsWith("package.json")), "manifests count as source");
-    assert.deepEqual([...SKIP_DIRS].sort(), [".git", "node_modules"],
-      "only build and vcs directories may be skipped; a hidden module directory must be scanned");
-    assert.ok(SOURCE_EXTENSIONS.includes(".mjs") && SOURCE_EXTENSIONS.includes(".cjs"),
-      "an imported .mjs or .cjs file must not escape the ceiling");
+  it("finds scope hidden in a dot-directory, a .mjs file, or a camelCase alias", () => {
+    // Asserting the scanner's constants proved nothing: disabling hidden traversal,
+    // .mjs traversal, or normalization left the suite green. This builds a tree
+    // containing each evasion and asserts the scanner and the matcher actually catch
+    // it, so those protections cannot silently regress.
+    const root = mkdtempSync(join(tmpdir(), "ff-ceiling-probe-"));
+    try {
+      mkdirSync(join(root, ".hidden"), { recursive: true });
+      mkdirSync(join(root, "node_modules"), { recursive: true });
+      writeFileSync(join(root, ".hidden", "sneaked.js"), "export const x = 'post_pr';\n");
+      writeFileSync(join(root, "alias.mjs"), "export const y = 'steering';\n");
+      writeFileSync(join(root, "camel.js"), "export const postPR = 1;\n");
+      writeFileSync(join(root, "ignored.txt"), "post_pr\n");
+      writeFileSync(join(root, "node_modules", "vendor.js"), "post_pr\n");
+
+      const found = sourceFiles(root).map((path) => path.slice(root.length + 1));
+      assert.ok(found.includes(join(".hidden", "sneaked.js")), "a hidden directory must be scanned");
+      assert.ok(found.includes("alias.mjs"), "a .mjs file must be scanned");
+      assert.ok(found.includes("camel.js"));
+      assert.equal(found.includes(join("node_modules", "vendor.js")), false, "node_modules stays skipped");
+
+      // The matcher, on the same fixtures.
+      const offenders = found.filter((relative) => {
+        const text = normalize(readFileSync(join(root, relative), "utf8"));
+        return FORBIDDEN_SUBSTRINGS.some((needle) => text.includes(normalize(needle)));
+      }).sort();
+      assert.deepEqual(offenders, [join(".hidden", "sneaked.js"), "alias.mjs", "camel.js"].sort(),
+        "each evasion must be caught: hidden directory, .mjs, and a camelCase alias");
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it("imports nothing from the predecessor tree", () => {
