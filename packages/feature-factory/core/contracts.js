@@ -139,15 +139,6 @@ const steps = contract({
 // and was dead. The end-to-end test caught it; the unit tests could not, because
 // they called the path helpers directly and never went through the hook.
 async function refuseUnownedMerge({ mode, current, candidate, observe }) {
-  // Activation re-observes the integration head at the boundary; the observer throws if
-  // it moved. Registered observers must actually be called, or the guard is inert.
-  if (mode === "activate") {
-    if (typeof observe !== "function") throw new Error("activating a slice requires a base observer");
-    const activated = (Array.isArray(candidate) ? candidate : []).filter((slice) => slice.status === "running"
-      && (Array.isArray(current) ? current : []).find((prior) => prior.id === slice.id)?.status !== "running");
-    for (const slice of activated) await observe(slice);
-    return;
-  }
   if (mode !== "merge") return;
   const priorSlices = Array.isArray(current) ? current : [];
   const nextSlices = Array.isArray(candidate) ? candidate : [];

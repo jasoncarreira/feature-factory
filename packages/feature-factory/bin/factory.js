@@ -80,17 +80,6 @@ function parse(command, args) {
 
 const key = (flag) => flag.slice(2).replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
 
-// Structural equality for re-read sidecars. Key order is irrelevant; content is not.
-function sameJson(left, right) {
-  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
-}
-
-function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
-}
-
 function runDirFor(flags, runId) {
   if (!runId) throw new CliError("a <run-id> is required");
   return join(resolve(flags.repo ?? process.cwd()), ".claude", "factory", runId);
@@ -221,41 +210,29 @@ const HANDLERS = {
     const repo = resolve(flags.repo ?? process.cwd());
     const at = stamp(flags);
 
-    // The branch point is observed rather than supplied. Finding 2 of the third round:
-    // observing it *before* the transition left a race - the feature ref could advance
-    // between the observation and the commit, and the write core's CAS protects
-    // run.json, not a Git ref. So the head is observed inside the transition's
-    // reobserve hook, at the commit boundary, and the value written is the one observed
-    // there.
-    const observeIntegrationHead = () => {
+    // The branch point is observed rather than supplied, so a stale or convenient base
+    // cannot be passed in.
+    //
+    // A boundary re-observation was added here and reverted: it guarded the window
+    // between this read and the commit, but only a second writer of the integration ref
+    // can open that window, and there is one orchestrator issuing sequential commands.
+    // The parallelism in a wave is between builders, not between writers of the control
+    // plane. It bought a retry failure path on correct runs for a race the design does
+    // not have. If concurrent orchestrators on one run ever become real, it comes back.
+    let observedBase = null;
+    if (status === "running") {
       const current = readRun(runDir);
       const integration = resolveWorktree(repo, current.worktree);
-      if (!integration) throw new Error(`integration worktree '${current.worktree}' is not observable`);
+      if (!integration) throw new CliError(`integration worktree '${current.worktree}' is not observable`);
       const head = observeWorktree(integration, current.branch, { ref: current.branch });
-      if (!head.commit) throw new Error(`could not observe the head of '${current.branch}' to bind the slice base`);
-      return head.commit;
-    };
-    // Read once up front only to shape the candidate; the authoritative value is the
-    // one re-observed at the boundary and compared below.
-    const provisionalBase = status === "running" ? observeIntegrationHead() : null;
+      if (!head.commit) throw new CliError(`could not observe the head of '${current.branch}' to bind the slice base`);
+      observedBase = head.commit;
+    }
     if (status === "merged" && !flags.mergeCommit) throw new CliError("recording a merge requires --merge-commit");
 
     // For a merge, the contract's reobserve hook demands freshly observed paths.
     // The observer is supplied here and runs inside the transition.
     const reobservers = new Map();
-    if (status === "running") {
-      reobservers.set("slices", async (slice) => {
-        // Finding 2: re-observe at the boundary. If the integration head moved between
-        // shaping the candidate and committing it, the base we are about to persist is
-        // already stale, and a stale base is exactly what makes an ownership diff
-        // exclude earlier commits.
-        const atBoundary = observeIntegrationHead();
-        if (slice.base_ref !== atBoundary) {
-          throw new Error(`integration head moved from ${String(slice.base_ref).slice(0, 12)} to ${atBoundary.slice(0, 12)} while activating '${slice.id}'; retry`);
-        }
-        return { diff_observed: true, unowned: [], privileged: [] };
-      });
-    }
     if (status === "merged") {
       reobservers.set("slices", async (slice) => {
         const worktree = resolveWorktree(repo, slice.worktree ?? "");
@@ -312,20 +289,6 @@ const HANDLERS = {
           throw new Error(`slice '${slice.id}' merge proof failed: ${proof.reason}`);
         }
 
-        // Finding 3: the review and evidence were read, validated, and then the
-        // expensive merge-proof observations ran before the rename - during which the
-        // sidecars could change. A reviewer process rewriting its own output is a
-        // plausible race, so both are re-read here, after the slow work and immediately
-        // before this hook returns, and required to be byte-identical.
-        const reviewAfter = readReview(runDir, slice.review_ref);
-        if (!sameJson(review, reviewAfter)) {
-          throw new Error(`review '${slice.review_ref}' changed while the merge was being verified; retry`);
-        }
-        const evidenceAfter = readEvidence(runDir, slice.evidence_ref, { runId });
-        if (!sameJson(evidence, evidenceAfter)) {
-          throw new Error(`evidence '${slice.evidence_ref}' changed while the merge was being verified; retry`);
-        }
-
         return {
           diff_observed: observation.diff_observed,
           unowned: unownedPaths(observation.files_changed, slice.paths),
@@ -335,7 +298,7 @@ const HANDLERS = {
     }
 
     const next = await transition(runDir, {
-      participants: [{ familyId: "slices", mode: status === "merged" ? "merge" : status === "running" ? "activate" : "record" }],
+      participants: [{ familyId: "slices", mode: status === "merged" ? "merge" : "record" }],
       reobservers,
       apply: (state) => {
         const existing = state.slices.find((slice) => slice.id === sliceId);
@@ -346,7 +309,7 @@ const HANDLERS = {
           attempts: flags.attempts === undefined ? existing.attempts : integer(flags.attempts, 1, "--attempts"),
           worktree: flags.worktree ?? existing.worktree,
           branch: flags.branch ?? existing.branch,
-          base_ref: provisionalBase ?? existing.base_ref,
+          base_ref: observedBase ?? existing.base_ref,
           evidence_ref: flags.evidenceRef ?? existing.evidence_ref,
           review_ref: flags.reviewRef ?? existing.review_ref,
           merge_commit: flags.mergeCommit ?? existing.merge_commit,

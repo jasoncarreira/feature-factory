@@ -372,6 +372,82 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
+  // KNOWN FAILING — pushed deliberately as a red baseline, not an oversight.
+  //
+  // The merge proof is `reviewed_tree === merged_tree`, which cannot hold for any wave
+  // after its first merge: a wave's slices all branch from the same integration head,
+  // merges are serial, so the second merge lands on a base containing the first slice's
+  // work and its merged tree necessarily differs from what was reviewed.
+  //
+  // Fails with: slice 'be-two' merge proof failed: merged tree differs from the reviewed
+  // tree.
+  //
+  // The replacement proof is diff equality — what the merge contributed must equal what
+  // was reviewed:
+  //
+  //   diff(base_ref -> reviewed_commit) == diff(first-parent(merge) -> merge)
+  //
+  // Tree equality then becomes the special case where the first parent still equals
+  // base_ref, i.e. the first merge of a wave. That also separates two things the current
+  // proof conflates: a moved base, which is normal and must pass, from unreviewed content
+  // inside the merge, which must fail.
+  //
+  // When this is fixed, `refuses a merge whose tree nobody reviewed` must be inverted:
+  // it currently asserts that a moved base is a failure, which encodes the same wrong
+  // assumption.
+  it("merges two file-disjoint slices from the same wave", () => {
+    // The central case, and the one that exposes the merge proof's assumption. Both
+    // slices branch from the same integration head, as viso specifies ("a slice worktree
+    // branched from the current feature-branch HEAD"), and merges are serial. So the
+    // second merge lands on a base that has moved, and its merged tree contains the
+    // first slice's work as well as its own. Tree equality cannot hold for it.
+    const p = project("wave", { seed: false });
+    try {
+      writeFileSync(join(p.runDir, "plan", "slices.json"), JSON.stringify({
+        slices: [
+          { id: "be-one", stack: "backend", paths: ["src/app/one/"], depends_on: [] },
+          { id: "be-two", stack: "backend", paths: ["src/app/two/"], depends_on: [] },
+        ],
+      }, null, 2));
+      assert.equal(factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
+      const waveBase = git(p.repo, "rev-parse", "HEAD");
+
+      const build = (id, dir, t) => {
+        git(p.repo, "checkout", "-q", "-b", id, waveBase);
+        mkdirSync(join(p.repo, "src", "app", dir), { recursive: true });
+        writeFileSync(join(p.repo, "src", "app", dir, "work.ts"), `${id}\n`);
+        git(p.repo, "add", "-A");
+        git(p.repo, "commit", "-q", "-m", id);
+        const head = git(p.repo, "rev-parse", "HEAD");
+        const act = factory(p.repo, ["slice", RUN, id, "running", "--worktree", ".", "--branch", id, "--now", NOW(t)]);
+        assert.equal(act.ok, true, `activate ${id}: ${act.stderr}`);
+        const obs = factory(p.repo, ["observe", RUN, id, "--worktree", ".", "--base", waveBase, "--attempt", "1",
+          "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW(t + 1)]);
+        assert.equal(obs.ok, true, `observe ${id}: ${obs.stderr}`);
+        writeReview(p.runDir, id, head);
+        factory(p.repo, ["slice", RUN, id, "review", "--review-ref", `reviews/${id}.json`,
+          "--evidence-ref", `evidence/${id}.json`, "--now", NOW(t + 2)]);
+        return head;
+      };
+      build("be-one", "one", 2);
+      build("be-two", "two", 6);
+
+      const mergeOne = (id, t) => {
+        git(p.repo, "checkout", "-q", "feature");
+        git(p.repo, "merge", "-q", "--no-ff", id, "-m", `merge ${id}`);
+        return factory(p.repo, ["slice", RUN, id, "merged", "--merge-commit", git(p.repo, "rev-parse", "HEAD"), "--now", NOW(t)]);
+      };
+
+      const first = mergeOne("be-one", 10);
+      assert.equal(first.ok, true, `first merge of a wave: ${first.stderr}`);
+
+      // The second slice reviewed a tree without be-one in it; the merged tree has both.
+      const second = mergeOne("be-two", 11);
+      assert.equal(second.ok, true, `second merge of the same wave must succeed: ${second.stderr}`);
+      assert.deepEqual(runJson(p.runDir).slices.map((slice) => slice.status), ["merged", "merged"]);
+    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  });
+
   it("refuses a merge with evidence but no review", () => {
     // Evidence is checked before the review, so this supplies review_ready evidence
     // and withholds only the review — otherwise the evidence refusal fires and the
