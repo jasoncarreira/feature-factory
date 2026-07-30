@@ -155,3 +155,60 @@ describe("attack 2 — the merged tree differs from the reviewed tree", () => {
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 });
+
+describe("attack 8 — external state changes between observation and effect", () => {
+  it("observes immediately before the commit, not at command start", async () => {
+    // The distinctive claim of this attack is about *ordering*: a check performed
+    // when the command starts is worthless if the world moves before the write
+    // lands. The write core runs reobserve inside the rename, after the mutator and
+    // after the compare-and-swap, so a change injected at the commit boundary must
+    // still be caught.
+    const { transition } = await import("../state/index.js");
+    const f = fixture("late-observation");
+    try {
+      const runDir = f.runDir;
+      writeFileSync(join(runDir, "run.json"), `${JSON.stringify({
+        version: 1, run_id: "app-1", jira_key: null, branch: "feature", worktree: ".",
+        created_at: "2026-07-30T12:00:00.000Z", updated_at: "2026-07-30T12:00:00.000Z",
+        status: "running", mode: "interactive", max_parallel_slices: 3, max_retries: 3,
+        base_commit: null, gates: {}, steps: [],
+        slices: [{
+          id: "be-thing", stack: "backend", depends_on: [], status: "review",
+          worktree: ".", branch: "slice", attempts: 1, paths: ["src/"],
+          base_ref: f.featureBase, evidence_ref: null, review_ref: "reviews/be-thing.json",
+          merge_commit: null,
+        }],
+        validator: null, terminal_result: null, pr_url: null,
+      }, null, 2)}\n`);
+
+      let observedAt = null;
+      let injected = false;
+      const reobservers = new Map([["slices", async () => {
+        // What the observer reports is decided when it runs, which is the point.
+        observedAt = injected ? "after-injection" : "before-injection";
+        return { diff_observed: true, unowned: injected ? ["src/injected.ts"] : [], privileged: [] };
+      }]]);
+
+      await assert.rejects(() => transition(runDir, {
+        participants: [{ familyId: "slices", mode: "merge" }],
+        reobservers,
+        apply: (state) => ({
+          ...state,
+          updated_at: "2026-07-30T12:05:00.000Z",
+          slices: state.slices.map((slice) => ({ ...slice, status: "merged", merge_commit: "b".repeat(40) })),
+        }),
+        // Fires after the mutator and before the rename: the window an early check
+        // would miss entirely.
+        hooks: { beforeCommit: () => { injected = true; } },
+      }), (error) => {
+        assert.match(String(error.cause?.message ?? error.message), /changed paths it does not own: src\/injected\.ts/u);
+        return true;
+      });
+
+      assert.equal(observedAt, "after-injection",
+        "the observation must run after the commit-boundary injection, or an early check would have passed");
+      assert.equal(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).slices[0].status, "review",
+        "the refused merge must leave the slice unmerged");
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+});

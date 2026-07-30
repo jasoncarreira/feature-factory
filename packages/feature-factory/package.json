@@ -1,0 +1,18 @@
+{
+  "name": "feature-factory",
+  "version": "0.1.0",
+  "description": "Durable, observed control plane for /feature runs. Host-agnostic: no opencode dependency.",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "factory": "bin/factory.js" },
+  "main": "state/index.js",
+  "exports": {
+    ".": "./state/index.js",
+    "./skill": "./skill/SKILL.md"
+  },
+  "files": ["bin", "core", "observe", "state", "skill", "README.md"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
