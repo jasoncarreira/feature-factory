@@ -8,7 +8,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { writeProtectedJsonAtomic } from "./atomic-write.js";
-import { probeProcessLiveness } from "./process-liveness.js";
 
 const DEFAULT_LOCK_TIMEOUT_MS = 1000;
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
@@ -325,12 +324,23 @@ function sameReclaimClaim(left, right) {
     && left.reclaim_nonce === right.reclaim_nonce;
 }
 
+// viso decides this with a timestamp: a lock whose heartbeat is older than the TTL
+// may be stolen. We do the same on `acquired_at`, because this lock is held for one
+// transition - a holder that has had it longer than the TTL is not working, it is
+// gone. The alternative was 520 lines of process-identity probing to steal a dead
+// owner's lock immediately rather than after the TTL, which is convenience rather
+// than correctness for a single-operator tool. Pull it back if a real case appears.
 function inspectLockOwnerLiveness(owner, options = {}) {
-  if (!isDurableLockOwner(owner) || owner.hostname !== hostname()) return "indeterminate";
-  const status = probeProcessLiveness(owner.pid, options).status;
-  if (status === "live") return "alive";
-  if (status === "absent") return "dead";
-  return "indeterminate";
+  if (!isDurableLockOwner(owner)) return "indeterminate";
+  // A lock taken on another host cannot be adjudicated from here at all.
+  if (owner.hostname !== hostname()) return "indeterminate";
+  const staleAfterMs = normalizePositiveInteger(options.staleLockMs, DEFAULT_STALE_LOCK_MS);
+  const heldForMs = Date.now() - Date.parse(owner.acquired_at);
+  if (!Number.isFinite(heldForMs)) return "indeterminate";
+  // A future `acquired_at` yields a negative age, which is never greater than the
+  // TTL, so clock skew already fails closed here. An explicit `heldForMs < 0`
+  // branch was removed after its falsification showed removing it changed nothing.
+  return heldForMs > staleAfterMs ? "dead" : "alive";
 }
 
 async function lockOwnerEntryExists(ownerPath) {
