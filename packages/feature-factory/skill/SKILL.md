@@ -97,7 +97,7 @@ factory lock <run-id> claim --session <session-id>
 `evidence/`, `reviews/` and writes the manifest.
 
 If `factory lock` reports the run is held by another session, it tells you the owner: **resume** with
-that session id, **steal** it (`factory lock <run-id> steal`) if the holder is gone, or abort. If
+that session id, **steal** it (`factory lock <run-id> steal --session <session-id>`) if the holder is gone, or abort. If
 `run.json` already exists this is a **resume** — read `factory status <run-id> --json` and continue
 from its `next` field rather than restarting.
 
@@ -192,15 +192,23 @@ Per slice:
    slice spec, its worktree, the brief, and the research map.
 3. **Observe** — when the builder returns, do not read its prose for facts:
    ```sh
-   factory observe <run-id> <slice-id> --worktree <path> --base <feature-branch> \
+   factory observe <run-id> <slice-id> --worktree <path> --base <slice-base-sha> \
      --test-cmd "<the slice's test command>" [--claim <builder-report.json>]
    ```
+   `--base` is the slice's recorded `base_ref` — read it from `factory status <run-id> --json`, not
+   from the feature branch by name. The merge compares the evidence's base to that sha exactly, and a
+   branch name never matches one; it also moves under you as siblings merge.
+
    This re-derives the diff, runs the tests itself, records `review_ready`, and records any
    disagreement between the builder's claim and what was observed. A disagreement is a review finding,
    not a detail to reconcile in your head. Omit `--test-cmd` and the slice is not `review_ready`
    unless its ratified `test_plan` is empty — the waiver comes from the plan, not from you.
 4. **Review** — `work-reviewer` with subject `<slice-id>`, the observed evidence, the slice spec, and
-   the brief. Mark `factory slice <run-id> <slice-id> review --evidence-ref evidence/<slice-id>.json`.
+   the brief. Record both refs — the merge requires each:
+     ```sh
+     factory slice <run-id> <slice-id> review \
+       --evidence-ref evidence/<slice-id>.json --review-ref reviews/<slice-id>.json
+     ```
    - On REJECT, before spending an attempt, identify the design-level root cause. If the fix would
      violate an approved story or brief constraint, or repeated findings trace to the same unresolved
      design choice, stop and escalate the smallest decision needed rather than burning attempts.
@@ -291,7 +299,7 @@ approval, not a lost run:
 ```sh
 factory gate <run-id> pre_pr pending          # re-open; a decided gate may only re-open as pending
 factory observe <run-id> test-verifier ...     # re-observe the tests at the new head
-factory validator <run-id> <verdict> --reviewed-head <new-sha> --report ...
+factory validator <run-id> --report artifacts/validation-report.md   # verdict and head come from its record
 factory gate <run-id> pre_pr approved          # present the new diff and re-approve
 ```
 

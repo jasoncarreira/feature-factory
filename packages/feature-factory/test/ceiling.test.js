@@ -78,8 +78,65 @@ const files = sourceFiles();
 const productionFiles = files.filter((path) => !path.includes(`${pkg}/test/`));
 
 describe("ceiling — scope cannot grow without editing this file", () => {
-  it("exposes exactly the declared CLI commands", () => {
+  it("exposes exactly the declared CLI commands, and the skill invokes only those", () => {
     assert.deepEqual(Object.keys(COMMANDS).sort(), [...CLI_COMMANDS].sort());
+
+    // The skill is the authoritative instruction set, and nothing checked it against the CLI
+    // it drives. Four of its examples had drifted far enough to block a normal merge and the
+    // late-head recovery — including one this session introduced while correcting the same
+    // command elsewhere in the same round. Every prose fix so far was found by reading, which
+    // is why they kept coming back.
+    const markdown = readFileSync(join(pkg, "skill", "SKILL.md"), "utf8");
+    // Join shell continuations so one command is one string, then read only code — fenced
+    // blocks and inline spans — so prose cannot be mistaken for an invocation.
+    const text = markdown.replace(/\\\n\s*/gu, " ");
+    const snippets = [];
+    for (const [, body] of text.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)) snippets.push(...body.split("\n"));
+    for (const [, body] of text.matchAll(/`([^`\n]+)`/gu)) snippets.push(body);
+
+    const invocations = snippets
+      .map((snippet) => ({ snippet, match: /^\s*factory\s+([a-z-]+)/u.exec(snippet) }))
+      .filter((entry) => entry.match)
+      .map((entry) => ({
+        snippet: entry.snippet.trim(),
+        command: entry.match[1],
+        flags: [...entry.snippet.matchAll(/--[a-z][a-z-]*/gu)].map((flag) => flag[0]),
+      }));
+    assert.ok(invocations.length >= 10, `only ${invocations.length} documented invocations found; the parser is broken, not the skill`);
+
+    // Removing or renaming a flag is the drift that actually happens — --reviewed-head,
+    // --skip-tests-reason, --force and --worktree all went this session — so it is checked
+    // generally rather than case by case.
+    const unknown = [];
+    for (const { command, flags, snippet } of invocations) {
+      if (!Object.hasOwn(COMMANDS, command)) {
+        unknown.push(`unknown command '${command}': ${snippet}`);
+        continue;
+      }
+      for (const flag of flags) {
+        if (!COMMANDS[command].includes(flag)) unknown.push(`'${command}' has no ${flag}: ${snippet}`);
+      }
+    }
+    assert.deepEqual(unknown, [], "the skill documents a command or flag the CLI does not accept");
+
+    // Omissions and wrong argument *values* cannot be derived from the flag lists, so the few
+    // that blocked the path are named. Each entry is one refusal a reader would otherwise hit.
+    const required = [
+      { command: "lock", when: /\bsteal\b/u, flag: "--session", why: "claiming a stolen lock needs a session id" },
+      { command: "slice", when: /\breview\b/u, flag: "--review-ref", why: "the merge refuses a slice with no review_ref" },
+      { command: "slice", when: /\breview\b/u, flag: "--evidence-ref", why: "the merge refuses a slice with no evidence_ref" },
+    ];
+    for (const { command, when, flag, why } of required) {
+      const relevant = invocations.filter((entry) => entry.command === command && when.test(entry.snippet));
+      assert.ok(relevant.length > 0, `no documented '${command}' invocation matching ${when}`);
+      for (const entry of relevant) {
+        assert.ok(entry.flags.includes(flag), `${entry.snippet}\n  must pass ${flag}: ${why}`);
+      }
+    }
+    // A branch name can never equal the slice's recorded base_ref sha, so evidence observed
+    // against one is refused at merge — and the branch moves as siblings land.
+    assert.equal(/--base\s+<feature-branch>/u.test(markdown), false,
+      "observe --base must be the slice's recorded base_ref sha, not a mutable branch name");
   });
 
   it("declares exactly the declared run.json top-level keys", () => {
