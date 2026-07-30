@@ -184,6 +184,26 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   const tests = cleanliness.clean
     ? runTests(worktree, testCommand, { ...options, skipReason })
     : { cmd: testCommand ? testCommand.join(" ") : null, exit: null, observed: false, skipped_reason: null };
+
+  // Third round, finding 1: cleanliness was a pre-test snapshot, so a test that wrote
+  // tracked files left the tree dirty while the evidence still claimed a clean HEAD -
+  // and the same test then failed on the merged tree. The tree and the commit are
+  // re-observed after the run, and both must be unchanged for the result to describe
+  // the recorded commit.
+  //
+  // This does NOT close the case where another process mutates the worktree during the
+  // run and restores it before the end: both observations are clean and the commit
+  // matches, so no before/after comparison can see it. Closing that needs tests run from
+  // an isolated checkout. Left open deliberately - its precondition is a second writer
+  // in this slice's worktree, meaning a builder that has not actually finished or two
+  // slices sharing a worktree, which is an orchestration error rather than one of the
+  // twelve attacks.
+  const afterTests = observeCleanliness(worktree, options);
+  const headAfter = git(worktree, ["rev-parse", options.ref ?? "HEAD"], options);
+  const stableUnderTest = cleanliness.clean
+    && afterTests.clean
+    && headAfter.ok
+    && headAfter.stdout.trim() === observation.commit;
   const evidence = {
     subject,
     // Finding 2: evidence carried no run identity, so a record from another run with a
@@ -194,8 +214,10 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
     base_ref: baseRef,
     worktree,
     status,
-    blocked_reason: blockedReason ?? cleanliness.reason,
-    worktree_clean: cleanliness.clean,
+    blocked_reason: blockedReason ?? cleanliness.reason ?? (stableUnderTest ? null : "worktree changed while the tests ran"),
+    // Named for what it asserts: clean before the run, still clean after, and HEAD did
+    // not move. A pre-test snapshot alone was not enough.
+    worktree_clean: stableUnderTest,
     files_changed: observation.files_changed,
     diff_stat: observation.diff_stat,
     diff_observed: observation.diff_observed,

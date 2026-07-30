@@ -346,6 +346,32 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
+  it("refuses evidence when the test itself dirties the worktree", () => {
+    // opencode's first probe: a passing test modified tracked source and left it dirty.
+    // The pre-test snapshot said clean, so the evidence claimed a clean HEAD and the
+    // merged tree then failed the same test.
+    const p = project("test-dirties");
+    try {
+      const integrationHead = git(p.repo, "rev-parse", "HEAD");
+      git(p.repo, "checkout", "-q", "-b", "slice");
+      writeFileSync(join(p.repo, "src", "app", "thing.ts"), "slice\n");
+      git(p.repo, "add", "-A");
+      git(p.repo, "commit", "-q", "-m", "slice work");
+      factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
+
+      // A "test" that passes and writes a tracked file — ordinary behaviour for snapshot
+      // updaters, formatters, and code generators. No spaces: the command splits on them.
+      const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", integrationHead,
+        "--attempt", "1", "--test-cmd", "node -e require('fs').writeFileSync('src/app/thing.ts','mutated')", "--now", NOW(3)]);
+
+      assert.equal(observed.ok, true);
+      const record = JSON.parse(readFileSync(join(p.runDir, "evidence", "be-thing.json"), "utf8"));
+      assert.equal(record.worktree_clean, false, "a test that dirties the tree must not yield clean evidence");
+      assert.equal(record.review_ready, false);
+      assert.match(record.blocked_reason, /uncommitted changes|changed while the tests ran/u);
+    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  });
+
   it("refuses a merge with evidence but no review", () => {
     // Evidence is checked before the review, so this supplies review_ready evidence
     // and withholds only the review — otherwise the evidence refusal fires and the
