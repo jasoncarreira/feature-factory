@@ -126,10 +126,19 @@ const steps = contract({
 // Attack 5 lives here rather than in the CLI. `reobserve` runs inside the
 // transition, immediately before the atomic rename, so a merge cannot be recorded
 // without the ownership check having run against freshly observed paths.
-async function refuseUnownedMerge({ mode, before, after, observe }) {
+// The write core calls reobserve with { mode, current, candidate, observe, state,
+// nextState } — `current` is the family's freshly re-read projection and `candidate`
+// is the projection about to be written. An earlier version destructured
+// before/after here, which are the validateTransition names, so `candidate` was
+// undefined and this guard threw before checking anything. It read as enforcement
+// and was dead. The end-to-end test caught it; the unit tests could not, because
+// they called the path helpers directly and never went through the hook.
+async function refuseUnownedMerge({ mode, current, candidate, observe }) {
   if (mode !== "merge") return;
-  const newlyMerged = after.filter((slice) => slice.status === "merged"
-    && before.find((prior) => prior.id === slice.id)?.status !== "merged");
+  const priorSlices = Array.isArray(current) ? current : [];
+  const nextSlices = Array.isArray(candidate) ? candidate : [];
+  const newlyMerged = nextSlices.filter((slice) => slice.status === "merged"
+    && priorSlices.find((prior) => prior.id === slice.id)?.status !== "merged");
   if (newlyMerged.length === 0) return;
   if (typeof observe !== "function") {
     // Fail closed: a merge whose paths cannot be observed is not a merge we can
@@ -141,11 +150,15 @@ async function refuseUnownedMerge({ mode, before, after, observe }) {
     if (!observed || observed.diff_observed !== true) {
       throw new Error(`slice '${slice.id}' merge requires observed changed paths`);
     }
-    if (observed.unowned.length > 0) {
-      throw new Error(`slice '${slice.id}' changed paths it does not own: ${observed.unowned.join(", ")}`);
-    }
+    // Privilege is reported before ownership. A privileged path is almost always
+    // also unowned, so checking ownership first made the privileged message
+    // unreachable - and the two are different findings: exceeding your lane is a
+    // planning problem, touching the control plane is not.
     if (observed.privileged.length > 0) {
       throw new Error(`slice '${slice.id}' changed privileged control-plane paths: ${observed.privileged.join(", ")}`);
+    }
+    if (observed.unowned.length > 0) {
+      throw new Error(`slice '${slice.id}' changed paths it does not own: ${observed.unowned.join(", ")}`);
     }
   }
 }
@@ -190,8 +203,18 @@ const slices = contract({
 // ---------------------------------------------------------------------------
 // verdict — validator verdict and pr_url
 // ---------------------------------------------------------------------------
+// The core hands each contract its registered reobserver as `observe`; it does not
+// call it. A contract that omits reobserve therefore silently ignores whatever the
+// caller registered, which is how the PR head check came to be inert.
+async function checkPublication({ mode, observe, current, candidate, state, nextState }) {
+  if (mode !== "publish") return;
+  if (typeof observe !== "function") throw new Error("publishing a PR requires an observer");
+  await observe({ current, candidate, state, nextState });
+}
+
 const verdict = contract({
   id: "verdict",
+  reobserve: checkPublication,
   project: (state) => ({ validator: state.validator ?? null, pr_url: state.pr_url ?? null }),
   validateTransition: ({ before, after }) => {
     if (before.pr_url && before.pr_url !== after.pr_url) {

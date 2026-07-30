@@ -30,7 +30,7 @@ export const COMMANDS = Object.freeze({
   step: Object.freeze(["--repo", "--attempts", "--review-ref", "--evidence-ref", "--now", "--json"]),
   terminal: Object.freeze(["--repo", "--reason", "--now", "--json"]),
   "slices-seed": Object.freeze(["--repo", "--from", "--now", "--json"]),
-  slice: Object.freeze(["--repo", "--attempts", "--worktree", "--branch", "--evidence-ref", "--review-ref", "--merge-commit", "--now", "--json"]),
+  slice: Object.freeze(["--repo", "--attempts", "--worktree", "--branch", "--base", "--evidence-ref", "--review-ref", "--merge-commit", "--now", "--json"]),
   observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
   validator: Object.freeze(["--repo", "--report", "--reviewed-head", "--worktree", "--now", "--json"]),
   pr: Object.freeze(["--repo", "--url", "--worktree", "--now", "--json"]),
@@ -127,7 +127,7 @@ const HANDLERS = {
       }
       const integration = resolveWorktree(repo, run.worktree);
       if (!integration) throw new Error(`integration worktree '${run.worktree}' is not observable`);
-      const observed = observeWorktree(integration, validator.reviewed_head);
+      const observed = observeWorktree(integration, validator.reviewed_head, { ref: run.branch });
       if (!observed.commit) throw new Error("integration head could not be observed");
       if (observed.commit !== validator.reviewed_head) {
         throw new Error(`validator judged ${validator.reviewed_head.slice(0, 12)} but the integration head is ${observed.commit.slice(0, 12)}`);
@@ -202,7 +202,14 @@ const HANDLERS = {
         const worktree = resolveWorktree(repo, slice.worktree ?? "");
         if (!worktree) return { diff_observed: false, unowned: [], privileged: [] };
         const run = readRun(runDir);
-        const observation = observeWorktree(worktree, run.branch);
+        // Observe the slice's own branch, not the worktree's current HEAD: recording
+        // a merge legitimately happens with the integration branch checked out.
+        if (!slice.branch) throw new Error(`slice '${slice.id}' cannot merge without a recorded branch`);
+        // Diff from the slice's recorded branch point, not from the integration head:
+        // by merge time the integration branch contains the slice, so that diff is
+        // empty and ownership would pass vacuously.
+        if (!slice.base_ref) throw new Error(`slice '${slice.id}' cannot merge without a recorded base_ref`);
+        const observation = observeWorktree(worktree, slice.base_ref, { ref: slice.branch });
 
         // Attack 3: the approval must have judged the commit being merged. Read the
         // slice's own head from git rather than trusting anything recorded.
@@ -241,6 +248,7 @@ const HANDLERS = {
           attempts: flags.attempts === undefined ? existing.attempts : integer(flags.attempts, 1, "--attempts"),
           worktree: flags.worktree ?? existing.worktree,
           branch: flags.branch ?? existing.branch,
+          base_ref: flags.base ?? existing.base_ref,
           evidence_ref: flags.evidenceRef ?? existing.evidence_ref,
           review_ref: flags.reviewRef ?? existing.review_ref,
           merge_commit: flags.mergeCommit ?? existing.merge_commit,
@@ -543,9 +551,32 @@ Every command takes [--repo PATH] and [--json]. Unknown options are errors.
   return null;
 }
 
+// A refusal raised inside a transition reaches here wrapped by the atomic writer,
+// whose own message is generic. Printing only `error.message` would report every
+// refusal as "protected file commit failed" and hide the reason the operator needs,
+// so the cause chain is printed. This was caught by an end-to-end test rather than
+// by reading the code.
+export function describeError(error, depth = 0) {
+  const lines = [];
+  let current = error;
+  let indent = "";
+  while (current && depth < 5) {
+    const message = String(current.message ?? current);
+    // The wrapper adds nothing once its cause is shown; skip it rather than lead
+    // with it.
+    if (!(indent === "" && current.cause && message === "protected file commit failed")) {
+      lines.push(`${indent}${message}`);
+      indent = `${indent}  `;
+    }
+    current = current.cause;
+    depth += 1;
+  }
+  return lines.join("\n");
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   run(process.argv.slice(2)).catch((error) => {
-    process.stderr.write(`${error.message}\n`);
+    process.stderr.write(`${describeError(error)}\n`);
     process.exitCode = 1;
   });
 }

@@ -32,16 +32,21 @@ export function git(cwd, args, { runner = spawnSync } = {}) {
 // Every fact below is re-derived from the repository. A caller-supplied value is
 // never substituted for an observation; if git cannot answer, the field is null
 // and `diff_observed` is false, which blocks review_ready.
+// `options.ref` names what to observe, defaulting to HEAD. A caller that knows the
+// subject's branch should pass it: binding to whatever happens to be checked out
+// makes the observation depend on the orchestrator's current directory state, and a
+// merge legitimately checks out the integration branch in the same worktree.
 export function observeWorktree(worktree, baseRef, options = {}) {
+  const ref = options.ref ?? "HEAD";
   const commands = [];
   const record = (result) => {
     commands.push({ cmd: result.argv.join(" "), exit: result.status, summary: summarize(result) });
     return result;
   };
 
-  const head = record(git(worktree, ["rev-parse", "HEAD"], options));
-  const names = record(git(worktree, ["diff", "--name-only", `${baseRef}...HEAD`], options));
-  const stat = record(git(worktree, ["diff", "--stat", `${baseRef}...HEAD`], options));
+  const head = record(git(worktree, ["rev-parse", ref], options));
+  const names = record(git(worktree, ["diff", "--name-only", `${baseRef}...${ref}`], options));
+  const stat = record(git(worktree, ["diff", "--stat", `${baseRef}...${ref}`], options));
 
   const observed = head.ok && names.ok && stat.ok;
   return {

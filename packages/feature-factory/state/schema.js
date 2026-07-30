@@ -34,7 +34,11 @@ export const SLICE_KEYS = Object.freeze([
   // the decompose gate. It lives here rather than being re-read from the plan at
   // merge time so the set a transition validates against is the set the gate
   // approved, and so ownership is decidable from run.json alone.
-  "paths", "evidence_ref", "review_ref", "merge_commit",
+  // base_ref is the integration head the slice branched from, recorded when it is
+  // dispatched. Without it a slice's own diff is undecidable after the merge - the
+  // integration branch by then contains the slice, so diffing against it is empty
+  // and every ownership check would silently pass.
+  "paths", "base_ref", "evidence_ref", "review_ref", "merge_commit",
 ]);
 
 export const VALIDATOR_VERDICTS = Object.freeze(["GO", "GO-WITH-NITS", "NO-GO"]);
@@ -122,6 +126,10 @@ function slices(errors, value) {
     positiveInt(errors, slice, "attempts", path);
     for (const key of ["worktree", "branch"]) nullableString(errors, slice, key, path);
     for (const key of ["evidence_ref", "review_ref"]) nullableString(errors, slice, key, path);
+    if (slice.base_ref !== null && slice.base_ref !== undefined) optionalPattern(errors, slice, "base_ref", SHA, path);
+    if (slice.status === "merged" && !SHA.test(String(slice.base_ref))) {
+      errors.push({ path: `${path}.base_ref`, message: "is required when a slice is merged" });
+    }
     if (slice.merge_commit !== null && slice.merge_commit !== undefined) {
       optionalPattern(errors, slice, "merge_commit", SHA, path);
     }
