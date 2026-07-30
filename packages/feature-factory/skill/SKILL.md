@@ -203,8 +203,15 @@ Per slice:
 5. **Merge (you, serially)** — on APPROVE, merge the slice branch into the feature branch one at a
    time. Builds are concurrent; merges are single-writer, which is what makes the parallelism safe.
    ```sh
+   git -C $FEAT_WT merge --no-ff <slice-branch> -m "<slice-id>"
    factory slice <run-id> <slice-id> merged --merge-commit <sha>
    ```
+   **`--no-ff` is required, not stylistic.** The merge proof measures what the merge contributed as
+   the diff from its *first parent*, which only means "the integration branch before this merge" when
+   there are two parents. A fast-forward has no merge commit, so its first parent is the slice's own
+   previous commit and the proof would silently measure the wrong thing. `factory slice … merged`
+   refuses a merge commit that does not have exactly two parents, and refuses one that is not the
+   current head of the feature branch — record the merge before doing anything else to that branch.
    Recording a merge re-observes the slice's changed paths and **refuses** any path the slice does not
    own or any privileged control-plane path. Then remove the slice worktree and branch.
 

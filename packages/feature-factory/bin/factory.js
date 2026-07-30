@@ -129,6 +129,12 @@ const HANDLERS = {
       // Finding 2: a PR could be recorded on a run with no gates, steps, slices or
       // evidence whatsoever - the verdict was the only requirement and nothing
       // checked that the run had done any work.
+      // Finding 4: a partial run - some slices merged, others blocked - could record a
+      // PR. The skill requires a partial run to be surfaced rather than pushed onward,
+      // and the same holds for every terminal status.
+      if (TERMINAL_STATUSES.includes(nextState.status)) {
+        throw new Error(`a ${nextState.status} run must be surfaced, not published; recording a PR is refused`);
+      }
       if (nextState.gates?.pre_pr?.status !== "approved") {
         throw new Error("recording a PR requires an approved pre_pr gate");
       }
@@ -281,6 +287,16 @@ const HANDLERS = {
         // Attack 2: the merge proof, observed in the integration worktree.
         const integration = resolveWorktree(repo, run.worktree);
         if (!integration) throw new Error(`integration worktree '${run.worktree}' is not observable`);
+        // Finding 1: the proof validated a caller-supplied object without checking it
+        // landed on the integration branch, so a synthetic two-parent merge, or an older
+        // valid merge after the branch advanced, both passed. An orchestrator that
+        // captured the sha before merging, or reused a stale variable, produces exactly
+        // that. The recorded merge must be the branch's current tip.
+        const tip = observeWorktree(integration, run.branch, { ref: run.branch });
+        if (!tip.commit) throw new Error(`could not observe the head of '${run.branch}'`);
+        if (tip.commit !== flags.mergeCommit) {
+          throw new Error(`merge commit ${String(flags.mergeCommit).slice(0, 12)} is not the head of '${run.branch}' (${tip.commit.slice(0, 12)}); record the merge before advancing the branch`);
+        }
         const proof = observeMergeProof(integration, {
           baseRef: slice.base_ref,
           reviewedCommit: review.reviewed_commit,

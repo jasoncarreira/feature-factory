@@ -125,6 +125,25 @@ describe("attack 2 — the merge must contribute exactly what was reviewed", () 
       });
       assert.equal(proof.proven, true, proof.reason ?? "");
       assert.deepEqual(proof.reviewed_paths, ["src/slice.ts"]);
+
+      // Same group, because it is the same question: which merge topologies can be
+      // proven. A fast-forward has no merge commit, so its first parent is the slice's
+      // own previous commit and the proof would measure the slice's last commit against
+      // its whole reviewed diff — silently the wrong thing. Proving one would need the
+      // pre-merge head stored durably; requiring --no-ff, which the skill specifies,
+      // costs nothing.
+      const ff = fixture("proof-ff");
+      try {
+        run(ff.root, "checkout", "-q", "feature");
+        run(ff.root, "merge", "-q", "--ff-only", "slice");
+        const forwarded = run(ff.root, "rev-parse", "HEAD");
+        assert.equal(forwarded, ff.sliceHead, "a fast-forward leaves the slice head as the tip");
+        const ffProof = observeMergeProof(ff.root, {
+          baseRef: ff.featureBase, reviewedCommit: ff.sliceHead, mergeCommit: forwarded,
+        });
+        assert.equal(ffProof.proven, false);
+        assert.match(ffProof.reason, /has 1 parent; a slice merge must be a two-parent merge \(use --no-ff\)/u);
+      } finally { rmSync(ff.root, { recursive: true, force: true }); }
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 

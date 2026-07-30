@@ -38,7 +38,6 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
   const deadline = Date.now() + timeoutMs;
   let stolenFrom = null;
   let stealAttempted = false;
-  let contentionReported = false;
   let createdIdentity = null;
   let owner = null;
   let ownerPublished = false;
@@ -52,10 +51,6 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
       if (reclaimMode === "never") throw new RunJsonLockContendedError(lockDir);
-      if (!contentionReported && lockHooks.onContended) {
-        contentionReported = true;
-        await runContendedLockHook(lockHooks.onContended, { runDir, lockDir }, deadline, ownerPath);
-      }
       if (!stealAttempted) {
         const observedIdentity = await lockDirectoryIdentity(lockDir);
         const observedEvidence = await readLockOwnerEvidence(ownerPath);
@@ -83,9 +78,6 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
   if (stolenFrom) owner.stolen_from = sanitizeLockOwner(stolenFrom);
 
   try {
-    if (lockHooks.onLockCreated) {
-      await runRunJsonLockHook(lockHooks.onLockCreated, { runDir, lockDir }, deadline, ownerPath);
-    }
     if (!sameLockDirectoryIdentity(createdIdentity, await lockDirectoryIdentity(lockDir))) {
       throw new Error(`run.json lock ownership changed before owner publication at ${lockDir}`);
     }
@@ -96,7 +88,6 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
     return await fn({ lock_dir: lockDir, owner });
   } finally {
     if (ownerPublished) {
-      if (lockHooks.onBeforeCleanup) await lockHooks.onBeforeCleanup({ runDir, lockDir });
       await releaseOwnedRunJsonLock(runDir, lockDir, createdIdentity, publishedEvidence);
     } else if (!ownerPublished && !(await lockOwnerEntryExists(ownerPath))) {
       await quarantineAndRemoveOwnedLock(runDir, lockDir, createdIdentity);
@@ -110,46 +101,19 @@ function normalizeReclaimMode(value) {
   throw new Error("reclaimMode must be dead-owner or never");
 }
 
+// One seam, not six. The ported lock carried a generic six-hook structure with
+// per-hook validation and deadline-bounded invocation; only onBeforeSteal was ever
+// used, and only by the test that proves a lock re-acquired inside the steal window is
+// not taken. Generic extension points for callers who do not exist are how the
+// predecessor reached 43,000 lines. This displacement funded the merge-proof and PR
+// admission fixes instead of raising the ceiling.
 function validateRunJsonLockHooks(lockHooks) {
   if (lockHooks === undefined) return {};
   if (!isRecord(lockHooks)) throw new Error("lockHooks must be an object");
-  if (lockHooks.onContended !== undefined && typeof lockHooks.onContended !== "function") {
-    throw new Error("lockHooks.onContended must be a function");
-  }
-  if (lockHooks.onLockCreated !== undefined && typeof lockHooks.onLockCreated !== "function") {
-    throw new Error("lockHooks.onLockCreated must be a function");
-  }
-  // onBeforeSteal is the seam that makes the pre-rename identity check testable:
-  // it fires after the lock has been judged stale and before the rename, which is
-  // exactly the window where another process can steal and re-acquire.
-  for (const name of ["onBeforeSteal", "onReclaimRenamed", "onReclaimRemoved", "onBeforeCleanup"]) {
-    if (lockHooks[name] !== undefined && typeof lockHooks[name] !== "function") {
-      throw new Error(`lockHooks.${name} must be a function`);
-    }
+  if (lockHooks.onBeforeSteal !== undefined && typeof lockHooks.onBeforeSteal !== "function") {
+    throw new Error("lockHooks.onBeforeSteal must be a function");
   }
   return lockHooks;
-}
-
-async function runContendedLockHook(onContended, context, deadline, ownerPath) {
-  return runRunJsonLockHook(onContended, context, deadline, ownerPath);
-}
-
-async function runRunJsonLockHook(hook, context, deadline, ownerPath) {
-  const remainingMs = deadline - Date.now();
-  if (remainingMs <= 0) throw new Error(formatLockTimeout(context.lockDir, await readLockOwner(ownerPath)));
-  let timer;
-  try {
-    await Promise.race([
-      Promise.resolve().then(() => hook(context)),
-      new Promise((_, reject) => {
-        timer = setTimeout(async () => {
-          reject(new Error(formatLockTimeout(context.lockDir, await readLockOwner(ownerPath))));
-        }, remainingMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 function canStealRunJsonLock(owner, options = {}) {
@@ -212,9 +176,7 @@ async function stealByRename(runDir, lockDir, observedIdentity, observedOwner, l
     if (error?.code === "ENOENT") return null;
     throw error;
   }
-  if (lockHooks.onReclaimRenamed) await lockHooks.onReclaimRenamed({ runDir, lockDir, quarantine });
   await rm(quarantine, { recursive: true, force: true });
-  if (lockHooks.onReclaimRemoved) await lockHooks.onReclaimRemoved({ runDir, lockDir });
   return observedOwner ?? { pid: null, hostname: null, acquired_at: null, nonce: null };
 }
 

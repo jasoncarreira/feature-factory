@@ -106,8 +106,19 @@ export function observeMergeProof(worktree, { baseRef, reviewedCommit, mergeComm
   const ancestry = observeAncestry(worktree, reviewedCommit, mergeCommit, options);
   if (ancestry !== "ancestor") return fail(`reviewed commit is ${ancestry} of the merge commit`);
 
-  const firstParent = revParse(worktree, `${mergeCommit}^1`, options);
-  if (!firstParent) return fail("the merge commit's first parent could not be observed");
+  // Exactly two parents, so first-parent means "the integration branch before this
+  // merge" by construction rather than by assumption. A fast-forward has one parent -
+  // the slice's own previous commit - and the proof would then measure the slice's last
+  // commit against its whole reviewed diff, silently checking the wrong thing. Proving a
+  // fast-forward would need the pre-merge head stored as a durable field; requiring
+  // --no-ff, which the skill already specifies, costs nothing. An octopus merge carries
+  // other branches, which would surface as unreviewed paths and misdescribe the cause.
+  const parents = revList(worktree, mergeCommit, options);
+  if (parents === null) return fail("the merge commit's parents could not be observed");
+  if (parents.length !== 2) {
+    return fail(`the merge commit has ${parents.length} parent${parents.length === 1 ? "" : "s"}; a slice merge must be a two-parent merge (use --no-ff)`);
+  }
+  const firstParent = parents[0];
 
   const reviewedPaths = pathsChanged(worktree, baseRef, reviewedCommit, options);
   const contributedPaths = pathsChanged(worktree, firstParent, mergeCommit, options);
@@ -124,11 +135,18 @@ export function observeMergeProof(worktree, { baseRef, reviewedCommit, mergeComm
     return fail(`the merge did not contribute reviewed paths: ${missing.join(", ")}`);
   }
 
+  // Full tree-entry identity, not just the object id: rev-parse <commit>:<path> compares
+  // content while ignoring mode and type, so 100644 -> 100755 with identical bytes, and a
+  // regular file replaced by a symlink whose target bytes match the reviewed blob, both
+  // passed. ls-tree carries mode and type, and two calls replace one rev-parse per path.
+  const reviewedEntries = treeEntries(worktree, reviewedCommit, reviewedPaths, options);
+  const mergedEntries = treeEntries(worktree, mergeCommit, reviewedPaths, options);
+  if (reviewedEntries === null || mergedEntries === null) {
+    return fail("tree entries could not be observed");
+  }
   for (const path of reviewedPaths) {
-    const reviewedBlob = revParse(worktree, `${reviewedCommit}:${path}`, options);
-    const mergedBlob = revParse(worktree, `${mergeCommit}:${path}`, options);
-    // Both absent is a reviewed deletion that the merge also deleted, which agrees.
-    if (reviewedBlob !== mergedBlob) {
+    // Both absent is a reviewed deletion the merge also made, which agrees.
+    if (reviewedEntries.get(path) !== mergedEntries.get(path)) {
       return fail(`the merge's '${path}' differs from the reviewed commit's`);
     }
   }
@@ -136,9 +154,28 @@ export function observeMergeProof(worktree, { baseRef, reviewedCommit, mergeComm
   return { proven: true, reason: null, reviewed_paths: reviewedPaths, first_parent: firstParent };
 }
 
-function revParse(worktree, spec, options) {
-  const probe = git(worktree, ["rev-parse", spec], options);
-  return probe.ok ? probe.stdout.trim() : null;
+// "<mode> <type> <oid>\t<path>" per line, keyed by path. Mode and type are part of the
+// identity: a file that becomes executable or becomes a symlink is a different thing.
+function treeEntries(worktree, commit, paths, options) {
+  if (paths.length === 0) return new Map();
+  const probe = git(worktree, ["ls-tree", "-z", commit, "--", ...paths], options);
+  if (!probe.ok) return null;
+  const entries = new Map();
+  for (const record of probe.stdout.split("\0").filter(Boolean)) {
+    const [meta, path] = record.split("\t");
+    if (!path) continue;
+    const [mode, type, oid] = meta.trim().split(/\s+/u);
+    entries.set(path, `${mode} ${type} ${oid}`);
+  }
+  return entries;
+}
+
+function revList(worktree, commit, options) {
+  const probe = git(worktree, ["rev-list", "--parents", "-n", "1", commit], options);
+  if (!probe.ok) return null;
+  // "<commit> <parent1> <parent2>..." — drop the commit itself.
+  const fields = probe.stdout.trim().split(/\s+/u).filter(Boolean);
+  return fields.length > 0 ? fields.slice(1) : null;
 }
 
 function pathsChanged(worktree, from, to, options) {
