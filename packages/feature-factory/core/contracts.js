@@ -1,0 +1,180 @@
+// Family contracts against the schema-neutral write core.
+//
+// Each contract owns one region of run.json: its projection, the transitions that
+// region permits, and any re-observation it needs immediately before the atomic
+// rename. The core knows none of this — it calls the four methods and never
+// branches on which family it is talking to.
+//
+// `mode` is a static, code-owned string declared by the transition descriptor. It
+// is never persisted, never produced by an agent, and never hashed.
+import { GATE_NAMES, GATE_STATUSES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
+
+const TERMINAL_MODES = new Set(["terminalize"]);
+
+function contract({ id, project, validateTransition, reobserve }) {
+  return Object.freeze({
+    id,
+    project,
+    validateProjection: (projection) => {
+      if (projection === undefined) throw new Error(`${id} projection is undefined`);
+    },
+    validateTransition,
+    reobserve: reobserve ?? (async () => {}),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// envelope — identity, status, timestamps, limits, terminal_result
+// ---------------------------------------------------------------------------
+const envelope = contract({
+  id: "envelope",
+  project: (state) => ({
+    run_id: state.run_id,
+    status: state.status,
+    mode: state.mode,
+    branch: state.branch,
+    worktree: state.worktree,
+    base_commit: state.base_commit ?? null,
+    created_at: state.created_at,
+    updated_at: state.updated_at,
+    terminal_result: state.terminal_result ?? null,
+  }),
+  validateTransition: ({ mode, before, after }) => {
+    // Identity is immutable for the life of a run. Nothing legitimate renames a
+    // run, and allowing it would let a transition retarget another run's record.
+    for (const key of ["run_id", "created_at"]) {
+      if (before[key] !== after[key]) throw new Error(`envelope.${key} is immutable`);
+    }
+    if (Date.parse(after.updated_at) < Date.parse(before.updated_at)) {
+      throw new Error("envelope.updated_at cannot move backwards");
+    }
+    const wasTerminal = TERMINAL_STATUSES.includes(before.status);
+    const isTerminal = TERMINAL_STATUSES.includes(after.status);
+    if (wasTerminal && before.status !== after.status) {
+      throw new Error(`envelope cannot leave terminal status ${before.status}`);
+    }
+    if (isTerminal && !wasTerminal && !TERMINAL_MODES.has(mode)) {
+      throw new Error(`only a terminalize transition may enter ${after.status}`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// gates — the three human approval gates
+// ---------------------------------------------------------------------------
+const gates = contract({
+  id: "gates",
+  project: (state) => ({ ...(state.gates ?? {}) }),
+  validateTransition: ({ before, after }) => {
+    for (const name of GATE_NAMES) {
+      const from = before[name];
+      const to = after[name];
+      if (to === undefined) continue;
+      if (from === undefined) {
+        // A gate may appear only as pending; a gate that springs into existence
+        // already approved is a decision nobody made.
+        if (to.status !== "pending") throw new Error(`gate '${name}' must open as pending`);
+        continue;
+      }
+      if (from.status === to.status) continue;
+      if (from.status !== "pending") {
+        throw new Error(`gate '${name}' is already decided as ${from.status}`);
+      }
+      if (!GATE_STATUSES.includes(to.status)) throw new Error(`gate '${name}' status is invalid`);
+      if (to.status !== "pending" && !to.at) throw new Error(`gate '${name}' decision requires 'at'`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// steps — agent step rows
+// ---------------------------------------------------------------------------
+const steps = contract({
+  id: "steps",
+  project: (state) => (state.steps ?? []).map((step) => ({ ...step })),
+  validateTransition: ({ before, after, candidate }) => {
+    const priorByAgent = new Map(before.map((step) => [step.agent, step]));
+    for (const step of after) {
+      const prior = priorByAgent.get(step.agent);
+      if (!prior) {
+        if (step.attempts !== 1) throw new Error(`step '${step.agent}' must start at attempt 1`);
+        continue;
+      }
+      if (step.attempts < prior.attempts) throw new Error(`step '${step.agent}' attempts cannot decrease`);
+      if (step.attempts > prior.attempts + 1) throw new Error(`step '${step.agent}' attempts cannot skip`);
+      if (prior.status === "accepted" && step.status !== "accepted") {
+        throw new Error(`step '${step.agent}' is already accepted`);
+      }
+      if (!STEP_STATUSES.includes(step.status)) throw new Error(`step '${step.agent}' status is invalid`);
+    }
+    // Bounded loops: viso's max_retries, enforced rather than instructed.
+    for (const step of after) {
+      if (step.attempts > candidate.max_retries && step.status !== "blocked") {
+        throw new Error(`step '${step.agent}' exhausted max_retries and must be blocked`);
+      }
+    }
+    // A step row may never disappear; that would erase an attempt record.
+    for (const agent of priorByAgent.keys()) {
+      if (!after.some((step) => step.agent === agent)) throw new Error(`step '${agent}' cannot be removed`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// slices — slice rows, attempts, merge_commit
+// ---------------------------------------------------------------------------
+const slices = contract({
+  id: "slices",
+  project: (state) => (state.slices ?? []).map((slice) => ({ ...slice })),
+  validateTransition: ({ before, after, candidate }) => {
+    const priorById = new Map(before.map((slice) => [slice.id, slice]));
+    for (const slice of after) {
+      const prior = priorById.get(slice.id);
+      if (!prior) continue; // seeding from plan/slices.json
+      if (slice.attempts < prior.attempts) throw new Error(`slice '${slice.id}' attempts cannot decrease`);
+      if (slice.attempts > prior.attempts + 1) throw new Error(`slice '${slice.id}' attempts cannot skip`);
+      if (prior.status === "merged" && slice.status !== "merged") {
+        throw new Error(`slice '${slice.id}' is already merged`);
+      }
+      if (prior.status === "merged" && prior.merge_commit !== slice.merge_commit) {
+        throw new Error(`slice '${slice.id}' merge_commit is immutable once merged`);
+      }
+      if (!SLICE_STATUSES.includes(slice.status)) throw new Error(`slice '${slice.id}' status is invalid`);
+      if (slice.attempts > candidate.max_retries && !["merged", "blocked"].includes(slice.status)) {
+        throw new Error(`slice '${slice.id}' exhausted max_retries and must be blocked`);
+      }
+      // Dependency order: a slice cannot merge before everything it depends on.
+      if (slice.status === "merged") {
+        for (const dep of slice.depends_on ?? []) {
+          const dependency = after.find((entry) => entry.id === dep);
+          if (dependency?.status !== "merged") {
+            throw new Error(`slice '${slice.id}' cannot merge before dependency '${dep}'`);
+          }
+        }
+      }
+    }
+    for (const id of priorById.keys()) {
+      if (!after.some((slice) => slice.id === id)) throw new Error(`slice '${id}' cannot be removed`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// verdict — validator verdict and pr_url
+// ---------------------------------------------------------------------------
+const verdict = contract({
+  id: "verdict",
+  project: (state) => ({ validator: state.validator ?? null, pr_url: state.pr_url ?? null }),
+  validateTransition: ({ before, after }) => {
+    if (before.pr_url && before.pr_url !== after.pr_url) {
+      // Exactly-once: a run has one PR. Overwriting the URL would hide a second.
+      throw new Error("pr_url is immutable once recorded");
+    }
+    const priorLoops = before.validator?.loops ?? 0;
+    const nextLoops = after.validator?.loops ?? 0;
+    if (nextLoops < priorLoops) throw new Error("validator.loops cannot decrease");
+  },
+});
+
+export const FAMILY_CONTRACTS = Object.freeze([envelope, gates, steps, slices, verdict]);
+export const FAMILY_IDS = Object.freeze(FAMILY_CONTRACTS.map((entry) => entry.id));
