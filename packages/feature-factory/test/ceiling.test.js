@@ -94,15 +94,36 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     for (const [, body] of text.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)) snippets.push(...body.split("\n"));
     for (const [, body] of text.matchAll(/`([^`\n]+)`/gu)) snippets.push(body);
 
-    const invocations = snippets
-      .map((snippet) => ({ snippet, match: /^\s*factory\s+([a-z-]+)/u.exec(snippet) }))
-      .filter((entry) => entry.match)
-      .map((entry) => ({
-        snippet: entry.snippet.trim(),
-        command: entry.match[1],
-        flags: [...entry.snippet.matchAll(/--[a-z][a-z-]*/gu)].map((flag) => flag[0]),
-      }));
+    // Not anchored at the start of the snippet: an invocation quoted mid-sentence inside a
+    // code span was skipped entirely by `/^\s*factory/`. Flags are read from the command
+    // onward and stop at the next invocation, so two on one line do not pool their flags.
+    const invocations = [];
+    for (const snippet of snippets) {
+      const found = [...snippet.matchAll(/\bfactory\s+([a-z-]+)/gu)];
+      found.forEach((match, index) => {
+        const tail = snippet.slice(match.index, found[index + 1]?.index ?? snippet.length);
+        invocations.push({
+          snippet: tail.trim(),
+          command: match[1],
+          flags: [...tail.matchAll(/--[a-z][a-z-]*/gu)].map((flag) => flag[0]),
+          // A back-reference elided with U+2026 — `factory slice \u2026 running` — is a pointer to an
+          // invocation given in full elsewhere, not a runnable example. Its flags are still checked
+          // against the CLI, because naming a flag that does not exist is wrong either way; it is
+          // only exempt from *required*-flag checks, since omission is the whole point of an ellipsis.
+          elided: tail.includes("\u2026"),
+        });
+      });
+    }
     assert.ok(invocations.length >= 10, `only ${invocations.length} documented invocations found; the parser is broken, not the skill`);
+
+    // Both directions. Without this, deleting every mention of a command passes as long as
+    // the invocation floor above is still met by the others — an orchestrator following the
+    // skill would simply never learn the command exists.
+    assert.deepEqual(
+      [...new Set(invocations.map(({ command }) => command))].sort(),
+      [...CLI_COMMANDS].sort(),
+      "every CLI command must appear in the skill, and the skill must invoke no others",
+    );
 
     // Removing or renaming a flag is the drift that actually happens — --reviewed-head,
     // --skip-tests-reason, --force and --worktree all went this session — so it is checked
@@ -121,13 +142,20 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
     // Omissions and wrong argument *values* cannot be derived from the flag lists, so the few
     // that blocked the path are named. Each entry is one refusal a reader would otherwise hit.
+    //
+    // Deliberately only flags the handler accepts as optional but a *later* command needs.
+    // Flags a handler rejects immediately — init --branch/--worktree, observe --base, validator
+    // --report, pr --url, terminal --reason — are left out: the CLI already refuses those on
+    // the spot, so documenting them wrong fails loudly at the first attempt and needs no test.
     const required = [
       { command: "lock", when: /\bsteal\b/u, flag: "--session", why: "claiming a stolen lock needs a session id" },
       { command: "slice", when: /\breview\b/u, flag: "--review-ref", why: "the merge refuses a slice with no review_ref" },
       { command: "slice", when: /\breview\b/u, flag: "--evidence-ref", why: "the merge refuses a slice with no evidence_ref" },
+      { command: "slice", when: /\brunning\b/u, flag: "--branch", why: "the merge refuses a slice with no recorded branch" },
+      { command: "slice", when: /\brunning\b/u, flag: "--worktree", why: "an unset worktree falls back to the repository root instead of the isolated slice tree" },
     ];
     for (const { command, when, flag, why } of required) {
-      const relevant = invocations.filter((entry) => entry.command === command && when.test(entry.snippet));
+      const relevant = invocations.filter((entry) => entry.command === command && !entry.elided && when.test(entry.snippet));
       assert.ok(relevant.length > 0, `no documented '${command}' invocation matching ${when}`);
       for (const entry of relevant) {
         assert.ok(entry.flags.includes(flag), `${entry.snippet}\n  must pass ${flag}: ${why}`);
