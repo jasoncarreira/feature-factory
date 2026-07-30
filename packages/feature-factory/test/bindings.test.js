@@ -1,0 +1,157 @@
+// Attacks 2, 3, 4, 9, 10 — judgements bound to their subjects, and effects
+// recorded exactly once.
+//
+// Each guard is falsified by removing it; the results are in the commit message.
+// Where a test could pass for a reason other than the guard under test, the fixture
+// is made otherwise-green so only that guard can explain the refusal.
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { assertReviewBinding, observeMergeProof, readReview } from "../observe/review.js";
+
+const run = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+// An integration branch with one slice branched off it, mirroring the real flow:
+// the slice branches from the current integration head, so a clean merge produces
+// the reviewed tree.
+function fixture(name) {
+  const root = mkdtempSync(join(tmpdir(), `ff-bind-${name}-`));
+  run(root, "init", "-q", "-b", "feature");
+  run(root, "config", "user.email", "t@example.com");
+  run(root, "config", "user.name", "T");
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "base.ts"), "base\n");
+  run(root, "add", "-A");
+  run(root, "commit", "-q", "-m", "base");
+  const featureBase = run(root, "rev-parse", "HEAD");
+
+  run(root, "checkout", "-q", "-b", "slice");
+  writeFileSync(join(root, "src", "slice.ts"), "slice\n");
+  run(root, "add", "-A");
+  run(root, "commit", "-q", "-m", "slice");
+  const sliceHead = run(root, "rev-parse", "HEAD");
+
+  const runDir = join(root, ".claude", "factory", "app-1");
+  mkdirSync(join(runDir, "reviews"), { recursive: true });
+  return { root, runDir, featureBase, sliceHead };
+}
+
+function writeReview(runDir, subject, overrides = {}) {
+  const review = {
+    subject, reviewer: "work-reviewer", verdict: "APPROVE", attempt: 1,
+    reviewed_commit: "a".repeat(40), findings: [], required_fixes: [], checked_against: ["brief"],
+    ...overrides,
+  };
+  writeFileSync(join(runDir, "reviews", `${subject}.json`), `${JSON.stringify(review, null, 2)}\n`);
+  return `reviews/${subject}.json`;
+}
+
+// Merge the slice into the integration branch the way the orchestrator does.
+function mergeSlice(root) {
+  run(root, "checkout", "-q", "feature");
+  run(root, "merge", "-q", "--no-ff", "slice", "-m", "merge slice");
+  return run(root, "rev-parse", "HEAD");
+}
+
+describe("attack 3 — an approval presented against a different commit", () => {
+  it("refuses a review bound to another commit, and accepts the matching one", () => {
+    const f = fixture("binding");
+    try {
+      const ref = writeReview(f.runDir, "be-slice", { reviewed_commit: f.sliceHead });
+      const review = readReview(f.runDir, ref);
+
+      // The head it judged: accepted.
+      assertReviewBinding({ review, ref, observedHead: f.sliceHead });
+
+      // A different commit: refused, even though the verdict is a genuine APPROVE.
+      assert.throws(() => assertReviewBinding({ review, ref, observedHead: f.featureBase }),
+        /approved [0-9a-f]{12} but the head is [0-9a-f]{12}/u);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a review with no reviewed_commit at all", () => {
+    const f = fixture("unbound");
+    try {
+      const ref = writeReview(f.runDir, "be-slice", { reviewed_commit: undefined });
+      assert.throws(() => readReview(f.runDir, ref), /must record reviewed_commit as a full 40-character sha/u);
+      // A short sha is not a binding either: it cannot be compared unambiguously.
+      const shortRef = writeReview(f.runDir, "short", { reviewed_commit: f.sliceHead.slice(0, 12) });
+      assert.throws(() => readReview(f.runDir, shortRef), /full 40-character sha/u);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a non-approving verdict and an unknown key", () => {
+    const f = fixture("verdicts");
+    try {
+      const rejectRef = writeReview(f.runDir, "rejected", { verdict: "REJECT", reviewed_commit: f.sliceHead });
+      const review = readReview(f.runDir, rejectRef);
+      assert.throws(() => assertReviewBinding({ review, ref: rejectRef, observedHead: f.sliceHead }),
+        /verdict is REJECT, not an approval/u);
+      const oddRef = writeReview(f.runDir, "odd", { reviewed_commit: f.sliceHead, late_discovery_strike: false });
+      assert.throws(() => readReview(f.runDir, oddRef), /unknown keys: late_discovery_strike/u);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+});
+
+describe("attack 2 — the merged tree differs from the reviewed tree", () => {
+  it("proves a clean serial merge", () => {
+    const f = fixture("proof-ok");
+    try {
+      const mergeCommit = mergeSlice(f.root);
+      const proof = observeMergeProof(f.root, { reviewedCommit: f.sliceHead, mergeCommit });
+      assert.equal(proof.proven, true, proof.reason ?? "");
+      assert.equal(proof.reviewed_tree, proof.merged_tree);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a merge whose tree nobody reviewed", () => {
+    const f = fixture("proof-drift");
+    try {
+      // Something lands on the integration branch before the slice merges — the
+      // seriality violation. Ancestry still holds; the tree does not.
+      run(f.root, "checkout", "-q", "feature");
+      writeFileSync(join(f.root, "src", "sneaked.ts"), "unreviewed\n");
+      run(f.root, "add", "-A");
+      run(f.root, "commit", "-q", "-m", "concurrent work");
+      const mergeCommit = mergeSlice(f.root);
+
+      const proof = observeMergeProof(f.root, { reviewedCommit: f.sliceHead, mergeCommit });
+      assert.equal(proof.proven, false);
+      assert.equal(proof.reason, "merged tree differs from the reviewed tree");
+      // Ancestry alone would have accepted this, which is why tree equality is the
+      // proof and ancestry is only a precondition.
+      assert.notEqual(proof.reviewed_tree, proof.merged_tree);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses when the reviewed commit is not an ancestor of the merge", () => {
+    const f = fixture("proof-unrelated");
+    try {
+      const mergeCommit = mergeSlice(f.root);
+      // featureBase is an ancestor; a sibling commit on an unrelated history is not.
+      run(f.root, "checkout", "-q", "--orphan", "elsewhere");
+      run(f.root, "rm", "-rq", "--cached", ".");
+      writeFileSync(join(f.root, "other.ts"), "x\n");
+      run(f.root, "add", "-A");
+      run(f.root, "commit", "-q", "-m", "unrelated");
+      const unrelated = run(f.root, "rev-parse", "HEAD");
+
+      const proof = observeMergeProof(f.root, { reviewedCommit: unrelated, mergeCommit });
+      assert.equal(proof.proven, false);
+      assert.match(proof.reason, /not-ancestor/u);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses when a tree cannot be observed at all", () => {
+    const f = fixture("proof-unobservable");
+    try {
+      const mergeCommit = mergeSlice(f.root);
+      const proof = observeMergeProof(f.root, { reviewedCommit: "refs/heads/does-not-exist", mergeCommit });
+      assert.equal(proof.proven, false);
+      assert.equal(proof.reason, "trees could not be observed");
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+});

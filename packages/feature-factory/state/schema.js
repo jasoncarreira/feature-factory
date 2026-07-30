@@ -38,7 +38,9 @@ export const SLICE_KEYS = Object.freeze([
 ]);
 
 export const VALIDATOR_VERDICTS = Object.freeze(["GO", "GO-WITH-NITS", "NO-GO"]);
-export const VALIDATOR_KEYS = Object.freeze(["verdict", "report", "loops"]);
+// reviewed_head is the fourth field, justified by attack 4: a verdict that does not
+// name the head it judged cannot be refused once that head moves.
+export const VALIDATOR_KEYS = Object.freeze(["verdict", "report", "reviewed_head", "loops"]);
 export const TERMINAL_RESULT_KEYS = Object.freeze(["status", "reason"]);
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
@@ -151,6 +153,7 @@ function validator(errors, value) {
   if (!object(errors, value, "run.validator", VALIDATOR_KEYS)) return;
   enumValue(errors, value, "verdict", VALIDATOR_VERDICTS, "run.validator");
   nullableString(errors, value, "report", "run.validator");
+  pattern(errors, value, "reviewed_head", SHA, "run.validator");
   nonNegativeInt(errors, value, "loops", "run.validator");
 }
 

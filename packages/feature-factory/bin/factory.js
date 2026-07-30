@@ -14,8 +14,9 @@ import { join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { readRun, readRunUnchecked, transition } from "../state/index.js";
 import { buildEvidence, evidenceRef, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
+import { assertReviewBinding, isApproving, observeMergeProof, readReview } from "../observe/review.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
-import { SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
+import { SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, VALIDATOR_VERDICTS } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SessionLockHeldError,
 } from "../state/session-lock.js";
@@ -31,6 +32,8 @@ export const COMMANDS = Object.freeze({
   "slices-seed": Object.freeze(["--repo", "--from", "--now", "--json"]),
   slice: Object.freeze(["--repo", "--attempts", "--worktree", "--branch", "--evidence-ref", "--review-ref", "--merge-commit", "--now", "--json"]),
   observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
+  validator: Object.freeze(["--repo", "--report", "--reviewed-head", "--worktree", "--now", "--json"]),
+  pr: Object.freeze(["--repo", "--url", "--worktree", "--now", "--json"]),
 });
 
 const BOOLEAN_FLAGS = new Set(["--json", "--force"]);
@@ -82,6 +85,69 @@ function runDirFor(flags, runId) {
 }
 
 const HANDLERS = {
+  async validator([runId, verdictValue], flags) {
+    if (!VALIDATOR_VERDICTS.includes(verdictValue)) throw new CliError(`verdict must be one of ${VALIDATOR_VERDICTS.join(" | ")}`);
+    if (!flags.report) throw new CliError("factory validator requires --report");
+    if (!flags.reviewedHead) throw new CliError("factory validator requires --reviewed-head");
+    const runDir = runDirFor(flags, runId);
+    const at = stamp(flags);
+    const next = await transition(runDir, {
+      participants: [{ familyId: "verdict", mode: "record" }],
+      apply: (state) => ({
+        ...state,
+        updated_at: at,
+        validator: {
+          verdict: verdictValue,
+          report: flags.report,
+          // Attack 4: the verdict names the head it judged, so a later consumer can
+          // refuse it once that head moves.
+          reviewed_head: flags.reviewedHead,
+          loops: (state.validator?.loops ?? 0) + (state.validator ? 1 : 0),
+        },
+      }),
+    });
+    return emit(flags, { run_id: runId, verdict: next.validator.verdict, reviewed_head: next.validator.reviewed_head, loops: next.validator.loops });
+  },
+
+  async pr([runId], flags) {
+    if (!flags.url) throw new CliError("factory pr requires --url");
+    const runDir = runDirFor(flags, runId);
+    const repo = resolve(flags.repo ?? process.cwd());
+    const run = readRun(runDir);
+    const at = stamp(flags);
+
+    // Attack 4: a PR may only be recorded against the head the validator judged.
+    // Re-observed here rather than taken from the manifest, because the manifest
+    // records what we were told and the repository records what is true.
+    const reobservers = new Map();
+    reobservers.set("verdict", async ({ candidate }) => {
+      const validator = candidate.validator;
+      if (!validator || !isApproving(validator.verdict)) {
+        throw new Error("recording a PR requires an approving validator verdict");
+      }
+      const integration = resolveWorktree(repo, run.worktree);
+      if (!integration) throw new Error(`integration worktree '${run.worktree}' is not observable`);
+      const observed = observeWorktree(integration, validator.reviewed_head);
+      if (!observed.commit) throw new Error("integration head could not be observed");
+      if (observed.commit !== validator.reviewed_head) {
+        throw new Error(`validator judged ${validator.reviewed_head.slice(0, 12)} but the integration head is ${observed.commit.slice(0, 12)}`);
+      }
+    });
+
+    const next = await transition(runDir, {
+      participants: [{ familyId: "verdict", mode: "publish" }],
+      reobservers,
+      apply: (state) => {
+        // Attacks 9 and 10: recording the same PR twice is the crash-replay path and
+        // must be idempotent; recording a different one is a second PR and is refused
+        // by the verdict contract.
+        if (state.pr_url === flags.url) return { ...state, updated_at: at };
+        return { ...state, updated_at: at, pr_url: flags.url };
+      },
+    });
+    return emit(flags, { run_id: runId, pr_url: next.pr_url, idempotent: run.pr_url === flags.url });
+  },
+
   async ["slices-seed"]([runId], flags) {
     const runDir = runDirFor(flags, runId);
     const from = flags.from ?? "plan/slices.json";
@@ -135,8 +201,26 @@ const HANDLERS = {
       reobservers.set("slices", async (slice) => {
         const worktree = resolveWorktree(repo, slice.worktree ?? "");
         if (!worktree) return { diff_observed: false, unowned: [], privileged: [] };
-        const base = flags.base ?? readRun(runDir).branch;
-        const observation = observeWorktree(worktree, base);
+        const run = readRun(runDir);
+        const observation = observeWorktree(worktree, run.branch);
+
+        // Attack 3: the approval must have judged the commit being merged. Read the
+        // slice's own head from git rather than trusting anything recorded.
+        if (!slice.review_ref) throw new Error(`slice '${slice.id}' cannot merge without a review_ref`);
+        const review = readReview(runDir, slice.review_ref);
+        assertReviewBinding({ review, ref: slice.review_ref, observedHead: observation.commit });
+
+        // Attack 2: the merge proof, observed in the integration worktree.
+        const integration = resolveWorktree(repo, run.worktree);
+        if (!integration) throw new Error(`integration worktree '${run.worktree}' is not observable`);
+        const proof = observeMergeProof(integration, {
+          reviewedCommit: review.reviewed_commit,
+          mergeCommit: flags.mergeCommit,
+        });
+        if (!proof.proven) {
+          throw new Error(`slice '${slice.id}' merge proof failed: ${proof.reason}`);
+        }
+
         return {
           diff_observed: observation.diff_observed,
           unowned: unownedPaths(observation.files_changed, slice.paths),

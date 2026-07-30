@@ -22,9 +22,11 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Widened deliberately when slices/observe landed. BUILD-PLAN-SMALL.md declares
 // twelve commands; `validator` and `pr` are not built yet, so they are absent here
 // and adding them will be another visible diff.
+// All twelve commands BUILD-PLAN-SMALL.md declares are now built. A thirteenth
+// needs a reason in the plan first, not just an edit here.
 const CLI_COMMANDS = [
   "init", "status", "lock", "heartbeat", "gate", "step", "terminal",
-  "slices-seed", "slice", "observe",
+  "slices-seed", "slice", "observe", "validator", "pr",
 ];
 
 const RUN_JSON_KEYS = [
@@ -107,10 +109,15 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("keeps the production surface small enough to read in one sitting", () => {
     const total = productionFiles.reduce((sum, path) => sum + readFileSync(path, "utf8").split("\n").length, 0);
-    // Not a hard architectural limit — a tripwire. Crossing it means re-reading
-    // BUILD-PLAN-SMALL.md's non-goals before adding more, not that the number is
-    // wrong. Raise it deliberately, with a reason in the commit message.
-    assert.ok(total < 2000, `production source is ${total} lines; the tripwire is 2000`);
+    // Raised from 2000 to 2500 when the twelfth command landed at 2,041 lines.
+    // 2500 is BUILD-PLAN-SMALL.md's stated upper bound for the whole system, so this
+    // is no longer a number I can quietly raise again: crossing it means the design
+    // is wrong, not that the tripwire is.
+    //
+    // Known reduction candidate if it does need to come down: core/run-lock.js (349
+    // lines) is the largest ported file and still carries quarantine machinery and
+    // hook plumbing beyond what the twelve commands use.
+    assert.ok(total < 2500, `production source is ${total} lines; the tripwire is 2500`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
