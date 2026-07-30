@@ -19,7 +19,13 @@ import { RUN_KEYS } from "../state/schema.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-const CLI_COMMANDS = ["init", "status", "lock", "heartbeat", "gate", "step", "terminal"];
+// Widened deliberately when slices/observe landed. BUILD-PLAN-SMALL.md declares
+// twelve commands; `validator` and `pr` are not built yet, so they are absent here
+// and adding them will be another visible diff.
+const CLI_COMMANDS = [
+  "init", "status", "lock", "heartbeat", "gate", "step", "terminal",
+  "slices-seed", "slice", "observe",
+];
 
 const RUN_JSON_KEYS = [
   // viso's fifteen

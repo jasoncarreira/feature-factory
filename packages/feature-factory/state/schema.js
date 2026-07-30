@@ -30,7 +30,11 @@ export const STEP_KEYS = Object.freeze(["agent", "status", "attempts", "review_r
 export const SLICE_STATUSES = Object.freeze(["pending", "running", "review", "merged", "blocked"]);
 export const SLICE_KEYS = Object.freeze([
   "id", "stack", "depends_on", "status", "worktree", "branch", "attempts",
-  "evidence_ref", "review_ref", "merge_commit",
+  // `paths` is the ratified ownership declaration, seeded from plan/slices.json at
+  // the decompose gate. It lives here rather than being re-read from the plan at
+  // merge time so the set a transition validates against is the set the gate
+  // approved, and so ownership is decidable from run.json alone.
+  "paths", "evidence_ref", "review_ref", "merge_commit",
 ]);
 
 export const VALIDATOR_VERDICTS = Object.freeze(["GO", "GO-WITH-NITS", "NO-GO"]);
@@ -118,6 +122,13 @@ function slices(errors, value) {
     for (const key of ["evidence_ref", "review_ref"]) nullableString(errors, slice, key, path);
     if (slice.merge_commit !== null && slice.merge_commit !== undefined) {
       optionalPattern(errors, slice, "merge_commit", SHA, path);
+    }
+    if (!Array.isArray(slice.paths) || slice.paths.length === 0 || !slice.paths.every((entry) => stringValue(entry))) {
+      errors.push({ path: `${path}.paths`, message: "must be a non-empty array of paths" });
+    } else if (slice.paths.some((entry) => entry.startsWith("/") || entry.split("/").includes(".."))) {
+      // A declared path that escapes the repository would make ownership
+      // unenforceable, so it is refused at admission rather than at merge.
+      errors.push({ path: `${path}.paths`, message: "must be repository-relative without '..'" });
     }
     if (!Array.isArray(slice.depends_on)) {
       errors.push({ path: `${path}.depends_on`, message: "must be an array" });

@@ -123,8 +123,36 @@ const steps = contract({
 // ---------------------------------------------------------------------------
 // slices — slice rows, attempts, merge_commit
 // ---------------------------------------------------------------------------
+// Attack 5 lives here rather than in the CLI. `reobserve` runs inside the
+// transition, immediately before the atomic rename, so a merge cannot be recorded
+// without the ownership check having run against freshly observed paths.
+async function refuseUnownedMerge({ mode, before, after, observe }) {
+  if (mode !== "merge") return;
+  const newlyMerged = after.filter((slice) => slice.status === "merged"
+    && before.find((prior) => prior.id === slice.id)?.status !== "merged");
+  if (newlyMerged.length === 0) return;
+  if (typeof observe !== "function") {
+    // Fail closed: a merge whose paths cannot be observed is not a merge we can
+    // authorize. Recording it anyway is precisely the false green being prevented.
+    throw new Error("a merge transition requires a path observer");
+  }
+  for (const slice of newlyMerged) {
+    const observed = await observe(slice);
+    if (!observed || observed.diff_observed !== true) {
+      throw new Error(`slice '${slice.id}' merge requires observed changed paths`);
+    }
+    if (observed.unowned.length > 0) {
+      throw new Error(`slice '${slice.id}' changed paths it does not own: ${observed.unowned.join(", ")}`);
+    }
+    if (observed.privileged.length > 0) {
+      throw new Error(`slice '${slice.id}' changed privileged control-plane paths: ${observed.privileged.join(", ")}`);
+    }
+  }
+}
+
 const slices = contract({
   id: "slices",
+  reobserve: refuseUnownedMerge,
   project: (state) => (state.slices ?? []).map((slice) => ({ ...slice })),
   validateTransition: ({ before, after, candidate }) => {
     const priorById = new Map(before.map((slice) => [slice.id, slice]));

@@ -11,8 +11,11 @@
 // into a missing field.
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
 import { readRun, readRunUnchecked, transition } from "../state/index.js";
-import { SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
+import { buildEvidence, evidenceRef, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
+import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
+import { SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SessionLockHeldError,
 } from "../state/session-lock.js";
@@ -25,6 +28,9 @@ export const COMMANDS = Object.freeze({
   gate: Object.freeze(["--repo", "--artifact", "--now", "--json"]),
   step: Object.freeze(["--repo", "--attempts", "--review-ref", "--evidence-ref", "--now", "--json"]),
   terminal: Object.freeze(["--repo", "--reason", "--now", "--json"]),
+  "slices-seed": Object.freeze(["--repo", "--from", "--now", "--json"]),
+  slice: Object.freeze(["--repo", "--attempts", "--worktree", "--branch", "--evidence-ref", "--review-ref", "--merge-commit", "--now", "--json"]),
+  observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
 });
 
 const BOOLEAN_FLAGS = new Set(["--json", "--force"]);
@@ -76,6 +82,137 @@ function runDirFor(flags, runId) {
 }
 
 const HANDLERS = {
+  async ["slices-seed"]([runId], flags) {
+    const runDir = runDirFor(flags, runId);
+    const from = flags.from ?? "plan/slices.json";
+    let plan;
+    try {
+      plan = JSON.parse(readFileSync(join(runDir, from), "utf8"));
+    } catch (error) {
+      throw new CliError(`could not read ${from}: ${error.message}`);
+    }
+    if (!Array.isArray(plan?.slices) || plan.slices.length === 0) throw new CliError(`${from} has no slices`);
+    const at = stamp(flags);
+    const next = await transition(runDir, {
+      participants: [{ familyId: "slices", mode: "seed" }],
+      apply: (state) => {
+        if (state.slices.length > 0) throw new Error("slices are already seeded");
+        return {
+          ...state,
+          updated_at: at,
+          slices: plan.slices.map((slice) => ({
+            id: slice.id,
+            stack: slice.stack,
+            depends_on: slice.depends_on ?? [],
+            status: "pending",
+            worktree: null,
+            branch: null,
+            attempts: 1,
+            // The ratification point: the gate approved these paths, so this is the
+            // set every later merge is judged against.
+            paths: slice.paths ?? [],
+            evidence_ref: null,
+            review_ref: null,
+            merge_commit: null,
+          })),
+        };
+      },
+    });
+    return emit(flags, { run_id: runId, seeded: next.slices.length, slices: next.slices.map((slice) => slice.id) });
+  },
+
+  async slice([runId, sliceId, status], flags) {
+    if (!SLICE_STATUSES.includes(status)) throw new CliError(`status must be one of ${SLICE_STATUSES.join(" | ")}`);
+    const runDir = runDirFor(flags, runId);
+    const repo = resolve(flags.repo ?? process.cwd());
+    const at = stamp(flags);
+    if (status === "merged" && !flags.mergeCommit) throw new CliError("recording a merge requires --merge-commit");
+
+    // For a merge, the contract's reobserve hook demands freshly observed paths.
+    // The observer is supplied here and runs inside the transition.
+    const reobservers = new Map();
+    if (status === "merged") {
+      reobservers.set("slices", async (slice) => {
+        const worktree = resolveWorktree(repo, slice.worktree ?? "");
+        if (!worktree) return { diff_observed: false, unowned: [], privileged: [] };
+        const base = flags.base ?? readRun(runDir).branch;
+        const observation = observeWorktree(worktree, base);
+        return {
+          diff_observed: observation.diff_observed,
+          unowned: unownedPaths(observation.files_changed, slice.paths),
+          privileged: privilegedPaths(observation.files_changed),
+        };
+      });
+    }
+
+    const next = await transition(runDir, {
+      participants: [{ familyId: "slices", mode: status === "merged" ? "merge" : "record" }],
+      reobservers,
+      apply: (state) => {
+        const existing = state.slices.find((slice) => slice.id === sliceId);
+        if (!existing) throw new Error(`unknown slice '${sliceId}'`);
+        const row = {
+          ...existing,
+          status,
+          attempts: flags.attempts === undefined ? existing.attempts : integer(flags.attempts, 1, "--attempts"),
+          worktree: flags.worktree ?? existing.worktree,
+          branch: flags.branch ?? existing.branch,
+          evidence_ref: flags.evidenceRef ?? existing.evidence_ref,
+          review_ref: flags.reviewRef ?? existing.review_ref,
+          merge_commit: flags.mergeCommit ?? existing.merge_commit,
+        };
+        return { ...state, updated_at: at, slices: state.slices.map((slice) => (slice.id === sliceId ? row : slice)) };
+      },
+    });
+    const row = next.slices.find((slice) => slice.id === sliceId);
+    return emit(flags, { run_id: runId, slice: sliceId, status: row.status, attempts: row.attempts, merge_commit: row.merge_commit });
+  },
+
+  async observe([runId, subject], flags) {
+    if (!subject) throw new CliError("factory observe requires <subject>");
+    if (!flags.worktree || !flags.base) throw new CliError("factory observe requires --worktree and --base");
+    const runDir = runDirFor(flags, runId);
+    const repo = resolve(flags.repo ?? process.cwd());
+    const worktree = resolveWorktree(repo, flags.worktree);
+    if (!worktree) throw new CliError(`worktree '${flags.worktree}' is not inside the repository`);
+
+    let claim = null;
+    if (flags.claim) {
+      try {
+        claim = JSON.parse(readFileSync(resolve(repo, flags.claim), "utf8"));
+      } catch (error) {
+        throw new CliError(`could not read --claim: ${error.message}`);
+      }
+    }
+
+    const evidence = buildEvidence({
+      subject,
+      attempt: flags.attempt === undefined ? 1 : integer(flags.attempt, 1, "--attempt"),
+      branch: flags.branch ?? null,
+      baseRef: flags.base,
+      worktree,
+      status: flags.status ?? "completed",
+      blockedReason: flags.blockedReason ?? null,
+      claim,
+      testCommand: flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
+    });
+
+    // Attack 7: a base that is not an ancestor of HEAD makes the diff meaningless,
+    // so the evidence is not review-ready regardless of what the tests said.
+    const ancestry = observeAncestry(worktree, flags.base, "HEAD");
+    if (ancestry !== "ancestor") {
+      evidence.review_ready = false;
+      evidence.blocked_reason = evidence.blocked_reason ?? `base ${flags.base} is ${ancestry} of HEAD`;
+    }
+
+    await writeProtectedJsonAtomic(runDir, evidenceRef(subject), evidence);
+    return emit(flags, {
+      run_id: runId, subject, evidence_ref: evidenceRef(subject),
+      review_ready: evidence.review_ready, files_changed: evidence.files_changed.length,
+      tests: evidence.tests.observed ? `exit ${evidence.tests.exit}` : `skipped: ${evidence.tests.skipped_reason}`,
+      ancestry, mismatches: evidence.claim_reconciliation.mismatches.map((entry) => entry.field),
+    });
+  },
   async init([runId], flags) {
     if (!flags.branch || !flags.worktree) throw new CliError("factory init requires --branch and --worktree");
     const mode = flags.mode ?? "interactive";
