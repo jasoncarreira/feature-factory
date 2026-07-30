@@ -180,17 +180,20 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // the largest ported file. Its quarantine machinery is NOT the candidate - that is
     // active correctness machinery - but its hook plumbing exceeds what twelve commands
     // use.
-    // 2650 -> 2700, second findings-driven raise, at 2,660. Two more high findings, both
-    // publication authorization: a re-opened Story gate did not withdraw publication
-    // authority because only pre_pr was consulted, and the validator's verdict and head were
-    // arguments rather than being read from the record it judged. Paid down first with the
-    // dead `--worktree` flags on validator and pr and an unused import; the rest is the
-    // all-gates check and readValidatorReview.
+    // Raised to 2700 for the publication-authorization findings and then **put back**,
+    // because the deletion arrived: run-lock.js gave up 70 lines of plumbing no caller used
+    // — a contended-error class and reclaimMode nothing selects, two reclaim wrappers whose
+    // only content was a null check, a six-hook object collapsed to the one `onBeforeSteal`
+    // seam a test actually needs, owner-detail timeout formatting, run-lock's own
+    // stolen_from bookkeeping, a configurable retry delay nobody set, and five dead imports
+    // — plus write-core's unused lockOptions and beforeRename pass-throughs.
     //
-    // Two raises in one session is a ratchet, and the next request should be met by deleting
-    // something rather than by editing this line. run-lock.js's hook plumbing is still the
-    // standing candidate — not its quarantine machinery, which is live.
-    assert.ok(total < 2700, `production source is ${total} lines; the tripwire is 2700`);
+    // Its quarantine machinery, the steal seam, both CAS comparisons, and the atomic
+    // writer's beforeCommit hook all stay: those are live correctness machinery.
+    //
+    // So the number is 2650 again, and the precedent is the one worth keeping: a raise is a
+    // debt, and the next one should be paid the same way.
+    assert.ok(total < 2650, `production source is ${total} lines; the tripwire is 2650`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

@@ -179,7 +179,14 @@ describe("stealing a stale lock is one atomic rename", () => {
         // Hold it briefly so the two calls genuinely overlap.
         await new Promise((resolve) => setTimeout(resolve, 20));
         writeFileSync(join(dir, "run.json"), `${JSON.stringify({ ...current, turns: current.turns + 1 })}\n`);
-      }, { staleLockMs: 100, timeoutMs: 5000 });
+        // staleLockMs must exceed this critical section, and by a wide margin. At 100ms it
+        // did not: under a loaded suite the winner's 20ms hold plus file I/O ran past the
+        // TTL, so the loser judged a *live* lock dead, stole it, and both ran concurrently —
+        // producing exactly the lost update this test exists to detect. It failed roughly one
+        // run in three and passed in isolation, which read as a real-clock flake to be
+        // tolerated. It was a fixture asserting serialization while declaring the holder dead
+        // mid-critical-section. The seeded lock is 60s old, so 5s still steals it on sight.
+      }, { staleLockMs: 5000, timeoutMs: 5000 });
 
       await Promise.all([attempt("a"), attempt("b")]);
 
@@ -207,8 +214,7 @@ describe("stealing a stale lock is one atomic rename", () => {
       let injected = false;
       // Between judging the lock stale and renaming it away, another process steals
       // it and takes a fresh one. Renaming that away would steal a live lock.
-      const lockHooks = {
-        onBeforeSteal: () => {
+      const onBeforeSteal = () => {
           if (injected) return;
           injected = true;
           rmSync(lockDir, { recursive: true, force: true });
@@ -218,10 +224,9 @@ describe("stealing a stale lock is one atomic rename", () => {
             acquired_at: new Date().toISOString(),
             nonce: "33333333-3333-4333-8333-333333333333",
           })}\n`);
-        },
       };
       await assert.rejects(
-        () => withRunJsonLock(dir, async () => {}, { staleLockMs: 100, timeoutMs: 200, lockHooks }),
+        () => withRunJsonLock(dir, async () => {}, { staleLockMs: 100, timeoutMs: 200, onBeforeSteal }),
         (error) => {
           assert.match(String(error.message), /lock|contend|timed out/iu);
           return true;

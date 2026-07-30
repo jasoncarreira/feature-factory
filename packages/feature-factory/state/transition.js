@@ -17,7 +17,7 @@ import { FAMILY_CONTRACTS } from "../core/contracts.js";
 //
 // `apply` receives a structured clone and returns the next state. It never sees
 // the lock, the file, or the rename.
-export async function transition(runDir, { participants, apply, reobservers, lockOptions, hooks } = {}) {
+export async function transition(runDir, { participants, apply, reobservers, hooks } = {}) {
   const descriptor = Object.freeze({
     participants: Object.freeze((participants ?? []).map((entry) => Object.freeze({ ...entry }))),
     apply,
@@ -27,7 +27,6 @@ export async function transition(runDir, { participants, apply, reobservers, loc
     descriptor,
     validateEnvelope: validateRun,
     reobservers: reobservers ?? new Map(),
-    lockOptions: lockOptions ?? {},
     atomicWriteHooks: hooks,
   });
 }

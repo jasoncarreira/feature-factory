@@ -101,7 +101,7 @@ const runJson = (runDir) => JSON.parse(readFileSync(join(runDir, "run.json"), "u
 // refusal has to be otherwise-complete or the earlier gates explain the failure instead of
 // the guard under test. That masking has bitten this suite repeatedly.
 function approveEarlyGates(repo, at) {
-  for (const name of ["story", "brief"]) assert.equal(approveGate(repo, name, at).ok, true);
+  for (const name of ["story", "brief"]) { const r = approveGate(repo, name, at); assert.equal(r.ok, true, `${name}: ${r.stderr}`); }
 }
 
 function approveGate(repo, name, at) {
@@ -588,19 +588,26 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       verifyTests(p.repo, p.basePoint, NOW(5));
       approveGate(p.repo, "pre_pr", NOW(5));
 
-      // Folded in first, on an otherwise-publishable run: re-opening an *earlier* gate
-      // withdraws publication authority. Publication consulted only pre_pr, so opencode
-      // approved Gate 3, re-opened Story, decided stop, and recorded a PR against a stopped
-      // run. Every gate's current status is what authorizes a PR, not the last one decided.
-      assert.equal(factory(p.repo, ["gate", RUN, "story", "pending", "--now", NOW(6)]).ok, true);
-      assert.equal(factory(p.repo, ["gate", RUN, "story", "stop", "--now", NOW(6)]).ok, true);
-      const stopped = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
-      assert.equal(stopped.ok, false, "a stopped Story gate must block publication");
-      assert.match(stopped.stderr, /every gate must be approved; not approved: story\(stop\)/u);
-      assert.equal(runJson(p.runDir).pr_url, null);
+      // Folded in first, on an otherwise-publishable run: the approved Story cannot be
+      // changed underneath everything that was judged against it. Both routes are asserted,
+      // because the second needs no re-opening at all.
+      //
+      // Re-opening any gate was permitted for one round, to give the late-head recovery a way
+      // out. That let Story be re-opened, pointed at a new document and re-approved, while the
+      // Brief, validator, tests and Gate 3 that all judged the *old* story stayed valid — the
+      // run then published Story v1's implementation under Story v2. Only pre_pr re-opens now,
+      // because only its subject can legitimately change after approval.
+      const reopenStory = factory(p.repo, ["gate", RUN, "story", "pending", "--now", NOW(6)]);
+      assert.equal(reopenStory.ok, false, "an earlier gate must not re-open under completed work");
+      assert.match(reopenStory.stderr, /gate 'story' cannot be re-opened once decided; only pre_pr may/u);
 
-      // Re-approved, and the run publishes again — the withdrawal is reversible.
-      assert.equal(approveGate(p.repo, "story", NOW(6)).ok, true);
+      // And the shorter route: re-deciding an approved gate to the status it already holds
+      // used to skip every check, so `--artifact` swapped the document in place.
+      const swap = factory(p.repo, ["gate", RUN, "story", "approved", "--artifact", "artifacts/story-v2.md", "--now", NOW(6)]);
+      assert.equal(swap.ok, false, "an approved gate's artifact must not change in place");
+      assert.match(swap.stderr, /gate 'story' artifact is what was decided against and cannot change/u);
+      assert.equal(runJson(p.runDir).gates.story.artifact, null, "and the manifest is untouched");
+
       factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
       const second = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/2", "--now", NOW(7)]);
       assert.equal(second.ok, false, "a run has one PR");

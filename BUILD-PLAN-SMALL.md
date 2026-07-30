@@ -272,6 +272,12 @@ from the record it produced — so a report about one commit could be recorded a
 on another. Two raises in one session is a ratchet; the next request should be answered by
 deleting something.
 
+**Put back to 2,650, and it stands at 2,599.** The deletion arrived: `core/run-lock.js`
+lost 70 lines of plumbing no caller used, and `write-core.js` two unused pass-throughs.
+Its quarantine machinery, the steal seam, both CAS comparisons and the atomic writer's
+`beforeCommit` hook were kept — those are live. The precedent is the part worth keeping: a
+raise is a debt, and it can be paid.
+
 ## Acceptance — the attack catalogue
 
 The build is done when each attack is injected and rejected. Ported from the

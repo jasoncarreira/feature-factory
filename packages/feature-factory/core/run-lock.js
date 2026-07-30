@@ -3,11 +3,10 @@
 // rewritten: hand-rolling lock reclaim and steal logic is where subtle crash bugs
 // live. Only the imports and the extracted constants below are new.
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
-import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { join, resolve } from "node:path";
-import { writeProtectedJsonAtomic } from "./atomic-write.js";
+import { join } from "node:path";
 
 const DEFAULT_LOCK_TIMEOUT_MS = 1000;
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
@@ -16,27 +15,18 @@ const DEFAULT_MISSING_OWNER_STEAL_MS = 5000;
 const LOCK_DIR = "run-json.lock";
 const LOCK_OWNER_FILE = "owner.json";
 
-export class RunJsonLockContendedError extends Error {
-  constructor(lockDir) {
-    super(`run.json lock is contended at ${lockDir}`);
-    this.name = "RunJsonLockContendedError";
-    this.code = "RUN_JSON_LOCK_CONTENDED";
-    this.lockDir = lockDir;
-  }
-}
-
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
-  const reclaimMode = normalizeReclaimMode(options.reclaimMode);
-  const lockHooks = validateRunJsonLockHooks(options.lockHooks);
+  const { onBeforeSteal } = options;
+  if (onBeforeSteal !== undefined && typeof onBeforeSteal !== "function") {
+    throw new Error("onBeforeSteal must be a function");
+  }
   const timeoutMs = normalizePositiveInteger(options.timeoutMs, DEFAULT_LOCK_TIMEOUT_MS);
-  const retryDelayMs = normalizePositiveInteger(options.retryDelayMs, DEFAULT_LOCK_RETRY_DELAY_MS);
   normalizePositiveInteger(options.staleLockMs, DEFAULT_STALE_LOCK_MS);
   normalizePositiveInteger(options.missingOwnerStealMs, DEFAULT_MISSING_OWNER_STEAL_MS);
   const lockDir = join(runDir, LOCK_DIR);
   const ownerPath = join(lockDir, LOCK_OWNER_FILE);
   const deadline = Date.now() + timeoutMs;
-  let stolenFrom = null;
   let stealAttempted = false;
   let createdIdentity = null;
   let owner = null;
@@ -50,32 +40,23 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
-      if (reclaimMode === "never") throw new RunJsonLockContendedError(lockDir);
       if (!stealAttempted) {
         const observedIdentity = await lockDirectoryIdentity(lockDir);
         const observedEvidence = await readLockOwnerEvidence(ownerPath);
         if (canStealRunJsonLock(observedEvidence?.owner, options)) {
           stealAttempted = true;
-          const reclaimed = await reclaimRunJsonLock(runDir, lockDir, observedIdentity, observedEvidence, options, lockHooks, deadline);
-          if (reclaimed) {
-            stolenFrom = reclaimed;
-            continue;
-          }
+          if (observedIdentity && await stealByRename(runDir, lockDir, observedIdentity, observedEvidence.owner, onBeforeSteal)) continue;
         } else if (!observedEvidence && await ownerlessLockIsReclaimable(lockDir, ownerPath, options)) {
           stealAttempted = true;
-          if (await reclaimOwnerlessRunJsonLock(runDir, lockDir, observedIdentity, options, lockHooks, deadline)) continue;
+          if (observedIdentity && await stealByRename(runDir, lockDir, observedIdentity, null, onBeforeSteal)) continue;
         }
       }
-      if (Date.now() >= deadline) {
-        const observedOwner = await readLockOwner(ownerPath);
-        throw new Error(formatLockTimeout(lockDir, observedOwner));
-      }
-      await delay(Math.min(retryDelayMs, Math.max(1, deadline - Date.now())));
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for run.json lock at ${lockDir}`);
+      await delay(Math.min(DEFAULT_LOCK_RETRY_DELAY_MS, Math.max(1, deadline - Date.now())));
     }
   }
 
   owner = { pid: process.pid, hostname: hostname(), acquired_at: new Date().toISOString(), nonce: randomUUID() };
-  if (stolenFrom) owner.stolen_from = sanitizeLockOwner(stolenFrom);
 
   try {
     if (!sameLockDirectoryIdentity(createdIdentity, await lockDirectoryIdentity(lockDir))) {
@@ -93,27 +74,6 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
       await quarantineAndRemoveOwnedLock(runDir, lockDir, createdIdentity);
     }
   }
-}
-
-function normalizeReclaimMode(value) {
-  if (value === undefined || value === "dead-owner") return "dead-owner";
-  if (value === "never") return value;
-  throw new Error("reclaimMode must be dead-owner or never");
-}
-
-// One seam, not six. The ported lock carried a generic six-hook structure with
-// per-hook validation and deadline-bounded invocation; only onBeforeSteal was ever
-// used, and only by the test that proves a lock re-acquired inside the steal window is
-// not taken. Generic extension points for callers who do not exist are how the
-// predecessor reached 43,000 lines. This displacement funded the merge-proof and PR
-// admission fixes instead of raising the ceiling.
-function validateRunJsonLockHooks(lockHooks) {
-  if (lockHooks === undefined) return {};
-  if (!isRecord(lockHooks)) throw new Error("lockHooks must be an object");
-  if (lockHooks.onBeforeSteal !== undefined && typeof lockHooks.onBeforeSteal !== "function") {
-    throw new Error("lockHooks.onBeforeSteal must be a function");
-  }
-  return lockHooks;
 }
 
 function canStealRunJsonLock(owner, options = {}) {
@@ -135,20 +95,6 @@ async function readLockOwnerEvidence(ownerPath) {
   }
 }
 
-async function readLockOwner(ownerPath) {
-  return (await readLockOwnerEvidence(ownerPath))?.owner ?? null;
-}
-
-async function reclaimRunJsonLock(runDir, lockDir, observedIdentity, observedEvidence, options, lockHooks, deadline) {
-  if (!observedIdentity || !observedEvidence) return null;
-  return stealByRename(runDir, lockDir, observedIdentity, observedEvidence.owner, lockHooks);
-}
-
-async function reclaimOwnerlessRunJsonLock(runDir, lockDir, observedIdentity, options, lockHooks, deadline) {
-  if (!observedIdentity) return null;
-  return stealByRename(runDir, lockDir, observedIdentity, null, lockHooks);
-}
-
 // Stealing a stale lock is one atomic rename.
 //
 // A nonce-keyed reclaim-claim protocol used to guard this, re-verifying a claim
@@ -162,8 +108,8 @@ async function reclaimOwnerlessRunJsonLock(runDir, lockDir, observedIdentity, op
 // The identity check still earns its place: it refuses to rename away a lock that
 // is no longer the one we judged stale, which is the case where another process
 // already stole and re-acquired.
-async function stealByRename(runDir, lockDir, observedIdentity, observedOwner, lockHooks) {
-  if (lockHooks.onBeforeSteal) await lockHooks.onBeforeSteal({ runDir, lockDir, owner: observedOwner });
+async function stealByRename(runDir, lockDir, observedIdentity, observedOwner, onBeforeSteal) {
+  if (onBeforeSteal) await onBeforeSteal({ runDir, lockDir, owner: observedOwner });
   // No identity pre-check here on purpose. renameOwnedLockToQuarantine re-checks
   // dev/ino *after* the rename and throws, which covers the re-acquisition case
   // and is not subject to a check-then-act window. A pre-check was added here and
@@ -173,11 +119,11 @@ async function stealByRename(runDir, lockDir, observedIdentity, observedOwner, l
     quarantine = await renameOwnedLockToQuarantine(runDir, lockDir, observedIdentity);
   } catch (error) {
     // ENOENT means another racer got there first: fall back to the acquire loop.
-    if (error?.code === "ENOENT") return null;
+    if (error?.code === "ENOENT") return false;
     throw error;
   }
   await rm(quarantine, { recursive: true, force: true });
-  return observedOwner ?? { pid: null, hostname: null, acquired_at: null, nonce: null };
+  return true;
 }
 
 async function releaseOwnedRunJsonLock(runDir, lockDir, expectedIdentity, expectedEvidence) {
@@ -211,8 +157,6 @@ async function renameOwnedLockToQuarantine(runDir, lockDir, expectedIdentity) {
   return quarantine;
 }
 
-
-
 // viso decides this with a timestamp: a lock whose heartbeat is older than the TTL
 // may be stolen. We do the same on `acquired_at`, because this lock is held for one
 // transition - a holder that has had it longer than the TTL is not working, it is
@@ -240,11 +184,6 @@ async function lockOwnerEntryExists(ownerPath) {
     if (error?.code === "ENOENT") return false;
     return true;
   }
-}
-
-function sanitizeLockOwner(owner) {
-  if (!isRecord(owner)) return owner;
-  return Object.fromEntries(Object.entries(owner).filter(([key]) => key !== "stolen_from" && key !== "nonce"));
 }
 
 function isDurableLockOwner(owner) {
@@ -282,7 +221,6 @@ function sameLockDirectoryIdentity(left, right) {
   return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
 }
 
-
 function normalizePositiveInteger(value, fallback) {
   if (value === undefined || value === null) return fallback;
   if (!Number.isInteger(value) || value <= 0) throw new Error("lock timing options must be positive integers");
@@ -292,14 +230,6 @@ function normalizePositiveInteger(value, fallback) {
 // Small local helpers, lifted with the cluster.
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function formatLockTimeout(lockDir, owner) {
-  if (!isRecord(owner)) return `timed out waiting for run.json lock at ${lockDir}`;
-  const heldBy = [owner.hostname, owner.pid].filter((value) => value !== undefined && value !== null).join(":");
-  const suffix = heldBy ? ` held by ${heldBy}` : "";
-  const acquiredAt = stringValue(owner.acquired_at) ? ` since ${owner.acquired_at}` : "";
-  return `timed out waiting for run.json lock at ${lockDir}${suffix}${acquiredAt}`;
 }
 
 // An ownerless lock is a directory with no valid owner record: a crash between the

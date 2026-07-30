@@ -102,17 +102,31 @@ const gates = contract({
         if (to.status !== "pending") throw new Error(`gate '${name}' must open as pending`);
         continue;
       }
+      const decided = from.status !== "pending";
+      const reopening = decided && to.status === "pending";
+      // The artifact is *what was decided against*, so a decided gate's artifact is frozen.
+      // Checked before the unchanged-status early-out, because that is where it was
+      // reachable: re-deciding a gate to the status it already held skipped every check
+      // below, and the handler writes whatever --artifact it is given, so an approved Story
+      // could be pointed at a new document in place, without re-opening anything.
+      if (decided && !reopening && from.artifact !== to.artifact) {
+        throw new Error(`gate '${name}' artifact is what was decided against and cannot change`);
+      }
+      // Every gate is compared on every gates transition, so a gate nobody touched must fall
+      // through here rather than be judged again.
       if (from.status === to.status) continue;
-      // A decided gate may be re-opened to pending, and only to pending. Without this the
-      // verdict freeze below has no way out: once the branch moves under an approval, the
-      // approval is stale, re-validating is refused, and the run can only be abandoned —
-      // a shipped feature lost to a commit that was probably a test fix. Re-opening is what
-      // makes "the head changed, so ask the human again" expressible.
-      //
-      // Only to pending, so this cannot flip an approval into a rejection or vice versa;
-      // the decision has to be made again, by whoever makes decisions.
-      if (from.status !== "pending" && to.status !== "pending") {
-        throw new Error(`gate '${name}' is already decided as ${from.status}; re-open it as pending to decide again`);
+      // Re-opening exists for exactly one reason: the integration head can move after Gate 3
+      // is approved, and without a way back the verdict freeze strands the run. So only
+      // pre_pr may re-open. Extending it to every gate was generality nobody asked for, and
+      // it published Story v1's implementation under Story v2 — re-open Story, point it at a
+      // new document, re-approve, and the Brief, validator, tests and Gate 3 that all judged
+      // the old story stayed valid. A story that really changed is a new run, not a mutation
+      // of this one, which is the rule paths, test_plan and base_ref already follow.
+      if (reopening && name !== "pre_pr") {
+        throw new Error(`gate '${name}' cannot be re-opened once decided; only pre_pr may, because only its subject can change after approval`);
+      }
+      if (decided && !reopening) {
+        throw new Error(`gate '${name}' is already decided as ${from.status}`);
       }
       if (!GATE_STATUSES.includes(to.status)) throw new Error(`gate '${name}' status is invalid`);
       if (to.status !== "pending" && !to.at) throw new Error(`gate '${name}' decision requires 'at'`);

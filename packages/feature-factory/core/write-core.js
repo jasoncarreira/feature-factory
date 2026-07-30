@@ -12,15 +12,12 @@ export async function coordinateRunJsonTransition(runDir, options) {
     descriptor,
     validateEnvelope,
     reobservers = new Map(),
-    lockOptions = {},
     atomicWriteHooks,
-    beforeRename,
   } = options ?? {};
   const registry = contractRegistry(contracts);
   const participants = participantRegistry(descriptor, registry);
   if (typeof validateEnvelope !== "function") throw new Error("validateEnvelope must be a function");
   if (!(reobservers instanceof Map)) throw new Error("reobservers must be a Map");
-  if (beforeRename !== undefined && typeof beforeRename !== "function") throw new Error("beforeRename must be a function");
 
   return withRunJsonLock(runDir, async () => {
     const initial = deepFreeze(await readRunState(runDir, validateEnvelope));
@@ -47,7 +44,6 @@ export async function coordinateRunJsonTransition(runDir, options) {
       hooks: atomicWriteHooks,
       fsOps: {
         rename: async (source, destination) => {
-          await beforeRename?.({ source, destination, current: initial, candidate });
 
           // First comparison: gives the reobservers a state to reason about that is
           // known current as of this moment.
@@ -77,7 +73,7 @@ export async function coordinateRunJsonTransition(runDir, options) {
       },
     });
     return candidate;
-  }, lockOptions);
+  });
 }
 
 function assertUnchanged(observed, initial) {
