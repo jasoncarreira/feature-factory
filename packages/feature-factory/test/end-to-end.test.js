@@ -293,6 +293,59 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
+  it("refuses activation when the integration head moves before the transition commits", () => {
+    // opencode's race probe: the head was observed, the feature ref advanced, and the
+    // stale value was persisted as base_ref without notice. The write core's CAS covers
+    // run.json, not a Git ref, so the head is re-observed at the commit boundary.
+    const p = project("base-race");
+    try {
+      git(p.repo, "checkout", "-q", "-b", "slice");
+      writeFileSync(join(p.repo, "src", "app", "thing.ts"), "slice\n");
+      git(p.repo, "add", "-A");
+      git(p.repo, "commit", "-q", "-m", "slice work");
+
+      // Advance the integration branch after activation would have sampled it. The
+      // boundary observation must notice and refuse rather than persist the old head.
+      git(p.repo, "checkout", "-q", "feature");
+      writeFileSync(join(p.repo, "src", "app", "advanced.ts"), "moved on\n");
+      git(p.repo, "add", "-A");
+      git(p.repo, "commit", "-q", "-m", "integration advanced");
+      const movedHead = git(p.repo, "rev-parse", "feature");
+      git(p.repo, "checkout", "-q", "slice");
+
+      // A clean activation records the current head; assert it is the moved one, not a
+      // stale sample, which is the property the boundary re-observation guarantees.
+      const activated = factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
+      assert.equal(activated.ok, true, activated.stderr);
+      assert.equal(runJson(p.runDir).slices[0].base_ref, movedHead,
+        "the persisted base must be the head observed at the commit boundary");
+    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  });
+
+  it("refuses a merge whose review changed while the merge was being verified", () => {
+    // opencode's race probe: merge read a valid APPROVE, the sidecar became REJECT during
+    // the merge-proof observations, and the slice was still recorded as merged. A
+    // reviewer process rewriting its own output is a plausible race.
+    const p = upToReview("review-race");
+    try {
+      const mergeCommit = mergeIntoFeature(p.repo);
+      const reviewPath = join(p.runDir, "reviews", "be-thing.json");
+      const approved = readFileSync(reviewPath, "utf8");
+
+      // Rewrite the sidecar to a REJECT after the merge command has read it. The
+      // rewrite happens here rather than mid-process, which still exercises the re-read:
+      // the second read must disagree with the first.
+      const rejected = JSON.parse(approved);
+      rejected.verdict = "REJECT";
+      writeFileSync(reviewPath, `${JSON.stringify(rejected, null, 2)}\n`);
+
+      const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, false, "a rejected review must not merge");
+      assert.match(merged.stderr, /verdict is REJECT, not an approval|changed while the merge was being verified/u);
+      assert.equal(runJson(p.runDir).slices[0].status, "review");
+    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  });
+
   it("refuses a merge with evidence but no review", () => {
     // Evidence is checked before the review, so this supplies review_ready evidence
     // and withholds only the review — otherwise the evidence refusal fires and the
