@@ -33,8 +33,9 @@ const RUN_JSON_KEYS = [
   // viso's fifteen
   "version", "run_id", "jira_key", "branch", "worktree", "created_at", "updated_at",
   "status", "max_parallel_slices", "max_retries", "gates", "steps", "slices", "validator", "pr_url",
-  // the three justified additions
-  "mode", "terminal_result", "base_commit",
+  // the two justified additions. base_commit was dropped: it was written and never
+  // read, which is the standard a durable field has to meet.
+  "mode", "terminal_result",
 ];
 
 const FAMILIES = ["envelope", "gates", "steps", "slices", "verdict"];
@@ -82,7 +83,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 18, "eighteen fields: viso's fifteen plus three");
+    assert.equal(RUN_KEYS.length, 17, "seventeen: viso's fifteen plus mode and terminal_result");
   });
 
   it("registers exactly the declared families", () => {

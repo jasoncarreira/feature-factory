@@ -28,7 +28,6 @@ function baseRun(overrides = {}) {
     mode: "interactive",
     max_parallel_slices: 3,
     max_retries: 3,
-    base_commit: SHA_A,
     gates: { story: { status: "pending", at: null, artifact: "artifacts/story.md" } },
     steps: [],
     slices: [],

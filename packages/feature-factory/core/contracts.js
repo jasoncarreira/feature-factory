@@ -40,7 +40,6 @@ const envelope = contract({
     mode: state.mode,
     branch: state.branch,
     worktree: state.worktree,
-    base_commit: state.base_commit ?? null,
     created_at: state.created_at,
     updated_at: state.updated_at,
     terminal_result: state.terminal_result ?? null,

@@ -23,7 +23,7 @@ import {
 } from "../state/session-lock.js";
 
 export const COMMANDS = Object.freeze({
-  init: Object.freeze(["--repo", "--branch", "--worktree", "--jira", "--mode", "--max-parallel-slices", "--max-retries", "--base-commit", "--now", "--json"]),
+  init: Object.freeze(["--repo", "--branch", "--worktree", "--jira", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
   lock: Object.freeze(["--repo", "--session", "--branch", "--ttl-ms", "--force", "--now", "--json"]),
   heartbeat: Object.freeze(["--repo", "--session", "--now", "--json"]),
@@ -365,7 +365,6 @@ const HANDLERS = {
       mode,
       max_parallel_slices: integer(flags.maxParallelSlices, 3, "--max-parallel-slices"),
       max_retries: integer(flags.maxRetries, 3, "--max-retries"),
-      base_commit: flags.baseCommit ?? null,
       gates: {},
       steps: [],
       slices: [],
