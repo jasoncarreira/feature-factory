@@ -28,6 +28,12 @@ function contract({ id, project, validateTransition, reobserve }) {
 // ---------------------------------------------------------------------------
 const envelope = contract({
   id: "envelope",
+  // Calls whatever observer the caller registered. Without this a registered
+  // envelope reobserver is silently ignored, which is the defect that made the PR
+  // head check inert.
+  reobserve: async ({ observe, ...rest }) => {
+    if (typeof observe === "function") await observe(rest);
+  },
   project: (state) => ({
     run_id: state.run_id,
     status: state.status,

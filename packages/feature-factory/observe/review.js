@@ -93,3 +93,21 @@ export function observeMergeProof(worktree, { reviewedCommit, mergeCommit, optio
   }
   return { proven: true, reason: null, reviewed_tree: reviewedTree, merged_tree: mergedTree };
 }
+
+// Evidence records are read the same way reviews are: shape-checked, and refused
+// rather than half-trusted. `factory observe` is the only writer.
+export function readEvidence(runDir, ref) {
+  let value;
+  try {
+    value = JSON.parse(readFileSync(join(runDir, ref), "utf8"));
+  } catch (error) {
+    throw new Error(`evidence '${ref}' could not be read: ${error.message}`);
+  }
+  for (const key of ["subject", "status", "observed_by"]) {
+    if (typeof value[key] !== "string" || !value[key].trim()) throw new Error(`evidence '${ref}' has no ${key}`);
+  }
+  if (value.observed_by !== "orchestrator") throw new Error(`evidence '${ref}' was not written by the orchestrator`);
+  if (typeof value.review_ready !== "boolean") throw new Error(`evidence '${ref}' has no review_ready`);
+  if (!Number.isSafeInteger(value.attempt) || value.attempt < 1) throw new Error(`evidence '${ref}' has no attempt`);
+  return value;
+}

@@ -48,10 +48,12 @@ export async function coordinateRunJsonTransition(runDir, options) {
       fsOps: {
         rename: async (source, destination) => {
           await beforeRename?.({ source, destination, current: initial, candidate });
+
+          // First comparison: gives the reobservers a state to reason about that is
+          // known current as of this moment.
           const observed = deepFreeze(await readRunState(runDir, validateEnvelope));
-          if (!isDeepStrictEqual(observed, initial)) {
-            throw new Error("run state changed before protected replacement");
-          }
+          assertUnchanged(observed, initial);
+
           const observedProjections = projectAll(registry, observed);
           for (const [familyId, contract] of registry) {
             await contract.reobserve({
@@ -63,12 +65,25 @@ export async function coordinateRunJsonTransition(runDir, options) {
               nextState: candidate,
             });
           }
+
+          // Second comparison, immediately before the rename and after anything the
+          // reobservers did. Comparing only once left a window: a reobserver - or a
+          // concurrent writer running while one awaited - could commit a valid
+          // record after the check, and this rename would silently overwrite it.
+          // Nothing may run between this line and the rename.
+          assertUnchanged(deepFreeze(await readRunState(runDir, validateEnvelope)), initial);
           await rename(source, destination);
         },
       },
     });
     return candidate;
   }, lockOptions);
+}
+
+function assertUnchanged(observed, initial) {
+  if (!isDeepStrictEqual(observed, initial)) {
+    throw new Error("run state changed before protected replacement");
+  }
 }
 
 async function readRunState(runDir, validateEnvelope) {

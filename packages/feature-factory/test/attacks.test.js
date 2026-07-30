@@ -116,6 +116,37 @@ describe("attack 11 — a concurrent writer changes run.json mid-transition", ()
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
+  it("rejects a write that lands after the reobservers run", async () => {
+    // The earlier test injects at beforeCommit, which is *before* the comparison, so
+    // it only ever exercised a window that was already safe. This injects from a
+    // reobserver — after the comparison and before the rename — which is where the
+    // lost update actually was.
+    const f = fixture("cas-late");
+    try {
+      const intruder = baseRun({ updated_at: LATER, jira_key: "APP-999" });
+      const intruderBytes = `${JSON.stringify(intruder, null, 2)}\n`;
+      let injected = false;
+
+      await assert.rejects(
+        () => transition(f.runDir, {
+          participants: [{ familyId: "envelope", mode: "annotate" }],
+          apply: (state) => ({ ...state, updated_at: LATER, pr_url: "https://example.test/pr/1" }),
+          reobservers: new Map([["envelope", async () => {
+            injected = true;
+            writeFileSync(join(f.runDir, "run.json"), intruderBytes);
+          }]]),
+        }),
+        (error) => {
+          assert.match(String(error.cause?.message ?? error.message), /run state changed before protected replacement/u);
+          return true;
+        },
+      );
+
+      assert.equal(injected, true, "the reobserver must have run, or the window was never opened");
+      assert.equal(bytes(f.runDir), intruderBytes, "the competing record must survive");
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
   it("commits when no concurrent write occurred", async () => {
     const f = fixture("cas-clean");
     try {

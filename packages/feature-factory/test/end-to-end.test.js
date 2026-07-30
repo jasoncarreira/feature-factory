@@ -32,7 +32,7 @@ const RUN = "app-1";
 const NOW = (minute) => `2026-07-30T12:${String(minute).padStart(2, "0")}:00Z`;
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name) {
+function project(name, { seed = true } = {}) {
   const repo = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(repo, "init", "-q", "-b", "feature");
   git(repo, "config", "user.email", "t@example.com");
@@ -53,7 +53,7 @@ function project(name) {
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({
     slices: [{ id: "be-thing", stack: "backend", paths: ["src/app/"], depends_on: [], acceptance: ["AC1"], test_plan: ["t"] }],
   }, null, 2));
-  assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
+  if (seed) assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
   return { repo, runDir };
 }
 
@@ -88,14 +88,26 @@ function mergeIntoFeature(repo) {
 
 const runJson = (runDir) => JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
 
+function approveGate(repo, name, at) {
+  factory(repo, ["gate", RUN, name, "pending", "--now", at]);
+  return factory(repo, ["gate", RUN, name, "approved", "--now", at]);
+}
+
 describe("end to end — a merge is refused through the real CLI", () => {
   function upToReview(name, buildOptions) {
     const p = project(name);
     const { head: sliceHead, basePoint } = buildSlice(p.repo, buildOptions);
     assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--base", basePoint, "--now", NOW(2)]).ok, true);
+    // The orchestrator must observe before it may merge: the diff is re-derived and
+    // the named tests are re-run here, not taken from a builder's report.
+    const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+      "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW(3)]);
+    assert.equal(observed.ok, true, observed.stderr);
+    assert.equal(observed.out.review_ready, true, "the fixture must produce review_ready evidence");
     const reviewRef = writeReview(p.runDir, "be-thing", sliceHead);
-    assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef, "--now", NOW(3)]).ok, true);
-    return { ...p, sliceHead };
+    assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef,
+      "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]).ok, true);
+    return { ...p, sliceHead, basePoint };
   }
 
   it("records a clean serial merge", () => {
@@ -166,12 +178,56 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
-  it("refuses a merge with no review at all", () => {
+  it("refuses a merge with no observed evidence", () => {
+    // opencode drove init -> slice merge without ever invoking observe and the merge
+    // succeeded, which made the entire observe-don't-trust mechanism optional.
+    const p = project("no-evidence");
+    try {
+      const { head: sliceHead, basePoint } = buildSlice(p.repo);
+      factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--base", basePoint, "--now", NOW(2)]);
+      const reviewRef = writeReview(p.runDir, "be-thing", sliceHead);
+      factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef, "--now", NOW(3)]);
+      const mergeCommit = mergeIntoFeature(p.repo);
+
+      const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, false, "a merge without observed evidence must be refused");
+      assert.match(merged.stderr, /cannot merge without an evidence_ref/u);
+    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  });
+
+  it("refuses a merge whose evidence is not review_ready", () => {
+    const p = project("not-ready");
+    try {
+      const { head: sliceHead, basePoint } = buildSlice(p.repo);
+      factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--base", basePoint, "--now", NOW(2)]);
+      // A failing test command: observed, and observed to fail.
+      const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+        "--attempt", "1", "--test-cmd", "git --no-pager grep --quiet THIS_STRING_IS_ABSENT", "--now", NOW(3)]);
+      assert.equal(observed.out.review_ready, false);
+      const reviewRef = writeReview(p.runDir, "be-thing", sliceHead);
+      factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef, "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]);
+      const mergeCommit = mergeIntoFeature(p.repo);
+
+      const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, false, "a failing observed test must block the merge");
+      assert.match(merged.stderr, /evidence is not review_ready/u);
+    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  });
+
+  it("refuses a merge with evidence but no review", () => {
+    // Evidence is checked before the review, so this supplies review_ready evidence
+    // and withholds only the review — otherwise the evidence refusal fires and the
+    // review requirement goes untested.
     const p = project("no-review");
     try {
       const { basePoint } = buildSlice(p.repo);
       factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--base", basePoint, "--now", NOW(2)]);
+      const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+        "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW(3)]);
+      assert.equal(observed.out.review_ready, true, "the evidence must be otherwise acceptable");
+      factory(p.repo, ["slice", RUN, "be-thing", "review", "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]);
       const mergeCommit = mergeIntoFeature(p.repo);
+
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, false);
       assert.match(merged.stderr, /cannot merge without a review_ref/u);
@@ -184,8 +240,11 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     const p = project(name);
     const { head: sliceHead, basePoint } = buildSlice(p.repo);
     factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--base", basePoint, "--now", NOW(2)]);
+    factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+      "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW(3)]);
     const reviewRef = writeReview(p.runDir, "be-thing", sliceHead);
-    factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef, "--now", NOW(3)]);
+    factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef,
+      "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]);
     const mergeCommit = mergeIntoFeature(p.repo);
     assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
     return { ...p, head: git(p.repo, "rev-parse", "HEAD") };
@@ -194,6 +253,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
   it("records a PR against the validated head, and is idempotent on replay", () => {
     const p = readyForPr("pr-ok");
     try {
+      approveGate(p.repo, "pre_pr", NOW(5));
       assert.equal(factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", p.head, "--now", NOW(5)]).ok, true);
       const first = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
       assert.equal(first.ok, true, first.stderr);
@@ -211,6 +271,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
   it("refuses a second, different PR", () => {
     const p = readyForPr("pr-second");
     try {
+      approveGate(p.repo, "pre_pr", NOW(5));
       factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", p.head, "--now", NOW(5)]);
       factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
       const second = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/2", "--now", NOW(7)]);
@@ -223,6 +284,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
   it("refuses a PR once the integration head has moved past what was validated", () => {
     const p = readyForPr("pr-stale");
     try {
+      approveGate(p.repo, "pre_pr", NOW(5));
       factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", p.head, "--now", NOW(5)]);
       // Something lands after validation. The verdict no longer describes the branch.
       writeFileSync(join(p.repo, "src", "app", "after-validation.ts"), "late\n");
@@ -236,9 +298,42 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
+  it("refuses a PR on a run that did no work", () => {
+    // opencode drove init -> approving validator -> PR with no gates, steps, slices
+    // or evidence, and the PR was recorded.
+    // Unseeded on purpose: the run never decomposed, so there is no slice plan at all.
+    const p = project("no-work", { seed: false });
+    try {
+      const head = git(p.repo, "rev-parse", "HEAD");
+      // Approve pre_pr and record a GO so neither of those can be the refusal: the
+      // only thing missing is that the run never decomposed or built anything.
+      approveGate(p.repo, "pre_pr", NOW(5));
+      factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", head, "--now", NOW(5)]);
+      const pr = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
+      assert.equal(pr.ok, false, "a run with no slice plan must not produce a PR");
+      assert.match(pr.stderr, /requires a seeded slice plan/u);
+      assert.equal(runJson(p.runDir).pr_url, null);
+    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  });
+
+  it("refuses a PR while a slice is still open", () => {
+    const p = project("open-slice");
+    try {
+      const { basePoint } = buildSlice(p.repo);
+      factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--base", basePoint, "--now", NOW(2)]);
+      const head = git(p.repo, "rev-parse", "slice");
+      approveGate(p.repo, "pre_pr", NOW(5));
+      factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", head, "--now", NOW(5)]);
+      const pr = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
+      assert.equal(pr.ok, false);
+      assert.match(pr.stderr, /every slice merged or blocked; open: be-thing/u);
+    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  });
+
   it("refuses a PR with no approving verdict", () => {
     const p = readyForPr("pr-nogo");
     try {
+      approveGate(p.repo, "pre_pr", NOW(5));
       factory(p.repo, ["validator", RUN, "NO-GO", "--report", "artifacts/validation-report.md", "--reviewed-head", p.head, "--now", NOW(5)]);
       const pr = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
       assert.equal(pr.ok, false);

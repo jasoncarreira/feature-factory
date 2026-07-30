@@ -14,7 +14,7 @@ import { join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { readRun, readRunUnchecked, transition } from "../state/index.js";
 import { buildEvidence, evidenceRef, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
-import { assertReviewBinding, isApproving, observeMergeProof, readReview } from "../observe/review.js";
+import { assertReviewBinding, isApproving, observeMergeProof, readEvidence, readReview } from "../observe/review.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, VALIDATOR_VERDICTS } from "../state/schema.js";
 import {
@@ -120,10 +120,26 @@ const HANDLERS = {
     // Re-observed here rather than taken from the manifest, because the manifest
     // records what we were told and the repository records what is true.
     const reobservers = new Map();
-    reobservers.set("verdict", async ({ candidate }) => {
+    reobservers.set("verdict", async ({ candidate, nextState }) => {
       const validator = candidate.validator;
       if (!validator || !isApproving(validator.verdict)) {
         throw new Error("recording a PR requires an approving validator verdict");
+      }
+      // Finding 2: a PR could be recorded on a run with no gates, steps, slices or
+      // evidence whatsoever - the verdict was the only requirement and nothing
+      // checked that the run had done any work.
+      if (nextState.gates?.pre_pr?.status !== "approved") {
+        throw new Error("recording a PR requires an approved pre_pr gate");
+      }
+      if (!Array.isArray(nextState.slices) || nextState.slices.length === 0) {
+        throw new Error("recording a PR requires a seeded slice plan");
+      }
+      const open = nextState.slices.filter((slice) => !["merged", "blocked"].includes(slice.status));
+      if (open.length > 0) {
+        throw new Error(`recording a PR requires every slice merged or blocked; open: ${open.map((slice) => slice.id).join(", ")}`);
+      }
+      if (!nextState.slices.some((slice) => slice.status === "merged")) {
+        throw new Error("recording a PR requires at least one merged slice");
       }
       const integration = resolveWorktree(repo, run.worktree);
       if (!integration) throw new Error(`integration worktree '${run.worktree}' is not observable`);
@@ -213,9 +229,31 @@ const HANDLERS = {
 
         // Attack 3: the approval must have judged the commit being merged. Read the
         // slice's own head from git rather than trusting anything recorded.
+        // Finding 2: `observe` wrote evidence that nothing consumed, so a merge could
+        // be recorded with no observed diff and no test run at all - the whole
+        // observe-don't-trust mechanism was a write-only side effect. Evidence is now
+        // required, must be review_ready, and must describe this slice at this attempt
+        // against this base and this head.
+        if (!slice.evidence_ref) throw new Error(`slice '${slice.id}' cannot merge without an evidence_ref`);
+        const evidence = readEvidence(runDir, slice.evidence_ref);
+        if (evidence.subject !== slice.id) {
+          throw new Error(`evidence '${slice.evidence_ref}' describes '${evidence.subject}', not '${slice.id}'`);
+        }
+        if (evidence.review_ready !== true) {
+          throw new Error(`slice '${slice.id}' evidence is not review_ready${evidence.blocked_reason ? `: ${evidence.blocked_reason}` : ""}`);
+        }
+        if (evidence.attempt !== slice.attempts) {
+          throw new Error(`evidence '${slice.evidence_ref}' is for attempt ${evidence.attempt}, slice is at attempt ${slice.attempts}`);
+        }
+        if (evidence.base_ref !== slice.base_ref) {
+          throw new Error(`evidence '${slice.evidence_ref}' observed base ${String(evidence.base_ref).slice(0, 12)}, slice base is ${String(slice.base_ref).slice(0, 12)}`);
+        }
         if (!slice.review_ref) throw new Error(`slice '${slice.id}' cannot merge without a review_ref`);
         const review = readReview(runDir, slice.review_ref);
         assertReviewBinding({ review, ref: slice.review_ref, observedHead: observation.commit });
+        if (evidence.commit !== observation.commit) {
+          throw new Error(`evidence '${slice.evidence_ref}' observed ${String(evidence.commit).slice(0, 12)} but the slice head is ${String(observation.commit).slice(0, 12)}`);
+        }
 
         // Attack 2: the merge proof, observed in the integration worktree.
         const integration = resolveWorktree(repo, run.worktree);
