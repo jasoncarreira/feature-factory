@@ -112,8 +112,13 @@ function approveGate(repo, name, at) {
 describe("end to end — a merge is refused through the real CLI", () => {
   function upToReview(name, buildOptions) {
     const p = project(name);
-    const { head: sliceHead, basePoint } = buildSlice(p.repo, buildOptions);
-    assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+    const { head: sliceHead } = buildSlice(p.repo, buildOptions);
+    const activated = factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
+    assert.equal(activated.ok, true, activated.stderr);
+    // The documented flow: `observe --base` takes the base_ref this command reported. Asserted
+    // because the skill told readers to get it from `factory status`, which never exposed it.
+    const basePoint = activated.out.base_ref;
+    assert.match(String(basePoint), /^[0-9a-f]{40}$/u, "activation must report the base_ref it recorded");
     // The orchestrator must observe before it may merge: the diff is re-derived and
     // the named tests are re-run here, not taken from a builder's report.
     const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,

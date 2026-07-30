@@ -335,7 +335,11 @@ const HANDLERS = {
       },
     });
     const row = next.slices.find((slice) => slice.id === sliceId);
-    return emit(flags, { run_id: runId, slice: sliceId, status: row.status, attempts: row.attempts, merge_commit: row.merge_commit });
+    // base_ref is reported because this command is what establishes it, and the very next
+    // step needs it: `observe --base` is compared for exact equality against this value at
+    // merge time. The skill previously said to read it from `factory status`, which does not
+    // expose it — so the documented path could not be followed at all.
+    return emit(flags, { run_id: runId, slice: sliceId, status: row.status, attempts: row.attempts, base_ref: row.base_ref, merge_commit: row.merge_commit });
   },
 
   async observe([runId, subject], flags) {

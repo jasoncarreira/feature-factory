@@ -195,9 +195,10 @@ Per slice:
    factory observe <run-id> <slice-id> --worktree <path> --base <slice-base-sha> \
      --test-cmd "<the slice's test command>" [--claim <builder-report.json>]
    ```
-   `--base` is the slice's recorded `base_ref` — read it from `factory status <run-id> --json`, not
-   from the feature branch by name. The merge compares the evidence's base to that sha exactly, and a
-   branch name never matches one; it also moves under you as siblings merge.
+   `--base` is the sha that step 1's `factory slice … running` reported as `base_ref` — not the feature
+   branch by name. That command observes and records the branch point, and the merge compares the
+   evidence's base to it exactly: a branch name never matches a sha, and the branch moves under you as
+   siblings merge.
 
    This re-derives the diff, runs the tests itself, records `review_ready`, and records any
    disagreement between the builder's claim and what was observed. A disagreement is a review finding,
