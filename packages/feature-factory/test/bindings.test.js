@@ -83,6 +83,25 @@ describe("attack 3 — an approval presented against a different commit", () => 
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
+  it("refuses a review from an earlier attempt", () => {
+    // Attempts are distinct review rounds: attempt 1's approval says nothing about the
+    // code produced for attempt 2. Isolated deliberately — the subject and commit both
+    // match, so only the attempt comparison can refuse this.
+    const f = fixture("stale-attempt");
+    try {
+      const ref = writeReview(f.runDir, "be-slice", { reviewed_commit: f.sliceHead, attempt: 1 });
+      const review = readReview(f.runDir, ref);
+
+      assert.doesNotThrow(() => assertReviewBinding({
+        review, ref, observedHead: f.sliceHead, subject: "be-slice", attempt: 1,
+      }), "the matching attempt must be accepted");
+
+      assert.throws(() => assertReviewBinding({
+        review, ref, observedHead: f.sliceHead, subject: "be-slice", attempt: 2,
+      }), /is for attempt 1, subject is at attempt 2/u);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
   it("refuses a non-approving verdict and an unknown key", () => {
     const f = fixture("verdicts");
     try {
