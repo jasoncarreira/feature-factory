@@ -15,9 +15,9 @@ import { readFileSync } from "node:fs";
 import { readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { buildEvidence, evidenceRef, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
-import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview } from "../observe/review.js";
+import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
-import { SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, VALIDATOR_VERDICTS } from "../state/schema.js";
+import { SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SessionLockHeldError,
 } from "../state/session-lock.js";
@@ -37,8 +37,8 @@ export const COMMANDS = Object.freeze({
   // No --skip-tests-reason: whether a slice needs tests is ratified in its test_plan at
   // seeding, not asserted at observation time by the party being observed.
   observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
-  validator: Object.freeze(["--repo", "--report", "--reviewed-head", "--worktree", "--now", "--json"]),
-  pr: Object.freeze(["--repo", "--url", "--worktree", "--now", "--json"]),
+  validator: Object.freeze(["--repo", "--report", "--now", "--json"]),
+  pr: Object.freeze(["--repo", "--url", "--now", "--json"]),
 });
 
 const BOOLEAN_FLAGS = new Set(["--json"]);
@@ -104,23 +104,27 @@ function integrationHead(repo, run) {
 }
 
 const HANDLERS = {
-  async validator([runId, verdictValue], flags) {
-    if (!VALIDATOR_VERDICTS.includes(verdictValue)) throw new CliError(`verdict must be one of ${VALIDATOR_VERDICTS.join(" | ")}`);
+  async validator([runId], flags) {
     if (!flags.report) throw new CliError("factory validator requires --report");
-    if (!flags.reviewedHead) throw new CliError("factory validator requires --reviewed-head");
     const runDir = runDirFor(flags, runId);
+    const repo = resolve(flags.repo ?? process.cwd());
     const at = stamp(flags);
+    // Neither the verdict nor the head is an argument any more. Both come from the
+    // validator's own record, which must name the integration head as observed right now —
+    // otherwise a report about one commit could be recorded as a verdict on another.
+    const head = integrationHead(repo, readRun(runDir));
+    const review = readValidatorReview(runDir, head.commit);
     const next = await transition(runDir, {
       participants: [{ familyId: "verdict", mode: "record" }],
       apply: (state) => ({
         ...state,
         updated_at: at,
         validator: {
-          verdict: verdictValue,
+          verdict: review.verdict,
           report: flags.report,
           // Attack 4: the verdict names the head it judged, so a later consumer can
           // refuse it once that head moves.
-          reviewed_head: flags.reviewedHead,
+          reviewed_head: review.reviewed_commit,
           loops: (state.validator?.loops ?? 0) + (state.validator ? 1 : 0),
         },
       }),
@@ -135,16 +139,13 @@ const HANDLERS = {
     const run = readRun(runDir);
     const at = stamp(flags);
 
-    // The readiness rules themselves live in one place and are re-asked here rather than
-    // assumed from Gate 3's approval: between the approval and this call the integration
-    // head can move and a slice can regress, and `pr` is where the record becomes
-    // permanent. What is checked only here is that the gate happened at all - at gate
-    // time that is the decision being made, not a precondition.
+    // Re-asked rather than assumed from Gate 3's approval: between the two the head can
+    // move, a slice can regress, and a gate can be re-opened, and `pr` is where the record
+    // becomes permanent. The rules live in one place, including the requirement that all
+    // three gates are approved *now* — this handler used to check pre_pr on its own, which
+    // is how a re-opened Story gate went unnoticed.
     const reobservers = new Map();
     reobservers.set("verdict", async ({ nextState }) => {
-      if (nextState.gates?.pre_pr?.status !== "approved") {
-        throw new Error("recording a PR requires an approved pre_pr gate");
-      }
       assertPublicationReady({
         runDir, state: nextState, runId,
         observeHead: () => integrationHead(repo, nextState).commit,
@@ -651,6 +652,7 @@ function usage() {
   factory heartbeat <run-id> --session ID
   factory gate <run-id> <${GATE_NAMES.join("|")}> <${GATE_STATUSES.join("|")}> [--artifact REF]
   factory step <run-id> <agent> <${STEP_STATUSES.join("|")}> [--attempts N] [--review-ref REF] [--evidence-ref REF]
+  factory validator <run-id> --report REF   (verdict and head come from reviews/implementation-validator.json)
   factory terminal <run-id> <${TERMINAL_STATUSES.join("|")}> --reason TEXT
 
 Every command takes [--repo PATH] and [--json]. Unknown options are errors.

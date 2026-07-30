@@ -250,9 +250,15 @@ Against the integrated feature worktree, not a slice:
    zero, against the integration head as it stands. Then `work-reviewer` confirms each criterion maps to
    a real assertion.
 2. `implementation-validator` — the holistic pass across the whole diff, complementing per-slice
-   reviews. It returns GO / GO-WITH-NITS / NO-GO. Record it with
-   `factory validator <run-id> <verdict> --report artifacts/validation-report.md --reviewed-head <sha>`.
-   Record it **before** presenting Gate 3: the gate cannot be approved without it.
+   reviews. It returns GO / GO-WITH-NITS / NO-GO **and writes `reviews/implementation-validator.json`
+   naming the commit it judged**, exactly like any other reviewer. Then:
+   ```sh
+   factory validator <run-id> --report artifacts/validation-report.md
+   ```
+   The verdict and the judged head are read from that record, not passed as arguments, and the record's
+   commit must still be the integration head — so a report about one commit cannot be recorded as a
+   verdict on another. If the head moved while the validator was working, re-run it. Record this
+   **before** presenting Gate 3: the gate cannot be approved without it.
 
 On NO-GO, classify each finding against the prior round and find its design-level root cause before
 spending a retry; route the top finding to the owning builder in a fresh slice worktree, or fix in the
@@ -269,6 +275,8 @@ missing. This is deliberate: everything after this point — the push, the PR �
 the time `factory pr` runs, so this is the last refusal that can still prevent something. It requires:
 
 - the run is not terminal, and every slice is `merged` (a partial run is surfaced, not published);
+- **all three gates currently approved** — not just this one, and not "was approved once". Re-opening an
+  earlier gate withdraws publication authority, so a Story gate re-opened and stopped blocks the PR;
 - an approving `implementation-validator` verdict whose `reviewed_head` **is** the integration branch's
   current head, re-observed from git rather than read back from the manifest;
 - `evidence/test-verifier.json`, belonging to this run, recording tests that were observed and exited

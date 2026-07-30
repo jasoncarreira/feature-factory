@@ -80,6 +80,15 @@ function writeReview(runDir, subject, reviewedCommit, overrides = {}) {
   return `reviews/${subject}.json`;
 }
 
+// The validator judges a commit and says so in its record; `factory validator` derives the
+// verdict and the head from that rather than taking them as arguments. Reports used to be
+// an opaque path and the head an argument, so a report about one commit could be recorded
+// as a verdict on another.
+function recordValidator(repo, runDir, head, verdict, at) {
+  writeReview(runDir, "implementation-validator", head, { verdict });
+  return factory(repo, ["validator", RUN, "--report", "artifacts/validation-report.md", "--now", at]);
+}
+
 function mergeIntoFeature(repo) {
   git(repo, "checkout", "-q", "feature");
   git(repo, "merge", "-q", "--no-ff", "slice", "-m", "merge slice");
@@ -87,6 +96,13 @@ function mergeIntoFeature(repo) {
 }
 
 const runJson = (runDir) => JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+
+// Every publication check now asks for all three gates, so a fixture probing one specific
+// refusal has to be otherwise-complete or the earlier gates explain the failure instead of
+// the guard under test. That masking has bitten this suite repeatedly.
+function approveEarlyGates(repo, at) {
+  for (const name of ["story", "brief"]) assert.equal(approveGate(repo, name, at).ok, true);
+}
 
 function approveGate(repo, name, at) {
   factory(repo, ["gate", RUN, name, "pending", "--now", at]);
@@ -521,8 +537,8 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     const mergeCommit = mergeIntoFeature(p.repo);
     assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
     const head = git(p.repo, "rev-parse", "HEAD");
-    assert.equal(factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md",
-      "--reviewed-head", head, "--now", NOW(5)]).ok, true);
+    approveEarlyGates(p.repo, NOW(5));
+    assert.equal(recordValidator(p.repo, p.runDir, head, "GO", NOW(5)).ok, true);
     return { ...p, head, basePoint };
   }
 
@@ -571,6 +587,20 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     try {
       verifyTests(p.repo, p.basePoint, NOW(5));
       approveGate(p.repo, "pre_pr", NOW(5));
+
+      // Folded in first, on an otherwise-publishable run: re-opening an *earlier* gate
+      // withdraws publication authority. Publication consulted only pre_pr, so opencode
+      // approved Gate 3, re-opened Story, decided stop, and recorded a PR against a stopped
+      // run. Every gate's current status is what authorizes a PR, not the last one decided.
+      assert.equal(factory(p.repo, ["gate", RUN, "story", "pending", "--now", NOW(6)]).ok, true);
+      assert.equal(factory(p.repo, ["gate", RUN, "story", "stop", "--now", NOW(6)]).ok, true);
+      const stopped = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
+      assert.equal(stopped.ok, false, "a stopped Story gate must block publication");
+      assert.match(stopped.stderr, /every gate must be approved; not approved: story\(stop\)/u);
+      assert.equal(runJson(p.runDir).pr_url, null);
+
+      // Re-approved, and the run publishes again — the withdrawal is reversible.
+      assert.equal(approveGate(p.repo, "story", NOW(6)).ok, true);
       factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
       const second = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/2", "--now", NOW(7)]);
       assert.equal(second.ok, false, "a run has one PR");
@@ -607,8 +637,17 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       const newHead = git(p.repo, "rev-parse", "HEAD");
       assert.notEqual(newHead, p.head);
       assert.equal(verifyTests(p.repo, p.basePoint, NOW(6)).ok, true, "re-observing tests is allowed");
-      const revalidate = factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md",
-        "--reviewed-head", newHead, "--now", NOW(6)]);
+
+      // Folded in: a validator record that judged the *old* head cannot be recorded while the
+      // branch is at the new one. The verdict and head used to be arguments, so a report about
+      // one commit could be recorded as a verdict on another — this asserts the record has to
+      // name what it judged and that git is asked whether that is still current. Checked
+      // before the transition, so it fires ahead of the approval freeze below.
+      const stale = recordValidator(p.repo, p.runDir, p.head, "GO", NOW(6));
+      assert.equal(stale.ok, false, "a verdict on a commit that is no longer the head must refuse");
+      assert.match(stale.stderr, /judged [0-9a-f]{12} but the integration head is [0-9a-f]{12}; re-run the validator/u);
+
+      const revalidate = recordValidator(p.repo, p.runDir, newHead, "GO", NOW(6));
       assert.equal(revalidate.ok, false, "an approved gate must not be re-pointed at a new head");
       assert.match(revalidate.stderr, /re-open it as pending before re-recording the validator/u);
       assert.equal(runJson(p.runDir).validator.reviewed_head, p.head, "the approved verdict stands");
@@ -618,8 +657,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       // it again, and the PR records. A guard that turned a late test-only commit into a
       // dead run would be worse than the staleness it prevents.
       assert.equal(factory(p.repo, ["gate", RUN, "pre_pr", "pending", "--now", NOW(7)]).ok, true, "a decided gate re-opens");
-      assert.equal(factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md",
-        "--reviewed-head", newHead, "--now", NOW(7)]).ok, true, "and re-validating is then allowed");
+      assert.equal(recordValidator(p.repo, p.runDir, newHead, "GO", NOW(7)).ok, true, "and re-validating is then allowed");
       assert.equal(factory(p.repo, ["gate", RUN, "pre_pr", "approved", "--now", NOW(7)]).ok, true, "re-approved at the new head");
       const after = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(8)]);
       assert.equal(after.ok, true, `the run must still be able to ship: ${after.stderr}`);
@@ -637,7 +675,8 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     const p = project("no-work", { seed: false });
     try {
       const head = git(p.repo, "rev-parse", "HEAD");
-      factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", head, "--now", NOW(5)]);
+      approveEarlyGates(p.repo, NOW(5));
+      recordValidator(p.repo, p.runDir, head, "GO", NOW(5));
       const gate = approveGate(p.repo, "pre_pr", NOW(5));
       assert.equal(gate.ok, false, "a run with no slice plan must not clear Gate 3");
       assert.match(gate.stderr, /no slice plan has been seeded/u);
@@ -646,7 +685,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       // the pair, since a `pr` call is what an orchestrator that ignored the gate would do.
       const pr = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
       assert.equal(pr.ok, false);
-      assert.match(pr.stderr, /requires an approved pre_pr gate/u);
+      assert.match(pr.stderr, /every gate must be approved; not approved: pre_pr\(pending\)/u);
       assert.equal(runJson(p.runDir).pr_url, null);
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
@@ -657,7 +696,8 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       buildSlice(p.repo);
       factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
       const head = git(p.repo, "rev-parse", "slice");
-      factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", head, "--now", NOW(5)]);
+      approveEarlyGates(p.repo, NOW(5));
+      recordValidator(p.repo, p.runDir, head, "GO", NOW(5));
       const running = approveGate(p.repo, "pre_pr", NOW(5));
       assert.equal(running.ok, false);
       assert.match(running.stderr, /every slice must be merged; not merged: be-thing\(running\)/u);
@@ -677,7 +717,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     try {
       verifyTests(p.repo, p.basePoint, NOW(5));
       // The validator loops: a NO-GO recorded over the GO the fixture established.
-      factory(p.repo, ["validator", RUN, "NO-GO", "--report", "artifacts/validation-report.md", "--reviewed-head", p.head, "--now", NOW(5)]);
+      recordValidator(p.repo, p.runDir, p.head, "NO-GO", NOW(5));
       const gate = approveGate(p.repo, "pre_pr", NOW(5));
       assert.equal(gate.ok, false);
       assert.match(gate.stderr, /the validator verdict is not an approval/u);

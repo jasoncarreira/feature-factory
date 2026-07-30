@@ -265,6 +265,13 @@ observations — so the raise covers only what is new. The reasoning is recorded
 `test/ceiling.test.js` beside the assertion, which is the file a future raise has
 to edit.
 
+**Revised again to 2,700** at 2,660, for two more publication-authorization findings: a
+re-opened earlier gate did not withdraw publication authority because only `pre_pr` was
+consulted, and the validator's verdict and judged head were CLI arguments rather than read
+from the record it produced — so a report about one commit could be recorded as a verdict
+on another. Two raises in one session is a ratchet; the next request should be answered by
+deleting something.
+
 ## Acceptance — the attack catalogue
 
 The build is done when each attack is injected and rejected. Ported from the

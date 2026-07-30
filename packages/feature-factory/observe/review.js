@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isAbsolute, sep } from "node:path";
 import { deriveReviewReady, EVIDENCE_DIR, EVIDENCE_KEYS, evidenceRef, git, observeAncestry } from "./index.js";
-import { TERMINAL_STATUSES } from "../state/schema.js";
+import { GATE_NAMES, TERMINAL_STATUSES, VALIDATOR_VERDICTS } from "../state/schema.js";
 
 export const REVIEW_KEYS = Object.freeze([
   "subject", "reviewer", "verdict", "attempt", "reviewed_commit",
@@ -74,6 +74,34 @@ export function assertReviewBinding({ review, ref, observedHead, subject = null,
   if (review.reviewed_commit !== observedHead) {
     throw new Error(`review '${ref}' approved ${review.reviewed_commit.slice(0, 12)} but the head is ${String(observedHead).slice(0, 12)}`);
   }
+}
+
+// The implementation-validator's judgement, bound the way every other judgement here is
+// bound: by a record naming the commit it judged.
+//
+// `factory validator` took the verdict and head as arguments and stored them without
+// reading anything, so a report describing H1 could be recorded as a verdict on H2 — which
+// is exactly what happened, and it disproves the claim that the whole-diff pass stands
+// between unreviewed content and a PR. It does, but only if the record says what it judged.
+// Both values are now derived from that record, and the commit it names must be the head as
+// observed now. `assertReviewBinding` is not reused: it demands an approving verdict, and a
+// NO-GO must be recordable.
+export function readValidatorReview(runDir, observedHead) {
+  const ref = reviewRef("implementation-validator");
+  const review = readReview(runDir, ref);
+  if (review.subject !== "implementation-validator") {
+    throw new Error(`${ref} describes '${review.subject}', not the implementation-validator`);
+  }
+  if (!VALIDATOR_VERDICTS.includes(review.verdict)) {
+    throw new Error(`${ref} verdict must be one of ${VALIDATOR_VERDICTS.join(" | ")}`);
+  }
+  if (!SHA.test(String(observedHead))) {
+    throw new Error(`${ref} cannot be recorded without an observed integration head`);
+  }
+  if (review.reviewed_commit !== observedHead) {
+    throw new Error(`${ref} judged ${review.reviewed_commit.slice(0, 12)} but the integration head is ${String(observedHead).slice(0, 12)}; re-run the validator`);
+  }
+  return review;
 }
 
 // Attack 2: the merge proof. What the merge contributed must be exactly what was
@@ -208,6 +236,15 @@ export function assertPublicationReady({ runDir, state, runId, observeHead }) {
 
   if (TERMINAL_STATUSES.includes(state.status)) {
     refuse(`a ${state.status} run must be surfaced, not published`);
+  }
+  // Every gate, currently approved — not just pre_pr, and not "was approved once".
+  // Re-opening a decided gate is what keeps a late change from stranding a run, but it also
+  // means an approval can be withdrawn, and publication was reading only pre_pr: opencode
+  // approved Gate 3, re-opened Story, decided stop, and recorded a PR against a stopped
+  // run. Asking for the current status of all three is what makes re-opening safe.
+  const unapproved = GATE_NAMES.filter((name) => state.gates?.[name]?.status !== "approved");
+  if (unapproved.length > 0) {
+    refuse(`every gate must be approved; not approved: ${unapproved.map((name) => `${name}(${state.gates?.[name]?.status ?? "absent"})`).join(", ")}`);
   }
   if (!Array.isArray(state.slices) || state.slices.length === 0) refuse("no slice plan has been seeded");
   const unmerged = state.slices.filter((slice) => slice.status !== "merged");
