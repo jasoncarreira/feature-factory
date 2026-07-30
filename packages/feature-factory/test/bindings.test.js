@@ -229,6 +229,32 @@ describe("attack 2 — the merge must contribute exactly what was reviewed", () 
       });
       assert.equal(proof.proven, false);
       assert.match(proof.reason, /did not contribute reviewed paths: src\/second\.ts/u);
+
+      // Folded in: a filename whose bytes were being trimmed. The path list used to be
+      // newline-split and trimmed, so this name became a pathspec matching nothing, both
+      // ls-tree lookups returned undefined, and undefined === undefined passed tampered
+      // content. "Unobservable" must never be spelled the same way as "agrees".
+      const spaced = fixture("proof-spaced-name");
+      try {
+        run(spaced.root, "checkout", "-q", "slice");
+        writeFileSync(join(spaced.root, "src", "spaced .ts"), "reviewed\n");
+        run(spaced.root, "add", "-A");
+        run(spaced.root, "commit", "-q", "-m", "file with a trailing space in its name");
+        const spacedReviewed = run(spaced.root, "rev-parse", "HEAD");
+
+        run(spaced.root, "checkout", "-q", "feature");
+        run(spaced.root, "merge", "-q", "--no-ff", "--no-commit", "slice");
+        writeFileSync(join(spaced.root, "src", "spaced .ts"), "TAMPERED\n");
+        run(spaced.root, "add", "-A");
+        run(spaced.root, "commit", "-q", "-m", "merge, altered");
+        const spacedMerge = run(spaced.root, "rev-parse", "HEAD");
+
+        const spacedProof = observeMergeProof(spaced.root, {
+          baseRef: spaced.featureBase, reviewedCommit: spacedReviewed, mergeCommit: spacedMerge,
+        });
+        assert.equal(spacedProof.proven, false, "altered content must be caught whatever the filename");
+        assert.match(spacedProof.reason, /differs from the reviewed commit's/u);
+      } finally { rmSync(spaced.root, { recursive: true, force: true }); }
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 

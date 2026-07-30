@@ -558,7 +558,15 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", head, "--now", NOW(5)]);
       const pr = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
       assert.equal(pr.ok, false);
-      assert.match(pr.stderr, /every slice merged or blocked; open: be-thing/u);
+      assert.match(pr.stderr, /every slice merged; not merged: be-thing\(running\)/u);
+
+      // Folded in rather than added, per the test budget: a *blocked* slice must refuse
+      // too. This accepted "merged or blocked", so a run with blocked work published
+      // while its status stayed running.
+      factory(p.repo, ["slice", RUN, "be-thing", "blocked", "--now", NOW(7)]);
+      const withBlocked = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(8)]);
+      assert.equal(withBlocked.ok, false, "blocked work must not be published");
+      assert.match(withBlocked.stderr, /every slice merged; not merged: be-thing\(blocked\)/u);
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 

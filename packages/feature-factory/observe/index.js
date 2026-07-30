@@ -46,13 +46,15 @@ export function observeWorktree(worktree, baseRef, options = {}) {
   };
 
   const head = record(git(worktree, ["rev-parse", ref], options));
-  const names = record(git(worktree, ["diff", "--name-only", `${baseRef}...${ref}`], options));
+  const names = record(git(worktree, ["--literal-pathspecs", "diff", "--name-only", "-z", `${baseRef}...${ref}`], options));
   const stat = record(git(worktree, ["diff", "--stat", `${baseRef}...${ref}`], options));
 
   const observed = head.ok && names.ok && stat.ok;
   return {
     commit: head.ok ? head.stdout.trim() : null,
-    files_changed: names.ok ? names.stdout.split("\n").map((line) => line.trim()).filter(Boolean) : [],
+    // NUL-separated and untrimmed: ownership is decided on these paths, so a name with a
+    // trailing space must stay a distinct path rather than collapsing onto another.
+    files_changed: names.ok ? names.stdout.split("\0").filter((path) => path !== "") : [],
     diff_stat: stat.ok ? stat.stdout.trim() : null,
     diff_observed: observed,
     commands,

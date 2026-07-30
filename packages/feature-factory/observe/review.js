@@ -145,8 +145,18 @@ export function observeMergeProof(worktree, { baseRef, reviewedCommit, mergeComm
     return fail("tree entries could not be observed");
   }
   for (const path of reviewedPaths) {
-    // Both absent is a reviewed deletion the merge also made, which agrees.
-    if (reviewedEntries.get(path) !== mergedEntries.get(path)) {
+    const reviewedEntry = reviewedEntries.get(path);
+    const mergedEntry = mergedEntries.get(path);
+    // The fail-open this replaces: both lookups returning undefined was read as "a
+    // reviewed deletion the merge also made, which agrees". Both can be undefined
+    // because the *lookup failed* - a trimmed filename no longer matching the real
+    // path - and undefined equals undefined, so tampered content passed. A reviewed
+    // deletion is now proven by the path being absent from the reviewed tree while the
+    // path was genuinely observed, not inferred from two failures agreeing.
+    if (reviewedEntry === undefined && mergedEntry === undefined) {
+      return fail(`neither tree could be read for '${path}'`);
+    }
+    if (reviewedEntry !== mergedEntry) {
       return fail(`the merge's '${path}' differs from the reviewed commit's`);
     }
   }
@@ -158,14 +168,19 @@ export function observeMergeProof(worktree, { baseRef, reviewedCommit, mergeComm
 // identity: a file that becomes executable or becomes a symlink is a different thing.
 function treeEntries(worktree, commit, paths, options) {
   if (paths.length === 0) return new Map();
-  const probe = git(worktree, ["ls-tree", "-z", commit, "--", ...paths], options);
+  // --literal-pathspecs: a filename containing a glob character is a filename, not a
+  // pattern. Records are NUL-separated and the path begins after the FIRST tab, so a
+  // filename containing a tab survives intact.
+  const probe = git(worktree, ["--literal-pathspecs", "ls-tree", "-z", commit, "--", ...paths], options);
   if (!probe.ok) return null;
   const entries = new Map();
-  for (const record of probe.stdout.split("\0").filter(Boolean)) {
-    const [meta, path] = record.split("\t");
-    if (!path) continue;
-    const [mode, type, oid] = meta.trim().split(/\s+/u);
-    entries.set(path, `${mode} ${type} ${oid}`);
+  for (const record of probe.stdout.split("\0")) {
+    if (record === "") continue;
+    const tab = record.indexOf("\t");
+    if (tab === -1) continue;
+    const [mode, type, oid] = record.slice(0, tab).split(" ");
+    // No trimming: leading or trailing whitespace is part of the name.
+    entries.set(record.slice(tab + 1), `${mode} ${type} ${oid}`);
   }
   return entries;
 }
@@ -179,9 +194,12 @@ function revList(worktree, commit, options) {
 }
 
 function pathsChanged(worktree, from, to, options) {
-  const probe = git(worktree, ["diff", "--name-only", from, to], options);
+  // -z, and no trimming: a filename may legitimately contain a newline, a tab, or
+  // leading and trailing spaces, and trimming one turned a real path into a pathspec
+  // that matched nothing.
+  const probe = git(worktree, ["--literal-pathspecs", "diff", "--name-only", "-z", from, to], options);
   if (!probe.ok) return null;
-  return probe.stdout.split("\n").map((line) => line.trim()).filter(Boolean).sort();
+  return probe.stdout.split("\0").filter((path) => path !== "").sort();
 }
 
 // Finding 2, three parts:

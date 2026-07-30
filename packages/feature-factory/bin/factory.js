@@ -141,12 +141,12 @@ const HANDLERS = {
       if (!Array.isArray(nextState.slices) || nextState.slices.length === 0) {
         throw new Error("recording a PR requires a seeded slice plan");
       }
-      const open = nextState.slices.filter((slice) => !["merged", "blocked"].includes(slice.status));
-      if (open.length > 0) {
-        throw new Error(`recording a PR requires every slice merged or blocked; open: ${open.map((slice) => slice.id).join(", ")}`);
-      }
-      if (!nextState.slices.some((slice) => slice.status === "merged")) {
-        throw new Error("recording a PR requires at least one merged slice");
+      // Finding 3: this accepted "merged or blocked", so a run with blocked work published
+      // while its status stayed running. Blocked work makes the run partial, which the
+      // skill requires surfacing rather than pushing onward.
+      const unmerged = nextState.slices.filter((slice) => slice.status !== "merged");
+      if (unmerged.length > 0) {
+        throw new Error(`recording a PR requires every slice merged; not merged: ${unmerged.map((slice) => `${slice.id}(${slice.status})`).join(", ")}`);
       }
       const integration = resolveWorktree(repo, run.worktree);
       if (!integration) throw new Error(`integration worktree '${run.worktree}' is not observable`);
