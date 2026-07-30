@@ -1,0 +1,330 @@
+#!/usr/bin/env node
+// The factory CLI. Every command that changes state is one checked transition:
+//
+//   lock -> read -> validate -> apply -> validate -> compare-and-swap -> rename
+//
+// Nothing else writes run.json. The orchestrating model calls these commands
+// instead of hand-writing JSON, which is the entire reason this package exists.
+//
+// Flags are declared per command and an unknown flag is an error. The predecessor
+// silently ignored unknown flags on ~36 of ~40 subcommands, which turns a typo
+// into a missing field.
+import { mkdirSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { readRun, readRunUnchecked, transition } from "../state/index.js";
+import { SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
+import {
+  claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SessionLockHeldError,
+} from "../state/session-lock.js";
+
+export const COMMANDS = Object.freeze({
+  init: Object.freeze(["--repo", "--branch", "--worktree", "--jira", "--mode", "--max-parallel-slices", "--max-retries", "--base-commit", "--now", "--json"]),
+  status: Object.freeze(["--repo", "--json"]),
+  lock: Object.freeze(["--repo", "--session", "--branch", "--ttl-ms", "--force", "--now", "--json"]),
+  heartbeat: Object.freeze(["--repo", "--session", "--now", "--json"]),
+  gate: Object.freeze(["--repo", "--artifact", "--now", "--json"]),
+  step: Object.freeze(["--repo", "--attempts", "--review-ref", "--evidence-ref", "--now", "--json"]),
+  terminal: Object.freeze(["--repo", "--reason", "--now", "--json"]),
+});
+
+const BOOLEAN_FLAGS = new Set(["--json", "--force"]);
+
+class CliError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CliError";
+  }
+}
+
+export async function run(argv) {
+  const [command, ...rest] = argv;
+  if (!command || command === "--help" || command === "-h") return usage();
+  if (!Object.hasOwn(COMMANDS, command)) throw new CliError(`unknown command '${command}' (try --help)`);
+  const { positional, flags } = parse(command, rest);
+  const handler = HANDLERS[command];
+  return handler(positional, flags);
+}
+
+function parse(command, args) {
+  const allowed = COMMANDS[command];
+  const positional = [];
+  const flags = {};
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
+      continue;
+    }
+    if (!allowed.includes(arg)) throw new CliError(`unknown option '${arg}' for '${command}'`);
+    if (BOOLEAN_FLAGS.has(arg)) {
+      flags[key(arg)] = true;
+      continue;
+    }
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("--")) throw new CliError(`${arg} requires a value`);
+    flags[key(arg)] = value;
+    index += 1;
+  }
+  return { positional, flags };
+}
+
+const key = (flag) => flag.slice(2).replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
+
+function runDirFor(flags, runId) {
+  if (!runId) throw new CliError("a <run-id> is required");
+  return join(resolve(flags.repo ?? process.cwd()), ".claude", "factory", runId);
+}
+
+const HANDLERS = {
+  async init([runId], flags) {
+    if (!flags.branch || !flags.worktree) throw new CliError("factory init requires --branch and --worktree");
+    const mode = flags.mode ?? "interactive";
+    if (!MODES.includes(mode)) throw new CliError(`--mode must be one of ${MODES.join(" | ")}`);
+    const runDir = runDirFor(flags, runId);
+    for (const dir of ["plan", "artifacts", "evidence", "reviews"]) {
+      mkdirSync(join(runDir, dir), { recursive: true });
+    }
+    const at = stamp(flags);
+    const run = {
+      version: SCHEMA_VERSION,
+      run_id: runId,
+      jira_key: flags.jira ?? null,
+      branch: flags.branch,
+      worktree: flags.worktree,
+      created_at: at,
+      updated_at: at,
+      status: "running",
+      mode,
+      max_parallel_slices: integer(flags.maxParallelSlices, 3, "--max-parallel-slices"),
+      max_retries: integer(flags.maxRetries, 3, "--max-retries"),
+      base_commit: flags.baseCommit ?? null,
+      gates: {},
+      steps: [],
+      slices: [],
+      validator: null,
+      terminal_result: null,
+      pr_url: null,
+    };
+    // init is the one write with no prior state, so it goes through the schema
+    // directly rather than through a transition.
+    const { writeProtectedJsonAtomic } = await import("../core/atomic-write.js");
+    const { validateRun } = await import("../state/schema.js");
+    await writeProtectedJsonAtomic(runDir, "run.json", validateRun(run));
+    return emit(flags, { run_id: runId, run_dir: runDir, status: "running", mode });
+  },
+
+  status([runId], flags) {
+    const runDir = runDirFor(flags, runId);
+    const observed = readRunUnchecked(runDir);
+    if (!observed.ok) return emit(flags, { run_id: runId, valid: false, error: observed.error });
+    let run;
+    try {
+      run = readRun(runDir);
+    } catch (error) {
+      // A record that exists but does not validate is reported, not hidden: the
+      // operator needs to see the invalid state, not an absence.
+      return emit(flags, { run_id: runId, valid: false, error: error.message });
+    }
+    const lock = inspectSessionLock(runDir);
+    return emit(flags, {
+      run_id: run.run_id,
+      valid: true,
+      status: run.status,
+      mode: run.mode,
+      branch: run.branch,
+      lock: lock.state,
+      lock_session: lock.owner?.session ?? null,
+      gates: Object.fromEntries(GATE_NAMES.filter((name) => run.gates[name]).map((name) => [name, run.gates[name].status])),
+      steps: run.steps.map((step) => `${step.agent}:${step.status}(${step.attempts})`),
+      slices: run.slices.map((slice) => `${slice.id}:${slice.status}(${slice.attempts})`),
+      validator: run.validator?.verdict ?? null,
+      pr_url: run.pr_url,
+      terminal_result: run.terminal_result,
+      next: nextIncomplete(run),
+    });
+  },
+
+  async lock([runId, action], flags) {
+    const runDir = runDirFor(flags, runId);
+    const ttlMs = flags.ttlMs === undefined ? undefined : integer(flags.ttlMs, undefined, "--ttl-ms");
+    const now = flags.now ? Date.parse(flags.now) : undefined;
+    try {
+      if (action === "claim" || action === "steal") {
+        const owner = await claimSessionLock(runDir, {
+          session: flags.session, runId, branch: flags.branch, now, ttlMs,
+          force: action === "steal" || flags.force === true,
+        });
+        return emit(flags, { run_id: runId, action, session: owner.session, stolen_from: owner.stolen_from?.session ?? null });
+      }
+      if (action === "release") {
+        const released = await releaseSessionLock(runDir, { session: flags.session });
+        return emit(flags, { run_id: runId, action, ...released });
+      }
+      if (action === "inspect" || action === undefined) {
+        const observed = inspectSessionLock(runDir, ttlMs === undefined ? {} : { ttlMs });
+        return emit(flags, { run_id: runId, action: "inspect", state: observed.state, session: observed.owner?.session ?? null, heartbeat_at: observed.owner?.heartbeat_at ?? null });
+      }
+    } catch (error) {
+      if (error instanceof SessionLockHeldError) {
+        throw new CliError(`${error.message}\n  resume with --session ${error.owner.session}, or take it with 'lock ${runId} steal'`);
+      }
+      throw error;
+    }
+    throw new CliError("factory lock requires <claim|steal|release|inspect>");
+  },
+
+  async heartbeat([runId], flags) {
+    const runDir = runDirFor(flags, runId);
+    const owner = await refreshSessionLock(runDir, {
+      session: flags.session,
+      now: flags.now ? Date.parse(flags.now) : undefined,
+    });
+    return emit(flags, { run_id: runId, heartbeat_at: owner.heartbeat_at });
+  },
+
+  async gate([runId, name, decision], flags) {
+    if (!GATE_NAMES.includes(name)) throw new CliError(`gate must be one of ${GATE_NAMES.join(" | ")}`);
+    if (!GATE_STATUSES.includes(decision)) throw new CliError(`decision must be one of ${GATE_STATUSES.join(" | ")}`);
+    const runDir = runDirFor(flags, runId);
+    const at = stamp(flags);
+    const next = await transition(runDir, {
+      participants: [{ familyId: "gates", mode: decision === "pending" ? "open" : "decide" }],
+      apply: (state) => ({
+        ...state,
+        updated_at: at,
+        gates: {
+          ...state.gates,
+          [name]: {
+            status: decision,
+            at: decision === "pending" ? null : at,
+            artifact: flags.artifact ?? state.gates[name]?.artifact ?? null,
+          },
+        },
+      }),
+    });
+    return emit(flags, { run_id: runId, gate: name, status: next.gates[name].status, at: next.gates[name].at });
+  },
+
+  async step([runId, agent, status], flags) {
+    if (!agent) throw new CliError("factory step requires <agent>");
+    if (!STEP_STATUSES.includes(status)) throw new CliError(`status must be one of ${STEP_STATUSES.join(" | ")}`);
+    const runDir = runDirFor(flags, runId);
+    const at = stamp(flags);
+    const next = await transition(runDir, {
+      participants: [{ familyId: "steps", mode: "record" }],
+      apply: (state) => {
+        const existing = state.steps.find((step) => step.agent === agent);
+        const attempts = flags.attempts === undefined
+          ? existing?.attempts ?? 1
+          : integer(flags.attempts, 1, "--attempts");
+        const row = {
+          agent,
+          status,
+          attempts,
+          review_ref: flags.reviewRef ?? existing?.review_ref ?? null,
+          evidence_ref: flags.evidenceRef ?? existing?.evidence_ref ?? null,
+        };
+        return {
+          ...state,
+          updated_at: at,
+          steps: existing
+            ? state.steps.map((step) => (step.agent === agent ? row : step))
+            : [...state.steps, row],
+        };
+      },
+    });
+    const row = next.steps.find((step) => step.agent === agent);
+    return emit(flags, { run_id: runId, agent, status: row.status, attempts: row.attempts });
+  },
+
+  async terminal([runId, status], flags) {
+    if (!TERMINAL_STATUSES.includes(status)) throw new CliError(`status must be one of ${TERMINAL_STATUSES.join(" | ")}`);
+    if (!flags.reason) throw new CliError("factory terminal requires --reason");
+    const runDir = runDirFor(flags, runId);
+    const at = stamp(flags);
+    const next = await transition(runDir, {
+      participants: [{ familyId: "envelope", mode: "terminalize" }],
+      apply: (state) => ({
+        ...state,
+        updated_at: at,
+        status,
+        terminal_result: { status, reason: flags.reason },
+      }),
+    });
+    return emit(flags, { run_id: runId, status: next.status, reason: next.terminal_result.reason });
+  },
+};
+
+// Resume: the first thing a returning session needs to know. Mirrors viso's
+// resume rules — a pending gate re-presents, a running slice re-observes, an
+// unaccepted step re-runs.
+function nextIncomplete(run) {
+  if (TERMINAL_STATUSES.includes(run.status)) return `terminal:${run.status}`;
+  for (const name of GATE_NAMES) {
+    // Absent means that phase has not started; pending means it is waiting on a
+    // human. Either way the gate is the next thing to happen, and treating absent
+    // as "done" would report a run as further along than it is.
+    const gate = run.gates[name];
+    if (gate === undefined || gate.status === "pending") return `gate:${name}`;
+    if (gate.status === "stop") return `stopped-at-gate:${name}`;
+    if (gate.status === "changes") return `changes-at-gate:${name}`;
+  }
+  const blockedSlice = run.slices.find((slice) => slice.status === "blocked");
+  if (blockedSlice) return `blocked-slice:${blockedSlice.id}`;
+  const activeSlice = run.slices.find((slice) => ["running", "review"].includes(slice.status));
+  if (activeSlice) return `observe-slice:${activeSlice.id}`;
+  const pendingSlice = run.slices.find((slice) => slice.status === "pending");
+  if (pendingSlice) return `dispatch-slice:${pendingSlice.id}`;
+  const openStep = run.steps.find((step) => step.status !== "accepted");
+  if (openStep) return `step:${openStep.agent}`;
+  if (!run.pr_url) return "pr";
+  return "complete";
+}
+
+function integer(value, fallback, flag) {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new CliError(`${flag} must be a positive integer`);
+  return parsed;
+}
+
+function stamp(flags) {
+  const at = flags.now ? Date.parse(flags.now) : Date.now();
+  if (!Number.isFinite(at)) throw new CliError("--now must be an ISO timestamp");
+  return new Date(at).toISOString();
+}
+
+function emit(flags, payload) {
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  } else {
+    for (const [name, value] of Object.entries(payload)) {
+      if (value === null || value === undefined) continue;
+      process.stdout.write(`${name}: ${typeof value === "object" ? JSON.stringify(value) : value}\n`);
+    }
+  }
+  return payload;
+}
+
+function usage() {
+  process.stdout.write(`factory — durable control plane for /feature runs
+
+  factory init <run-id> --branch B --worktree W [--jira KEY] [--mode interactive|headless|autonomous]
+  factory status <run-id> [--json]
+  factory lock <run-id> <claim|steal|release|inspect> --session ID [--ttl-ms N]
+  factory heartbeat <run-id> --session ID
+  factory gate <run-id> <${GATE_NAMES.join("|")}> <${GATE_STATUSES.join("|")}> [--artifact REF]
+  factory step <run-id> <agent> <${STEP_STATUSES.join("|")}> [--attempts N] [--review-ref REF] [--evidence-ref REF]
+  factory terminal <run-id> <${TERMINAL_STATUSES.join("|")}> --reason TEXT
+
+Every command takes [--repo PATH] and [--json]. Unknown options are errors.
+`);
+  return null;
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  run(process.argv.slice(2)).catch((error) => {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+  });
+}

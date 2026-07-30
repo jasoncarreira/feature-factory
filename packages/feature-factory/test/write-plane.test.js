@@ -152,3 +152,85 @@ describe("lock staleness is decided by TTL, not by process probing", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+describe("stealing a stale lock is one atomic rename", () => {
+  function seed(name) {
+    const dir = mkdtempSync(join(tmpdir(), `ff-race-${name}-`));
+    writeFileSync(join(dir, "run.json"), '{"version":1,"turns":0}\n');
+    const lockDir = join(dir, "run-json.lock");
+    mkdirSync(lockDir, { recursive: true });
+    writeFileSync(join(lockDir, "owner.json"), `${JSON.stringify({
+      pid: process.pid, hostname: hostname(),
+      acquired_at: new Date(Date.now() - 60000).toISOString(),
+      nonce: "22222222-2222-4222-8222-222222222222",
+    })}\n`);
+    return dir;
+  }
+
+  it("serializes concurrent racers and loses no update", async () => {
+    const dir = seed("both");
+    try {
+      // Both see the same stale lock and both try to steal. Exactly one rename can
+      // succeed; the loser must fall back to the acquire loop rather than fail.
+      const turns = [];
+      const attempt = (label) => withRunJsonLock(dir, async () => {
+        const current = JSON.parse(readFileSync(join(dir, "run.json"), "utf8"));
+        turns.push(label);
+        // Hold it briefly so the two calls genuinely overlap.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        writeFileSync(join(dir, "run.json"), `${JSON.stringify({ ...current, turns: current.turns + 1 })}\n`);
+      }, { staleLockMs: 100, timeoutMs: 5000 });
+
+      await Promise.all([attempt("a"), attempt("b")]);
+
+      assert.deepEqual(turns.sort(), ["a", "b"], "both racers must eventually run");
+      assert.equal(JSON.parse(readFileSync(join(dir, "run.json"), "utf8")).turns, 2,
+        "serialized turns must both be recorded; a lost update means the lock did not hold");
+      assert.deepEqual(readdirSync(dir).filter((entry) => entry.includes("quarantine")), [],
+        "no quarantine directory may survive a completed steal");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("leaves no reclaim-claim artifacts behind", async () => {
+    const dir = seed("artifacts");
+    try {
+      await withRunJsonLock(dir, async () => {}, { staleLockMs: 100, timeoutMs: 2000 });
+      const stray = readdirSync(dir).filter((entry) => entry.startsWith(".run-json.lock"));
+      assert.deepEqual(stray, [], "the nonce-keyed claim protocol is gone; nothing should be written");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("refuses to steal a lock that was re-acquired after being judged stale", async () => {
+    const dir = seed("reacquired");
+    try {
+      const lockDir = join(dir, "run-json.lock");
+      let injected = false;
+      // Between judging the lock stale and renaming it away, another process steals
+      // it and takes a fresh one. Renaming that away would steal a live lock.
+      const lockHooks = {
+        onBeforeSteal: () => {
+          if (injected) return;
+          injected = true;
+          rmSync(lockDir, { recursive: true, force: true });
+          mkdirSync(lockDir, { recursive: true });
+          writeFileSync(join(lockDir, "owner.json"), `${JSON.stringify({
+            pid: process.pid, hostname: hostname(),
+            acquired_at: new Date().toISOString(),
+            nonce: "33333333-3333-4333-8333-333333333333",
+          })}\n`);
+        },
+      };
+      await assert.rejects(
+        () => withRunJsonLock(dir, async () => {}, { staleLockMs: 100, timeoutMs: 200, lockHooks }),
+        (error) => {
+          assert.match(String(error.message), /lock|contend|timed out/iu);
+          return true;
+        },
+        "a lock re-acquired inside the steal window must not be taken",
+      );
+      assert.equal(injected, true, "the seam must have fired");
+      assert.equal(JSON.parse(readFileSync(join(lockDir, "owner.json"), "utf8")).nonce,
+        "33333333-3333-4333-8333-333333333333", "the live owner must still hold the lock");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});

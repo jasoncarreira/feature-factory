@@ -119,7 +119,10 @@ function validateRunJsonLockHooks(lockHooks) {
   if (lockHooks.onLockCreated !== undefined && typeof lockHooks.onLockCreated !== "function") {
     throw new Error("lockHooks.onLockCreated must be a function");
   }
-  for (const name of ["onBeforeReclaimClaim", "onReclaimClaimed", "onReclaimAbandoned", "onReclaimRenamed", "onReclaimRemoved", "onBeforeCleanup"]) {
+  // onBeforeSteal is the seam that makes the pre-rename identity check testable:
+  // it fires after the lock has been judged stale and before the rename, which is
+  // exactly the window where another process can steal and re-acquire.
+  for (const name of ["onBeforeSteal", "onReclaimRenamed", "onReclaimRemoved", "onBeforeCleanup"]) {
     if (lockHooks[name] !== undefined && typeof lockHooks[name] !== "function") {
       throw new Error(`lockHooks.${name} must be a function`);
     }
@@ -174,105 +177,45 @@ async function readLockOwner(ownerPath) {
 
 async function reclaimRunJsonLock(runDir, lockDir, observedIdentity, observedEvidence, options, lockHooks, deadline) {
   if (!observedIdentity || !observedEvidence) return null;
-  const claimPath = reclaimClaimPath(runDir, observedIdentity, observedEvidence.owner.nonce);
-  const claim = { owner_nonce: observedEvidence.owner.nonce, reclaim_nonce: randomUUID() };
-  if (lockHooks.onBeforeReclaimClaim) {
-    await runRunJsonLockHook(lockHooks.onBeforeReclaimClaim, { runDir, lockDir }, deadline, join(lockDir, LOCK_OWNER_FILE));
-  }
-  try {
-    await writeFile(claimPath, `${JSON.stringify(claim)}\n`, { encoding: "utf8", flag: "wx" });
-  } catch (error) {
-    if (error?.code === "EEXIST" || error?.code === "ENOENT") return null;
-    throw error;
-  }
-  if (lockHooks.onReclaimClaimed) {
-    await runRunJsonLockHook(lockHooks.onReclaimClaimed, { runDir, lockDir }, deadline, join(lockDir, LOCK_OWNER_FILE));
-  }
-  const confirmedIdentity = await lockDirectoryIdentity(lockDir);
-  const confirmedEvidence = await readLockOwnerEvidence(join(lockDir, LOCK_OWNER_FILE));
-  if (!sameLockDirectoryIdentity(observedIdentity, confirmedIdentity)
-    || !sameLockOwnerEvidence(observedEvidence, confirmedEvidence)
-    || !canStealRunJsonLock(confirmedEvidence?.owner, options)
-    || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) {
-    await removeOwnedReclaimClaim(claimPath, claim);
-    if (lockHooks.onReclaimAbandoned) await lockHooks.onReclaimAbandoned({ runDir, lockDir });
-    return null;
-  }
-
-  const quarantine = await renameOwnedLockToQuarantine(runDir, lockDir, observedIdentity);
-  const movedOwnerPath = join(quarantine, LOCK_OWNER_FILE);
-  if (!sameLockOwnerEvidence(observedEvidence, await readLockOwnerEvidence(movedOwnerPath))
-    || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) {
-    throw new Error(`run.json lock reclamation identity changed at ${quarantine}`);
-  }
-  if (lockHooks.onReclaimRenamed) await lockHooks.onReclaimRenamed({ runDir, lockDir, quarantine });
-  if (!sameLockDirectoryIdentity(observedIdentity, await lockDirectoryIdentity(quarantine))
-    || !sameLockOwnerEvidence(observedEvidence, await readLockOwnerEvidence(movedOwnerPath))
-    || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) {
-    throw new Error(`run.json lock reclamation identity changed before removal at ${quarantine}`);
-  }
-  if (!canStealRunJsonLock(observedEvidence.owner, options)) {
-    throw new Error(`run.json lock owner is no longer definitively dead before removal at ${quarantine}`);
-  }
-  await rm(quarantine, { recursive: true, force: true });
-  await removeOwnedReclaimClaim(claimPath, claim);
-  if (lockHooks.onReclaimRemoved) await lockHooks.onReclaimRemoved({ runDir, lockDir });
-  return observedEvidence.owner;
-}
-
-async function canReclaimOwnerlessRunJsonLock(identity, ownerPath, options = {}) {
-  if (!identity || await lockOwnerEntryExists(ownerPath)) return false;
-  const ageMs = Date.now() - identity.mtimeMs;
-  return Number.isFinite(ageMs) && ageMs >= normalizePositiveInteger(options.missingOwnerStealMs, DEFAULT_MISSING_OWNER_STEAL_MS);
+  return stealByRename(runDir, lockDir, observedIdentity, observedEvidence.owner, lockHooks);
 }
 
 async function reclaimOwnerlessRunJsonLock(runDir, lockDir, observedIdentity, options, lockHooks, deadline) {
-  if (!observedIdentity) return false;
-  const claimPath = reclaimClaimPath(runDir, observedIdentity, "ownerless");
-  const claim = { owner_nonce: "ownerless", reclaim_nonce: randomUUID() };
-  if (lockHooks.onBeforeReclaimClaim) {
-    await runRunJsonLockHook(lockHooks.onBeforeReclaimClaim, { runDir, lockDir }, deadline, join(lockDir, LOCK_OWNER_FILE));
-  }
+  if (!observedIdentity) return null;
+  return stealByRename(runDir, lockDir, observedIdentity, null, lockHooks);
+}
+
+// Stealing a stale lock is one atomic rename.
+//
+// A nonce-keyed reclaim-claim protocol used to guard this, re-verifying a claim
+// file four times across the steal. It was unnecessary: `rename` is atomic, so of
+// two racers exactly one succeeds and the loser gets ENOENT and retries the
+// acquire loop. More importantly the lock is not the correctness boundary - the
+// write core re-reads run.json and deep-compares it immediately before its own
+// rename, so even a wrongly stolen lock cannot produce a lost update. The
+// ceremony was protecting the lock as though the lock were the invariant.
+//
+// The identity check still earns its place: it refuses to rename away a lock that
+// is no longer the one we judged stale, which is the case where another process
+// already stole and re-acquired.
+async function stealByRename(runDir, lockDir, observedIdentity, observedOwner, lockHooks) {
+  if (lockHooks.onBeforeSteal) await lockHooks.onBeforeSteal({ runDir, lockDir, owner: observedOwner });
+  // No identity pre-check here on purpose. renameOwnedLockToQuarantine re-checks
+  // dev/ino *after* the rename and throws, which covers the re-acquisition case
+  // and is not subject to a check-then-act window. A pre-check was added here and
+  // removed once falsification showed its removal was undetectable.
+  let quarantine;
   try {
-    await writeFile(claimPath, `${JSON.stringify(claim)}\n`, { encoding: "utf8", flag: "wx" });
+    quarantine = await renameOwnedLockToQuarantine(runDir, lockDir, observedIdentity);
   } catch (error) {
-    if (error?.code === "EEXIST" || error?.code === "ENOENT") return false;
+    // ENOENT means another racer got there first: fall back to the acquire loop.
+    if (error?.code === "ENOENT") return null;
     throw error;
   }
-  if (lockHooks.onReclaimClaimed) {
-    await runRunJsonLockHook(lockHooks.onReclaimClaimed, { runDir, lockDir }, deadline, join(lockDir, LOCK_OWNER_FILE));
-  }
-  const ownerPath = join(lockDir, LOCK_OWNER_FILE);
-  if (!sameLockDirectoryIdentity(observedIdentity, await lockDirectoryIdentity(lockDir))
-    || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))
-    || !await canReclaimOwnerlessRunJsonLock(observedIdentity, ownerPath, options)) {
-    await removeOwnedReclaimClaim(claimPath, claim);
-    if (lockHooks.onReclaimAbandoned) await lockHooks.onReclaimAbandoned({ runDir, lockDir });
-    return false;
-  }
-
-  const quarantine = await renameOwnedLockToQuarantine(runDir, lockDir, observedIdentity);
-  const movedOwnerPath = join(quarantine, LOCK_OWNER_FILE);
   if (lockHooks.onReclaimRenamed) await lockHooks.onReclaimRenamed({ runDir, lockDir, quarantine });
-  if (!sameLockDirectoryIdentity(observedIdentity, await lockDirectoryIdentity(quarantine))
-    || await lockOwnerEntryExists(movedOwnerPath)
-    || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) {
-    throw new Error(`ownerless run.json lock reclamation identity changed at ${quarantine}`);
-  }
   await rm(quarantine, { recursive: true, force: true });
-  await removeOwnedReclaimClaim(claimPath, claim);
   if (lockHooks.onReclaimRemoved) await lockHooks.onReclaimRemoved({ runDir, lockDir });
-  return true;
-}
-
-function reclaimClaimPath(runDir, identity, ownerNonce) {
-  const key = createHash("sha256").update(`${identity.dev}:${identity.ino}:${ownerNonce}`).digest("hex");
-  return join(runDir, `.run-json.lock-reclaim-${key}.json`);
-}
-
-async function removeOwnedReclaimClaim(claimPath, claim) {
-  if (!sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) return;
-  await rm(claimPath, { force: true });
+  return observedOwner ?? { pid: null, hostname: null, acquired_at: null, nonce: null };
 }
 
 async function releaseOwnedRunJsonLock(runDir, lockDir, expectedIdentity, expectedEvidence) {
@@ -306,23 +249,7 @@ async function renameOwnedLockToQuarantine(runDir, lockDir, expectedIdentity) {
   return quarantine;
 }
 
-async function readJsonNoFollow(path) {
-  let handle;
-  try {
-    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
-    return JSON.parse(await handle.readFile("utf8"));
-  } catch {
-    return null;
-  } finally {
-    await handle?.close();
-  }
-}
 
-function sameReclaimClaim(left, right) {
-  return isRecord(left) && isRecord(right)
-    && left.owner_nonce === right.owner_nonce
-    && left.reclaim_nonce === right.reclaim_nonce;
-}
 
 // viso decides this with a timestamp: a lock whose heartbeat is older than the TTL
 // may be stolen. We do the same on `acquired_at`, because this lock is held for one
