@@ -85,12 +85,12 @@ export function assertReviewBinding({ review, ref, observedHead, subject = null,
 // Every multi-slice wave would have failed on its second merge; a single-slice fixture
 // hid it.
 //
-// Diff equality instead, expressed at blob level rather than by comparing patch text
-// (patch context can differ legitimately once the surrounding base has moved):
+// Diff equality instead, expressed as changed-path sets rather than by comparing patch
+// text (patch context can differ legitimately once the surrounding base has moved):
 //
 //   * the paths the merge touched, relative to its first parent, are exactly the paths
 //     the slice changed relative to its own base; and
-//   * for each of those paths, the merge's blob equals the reviewed commit's blob.
+//   * the reviewed commit and the merge differ on none of those paths.
 //
 // A moved base is then normal and passes. Unreviewed content inside the merge shows up
 // either as an extra path or as a differing blob, and fails. Tree equality is the
@@ -135,54 +135,34 @@ export function observeMergeProof(worktree, { baseRef, reviewedCommit, mergeComm
     return fail(`the merge did not contribute reviewed paths: ${missing.join(", ")}`);
   }
 
-  // Full tree-entry identity, not just the object id: rev-parse <commit>:<path> compares
-  // content while ignoring mode and type, so 100644 -> 100755 with identical bytes, and a
-  // regular file replaced by a symlink whose target bytes match the reviewed blob, both
-  // passed. ls-tree carries mode and type, and two calls replace one rev-parse per path.
-  const reviewedEntries = treeEntries(worktree, reviewedCommit, reviewedPaths, options);
-  const mergedEntries = treeEntries(worktree, mergeCommit, reviewedPaths, options);
-  if (reviewedEntries === null || mergedEntries === null) {
-    return fail("tree entries could not be observed");
-  }
-  for (const path of reviewedPaths) {
-    const reviewedEntry = reviewedEntries.get(path);
-    const mergedEntry = mergedEntries.get(path);
-    // The fail-open this replaces: both lookups returning undefined was read as "a
-    // reviewed deletion the merge also made, which agrees". Both can be undefined
-    // because the *lookup failed* - a trimmed filename no longer matching the real
-    // path - and undefined equals undefined, so tampered content passed. A reviewed
-    // deletion is now proven by the path being absent from the reviewed tree while the
-    // path was genuinely observed, not inferred from two failures agreeing.
-    if (reviewedEntry === undefined && mergedEntry === undefined) {
-      return fail(`neither tree could be read for '${path}'`);
-    }
-    if (reviewedEntry !== mergedEntry) {
-      return fail(`the merge's '${path}' differs from the reviewed commit's`);
-    }
+  // Content identity, asked as one diff rather than as a per-path lookup.
+  //
+  // This was a per-path `ls-tree` comparison, and it could not distinguish two cases that
+  // both look like an empty lookup: the path is absent because the slice deleted it and
+  // the merge deleted it too, which agrees; or the pathspec matched nothing because the
+  // name was mis-parsed, which is tampered content wrongly proven. Treating them the same
+  // either passed the tampering or, once that was refused, refused every slice that
+  // deletes a file. Both spellings were wrong because the question was asked in a form
+  // whose failure mode is silence.
+  //
+  // Asked as a diff, there is no lookup to miss. Any difference on a reviewed path —
+  // content, file mode, or a regular file becoming a symlink — appears as that path in
+  // the drift list, and a deletion both commits made appears in neither. Both lists come
+  // from the same parser, so a mis-parsed name compares as the same wrong string on both
+  // sides and still matches.
+  //
+  // Drift on a path *outside* reviewedPaths is the sibling-merge case this proof must
+  // tolerate: such a path is identical in base and reviewed, and the two-parent check
+  // above already proved the merge contributed nothing outside reviewedPaths, so the
+  // difference came from the integration branch rather than from this slice.
+  const drift = pathsChanged(worktree, reviewedCommit, mergeCommit, options);
+  if (drift === null) return fail("the reviewed commit could not be compared to the merge");
+  const altered = drift.filter((path) => reviewedPaths.includes(path));
+  if (altered.length > 0) {
+    return fail(`the merge's content differs from the reviewed commit's: ${altered.join(", ")}`);
   }
 
   return { proven: true, reason: null, reviewed_paths: reviewedPaths, first_parent: firstParent };
-}
-
-// "<mode> <type> <oid>\t<path>" per line, keyed by path. Mode and type are part of the
-// identity: a file that becomes executable or becomes a symlink is a different thing.
-function treeEntries(worktree, commit, paths, options) {
-  if (paths.length === 0) return new Map();
-  // --literal-pathspecs: a filename containing a glob character is a filename, not a
-  // pattern. Records are NUL-separated and the path begins after the FIRST tab, so a
-  // filename containing a tab survives intact.
-  const probe = git(worktree, ["--literal-pathspecs", "ls-tree", "-z", commit, "--", ...paths], options);
-  if (!probe.ok) return null;
-  const entries = new Map();
-  for (const record of probe.stdout.split("\0")) {
-    if (record === "") continue;
-    const tab = record.indexOf("\t");
-    if (tab === -1) continue;
-    const [mode, type, oid] = record.slice(0, tab).split(" ");
-    // No trimming: leading or trailing whitespace is part of the name.
-    entries.set(record.slice(tab + 1), `${mode} ${type} ${oid}`);
-  }
-  return entries;
 }
 
 function revList(worktree, commit, options) {

@@ -126,6 +126,27 @@ describe("attack 2 — the merge must contribute exactly what was reviewed", () 
       assert.equal(proof.proven, true, proof.reason ?? "");
       assert.deepEqual(proof.reviewed_paths, ["src/slice.ts"]);
 
+      // Folded in: a slice whose change is a deletion. Ordinary refactoring work, and it
+      // was refused outright for one commit — the per-path tree lookup found the path in
+      // neither tree and could not tell that from a failed lookup, so refusing the
+      // ambiguity refused the deletion. The proof is asked as a diff now, in which a
+      // deletion both commits made is simply no difference.
+      const del = fixture("proof-deletion");
+      try {
+        run(del.root, "checkout", "-q", "slice");
+        run(del.root, "rm", "-q", "src/base.ts");
+        run(del.root, "commit", "-q", "-m", "slice deletes a file");
+        const deletedAt = run(del.root, "rev-parse", "HEAD");
+        const delMerge = mergeSlice(del.root);
+
+        const delProof = observeMergeProof(del.root, {
+          baseRef: del.featureBase, reviewedCommit: deletedAt, mergeCommit: delMerge,
+        });
+        assert.equal(delProof.proven, true, delProof.reason ?? "");
+        assert.deepEqual(delProof.reviewed_paths, ["src/base.ts", "src/slice.ts"],
+          "the deleted path is part of the reviewed change, not an unreadable tree entry");
+      } finally { rmSync(del.root, { recursive: true, force: true }); }
+
       // Same group, because it is the same question: which merge topologies can be
       // proven. A fast-forward has no merge commit, so its first parent is the slice's
       // own previous commit and the proof would measure the slice's last commit against
@@ -203,7 +224,7 @@ describe("attack 2 — the merge must contribute exactly what was reviewed", () 
         baseRef: f.featureBase, reviewedCommit: f.sliceHead, mergeCommit,
       });
       assert.equal(proof.proven, false);
-      assert.match(proof.reason, /'src\/slice\.ts' differs from the reviewed commit's/u);
+      assert.match(proof.reason, /differs from the reviewed commit's: src\/slice\.ts/u);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
@@ -230,10 +251,16 @@ describe("attack 2 — the merge must contribute exactly what was reviewed", () 
       assert.equal(proof.proven, false);
       assert.match(proof.reason, /did not contribute reviewed paths: src\/second\.ts/u);
 
-      // Folded in: a filename whose bytes were being trimmed. The path list used to be
-      // newline-split and trimmed, so this name became a pathspec matching nothing, both
-      // ls-tree lookups returned undefined, and undefined === undefined passed tampered
-      // content. "Unobservable" must never be spelled the same way as "agrees".
+      // Folded in: altered content must be caught whatever the filename's bytes are.
+      //
+      // Stated honestly, because the previous version of this comment claimed more than
+      // the test shows: this case passes under both the old newline-split-and-trim path
+      // parsing and the current NUL-delimited parsing, so it does not falsify that
+      // change. It cannot, now — the proof compares two path lists produced by the same
+      // parser and holds no pathspec, so a mis-parsed name compares as the same wrong
+      // string on both sides and the difference still surfaces. The parsing is right on
+      // its own merits and matters where paths are used as pathspecs or matched against
+      // declared ownership; it is no longer load-bearing here.
       const spaced = fixture("proof-spaced-name");
       try {
         run(spaced.root, "checkout", "-q", "slice");
