@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { buildEvidence, evidenceRef, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
-import { assertReviewBinding, isApproving, observeMergeProof, readEvidence, readReview } from "../observe/review.js";
+import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview } from "../observe/review.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, VALIDATOR_VERDICTS } from "../state/schema.js";
 import {
@@ -25,19 +25,23 @@ import {
 export const COMMANDS = Object.freeze({
   init: Object.freeze(["--repo", "--branch", "--worktree", "--jira", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
-  lock: Object.freeze(["--repo", "--session", "--branch", "--ttl-ms", "--force", "--now", "--json"]),
+  // No --force: `lock <id> steal` is the same operation with a name that says what it
+  // does, and two spellings of "take someone else's lock" is one too many.
+  lock: Object.freeze(["--repo", "--session", "--branch", "--ttl-ms", "--now", "--json"]),
   heartbeat: Object.freeze(["--repo", "--session", "--now", "--json"]),
   gate: Object.freeze(["--repo", "--artifact", "--now", "--json"]),
   step: Object.freeze(["--repo", "--attempts", "--review-ref", "--evidence-ref", "--now", "--json"]),
   terminal: Object.freeze(["--repo", "--reason", "--now", "--json"]),
   "slices-seed": Object.freeze(["--repo", "--from", "--now", "--json"]),
   slice: Object.freeze(["--repo", "--attempts", "--worktree", "--branch", "--evidence-ref", "--review-ref", "--merge-commit", "--now", "--json"]),
-  observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--skip-tests-reason", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
+  // No --skip-tests-reason: whether a slice needs tests is ratified in its test_plan at
+  // seeding, not asserted at observation time by the party being observed.
+  observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
   validator: Object.freeze(["--repo", "--report", "--reviewed-head", "--worktree", "--now", "--json"]),
   pr: Object.freeze(["--repo", "--url", "--worktree", "--now", "--json"]),
 });
 
-const BOOLEAN_FLAGS = new Set(["--json", "--force"]);
+const BOOLEAN_FLAGS = new Set(["--json"]);
 
 class CliError extends Error {
   constructor(message) {
@@ -85,6 +89,20 @@ function runDirFor(flags, runId) {
   return join(resolve(flags.repo ?? process.cwd()), ".claude", "factory", runId);
 }
 
+// The integration branch's worktree and currently observed head. Three call sites asked
+// this in four lines each with slightly different wording. The branch is named explicitly
+// rather than observed as HEAD: recording a merge legitimately runs with a different
+// branch checked out, and binding to whatever happens to be there makes the observation
+// depend on the orchestrator's directory state.
+//
+// `commit` may be null — an unobservable head is a different refusal at each call site,
+// so the decision stays with the caller rather than being flattened here.
+function integrationHead(repo, run) {
+  const worktree = resolveWorktree(repo, run.worktree);
+  if (!worktree) throw new CliError(`integration worktree '${run.worktree}' is not observable`);
+  return { worktree, commit: observeWorktree(worktree, run.branch, { ref: run.branch }).commit };
+}
+
 const HANDLERS = {
   async validator([runId, verdictValue], flags) {
     if (!VALIDATOR_VERDICTS.includes(verdictValue)) throw new CliError(`verdict must be one of ${VALIDATOR_VERDICTS.join(" | ")}`);
@@ -117,44 +135,20 @@ const HANDLERS = {
     const run = readRun(runDir);
     const at = stamp(flags);
 
-    // Attack 4: a PR may only be recorded against the head the validator judged.
-    // Re-observed here rather than taken from the manifest, because the manifest
-    // records what we were told and the repository records what is true.
+    // The readiness rules themselves live in one place and are re-asked here rather than
+    // assumed from Gate 3's approval: between the approval and this call the integration
+    // head can move and a slice can regress, and `pr` is where the record becomes
+    // permanent. What is checked only here is that the gate happened at all - at gate
+    // time that is the decision being made, not a precondition.
     const reobservers = new Map();
-    reobservers.set("verdict", async ({ candidate, nextState }) => {
-      const validator = candidate.validator;
-      if (!validator || !isApproving(validator.verdict)) {
-        throw new Error("recording a PR requires an approving validator verdict");
-      }
-      // Finding 2: a PR could be recorded on a run with no gates, steps, slices or
-      // evidence whatsoever - the verdict was the only requirement and nothing
-      // checked that the run had done any work.
-      // Finding 4: a partial run - some slices merged, others blocked - could record a
-      // PR. The skill requires a partial run to be surfaced rather than pushed onward,
-      // and the same holds for every terminal status.
-      if (TERMINAL_STATUSES.includes(nextState.status)) {
-        throw new Error(`a ${nextState.status} run must be surfaced, not published; recording a PR is refused`);
-      }
+    reobservers.set("verdict", async ({ nextState }) => {
       if (nextState.gates?.pre_pr?.status !== "approved") {
         throw new Error("recording a PR requires an approved pre_pr gate");
       }
-      if (!Array.isArray(nextState.slices) || nextState.slices.length === 0) {
-        throw new Error("recording a PR requires a seeded slice plan");
-      }
-      // Finding 3: this accepted "merged or blocked", so a run with blocked work published
-      // while its status stayed running. Blocked work makes the run partial, which the
-      // skill requires surfacing rather than pushing onward.
-      const unmerged = nextState.slices.filter((slice) => slice.status !== "merged");
-      if (unmerged.length > 0) {
-        throw new Error(`recording a PR requires every slice merged; not merged: ${unmerged.map((slice) => `${slice.id}(${slice.status})`).join(", ")}`);
-      }
-      const integration = resolveWorktree(repo, run.worktree);
-      if (!integration) throw new Error(`integration worktree '${run.worktree}' is not observable`);
-      const observed = observeWorktree(integration, validator.reviewed_head, { ref: run.branch });
-      if (!observed.commit) throw new Error("integration head could not be observed");
-      if (observed.commit !== validator.reviewed_head) {
-        throw new Error(`validator judged ${validator.reviewed_head.slice(0, 12)} but the integration head is ${observed.commit.slice(0, 12)}`);
-      }
+      assertPublicationReady({
+        runDir, state: nextState, runId,
+        observeHead: () => integrationHead(repo, nextState).commit,
+      });
     });
 
     const next = await transition(runDir, {
@@ -197,9 +191,11 @@ const HANDLERS = {
             worktree: null,
             branch: null,
             attempts: 1,
-            // The ratification point: the gate approved these paths, so this is the
-            // set every later merge is judged against.
+            // The ratification point: the gate approved these paths and this test plan,
+            // so they are the set every later merge is judged against and the decision
+            // about whether this slice may ship without an observed test run.
             paths: slice.paths ?? [],
+            test_plan: slice.test_plan ?? [],
             evidence_ref: null,
             review_ref: null,
             merge_commit: null,
@@ -228,9 +224,7 @@ const HANDLERS = {
     let observedBase = null;
     if (status === "running") {
       const current = readRun(runDir);
-      const integration = resolveWorktree(repo, current.worktree);
-      if (!integration) throw new CliError(`integration worktree '${current.worktree}' is not observable`);
-      const head = observeWorktree(integration, current.branch, { ref: current.branch });
+      const head = integrationHead(repo, current);
       if (!head.commit) throw new CliError(`could not observe the head of '${current.branch}' to bind the slice base`);
       observedBase = head.commit;
     }
@@ -285,19 +279,18 @@ const HANDLERS = {
         }
 
         // Attack 2: the merge proof, observed in the integration worktree.
-        const integration = resolveWorktree(repo, run.worktree);
-        if (!integration) throw new Error(`integration worktree '${run.worktree}' is not observable`);
+        //
         // Finding 1: the proof validated a caller-supplied object without checking it
         // landed on the integration branch, so a synthetic two-parent merge, or an older
         // valid merge after the branch advanced, both passed. An orchestrator that
         // captured the sha before merging, or reused a stale variable, produces exactly
         // that. The recorded merge must be the branch's current tip.
-        const tip = observeWorktree(integration, run.branch, { ref: run.branch });
+        const tip = integrationHead(repo, run);
         if (!tip.commit) throw new Error(`could not observe the head of '${run.branch}'`);
         if (tip.commit !== flags.mergeCommit) {
           throw new Error(`merge commit ${String(flags.mergeCommit).slice(0, 12)} is not the head of '${run.branch}' (${tip.commit.slice(0, 12)}); record the merge before advancing the branch`);
         }
-        const proof = observeMergeProof(integration, {
+        const proof = observeMergeProof(tip.worktree, {
           baseRef: slice.base_ref,
           reviewedCommit: review.reviewed_commit,
           mergeCommit: flags.mergeCommit,
@@ -355,6 +348,20 @@ const HANDLERS = {
       }
     }
 
+    // Whether this subject may be review-ready without an observed test run is read from
+    // the ratified plan, not supplied. `--skip-tests-reason` was the flag this replaces:
+    // it let the orchestrator write its own exemption at the moment of observation, and
+    // any nonempty string was accepted, so "no tests needed" was a valid reason to ship
+    // untested code. An empty test_plan is the same exemption, decided at Gate 2 by the
+    // human who owns that call.
+    //
+    // A subject with no slice row - test-verifier, an agent step - has no ratified
+    // waiver and so has none: its tests must be observed.
+    const slice = readRun(runDir).slices.find((entry) => entry.id === subject);
+    const skipReason = slice && slice.test_plan.length === 0
+      ? `test_plan for '${subject}' was approved empty at slices-seed`
+      : null;
+
     const evidence = buildEvidence({
       subject,
       attempt: flags.attempt === undefined ? 1 : integer(flags.attempt, 1, "--attempt"),
@@ -366,8 +373,7 @@ const HANDLERS = {
       claim,
       runId,
       testCommand: flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
-      // A skip is only a skip when the caller says so and says why.
-      skipReason: flags.skipTestsReason ?? null,
+      skipReason,
     });
 
     // Attack 7: a base that is not an ancestor of HEAD makes the diff meaningless,
@@ -460,8 +466,7 @@ const HANDLERS = {
     try {
       if (action === "claim" || action === "steal") {
         const owner = await claimSessionLock(runDir, {
-          session: flags.session, runId, branch: flags.branch, now, ttlMs,
-          force: action === "steal" || flags.force === true,
+          session: flags.session, runId, branch: flags.branch, now, ttlMs, force: action === "steal",
         });
         return emit(flags, { run_id: runId, action, session: owner.session, stolen_from: owner.stolen_from?.session ?? null });
       }
@@ -469,21 +474,15 @@ const HANDLERS = {
         const released = await releaseSessionLock(runDir, { session: flags.session });
         return emit(flags, { run_id: runId, action, ...released });
       }
-      if (action === "inspect" || action === undefined) {
-        // --now was parsed and then dropped, so inspect always used the real clock.
-        const observed = inspectSessionLock(runDir, {
-          ...(ttlMs === undefined ? {} : { ttlMs }),
-          ...(now === undefined ? {} : { now }),
-        });
-        return emit(flags, { run_id: runId, action: "inspect", state: observed.state, session: observed.owner?.session ?? null, heartbeat_at: observed.owner?.heartbeat_at ?? null });
-      }
+      // `inspect` was here and is gone: `factory status` already reports the lock state
+      // and its owning session, so this was a second way to ask one question.
     } catch (error) {
       if (error instanceof SessionLockHeldError) {
         throw new CliError(`${error.message}\n  resume with --session ${error.owner.session}, or take it with 'lock ${runId} steal'`);
       }
       throw error;
     }
-    throw new CliError("factory lock requires <claim|steal|release|inspect>");
+    throw new CliError("factory lock requires <claim|steal|release>");
   },
 
   async heartbeat([runId], flags) {
@@ -499,9 +498,27 @@ const HANDLERS = {
     if (!GATE_NAMES.includes(name)) throw new CliError(`gate must be one of ${GATE_NAMES.join(" | ")}`);
     if (!GATE_STATUSES.includes(decision)) throw new CliError(`decision must be one of ${GATE_STATUSES.join(" | ")}`);
     const runDir = runDirFor(flags, runId);
+    const repo = resolve(flags.repo ?? process.cwd());
     const at = stamp(flags);
+
+    // Gate 3's approval is what authorizes publication, and in the skill's flow it is the
+    // last transition before the branch is pushed and the PR is created. Readiness was
+    // checked only in `factory pr`, which runs after both of those effects - it could
+    // report a bad publication but not prevent one. The gates contract refuses a pre_pr
+    // approval that arrives with no observer registered, so this cannot go quiet.
+    const reobservers = new Map();
+    if (name === "pre_pr" && decision === "approved") {
+      reobservers.set("gates", async ({ nextState }) => {
+        assertPublicationReady({
+          runDir, state: nextState, runId,
+          observeHead: () => integrationHead(repo, nextState).commit,
+        });
+      });
+    }
+
     const next = await transition(runDir, {
       participants: [{ familyId: "gates", mode: decision === "pending" ? "open" : "decide" }],
+      reobservers,
       apply: (state) => ({
         ...state,
         updated_at: at,
@@ -624,7 +641,7 @@ function usage() {
 
   factory init <run-id> --branch B --worktree W [--jira KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
-  factory lock <run-id> <claim|steal|release|inspect> --session ID [--ttl-ms N]
+  factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID
   factory gate <run-id> <${GATE_NAMES.join("|")}> <${GATE_STATUSES.join("|")}> [--artifact REF]
   factory step <run-id> <agent> <${STEP_STATUSES.join("|")}> [--attempts N] [--review-ref REF] [--evidence-ref REF]

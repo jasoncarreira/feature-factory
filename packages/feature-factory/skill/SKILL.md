@@ -163,9 +163,14 @@ seed the manifest:
 factory slices-seed <run-id> --from plan/slices.json
 ```
 
-Seeding is the **ratification point** for path ownership: the `paths` recorded now are the set every
-later merge is judged against, so a slice that needs more scope amends the plan rather than quietly
-widening.
+Seeding is the **ratification point** for two decisions, and neither can be changed afterwards:
+
+- `paths` — the set every later merge is judged against, so a slice that needs more scope amends the
+  plan rather than quietly widening.
+- `test_plan` — whether the slice may ship without an observed test run. A slice with a non-empty
+  `test_plan` is not `review_ready` until you have run tests and seen them exit zero. A slice with an
+  **empty** `test_plan` is exempt. That exemption is a decision for the engineer at Gate 2, so decide
+  it in the plan and present it: there is no flag that waives tests at observation time.
 
 ### Gate 2 — Technical brief and slice plan
 
@@ -192,7 +197,8 @@ Per slice:
    ```
    This re-derives the diff, runs the tests itself, records `review_ready`, and records any
    disagreement between the builder's claim and what was observed. A disagreement is a review finding,
-   not a detail to reconcile in your head.
+   not a detail to reconcile in your head. Omit `--test-cmd` and the slice is not `review_ready`
+   unless its ratified `test_plan` is empty — the waiver comes from the plan, not from you.
 4. **Review** — `work-reviewer` with subject `<slice-id>`, the observed evidence, the slice spec, and
    the brief. Mark `factory slice <run-id> <slice-id> review --evidence-ref evidence/<slice-id>.json`.
    - On REJECT, before spending an attempt, identify the design-level root cause. If the fix would
@@ -227,12 +233,19 @@ blocked, the run is `partial` — surface it at the next gate rather than pushin
 
 Against the integrated feature worktree, not a slice:
 
-1. `test-verifier` writes and runs acceptance tests for the story's criteria. Observe its result with
-   `factory observe <run-id> test-verifier ...`, then `work-reviewer` confirms each criterion maps to a
-   real assertion.
+1. `test-verifier` writes and runs acceptance tests for the story's criteria. Observe its result on the
+   **integrated** worktree, with the run's original branch point as `--base`:
+   ```sh
+   factory observe <run-id> test-verifier --worktree $FEAT_WT --base <branch-point> --test-cmd "<suite>"
+   ```
+   This writes `evidence/test-verifier.json`, which Gate 3 requires by that exact name. There is no
+   waiver: the stage exists to run the tests, so the evidence must record an observed run that exited
+   zero, against the integration head as it stands. Then `work-reviewer` confirms each criterion maps to
+   a real assertion.
 2. `implementation-validator` — the holistic pass across the whole diff, complementing per-slice
    reviews. It returns GO / GO-WITH-NITS / NO-GO. Record it with
-   `factory validator <run-id> <verdict> --report artifacts/validation-report.md`.
+   `factory validator <run-id> <verdict> --report artifacts/validation-report.md --reviewed-head <sha>`.
+   Record it **before** presenting Gate 3: the gate cannot be approved without it.
 
 On NO-GO, classify each finding against the prior round and find its design-level root cause before
 spending a retry; route the top finding to the owning builder in a fresh slice worktree, or fix in the
@@ -241,9 +254,20 @@ integration branch if it is test-only. Respect `max_retries`.
 ### Gate 3 — Pre-PR
 
 Present the validator verdict, the acceptance-test table, the full diff against the base branch, and
-migration, flag, and risk callouts. Gate 3 requires `review_ready` observed evidence for the
-integrated branch: if the observed diff is empty or the tests were not observed green, do not offer
-approval except as an explicit, recorded human override.
+migration, flag, and risk callouts.
+
+**Approving this gate is the transition that authorizes publication**, so `factory gate <run-id>
+pre_pr approved` re-checks the whole publication story and *refuses the approval* if any of it is
+missing. This is deliberate: everything after this point — the push, the PR — has already happened by
+the time `factory pr` runs, so this is the last refusal that can still prevent something. It requires:
+
+- the run is not terminal, and every slice is `merged` (a partial run is surfaced, not published);
+- an approving `implementation-validator` verdict whose `reviewed_head` **is** the integration branch's
+  current head, re-observed from git rather than read back from the manifest;
+- `evidence/test-verifier.json`, belonging to this run, recording tests that were observed and exited
+  zero, against that same head.
+
+If the gate refuses, its message names the missing piece. Fix that and re-present — do not push.
 
 ## Step 6 — Draft PR
 
@@ -256,6 +280,11 @@ factory pr <run-id> --url <pr-url>
 `pr_url` is immutable once recorded — a run has one PR, and overwriting the URL would hide a second
 one. If PR creation returns an unknown outcome, re-observe whether the PR exists before retrying, and
 record the existing PR rather than creating another.
+
+`factory pr` re-runs every Gate 3 readiness check rather than trusting the approval. That is not
+redundancy: between the approval and this call the integration head can move, and if it has, the PR
+describes a head nobody validated. If `pr` refuses for that reason, the PR you just opened is ahead of
+what was approved — say so at the gate rather than recording it anyway.
 
 Labels, reviewers, and tracker fields are repository policy: derive them from the changed paths using
 whatever mapping the repository documents, and update the tracker only through *your* own calls.

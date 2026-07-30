@@ -335,7 +335,7 @@ describe("attack 8 — external state changes between observation and effect", (
         gates: {}, steps: [],
         slices: [{
           id: "be-thing", stack: "backend", depends_on: [], status: "review",
-          worktree: ".", branch: "slice", attempts: 1, paths: ["src/"],
+          worktree: ".", branch: "slice", attempts: 1, paths: ["src/"], test_plan: ["t"],
           base_ref: f.featureBase, evidence_ref: null, review_ref: "reviews/be-thing.json",
           merge_commit: null,
         }],

@@ -13,7 +13,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isAbsolute, sep } from "node:path";
-import { deriveReviewReady, EVIDENCE_DIR, EVIDENCE_KEYS, git, observeAncestry } from "./index.js";
+import { deriveReviewReady, EVIDENCE_DIR, EVIDENCE_KEYS, evidenceRef, git, observeAncestry } from "./index.js";
+import { TERMINAL_STATUSES } from "../state/schema.js";
 
 export const REVIEW_KEYS = Object.freeze([
   "subject", "reviewer", "verdict", "attempt", "reviewed_commit",
@@ -180,6 +181,63 @@ function pathsChanged(worktree, from, to, options) {
   const probe = git(worktree, ["--literal-pathspecs", "diff", "--name-only", "-z", from, to], options);
   if (!probe.ok) return null;
   return probe.stdout.split("\0").filter((path) => path !== "").sort();
+}
+
+// The single definition of "this run may be published", asked at both points where that
+// question has an answer: when Gate 3 is approved, and again when the PR is recorded.
+//
+// It lived only in the `pr` handler, and the skill pushes the branch and creates the PR
+// *before* calling `factory pr` — so every check there was post-effect. It could describe
+// a bad publication; it could not stop one. Gate 3's approval is the last transition
+// before the push, so that is where the refusal has to be able to land. Asking again at
+// `pr` is not redundant: between the two, slices can regress and the integration head can
+// move, and the second call re-observes rather than trusting the first.
+//
+// `observeHead` is injected so this module does not need to know how a worktree is
+// resolved; it returns the integration branch's currently observed commit, or null.
+export function assertPublicationReady({ runDir, state, runId, observeHead }) {
+  const refuse = (message) => { throw new Error(`this run is not publishable: ${message}`); };
+
+  if (TERMINAL_STATUSES.includes(state.status)) {
+    refuse(`a ${state.status} run must be surfaced, not published`);
+  }
+  if (!Array.isArray(state.slices) || state.slices.length === 0) refuse("no slice plan has been seeded");
+  const unmerged = state.slices.filter((slice) => slice.status !== "merged");
+  if (unmerged.length > 0) {
+    refuse(`every slice must be merged; not merged: ${unmerged.map((slice) => `${slice.id}(${slice.status})`).join(", ")}`);
+  }
+  const validator = state.validator;
+  if (!validator || !isApproving(validator.verdict)) refuse("the validator verdict is not an approval");
+
+  // Attack 4: the verdict names the head it judged, and that head is re-observed here
+  // rather than read back from the manifest — the manifest records what we were told and
+  // the repository records what is true.
+  const head = observeHead();
+  if (!head) refuse("the integration head could not be observed");
+  if (head !== validator.reviewed_head) {
+    refuse(`the validator judged ${String(validator.reviewed_head).slice(0, 12)} but the integration head is ${head.slice(0, 12)}`);
+  }
+
+  // The test-verifier stage, required by evidence rather than by having been mentioned.
+  // Read at its canonical path, not through a ref in run.json: a ref is a value the
+  // orchestrator chooses, and the point is that this particular stage ran.
+  //
+  // `review_ready` is not sufficient here. It admits an explicitly-reasoned skip, which
+  // is right for a slice whose gate waived tests and wrong for the stage whose entire
+  // job is to run them. So the run is required to have been observed, and to have exited
+  // zero, with no exemption available.
+  const ref = evidenceRef("test-verifier");
+  const evidence = readEvidence(runDir, ref, { runId });
+  if (evidence.subject !== "test-verifier") refuse(`${ref} describes '${evidence.subject}'`);
+  if (evidence.review_ready !== true) {
+    refuse(`${ref} is not review_ready${evidence.blocked_reason ? `: ${evidence.blocked_reason}` : ""}`);
+  }
+  if (evidence.tests?.observed !== true) refuse(`${ref} records no observed test run`);
+  if (evidence.tests.exit !== 0) refuse(`${ref} records tests exiting ${evidence.tests.exit}`);
+  if (evidence.commit !== head) {
+    refuse(`${ref} tested ${String(evidence.commit).slice(0, 12)} but the integration head is ${head.slice(0, 12)}`);
+  }
+  return { head, tested: evidence.commit };
 }
 
 // Finding 2, three parts:

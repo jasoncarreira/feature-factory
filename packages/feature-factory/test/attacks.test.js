@@ -89,7 +89,7 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
     // earlier commits from the ownership diff.
     const slice = (status, baseRef) => ({
       id: "be", stack: "backend", depends_on: [], status, worktree: null, branch: null,
-      attempts: 1, paths: ["src/"], base_ref: baseRef, evidence_ref: null, review_ref: null,
+      attempts: 1, paths: ["src/"], test_plan: ["t"], base_ref: baseRef, evidence_ref: null, review_ref: null,
       merge_commit: status === "merged" ? "c".repeat(40) : null,
     });
     // Pending may have none: the slice has not been activated yet.

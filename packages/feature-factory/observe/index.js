@@ -85,11 +85,6 @@ export function observeAncestry(worktree, ancestor, descendant, options = {}) {
   return "indeterminate";
 }
 
-export function observeTree(worktree, ref, options = {}) {
-  const probe = git(worktree, ["rev-parse", `${ref}^{tree}`], options);
-  return probe.ok ? probe.stdout.trim() : null;
-}
-
 // Attack 1: the test command is run here, by us, and its exit code is recorded
 // from the process rather than from anybody's report. `observed: false` means we
 // could not run it, which is not the same as a pass.

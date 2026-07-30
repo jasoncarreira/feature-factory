@@ -11,6 +11,14 @@ import { GATE_NAMES, GATE_STATUSES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STAT
 
 const TERMINAL_MODES = new Set(["terminalize"]);
 
+// The core hands each contract the observer the caller registered; it does not call it.
+// A contract that omits `reobserve` therefore ignores that observer silently, which is
+// twice now how a check that read as enforcement turned out to be dead. Families whose
+// only re-observation is the caller's use this.
+async function callRegisteredObserver({ observe, ...rest }) {
+  if (typeof observe === "function") await observe(rest);
+}
+
 function contract({ id, project, validateTransition, reobserve }) {
   return Object.freeze({
     id,
@@ -28,12 +36,7 @@ function contract({ id, project, validateTransition, reobserve }) {
 // ---------------------------------------------------------------------------
 const envelope = contract({
   id: "envelope",
-  // Calls whatever observer the caller registered. Without this a registered
-  // envelope reobserver is silently ignored, which is the defect that made the PR
-  // head check inert.
-  reobserve: async ({ observe, ...rest }) => {
-    if (typeof observe === "function") await observe(rest);
-  },
+  reobserve: callRegisteredObserver,
   project: (state) => ({
     run_id: state.run_id,
     status: state.status,
@@ -67,8 +70,26 @@ const envelope = contract({
 // ---------------------------------------------------------------------------
 // gates — the three human approval gates
 // ---------------------------------------------------------------------------
+// Approving Gate 3 is the moment publication becomes authorized, and in the skill's flow
+// it is also the last moment before the branch is pushed and the PR is created. Checks
+// that live only in `factory pr` run after both of those effects, so they can report a
+// bad publication but not prevent one. The readiness check is therefore invoked here as
+// well, and an approval that arrives without an observer is refused rather than trusted:
+// the two dead reobservers this codebase already found were both "registered but never
+// called", which fails open exactly here.
+async function checkPrePrApproval({ observe, current, candidate, state, nextState }) {
+  const wasApproved = current?.pre_pr?.status === "approved";
+  const isApproved = candidate?.pre_pr?.status === "approved";
+  if (!isApproved || wasApproved) return callRegisteredObserver({ observe, current, candidate, state, nextState });
+  if (typeof observe !== "function") {
+    throw new Error("approving the pre_pr gate requires a publication-readiness observer");
+  }
+  await observe({ current, candidate, state, nextState });
+}
+
 const gates = contract({
   id: "gates",
+  reobserve: checkPrePrApproval,
   project: (state) => ({ ...(state.gates ?? {}) }),
   validateTransition: ({ before, after }) => {
     for (const name of GATE_NAMES) {
@@ -184,6 +205,15 @@ const slices = contract({
       if (prior.base_ref && slice.base_ref !== prior.base_ref) {
         throw new Error(`slice '${slice.id}' base_ref is immutable once recorded`);
       }
+      // The gate ratified these two at seeding. Widening `paths` afterwards would make
+      // every ownership check judge against a set nobody approved; emptying `test_plan`
+      // afterwards would waive the tests after the fact. Both were only immutable by the
+      // CLI declining to write them, which is not the same as being immutable.
+      for (const field of ["paths", "test_plan"]) {
+        if (JSON.stringify(prior[field]) !== JSON.stringify(slice[field])) {
+          throw new Error(`slice '${slice.id}' ${field} is ratified at seeding and cannot change`);
+        }
+      }
       if (slice.attempts < prior.attempts) throw new Error(`slice '${slice.id}' attempts cannot decrease`);
       if (slice.attempts > prior.attempts + 1) throw new Error(`slice '${slice.id}' attempts cannot skip`);
       if (prior.status === "merged" && slice.status !== "merged") {
@@ -215,9 +245,6 @@ const slices = contract({
 // ---------------------------------------------------------------------------
 // verdict — validator verdict and pr_url
 // ---------------------------------------------------------------------------
-// The core hands each contract its registered reobserver as `observe`; it does not
-// call it. A contract that omits reobserve therefore silently ignores whatever the
-// caller registered, which is how the PR head check came to be inert.
 async function checkPublication({ mode, observe, current, candidate, state, nextState }) {
   if (mode !== "publish") return;
   if (typeof observe !== "function") throw new Error("publishing a PR requires an observer");

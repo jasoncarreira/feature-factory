@@ -156,15 +156,31 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("keeps the production surface small enough to read in one sitting", () => {
     const total = productionFiles.reduce((sum, path) => sum + readFileSync(path, "utf8").split("\n").length, 0);
-    // Raised from 2000 to 2500 when the twelfth command landed at 2,041 lines.
-    // 2500 is BUILD-PLAN-SMALL.md's stated upper bound for the whole system, so this
-    // is no longer a number I can quietly raise again: crossing it means the design
-    // is wrong, not that the tripwire is.
+    // 2000 -> 2500 when the twelfth command landed. 2500 was BUILD-PLAN-SMALL.md's stated
+    // upper bound for the whole system and was described here as a number that could not
+    // be quietly raised again. This raise is therefore not quiet: Jason authorized it
+    // explicitly, for three named findings, after the removals below were made first.
     //
-    // Known reduction candidate if it does need to come down: core/run-lock.js (349
-    // lines) is the largest ported file and still carries quarantine machinery and
-    // hook plumbing beyond what the twelve commands use.
-    assert.ok(total < 2500, `production source is ${total} lines; the tripwire is 2500`);
+    // Closed by the lines this buys:
+    //   * publication readiness centralized in one function and invoked at Gate 3's
+    //     approval, not only in `factory pr`. The skill pushes the branch and creates the
+    //     PR before calling `factory pr`, so every check that lived there was post-effect:
+    //     it could describe a bad publication but not prevent one.
+    //   * `test_plan` ratified on the slice row, replacing `observe --skip-tests-reason`,
+    //     under which the party being observed wrote its own exemption from testing.
+    //   * the gates contract's reobserve hook, without which a registered readiness
+    //     observer is accepted and never called - the third instance of that defect.
+    //
+    // Paid for first, so the raise covers only what is new: `lock inspect` and `--force`
+    // (duplicates of `status` and `steal`), `treeEntries` and `observeTree` (dead once
+    // the merge proof became a diff), and three copies of the integration-head
+    // observation collapsed into one helper.
+    //
+    // Reduction candidate if this has to come down again: core/run-lock.js (331 lines) is
+    // the largest ported file. Its quarantine machinery is NOT the candidate - that is
+    // active correctness machinery - but its hook plumbing exceeds what twelve commands
+    // use.
+    assert.ok(total < 2650, `production source is ${total} lines; the tripwire is 2650`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

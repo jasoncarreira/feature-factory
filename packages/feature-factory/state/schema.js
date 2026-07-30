@@ -46,7 +46,15 @@ export const SLICE_KEYS = Object.freeze([
   // dispatched. Without it a slice's own diff is undecidable after the merge - the
   // integration branch by then contains the slice, so diffing against it is empty
   // and every ownership check would silently pass.
-  "paths", "base_ref", "evidence_ref", "review_ref", "merge_commit",
+  //
+  // test_plan is ratified the same way and for the same reason. It replaced
+  // `observe --skip-tests-reason`, under which the orchestrator authored its own excuse
+  // for shipping an untested slice at the moment of observation - and any nonempty
+  // string was accepted, so "no tests needed" was a valid one. Whether a slice needs
+  // tests is a decision the decompose gate makes: a nonempty test_plan means an observed
+  // green run is required, and an empty one is an approved exemption. Empty by omission
+  // is not possible, because the field is required.
+  "paths", "test_plan", "base_ref", "evidence_ref", "review_ref", "merge_commit",
 ]);
 
 export const VALIDATOR_VERDICTS = Object.freeze(["GO", "GO-WITH-NITS", "NO-GO"]);
@@ -175,6 +183,11 @@ function slices(errors, value) {
     }
     if (slice.merge_commit !== null && slice.merge_commit !== undefined) {
       optionalPattern(errors, slice, "merge_commit", SHA, path);
+    }
+    // An array, possibly empty - empty is the approved exemption - but never absent, so a
+    // slice cannot acquire an exemption by omitting the field.
+    if (!Array.isArray(slice.test_plan) || !slice.test_plan.every((entry) => stringValue(entry))) {
+      errors.push({ path: `${path}.test_plan`, message: "must be an array of strings; empty means tests were waived at the gate" });
     }
     if (!Array.isArray(slice.paths) || slice.paths.length === 0 || !slice.paths.every((entry) => stringValue(entry))) {
       errors.push({ path: `${path}.paths`, message: "must be a non-empty array of paths" });

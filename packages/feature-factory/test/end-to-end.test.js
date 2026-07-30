@@ -32,7 +32,7 @@ const RUN = "app-1";
 const NOW = (minute) => `2026-07-30T12:${String(minute).padStart(2, "0")}:00Z`;
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true } = {}) {
+function project(name, { seed = true, testPlan = ["t"] } = {}) {
   const repo = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(repo, "init", "-q", "-b", "feature");
   git(repo, "config", "user.email", "t@example.com");
@@ -51,7 +51,7 @@ function project(name, { seed = true } = {}) {
   const init = factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW(0)]);
   assert.equal(init.ok, true, init.stderr);
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({
-    slices: [{ id: "be-thing", stack: "backend", paths: ["src/app/"], depends_on: [], acceptance: ["AC1"], test_plan: ["t"] }],
+    slices: [{ id: "be-thing", stack: "backend", paths: ["src/app/"], depends_on: [], acceptance: ["AC1"], test_plan: testPlan }],
   }, null, 2));
   if (seed) assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
   return { repo, runDir };
@@ -228,6 +228,25 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, false, "a failing observed test must block the merge");
       assert.match(merged.stderr, /evidence is not review_ready/u);
+
+      // Folded in, because it is the same question asked one level up: what makes a slice
+      // review-ready with no test run at all. That used to be `--skip-tests-reason`, set at
+      // observation time by the party being observed, and any nonempty string was accepted.
+      // It is now the test_plan the decompose gate ratified, and both directions are
+      // asserted because only the pair shows the field is being read.
+      for (const [label, testPlan, expected] of [["required", ["t"], false], ["waived", [], true]]) {
+        const q = project(`test-plan-${label}`, { testPlan });
+        try {
+          const { basePoint: qBase } = buildSlice(q.repo);
+          factory(q.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
+          // No --test-cmd in either case: the only difference is the ratified plan.
+          const seen = factory(q.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", qBase,
+            "--attempt", "1", "--now", NOW(3)]);
+          assert.equal(seen.ok, true, seen.stderr);
+          assert.equal(seen.out.review_ready, expected,
+            `an untested slice whose test_plan is ${label} must be review_ready: ${expected}`);
+        } finally { rmSync(q.repo, { recursive: true, force: true }); }
+      }
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
@@ -468,6 +487,10 @@ describe("end to end — a merge is refused through the real CLI", () => {
 });
 
 describe("end to end — a PR is recorded once, against the judged head", () => {
+  // Everything up to the point where publication becomes a question: the slice built,
+  // observed, reviewed, merged, and the integration branch validated. The test-verifier
+  // observation is deliberately NOT done here, so each test decides whether that stage
+  // ran and the requirement can be tested in isolation.
   function readyForPr(name) {
     const p = project(name);
     const { head: sliceHead, basePoint } = buildSlice(p.repo);
@@ -479,14 +502,39 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]);
     const mergeCommit = mergeIntoFeature(p.repo);
     assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
-    return { ...p, head: git(p.repo, "rev-parse", "HEAD") };
+    const head = git(p.repo, "rev-parse", "HEAD");
+    assert.equal(factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md",
+      "--reviewed-head", head, "--now", NOW(5)]).ok, true);
+    return { ...p, head, basePoint };
+  }
+
+  // The test-verifier stage, observed on the integrated branch rather than asserted to
+  // have happened.
+  function verifyTests(repo, base, at, { cmd = "git --no-pager log -1 --format=%H" } = {}) {
+    return factory(repo, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", base,
+      "--attempt", "1", "--test-cmd", cmd, "--now", at]);
   }
 
   it("records a PR against the validated head, and is idempotent on replay", () => {
     const p = readyForPr("pr-ok");
     try {
-      approveGate(p.repo, "pre_pr", NOW(5));
-      assert.equal(factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", p.head, "--now", NOW(5)]).ok, true);
+      // Gate 3 is the last transition before the skill pushes and opens the PR, so the
+      // readiness refusal has to be able to land here. Isolated: the slice is merged, the
+      // verdict is a GO against the current head, and the only thing missing is an
+      // observed test-verifier run.
+      const noTests = approveGate(p.repo, "pre_pr", NOW(5));
+      assert.equal(noTests.ok, false, "Gate 3 must not approve before the tests were observed");
+      assert.match(noTests.stderr, /evidence\/test-verifier\.json' could not be read/u);
+
+      // And a test-verifier run that was observed *failing* is not a pass either.
+      assert.equal(verifyTests(p.repo, p.basePoint, NOW(5), { cmd: "git rev-parse --verify --quiet refs/heads/nope" }).ok, true);
+      const redTests = approveGate(p.repo, "pre_pr", NOW(5));
+      assert.equal(redTests.ok, false, "a failing test-verifier run must not approve Gate 3");
+      assert.match(redTests.stderr, /records tests exiting 1|is not review_ready/u);
+
+      assert.equal(verifyTests(p.repo, p.basePoint, NOW(5)).ok, true);
+      assert.equal(approveGate(p.repo, "pre_pr", NOW(5)).ok, true, "a ready run must approve");
+
       const first = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
       assert.equal(first.ok, true, first.stderr);
       assert.equal(first.out.pr_url, "https://example.test/pr/1");
@@ -503,8 +551,8 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
   it("refuses a second, different PR", () => {
     const p = readyForPr("pr-second");
     try {
+      verifyTests(p.repo, p.basePoint, NOW(5));
       approveGate(p.repo, "pre_pr", NOW(5));
-      factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", p.head, "--now", NOW(5)]);
       factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
       const second = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/2", "--now", NOW(7)]);
       assert.equal(second.ok, false, "a run has one PR");
@@ -513,12 +561,15 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
-  it("refuses a PR once the integration head has moved past what was validated", () => {
+  it("refuses a PR once the integration head has moved past what was approved", () => {
+    // This is why readiness is asked twice rather than inherited from Gate 3. The run is
+    // genuinely ready at approval; the branch then moves, and the PR would publish a head
+    // nobody validated. Only the second check can see that.
     const p = readyForPr("pr-stale");
     try {
-      approveGate(p.repo, "pre_pr", NOW(5));
-      factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", p.head, "--now", NOW(5)]);
-      // Something lands after validation. The verdict no longer describes the branch.
+      verifyTests(p.repo, p.basePoint, NOW(5));
+      assert.equal(approveGate(p.repo, "pre_pr", NOW(5)).ok, true, "the run is ready at approval time");
+
       writeFileSync(join(p.repo, "src", "app", "after-validation.ts"), "late\n");
       git(p.repo, "add", "-A");
       git(p.repo, "commit", "-q", "-m", "after validation");
@@ -530,54 +581,60 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
-  it("refuses a PR on a run that did no work", () => {
-    // opencode drove init -> approving validator -> PR with no gates, steps, slices
-    // or evidence, and the PR was recorded.
-    // Unseeded on purpose: the run never decomposed, so there is no slice plan at all.
+  it("refuses to approve Gate 3 on a run that did no work", () => {
+    // opencode drove init -> approving validator -> PR with no gates, steps, slices or
+    // evidence, and the PR was recorded. Unseeded on purpose: the run never decomposed,
+    // so there is no slice plan at all.
+    //
+    // Asserted at the gate rather than at `pr`, because that is now where it is refused
+    // first — and refusing at `pr` alone would be a report about a PR that already exists.
     const p = project("no-work", { seed: false });
     try {
       const head = git(p.repo, "rev-parse", "HEAD");
-      // Approve pre_pr and record a GO so neither of those can be the refusal: the
-      // only thing missing is that the run never decomposed or built anything.
-      approveGate(p.repo, "pre_pr", NOW(5));
       factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", head, "--now", NOW(5)]);
+      const gate = approveGate(p.repo, "pre_pr", NOW(5));
+      assert.equal(gate.ok, false, "a run with no slice plan must not clear Gate 3");
+      assert.match(gate.stderr, /no slice plan has been seeded/u);
+
+      // And with the gate refused, the PR cannot be recorded either — the other half of
+      // the pair, since a `pr` call is what an orchestrator that ignored the gate would do.
       const pr = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
-      assert.equal(pr.ok, false, "a run with no slice plan must not produce a PR");
-      assert.match(pr.stderr, /requires a seeded slice plan/u);
+      assert.equal(pr.ok, false);
+      assert.match(pr.stderr, /requires an approved pre_pr gate/u);
       assert.equal(runJson(p.runDir).pr_url, null);
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
-  it("refuses a PR while a slice is still open", () => {
+  it("refuses to approve Gate 3 while a slice is still open", () => {
     const p = project("open-slice");
     try {
-      const { basePoint } = buildSlice(p.repo);
+      buildSlice(p.repo);
       factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
       const head = git(p.repo, "rev-parse", "slice");
-      approveGate(p.repo, "pre_pr", NOW(5));
       factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md", "--reviewed-head", head, "--now", NOW(5)]);
-      const pr = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
-      assert.equal(pr.ok, false);
-      assert.match(pr.stderr, /every slice merged; not merged: be-thing\(running\)/u);
+      const running = approveGate(p.repo, "pre_pr", NOW(5));
+      assert.equal(running.ok, false);
+      assert.match(running.stderr, /every slice must be merged; not merged: be-thing\(running\)/u);
 
       // Folded in rather than added, per the test budget: a *blocked* slice must refuse
       // too. This accepted "merged or blocked", so a run with blocked work published
       // while its status stayed running.
       factory(p.repo, ["slice", RUN, "be-thing", "blocked", "--now", NOW(7)]);
-      const withBlocked = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(8)]);
-      assert.equal(withBlocked.ok, false, "blocked work must not be published");
-      assert.match(withBlocked.stderr, /every slice merged; not merged: be-thing\(blocked\)/u);
+      const blocked = approveGate(p.repo, "pre_pr", NOW(8));
+      assert.equal(blocked.ok, false, "blocked work must not be published");
+      assert.match(blocked.stderr, /every slice must be merged; not merged: be-thing\(blocked\)/u);
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
-  it("refuses a PR with no approving verdict", () => {
+  it("refuses to approve Gate 3 with no approving verdict", () => {
     const p = readyForPr("pr-nogo");
     try {
-      approveGate(p.repo, "pre_pr", NOW(5));
+      verifyTests(p.repo, p.basePoint, NOW(5));
+      // The validator loops: a NO-GO recorded over the GO the fixture established.
       factory(p.repo, ["validator", RUN, "NO-GO", "--report", "artifacts/validation-report.md", "--reviewed-head", p.head, "--now", NOW(5)]);
-      const pr = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(6)]);
-      assert.equal(pr.ok, false);
-      assert.match(pr.stderr, /requires an approving validator verdict/u);
+      const gate = approveGate(p.repo, "pre_pr", NOW(5));
+      assert.equal(gate.ok, false);
+      assert.match(gate.stderr, /the validator verdict is not an approval/u);
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 });
