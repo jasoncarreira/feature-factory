@@ -161,20 +161,37 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
-  it("refuses a merge whose tree nobody reviewed", () => {
-    const p = upToReview("drift");
+  it("tolerates a moved base, and refuses unreviewed content in the merge", () => {
+    // Inverted. This asserted that a moved base is a failure, which is what every wave's
+    // second merge looks like. What must actually fail is unreviewed content inside the
+    // merge, so both halves are asserted here against one fixture.
+    const p = upToReview("moved-base");
     try {
-      // Concurrent work lands on the integration branch first: the seriality
-      // violation. Ancestry still holds, the tree does not.
       git(p.repo, "checkout", "-q", "feature");
-      writeFileSync(join(p.repo, "src", "app", "concurrent.ts"), "unreviewed\n");
+      writeFileSync(join(p.repo, "src", "app", "sibling.ts"), "another slice\n");
       git(p.repo, "add", "-A");
-      git(p.repo, "commit", "-q", "-m", "concurrent");
+      git(p.repo, "commit", "-q", "-m", "sibling merged first");
       const mergeCommit = mergeIntoFeature(p.repo);
 
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
-      assert.equal(merged.ok, false);
-      assert.match(merged.stderr, /merged tree differs from the reviewed tree/u);
+      assert.equal(merged.ok, true, `a moved base must not block a merge: ${merged.stderr}`);
+      assert.equal(runJson(p.runDir).slices[0].status, "merged");
+    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  });
+
+  it("refuses a merge that smuggles an unreviewed path", () => {
+    const p = upToReview("smuggled");
+    try {
+      git(p.repo, "checkout", "-q", "feature");
+      git(p.repo, "merge", "-q", "--no-ff", "--no-commit", "slice");
+      writeFileSync(join(p.repo, "src", "app", "smuggled.ts"), "never reviewed\n");
+      git(p.repo, "add", "-A");
+      git(p.repo, "commit", "-q", "-m", "merge plus extra");
+      const mergeCommit = git(p.repo, "rev-parse", "HEAD");
+
+      const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, false, "content nobody reviewed must not merge");
+      assert.match(merged.stderr, /contributed paths that were not reviewed: src\/app\/smuggled\.ts/u);
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
@@ -372,29 +389,10 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
-  // KNOWN FAILING — pushed deliberately as a red baseline, not an oversight.
-  //
-  // The merge proof is `reviewed_tree === merged_tree`, which cannot hold for any wave
-  // after its first merge: a wave's slices all branch from the same integration head,
-  // merges are serial, so the second merge lands on a base containing the first slice's
-  // work and its merged tree necessarily differs from what was reviewed.
-  //
-  // Fails with: slice 'be-two' merge proof failed: merged tree differs from the reviewed
-  // tree.
-  //
-  // The replacement proof is diff equality — what the merge contributed must equal what
-  // was reviewed:
-  //
-  //   diff(base_ref -> reviewed_commit) == diff(first-parent(merge) -> merge)
-  //
-  // Tree equality then becomes the special case where the first parent still equals
-  // base_ref, i.e. the first merge of a wave. That also separates two things the current
-  // proof conflates: a moved base, which is normal and must pass, from unreviewed content
-  // inside the merge, which must fail.
-  //
-  // When this is fixed, `refuses a merge whose tree nobody reviewed` must be inverted:
-  // it currently asserts that a moved base is a failure, which encodes the same wrong
-  // assumption.
+  // The case that exposed the old tree-equality proof: a wave's slices branch from one
+  // head and merge serially, so the second merge lands on a moved base. Now passing, and
+  // kept as the default multi-slice coverage — a single-slice fixture cannot detect a
+  // proof built on "nothing lands between branch and merge".
   it("merges two file-disjoint slices from the same wave", () => {
     // The central case, and the one that exposes the merge proof's assumption. Both
     // slices branch from the same integration head, as viso specifies ("a slice worktree

@@ -282,6 +282,7 @@ const HANDLERS = {
         const integration = resolveWorktree(repo, run.worktree);
         if (!integration) throw new Error(`integration worktree '${run.worktree}' is not observable`);
         const proof = observeMergeProof(integration, {
+          baseRef: slice.base_ref,
           reviewedCommit: review.reviewed_commit,
           mergeCommit: flags.mergeCommit,
         });

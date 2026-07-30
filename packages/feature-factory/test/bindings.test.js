@@ -115,34 +115,101 @@ describe("attack 3 — an approval presented against a different commit", () => 
   });
 });
 
-describe("attack 2 — the merged tree differs from the reviewed tree", () => {
-  it("proves a clean serial merge", () => {
+describe("attack 2 — the merge must contribute exactly what was reviewed", () => {
+  it("proves a merge onto an unmoved base", () => {
     const f = fixture("proof-ok");
     try {
       const mergeCommit = mergeSlice(f.root);
-      const proof = observeMergeProof(f.root, { reviewedCommit: f.sliceHead, mergeCommit });
+      const proof = observeMergeProof(f.root, {
+        baseRef: f.featureBase, reviewedCommit: f.sliceHead, mergeCommit,
+      });
       assert.equal(proof.proven, true, proof.reason ?? "");
-      assert.equal(proof.reviewed_tree, proof.merged_tree);
+      assert.deepEqual(proof.reviewed_paths, ["src/slice.ts"]);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
-  it("refuses a merge whose tree nobody reviewed", () => {
-    const f = fixture("proof-drift");
+  it("tolerates a base that moved, which is what a wave's second merge always looks like", () => {
+    // Inverted deliberately. This scenario used to be asserted as a failure, on the
+    // assumption that nothing lands between a slice branching and merging. A wave's
+    // slices all branch from one head and merge serially, so for every merge after the
+    // first the base has moved and the merged tree contains a sibling's work. That is
+    // normal and must pass.
+    const f = fixture("proof-moved-base");
     try {
-      // Something lands on the integration branch before the slice merges — the
-      // seriality violation. Ancestry still holds; the tree does not.
+      writeFileSync(join(f.root, "src", "sibling.ts"), "another slice\n");
       run(f.root, "checkout", "-q", "feature");
-      writeFileSync(join(f.root, "src", "sneaked.ts"), "unreviewed\n");
       run(f.root, "add", "-A");
-      run(f.root, "commit", "-q", "-m", "concurrent work");
+      run(f.root, "commit", "-q", "-m", "sibling merged first");
       const mergeCommit = mergeSlice(f.root);
 
-      const proof = observeMergeProof(f.root, { reviewedCommit: f.sliceHead, mergeCommit });
+      const proof = observeMergeProof(f.root, {
+        baseRef: f.featureBase, reviewedCommit: f.sliceHead, mergeCommit,
+      });
+      assert.equal(proof.proven, true, proof.reason ?? "");
+      assert.deepEqual(proof.reviewed_paths, ["src/slice.ts"],
+        "only the slice's own path was reviewed, and only it may be contributed");
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a merge that carries a path nobody reviewed", () => {
+    // The case tree equality was really trying to catch, now isolated from base movement.
+    const f = fixture("proof-extra-path");
+    try {
+      run(f.root, "checkout", "-q", "feature");
+      run(f.root, "merge", "-q", "--no-ff", "--no-commit", "slice");
+      writeFileSync(join(f.root, "src", "smuggled.ts"), "never reviewed\n");
+      run(f.root, "add", "-A");
+      run(f.root, "commit", "-q", "-m", "merge slice plus extra");
+      const mergeCommit = run(f.root, "rev-parse", "HEAD");
+
+      const proof = observeMergeProof(f.root, {
+        baseRef: f.featureBase, reviewedCommit: f.sliceHead, mergeCommit,
+      });
       assert.equal(proof.proven, false);
-      assert.equal(proof.reason, "merged tree differs from the reviewed tree");
-      // Ancestry alone would have accepted this, which is why tree equality is the
-      // proof and ancestry is only a precondition.
-      assert.notEqual(proof.reviewed_tree, proof.merged_tree);
+      assert.match(proof.reason, /contributed paths that were not reviewed: src\/smuggled\.ts/u);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a merge whose content differs from the reviewed content", () => {
+    const f = fixture("proof-altered");
+    try {
+      run(f.root, "checkout", "-q", "feature");
+      run(f.root, "merge", "-q", "--no-ff", "--no-commit", "slice");
+      writeFileSync(join(f.root, "src", "slice.ts"), "altered during the merge\n");
+      run(f.root, "add", "-A");
+      run(f.root, "commit", "-q", "-m", "merge slice, altered");
+      const mergeCommit = run(f.root, "rev-parse", "HEAD");
+
+      const proof = observeMergeProof(f.root, {
+        baseRef: f.featureBase, reviewedCommit: f.sliceHead, mergeCommit,
+      });
+      assert.equal(proof.proven, false);
+      assert.match(proof.reason, /'src\/slice\.ts' differs from the reviewed commit's/u);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a merge that drops part of the reviewed change", () => {
+    // The other half of diff equality. A conflict resolution that quietly discards one of
+    // the reviewed files ships less than was approved, which is as wrong as shipping more.
+    const f = fixture("proof-dropped");
+    try {
+      run(f.root, "checkout", "-q", "slice");
+      writeFileSync(join(f.root, "src", "second.ts"), "also reviewed\n");
+      run(f.root, "add", "-A");
+      run(f.root, "commit", "-q", "-m", "second reviewed file");
+      const reviewedCommit = run(f.root, "rev-parse", "HEAD");
+
+      run(f.root, "checkout", "-q", "feature");
+      run(f.root, "merge", "-q", "--no-ff", "--no-commit", "slice");
+      run(f.root, "rm", "-qf", "src/second.ts");
+      run(f.root, "commit", "-q", "-m", "merge slice, minus one file");
+      const mergeCommit = run(f.root, "rev-parse", "HEAD");
+
+      const proof = observeMergeProof(f.root, {
+        baseRef: f.featureBase, reviewedCommit, mergeCommit,
+      });
+      assert.equal(proof.proven, false);
+      assert.match(proof.reason, /did not contribute reviewed paths: src\/second\.ts/u);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
@@ -150,7 +217,6 @@ describe("attack 2 — the merged tree differs from the reviewed tree", () => {
     const f = fixture("proof-unrelated");
     try {
       const mergeCommit = mergeSlice(f.root);
-      // featureBase is an ancestor; a sibling commit on an unrelated history is not.
       run(f.root, "checkout", "-q", "--orphan", "elsewhere");
       run(f.root, "rm", "-rq", "--cached", ".");
       writeFileSync(join(f.root, "other.ts"), "x\n");
@@ -158,19 +224,23 @@ describe("attack 2 — the merged tree differs from the reviewed tree", () => {
       run(f.root, "commit", "-q", "-m", "unrelated");
       const unrelated = run(f.root, "rev-parse", "HEAD");
 
-      const proof = observeMergeProof(f.root, { reviewedCommit: unrelated, mergeCommit });
+      const proof = observeMergeProof(f.root, {
+        baseRef: f.featureBase, reviewedCommit: unrelated, mergeCommit,
+      });
       assert.equal(proof.proven, false);
       assert.match(proof.reason, /not-ancestor/u);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
-  it("refuses when a tree cannot be observed at all", () => {
+  it("refuses when the changed paths cannot be observed", () => {
     const f = fixture("proof-unobservable");
     try {
       const mergeCommit = mergeSlice(f.root);
-      const proof = observeMergeProof(f.root, { reviewedCommit: "refs/heads/does-not-exist", mergeCommit });
+      const proof = observeMergeProof(f.root, {
+        baseRef: "refs/heads/does-not-exist", reviewedCommit: f.sliceHead, mergeCommit,
+      });
       assert.equal(proof.proven, false);
-      assert.equal(proof.reason, "trees could not be observed");
+      assert.equal(proof.reason, "changed paths could not be observed");
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 });
