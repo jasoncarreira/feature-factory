@@ -161,16 +161,25 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
-  it("tolerates a moved base, and refuses unreviewed content in the merge", () => {
-    // Inverted. This asserted that a moved base is a failure, which is what every wave's
-    // second merge looks like. What must actually fail is unreviewed content inside the
-    // merge, so both halves are asserted here against one fixture.
+  it("tolerates a moved base, however it moved, and refuses unreviewed content in the merge", () => {
+    // Inverted once and then left alone deliberately.
+    //
+    // It originally asserted a moved base fails, which is what every wave's second merge
+    // looks like. A round later a guard was added requiring the base to have moved only by
+    // recorded slice merges — opencode had walked a direct privileged commit through here —
+    // and it was reverted: `base_ref` is immutable, so refusing the merge permanently
+    // strands the slice and the run produces no PR. Destroying a shipped feature to enforce
+    // a lane check is the wrong trade, and SKILL.md's NO-GO remediation explicitly permits
+    // fixing test-only problems directly in the integration branch.
+    //
+    // So a direct commit moves the base here on purpose: that shape must merge. What must
+    // fail is unreviewed content inside the *merge*, which the next test covers.
     const p = upToReview("moved-base");
     try {
       git(p.repo, "checkout", "-q", "feature");
-      writeFileSync(join(p.repo, "src", "app", "sibling.ts"), "another slice\n");
+      writeFileSync(join(p.repo, "src", "app", "sibling.ts"), "landed by other means\n");
       git(p.repo, "add", "-A");
-      git(p.repo, "commit", "-q", "-m", "sibling merged first");
+      git(p.repo, "commit", "-q", "-m", "direct integration commit");
       const mergeCommit = mergeIntoFeature(p.repo);
 
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
@@ -420,12 +429,21 @@ describe("end to end — a merge is refused through the real CLI", () => {
     // first slice's work as well as its own. Tree equality cannot hold for it.
     const p = project("wave", { seed: false });
     try {
-      writeFileSync(join(p.runDir, "plan", "slices.json"), JSON.stringify({
-        slices: [
-          { id: "be-one", stack: "backend", paths: ["src/app/one/"], depends_on: [] },
-          { id: "be-two", stack: "backend", paths: ["src/app/two/"], depends_on: [] },
-        ],
-      }, null, 2));
+      // Both slices declare a test_plan. This fixture used to omit it, which was how the
+      // omitted-field waiver stayed invisible: the fixture institutionalized the very
+      // shape that granted a silent exemption. Seeding a plan without one is now refused,
+      // and that refusal is asserted first so the fixture cannot drift back.
+      const planFile = join(p.runDir, "plan", "slices.json");
+      const slices = [
+        { id: "be-one", stack: "backend", paths: ["src/app/one/"], depends_on: [] },
+        { id: "be-two", stack: "backend", paths: ["src/app/two/"], depends_on: [] },
+      ];
+      writeFileSync(planFile, JSON.stringify({ slices }, null, 2));
+      const omitted = factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]);
+      assert.equal(omitted.ok, false, "a plan that never mentions tests must not seed");
+      assert.match(omitted.stderr, /test_plan: must be an array of strings/u);
+
+      writeFileSync(planFile, JSON.stringify({ slices: slices.map((s) => ({ ...s, test_plan: ["t"] })) }, null, 2));
       assert.equal(factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
       const waveBase = git(p.repo, "rev-parse", "HEAD");
 
@@ -578,6 +596,34 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       assert.equal(pr.ok, false, "a stale verdict must not authorize a PR");
       assert.match(pr.stderr, /validator judged [0-9a-f]{12} but the integration head is [0-9a-f]{12}/u);
       assert.equal(runJson(p.runDir).pr_url, null);
+
+      // Folded in: opencode's continuation of this exact sequence. Refusing the PR is not
+      // enough on its own, because the obvious next move is to re-observe and re-validate
+      // at the new head — which made every machine check current again while the human's
+      // Gate 3 approval still referred to the old one. The gate record holds a status and a
+      // time, not a commit, so nothing noticed. Freezing the verdict once the gate is
+      // approved is what binds that approval to a commit without storing a second copy of
+      // it for the two records to disagree about.
+      const newHead = git(p.repo, "rev-parse", "HEAD");
+      assert.notEqual(newHead, p.head);
+      assert.equal(verifyTests(p.repo, p.basePoint, NOW(6)).ok, true, "re-observing tests is allowed");
+      const revalidate = factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md",
+        "--reviewed-head", newHead, "--now", NOW(6)]);
+      assert.equal(revalidate.ok, false, "an approved gate must not be re-pointed at a new head");
+      assert.match(revalidate.stderr, /re-open it as pending before re-recording the validator/u);
+      assert.equal(runJson(p.runDir).validator.reviewed_head, p.head, "the approved verdict stands");
+
+      // And the recovery, which is the half that matters more than the refusal: this costs
+      // one more approval, not the run. Re-open Gate 3, re-validate at the new head, present
+      // it again, and the PR records. A guard that turned a late test-only commit into a
+      // dead run would be worse than the staleness it prevents.
+      assert.equal(factory(p.repo, ["gate", RUN, "pre_pr", "pending", "--now", NOW(7)]).ok, true, "a decided gate re-opens");
+      assert.equal(factory(p.repo, ["validator", RUN, "GO", "--report", "artifacts/validation-report.md",
+        "--reviewed-head", newHead, "--now", NOW(7)]).ok, true, "and re-validating is then allowed");
+      assert.equal(factory(p.repo, ["gate", RUN, "pre_pr", "approved", "--now", NOW(7)]).ok, true, "re-approved at the new head");
+      const after = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(8)]);
+      assert.equal(after.ok, true, `the run must still be able to ship: ${after.stderr}`);
+      assert.equal(runJson(p.runDir).pr_url, "https://example.test/pr/1");
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 

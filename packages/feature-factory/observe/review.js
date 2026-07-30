@@ -136,6 +136,14 @@ export function observeMergeProof(worktree, { baseRef, reviewedCommit, mergeComm
     return fail(`the merge did not contribute reviewed paths: ${missing.join(", ")}`);
   }
 
+  // Do not add a check that the base moved only by *recorded* slice merges. It was built
+  // and reverted: `base_ref` is immutable, so refusing the merge permanently strands the
+  // slice and the run ships nothing — a whole feature destroyed to enforce a lane check.
+  // It also contradicts SKILL.md, whose NO-GO remediation permits fixing test-only problems
+  // directly in the integration branch. Unreviewed content is stopped downstream instead,
+  // where it costs an approval rather than the run: the validator judges the whole
+  // integrated diff, and publication requires its judged head to still be the head.
+
   // Content identity, asked as one diff rather than as a per-path lookup.
   //
   // This was a per-path `ls-tree` comparison, and it could not distinguish two cases that

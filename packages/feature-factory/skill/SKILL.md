@@ -226,6 +226,13 @@ required work and discloses every concrete out-of-lane path with a rationale, so
 whether the plan or the change is wrong. Silent out-of-lane edits are the failure this prevents;
 privileged control-plane paths are never disclosable and are always refused.
 
+**A moved base is fine.** A wave's second merge lands on a base containing its sibling, and a direct
+commit to the feature branch — the test-only fix Step 5 permits — moves it too. The merge proof
+tolerates both: it checks that the merge contributed exactly the reviewed paths and that the merge's
+content on those paths matches what was reviewed, so unreviewed content inside *the merge* is refused
+while movement around it is not. What guards the branch as a whole is the integration pass: the
+validator judges the whole diff and Gate 3 will not approve unless the head it judged is still the head.
+
 Advance waves until all slices are `merged`, or a slice is `blocked`. If some merged and others
 blocked, the run is `partial` — surface it at the next gate rather than pushing on.
 
@@ -268,6 +275,17 @@ the time `factory pr` runs, so this is the last refusal that can still prevent s
   zero, against that same head.
 
 If the gate refuses, its message names the missing piece. Fix that and re-present — do not push.
+
+**If the branch moves after approval**, the approval no longer refers to what you would publish, so the
+validator verdict is frozen while the gate stands and `factory pr` refuses. Recovery is one more
+approval, not a lost run:
+
+```sh
+factory gate <run-id> pre_pr pending          # re-open; a decided gate may only re-open as pending
+factory observe <run-id> test-verifier ...     # re-observe the tests at the new head
+factory validator <run-id> <verdict> --reviewed-head <new-sha> --report ...
+factory gate <run-id> pre_pr approved          # present the new diff and re-approve
+```
 
 ## Step 6 — Draft PR
 

@@ -176,10 +176,16 @@ describe("attack 2 — the merge must contribute exactly what was reviewed", () 
     // normal and must pass.
     const f = fixture("proof-moved-base");
     try {
+      // The sibling arrives as a real merge, which is how a wave actually moves the base.
+      // A bare commit would also be tolerated — see the end-to-end moved-base test for why
+      // that is deliberate — but modelling the real shape here keeps this test about the
+      // case the proof was redesigned for.
+      run(f.root, "checkout", "-q", "-b", "sibling", f.featureBase);
       writeFileSync(join(f.root, "src", "sibling.ts"), "another slice\n");
-      run(f.root, "checkout", "-q", "feature");
       run(f.root, "add", "-A");
-      run(f.root, "commit", "-q", "-m", "sibling merged first");
+      run(f.root, "commit", "-q", "-m", "sibling work");
+      run(f.root, "checkout", "-q", "feature");
+      run(f.root, "merge", "-q", "--no-ff", "sibling", "-m", "merge sibling");
       const mergeCommit = mergeSlice(f.root);
 
       const proof = observeMergeProof(f.root, {

@@ -103,8 +103,16 @@ const gates = contract({
         continue;
       }
       if (from.status === to.status) continue;
-      if (from.status !== "pending") {
-        throw new Error(`gate '${name}' is already decided as ${from.status}`);
+      // A decided gate may be re-opened to pending, and only to pending. Without this the
+      // verdict freeze below has no way out: once the branch moves under an approval, the
+      // approval is stale, re-validating is refused, and the run can only be abandoned —
+      // a shipped feature lost to a commit that was probably a test fix. Re-opening is what
+      // makes "the head changed, so ask the human again" expressible.
+      //
+      // Only to pending, so this cannot flip an approval into a rejection or vice versa;
+      // the decision has to be made again, by whoever makes decisions.
+      if (from.status !== "pending" && to.status !== "pending") {
+        throw new Error(`gate '${name}' is already decided as ${from.status}; re-open it as pending to decide again`);
       }
       if (!GATE_STATUSES.includes(to.status)) throw new Error(`gate '${name}' status is invalid`);
       if (to.status !== "pending" && !to.at) throw new Error(`gate '${name}' decision requires 'at'`);
@@ -255,7 +263,7 @@ const verdict = contract({
   id: "verdict",
   reobserve: checkPublication,
   project: (state) => ({ validator: state.validator ?? null, pr_url: state.pr_url ?? null }),
-  validateTransition: ({ before, after }) => {
+  validateTransition: ({ before, after, candidate }) => {
     if (before.pr_url && before.pr_url !== after.pr_url) {
       // Exactly-once: a run has one PR. Overwriting the URL would hide a second.
       throw new Error("pr_url is immutable once recorded");
@@ -263,6 +271,21 @@ const verdict = contract({
     const priorLoops = before.validator?.loops ?? 0;
     const nextLoops = after.validator?.loops ?? 0;
     if (nextLoops < priorLoops) throw new Error("validator.loops cannot decrease");
+    // What the human approved at Gate 3 was this verdict against this head. The gate record
+    // stores only a status and a time, so re-recording the verdict afterwards silently
+    // re-points that approval at whatever the branch has become: opencode approved at one
+    // head, committed directly to reach a second, re-observed the tests and re-recorded the
+    // verdict there, then published without re-presenting the gate. Every machine check was
+    // current and the human decision was stale.
+    //
+    // Freezing the verdict while the gate stands is what makes the approval mean a commit,
+    // without storing a second copy of the head for the two records to disagree about. It
+    // is not a dead end: re-open Gate 3 as pending, re-validate, and present it again. So
+    // the cost of a late change is one more approval, not a lost run.
+    if (candidate.gates?.pre_pr?.status === "approved"
+      && JSON.stringify(before.validator) !== JSON.stringify(after.validator)) {
+      throw new Error("the pre_pr gate is approved; re-open it as pending before re-recording the validator");
+    }
   },
 });
 
