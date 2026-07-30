@@ -530,7 +530,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       assert.equal(verifyTests(p.repo, p.basePoint, NOW(5), { cmd: "git rev-parse --verify --quiet refs/heads/nope" }).ok, true);
       const redTests = approveGate(p.repo, "pre_pr", NOW(5));
       assert.equal(redTests.ok, false, "a failing test-verifier run must not approve Gate 3");
-      assert.match(redTests.stderr, /records tests exiting 1|is not review_ready/u);
+      assert.match(redTests.stderr, /test-verifier\.json records tests exiting 1/u);
 
       assert.equal(verifyTests(p.repo, p.basePoint, NOW(5)).ok, true);
       assert.equal(approveGate(p.repo, "pre_pr", NOW(5)).ok, true, "a ready run must approve");

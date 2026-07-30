@@ -229,11 +229,16 @@ export function assertPublicationReady({ runDir, state, runId, observeHead }) {
   const ref = evidenceRef("test-verifier");
   const evidence = readEvidence(runDir, ref, { runId });
   if (evidence.subject !== "test-verifier") refuse(`${ref} describes '${evidence.subject}'`);
+  // The concrete facts before the derived one, so each refusal names what is actually
+  // wrong. Reversed, `review_ready` absorbs both: a failing run derives false, so the
+  // exit-code branch could never be reached and would have been a dead guard reading as
+  // enforcement. The observed-run branch stays load-bearing either way — `review_ready`
+  // admits a recorded skip, which is exactly the exemption this stage does not get.
+  if (evidence.tests?.observed !== true) refuse(`${ref} records no observed test run`);
+  if (evidence.tests.exit !== 0) refuse(`${ref} records tests exiting ${evidence.tests.exit}`);
   if (evidence.review_ready !== true) {
     refuse(`${ref} is not review_ready${evidence.blocked_reason ? `: ${evidence.blocked_reason}` : ""}`);
   }
-  if (evidence.tests?.observed !== true) refuse(`${ref} records no observed test run`);
-  if (evidence.tests.exit !== 0) refuse(`${ref} records tests exiting ${evidence.tests.exit}`);
   if (evidence.commit !== head) {
     refuse(`${ref} tested ${String(evidence.commit).slice(0, 12)} but the integration head is ${head.slice(0, 12)}`);
   }
