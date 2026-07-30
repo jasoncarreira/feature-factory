@@ -66,7 +66,7 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
             stolenFrom = reclaimed;
             continue;
           }
-        } else if (!observedEvidence && await canReclaimOwnerlessRunJsonLock(observedIdentity, ownerPath, options)) {
+        } else if (!observedEvidence && await ownerlessLockIsReclaimable(lockDir, ownerPath, options)) {
           stealAttempted = true;
           if (await reclaimOwnerlessRunJsonLock(runDir, lockDir, observedIdentity, options, lockHooks, deadline)) continue;
         }
@@ -338,6 +338,26 @@ function formatLockTimeout(lockDir, owner) {
   const suffix = heldBy ? ` held by ${heldBy}` : "";
   const acquiredAt = stringValue(owner.acquired_at) ? ` since ${owner.acquired_at}` : "";
   return `timed out waiting for run.json lock at ${lockDir}${suffix}${acquiredAt}`;
+}
+
+// An ownerless lock is a directory with no valid owner record: a crash between the
+// mkdir and publishing owner.json. It is only reclaimable after a grace window,
+// because that gap is microseconds wide in the normal case and stealing inside it
+// would take a lock from a process that is about to publish.
+//
+// This replaces a canReclaimOwnerlessRunJsonLock that was deleted during the reclaim
+// simplification while its call site remained — a live ReferenceError on the
+// ownerless path, found by opencode.
+async function ownerlessLockIsReclaimable(lockDir, ownerPath, options = {}) {
+  if (await lockOwnerEntryExists(ownerPath)) return false;
+  const graceMs = normalizePositiveInteger(options.missingOwnerStealMs, DEFAULT_MISSING_OWNER_STEAL_MS);
+  try {
+    const observed = await stat(lockDir);
+    const ageMs = Date.now() - observed.mtimeMs;
+    return Number.isFinite(ageMs) && ageMs > graceMs;
+  } catch {
+    return false;
+  }
 }
 
 function isRecord(value) {

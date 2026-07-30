@@ -25,9 +25,14 @@ function sources(dir, found = []) {
   return found;
 }
 
+// Finding 7: an opencode helper invoked the CLI through an aliased node:child_process
+// import and the boundary test passed. Shelling out to the CLI is the *documented*
+// escape hatch, but it must be visible, so process-spawning is listed here too and a
+// legitimate use has to be added deliberately.
 const WRITE_PRIMITIVES = [
   "withRunJsonLock", "writeProtectedJsonAtomic", "writeProtectedFileAtomic",
   "writeFileSync", "writeFile", "renameSync", "coordinateRunJsonTransition", "transition(",
+  "node:child_process", "child_process", "execFile", "spawnSync", "spawn(", "exec(",
 ];
 
 describe("package boundary", () => {
@@ -57,6 +62,7 @@ describe("package boundary", () => {
     }
     // Widening this list is the signal that the boundary is wrong, not that the
     // export surface is too small.
+    // `transition` is deliberately absent: it no longer exists in the package root.
     const allowed = ["readRun", "readRunUnchecked", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION"];
     const unexpected = [...imported].filter((name) => !allowed.includes(name));
     assert.deepEqual(unexpected, [], `unexpected imports from feature-factory: ${unexpected.join(", ")}`);
@@ -79,6 +85,23 @@ describe("package boundary", () => {
       "the standalone package takes no dependency at all, so it installs and tests with no opencode present");
     assert.ok(factory.bin?.factory, "the factory package ships the CLI");
     assert.equal(opencode.bin, undefined, "the opencode package ships no CLI of its own");
+  });
+
+  it("does not expose a mutation entry point from the factory package root", () => {
+    // Finding 6: state/index.js exported `transition` while package.json exposed that
+    // module as the root, so the "read-only reader plus schema" public API handed out
+    // mutation authority. The write path now lives in a module the manifest does not
+    // export.
+    const manifest = JSON.parse(readFileSync(join(factoryPkg, "package.json"), "utf8"));
+    const root = manifest.exports?.["."] ?? manifest.main;
+    const rootSource = readFileSync(join(factoryPkg, root.replace(/^\.\//u, "")), "utf8");
+    assert.equal(/export\s+(async\s+)?function\s+transition\b/u.test(rootSource), false,
+      "the package root must not export a write path");
+    assert.equal(/coordinateRunJsonTransition/u.test(rootSource), false,
+      "the package root must not reach the write core at all");
+    const exported = Object.values(manifest.exports ?? {});
+    assert.equal(exported.includes("./state/transition.js"), false,
+      "the write path must not be reachable through any declared export");
   });
 
   it("names the factory package without an opencode prefix", () => {

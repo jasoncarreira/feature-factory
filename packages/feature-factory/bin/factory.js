@@ -12,7 +12,8 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
-import { readRun, readRunUnchecked, transition } from "../state/index.js";
+import { readRun, readRunUnchecked } from "../state/index.js";
+import { transition } from "../state/transition.js";
 import { buildEvidence, evidenceRef, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
 import { assertReviewBinding, isApproving, observeMergeProof, readEvidence, readReview } from "../observe/review.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";

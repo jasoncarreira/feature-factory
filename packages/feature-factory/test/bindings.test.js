@@ -163,7 +163,7 @@ describe("attack 8 — external state changes between observation and effect", (
     // lands. The write core runs reobserve inside the rename, after the mutator and
     // after the compare-and-swap, so a change injected at the commit boundary must
     // still be caught.
-    const { transition } = await import("../state/index.js");
+    const { transition } = await import("../state/transition.js");
     const f = fixture("late-observation");
     try {
       const runDir = f.runDir;

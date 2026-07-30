@@ -178,6 +178,13 @@ const slices = contract({
     for (const slice of after) {
       const prior = priorById.get(slice.id);
       if (!prior) continue; // seeding from plan/slices.json
+      // Finding 3: base_ref was replaceable on every update, so supplying the slice
+      // head as its own base made the diff empty and every ownership check vacuous.
+      // It is the branch point, which is a fact about the past: writable once, then
+      // fixed.
+      if (prior.base_ref && slice.base_ref !== prior.base_ref) {
+        throw new Error(`slice '${slice.id}' base_ref is immutable once recorded`);
+      }
       if (slice.attempts < prior.attempts) throw new Error(`slice '${slice.id}' attempts cannot decrease`);
       if (slice.attempts > prior.attempts + 1) throw new Error(`slice '${slice.id}' attempts cannot skip`);
       if (prior.status === "merged" && slice.status !== "merged") {

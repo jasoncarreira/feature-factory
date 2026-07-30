@@ -117,6 +117,13 @@ function steps(errors, value) {
 function slices(errors, value) {
   if (!Array.isArray(value)) return void errors.push({ path: "run.slices", message: "must be an array" });
   const ids = new Set(value.filter(isRecord).map((slice) => slice.id));
+  // Finding 5: the id set existed only for dependency validation, so two slices could
+  // share an id. Every later update maps by id and would then hit both rows.
+  const seenIds = new Set();
+  for (const slice of value.filter(isRecord)) {
+    if (seenIds.has(slice.id)) errors.push({ path: "run.slices", message: `duplicate slice id '${slice.id}'` });
+    seenIds.add(slice.id);
+  }
   value.forEach((slice, index) => {
     const path = `run.slices[${index}]`;
     if (!object(errors, slice, path, SLICE_KEYS)) return;

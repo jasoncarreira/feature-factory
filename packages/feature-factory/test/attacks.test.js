@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readRun, transition } from "../state/index.js";
+import { readRun } from "../state/index.js";
+import { transition } from "../state/transition.js";
 import { SchemaError, validateRun } from "../state/schema.js";
 
 const NOW = "2026-07-30T12:00:00.000Z";

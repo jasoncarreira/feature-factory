@@ -48,14 +48,28 @@ const FORBIDDEN_SUBSTRINGS = [
   "dispatch_claim", "completion_token", "hash_chain", "claim_nonce",
 ];
 
+// Finding 7: this scanner skipped hidden directories and every extension but .js, so
+// scope could grow in a `.hidden/` module or an imported `.mjs` file and the ceiling
+// stayed green. Only node_modules and .git are skipped now, and every JS extension
+// counts.
+const SKIP_DIRS = new Set(["node_modules", ".git"]);
+const SOURCE_EXTENSIONS = [".js", ".mjs", ".cjs", ".json"];
+
 function sourceFiles(dir = pkg, found = []) {
   for (const entry of readdirSync(dir)) {
-    if (entry === "node_modules" || entry.startsWith(".")) continue;
+    if (SKIP_DIRS.has(entry)) continue;
     const path = join(dir, entry);
     if (statSync(path).isDirectory()) sourceFiles(path, found);
-    else if (entry.endsWith(".js")) found.push(path);
+    else if (SOURCE_EXTENSIONS.some((extension) => entry.endsWith(extension))) found.push(path);
   }
   return found;
+}
+
+// Finding 7: forbidden names were matched as exact case-sensitive substrings, so a
+// `postPR` alias passed. Comparison is now on a normalized form — lowercased with
+// separators stripped — so post_pr, postPr, post-pr and postPR all collide.
+function normalize(text) {
+  return text.toLowerCase().replace(/[^a-z0-9]/gu, "");
 }
 
 const files = sourceFiles();
@@ -75,16 +89,26 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.deepEqual([...FAMILY_IDS].sort(), [...FAMILIES].sort());
   });
 
-  it("contains no trace of a dropped subsystem", () => {
+  it("contains no trace of a dropped subsystem, under any spelling", () => {
     const offenders = [];
     for (const path of productionFiles) {
-      const text = readFileSync(path, "utf8");
+      const normalized = normalize(readFileSync(path, "utf8"));
       for (const needle of FORBIDDEN_SUBSTRINGS) {
         // The ceiling test names them to forbid them, so it exempts itself.
-        if (text.includes(needle)) offenders.push(`${path.slice(pkg.length + 1)} :: ${needle}`);
+        if (normalized.includes(normalize(needle))) offenders.push(`${path.slice(pkg.length + 1)} :: ${needle}`);
       }
     }
     assert.deepEqual(offenders, [], "a dropped subsystem reappeared");
+  });
+
+  it("counts every source file, including hidden directories and other extensions", () => {
+    // Asserts the scanner itself, since finding 7 was that it silently skipped things.
+    assert.ok(files.some((path) => path.endsWith("bin/factory.js")), "the scanner must reach bin/");
+    assert.ok(files.some((path) => path.endsWith("package.json")), "manifests count as source");
+    assert.deepEqual([...SKIP_DIRS].sort(), [".git", "node_modules"],
+      "only build and vcs directories may be skipped; a hidden module directory must be scanned");
+    assert.ok(SOURCE_EXTENSIONS.includes(".mjs") && SOURCE_EXTENSIONS.includes(".cjs"),
+      "an imported .mjs or .cjs file must not escape the ceiling");
   });
 
   it("imports nothing from the predecessor tree", () => {
@@ -122,10 +146,18 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("keeps the test budget within the attack catalogue's scale", () => {
     const testFiles = files.filter((path) => path.endsWith(".test.js"));
-    const count = testFiles.reduce((sum, path) => sum + (readFileSync(path, "utf8").match(/^\s*it\(/gmu)?.length ?? 0), 0);
-    // The catalogue is 12 attacks with a 12-15 budget, plus write-plane and
-    // ceiling coverage. Exceeding this means proof mass is creeping, which is the
-    // failure mode that produced 68,911 lines of tests last time.
-    assert.ok(count <= 60, `${count} tests; the budget is 60`);
+    // Counts `test(` as well as `it(` — the budget previously counted only `it(`, so
+    // node:test's other entry point bypassed it.
+    const count = testFiles.reduce((sum, path) => sum + (readFileSync(path, "utf8").match(/^\s*(?:it|test)\(/gmu)?.length ?? 0), 0);
+    // Raised 60 -> 80 after opencode's review. The added tests are all attack or
+    // ratchet coverage tied to a specific finding — the late CAS window, merge
+    // without evidence, evidence not review_ready, PR with no slice plan, PR with an
+    // open slice, and the ceiling's own self-assertions — not proof mass. The counter
+    // also now includes `test(` as well as `it(`, so the number it reports is larger
+    // than before for the same suite.
+    //
+    // Raise this only alongside findings it closes. "We needed more tests" is the
+    // sentence that produced 68,911 lines of them last time.
+    assert.ok(count <= 80, `${count} tests; the budget is 80`);
   });
 });
