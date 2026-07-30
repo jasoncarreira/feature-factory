@@ -31,7 +31,7 @@ export const COMMANDS = Object.freeze({
   step: Object.freeze(["--repo", "--attempts", "--review-ref", "--evidence-ref", "--now", "--json"]),
   terminal: Object.freeze(["--repo", "--reason", "--now", "--json"]),
   "slices-seed": Object.freeze(["--repo", "--from", "--now", "--json"]),
-  slice: Object.freeze(["--repo", "--attempts", "--worktree", "--branch", "--base", "--evidence-ref", "--review-ref", "--merge-commit", "--now", "--json"]),
+  slice: Object.freeze(["--repo", "--attempts", "--worktree", "--branch", "--evidence-ref", "--review-ref", "--merge-commit", "--now", "--json"]),
   observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--skip-tests-reason", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
   validator: Object.freeze(["--repo", "--report", "--reviewed-head", "--worktree", "--now", "--json"]),
   pr: Object.freeze(["--repo", "--url", "--worktree", "--now", "--json"]),
@@ -206,12 +206,24 @@ const HANDLERS = {
 
   async slice([runId, sliceId, status], flags) {
     if (!SLICE_STATUSES.includes(status)) throw new CliError(`status must be one of ${SLICE_STATUSES.join(" | ")}`);
-    // The branch point is established when the slice is activated, so it is required
-    // there rather than accepted later.
-    if (status === "running" && !flags.base) throw new CliError("activating a slice requires --base (the integration head it branched from)");
     const runDir = runDirFor(flags, runId);
     const repo = resolve(flags.repo ?? process.cwd());
     const at = stamp(flags);
+
+    // Finding 1: activation used to accept any SHA as the base. Later observation only
+    // proved it was an ancestor, not that it was the integration head when the slice
+    // started - so a stale base (an orchestrator reusing one across waves, say) made
+    // the ownership diff exclude earlier commits. The branch point is observed here
+    // rather than supplied, which removes a caller input instead of adding a check.
+    let observedBase = null;
+    if (status === "running") {
+      const current = readRun(runDir);
+      const integration = resolveWorktree(repo, current.worktree);
+      if (!integration) throw new CliError(`integration worktree '${current.worktree}' is not observable`);
+      const head = observeWorktree(integration, current.branch, { ref: current.branch });
+      if (!head.commit) throw new CliError(`could not observe the head of '${current.branch}' to bind the slice base`);
+      observedBase = head.commit;
+    }
     if (status === "merged" && !flags.mergeCommit) throw new CliError("recording a merge requires --merge-commit");
 
     // For a merge, the contract's reobserve hook demands freshly observed paths.
@@ -254,7 +266,10 @@ const HANDLERS = {
         }
         if (!slice.review_ref) throw new Error(`slice '${slice.id}' cannot merge without a review_ref`);
         const review = readReview(runDir, slice.review_ref);
-        assertReviewBinding({ review, ref: slice.review_ref, observedHead: observation.commit });
+        assertReviewBinding({
+          review, ref: slice.review_ref, observedHead: observation.commit,
+          subject: slice.id, attempt: slice.attempts,
+        });
         if (evidence.commit !== observation.commit) {
           throw new Error(`evidence '${slice.evidence_ref}' observed ${String(evidence.commit).slice(0, 12)} but the slice head is ${String(observation.commit).slice(0, 12)}`);
         }
@@ -290,7 +305,7 @@ const HANDLERS = {
           attempts: flags.attempts === undefined ? existing.attempts : integer(flags.attempts, 1, "--attempts"),
           worktree: flags.worktree ?? existing.worktree,
           branch: flags.branch ?? existing.branch,
-          base_ref: flags.base ?? existing.base_ref,
+          base_ref: observedBase ?? existing.base_ref,
           evidence_ref: flags.evidenceRef ?? existing.evidence_ref,
           review_ref: flags.reviewRef ?? existing.review_ref,
           merge_commit: flags.mergeCommit ?? existing.merge_commit,

@@ -53,7 +53,17 @@ export function isApproving(verdict) {
 // Attack 3: the review must have judged the commit that is about to be consumed.
 // Comparing to the slice's current head rather than to anything the review says
 // about itself is the point — a review cannot vouch for its own currency.
-export function assertReviewBinding({ review, ref, observedHead }) {
+export function assertReviewBinding({ review, ref, observedHead, subject = null, attempt = null }) {
+  // Finding 2: a review was bound to a commit but not to a subject, so a valid
+  // approval for another slice at the same commit was accepted. With several slices
+  // in a wave and one --review-ref argument, passing the wrong one is an ordinary
+  // mistake. The record already names its subject, so checking costs nothing.
+  if (subject !== null && review.subject !== subject) {
+    throw new Error(`review '${ref}' approved '${review.subject}', not '${subject}'`);
+  }
+  if (attempt !== null && review.attempt !== attempt) {
+    throw new Error(`review '${ref}' is for attempt ${review.attempt}, subject is at attempt ${attempt}`);
+  }
   if (!isApproving(review.verdict)) {
     throw new Error(`review '${ref}' verdict is ${review.verdict}, not an approval`);
   }

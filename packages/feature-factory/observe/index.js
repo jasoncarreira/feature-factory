@@ -13,6 +13,7 @@ import { join, relative, resolve, sep } from "node:path";
 
 export const EVIDENCE_KEYS = Object.freeze([
   "subject", "run_id", "attempt", "branch", "base_ref", "worktree", "status", "blocked_reason",
+  "worktree_clean",
   "files_changed", "diff_stat", "diff_observed", "commands", "tests", "commit",
   "observed_by", "review_ready", "claim_reconciliation",
 ]);
@@ -61,6 +62,20 @@ export function observeWorktree(worktree, baseRef, options = {}) {
 // Attack 7: a caller may present any head it likes. Ancestry is asked of git, and
 // git's exit codes are read precisely: 0 is "is an ancestor", 1 is "proven not",
 // anything else is a failed probe that must not be read as either.
+// Finding 3: observeWorktree derives the commit and diff from a git ref, but runTests
+// executes in the mutable working directory. So tests could pass on uncommitted bytes
+// while the evidence claimed the HEAD commit - and the same tests then failed on the
+// clean merged tree. This is not an adversarial case: a builder leaving uncommitted
+// changes is the ordinary state of an agent-driven worktree.
+//
+// Observation of a dirty tree is meaningless, so it is refused rather than recorded.
+export function observeCleanliness(worktree, options = {}) {
+  const probe = git(worktree, ["status", "--porcelain", "--untracked-files=normal"], options);
+  if (!probe.ok) return { clean: false, reason: "worktree state could not be observed", entries: [] };
+  const entries = probe.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  return { clean: entries.length === 0, reason: entries.length === 0 ? null : "worktree has uncommitted changes", entries };
+}
+
 export function observeAncestry(worktree, ancestor, descendant, options = {}) {
   const probe = git(worktree, ["merge-base", "--is-ancestor", ancestor, descendant], options);
   if (probe.ok) return "ancestor";
@@ -94,6 +109,9 @@ export function runTests(worktree, command, { runner = spawnSync, skipReason = n
 // passing (or explicitly skipped with a reason), and diff_observed.
 export function deriveReviewReady(evidence) {
   if (evidence.status !== "completed") return false;
+  // A tree with uncommitted changes cannot produce evidence about the commit it
+  // claims, whatever the tests said.
+  if (evidence.worktree_clean !== true) return false;
   if (!Array.isArray(evidence.files_changed) || evidence.files_changed.length === 0) return false;
   if (evidence.diff_observed !== true) return false;
   const tests = evidence.tests ?? {};
@@ -156,8 +174,16 @@ export function privilegedPaths(filesChanged) {
 }
 
 export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, options = {} }) {
+  // Cleanliness is established before anything else is observed, because every later
+  // fact - the diff, the commit, and above all the test result - is only about the
+  // recorded commit if the tree has nothing uncommitted in it.
+  const cleanliness = observeCleanliness(worktree, options);
   const observation = observeWorktree(worktree, baseRef, options);
-  const tests = runTests(worktree, testCommand, { ...options, skipReason });
+  // Tests are not run at all against a dirty tree: running them would produce a
+  // result about bytes that are not going to merge.
+  const tests = cleanliness.clean
+    ? runTests(worktree, testCommand, { ...options, skipReason })
+    : { cmd: testCommand ? testCommand.join(" ") : null, exit: null, observed: false, skipped_reason: null };
   const evidence = {
     subject,
     // Finding 2: evidence carried no run identity, so a record from another run with a
@@ -168,7 +194,8 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
     base_ref: baseRef,
     worktree,
     status,
-    blocked_reason: blockedReason,
+    blocked_reason: blockedReason ?? cleanliness.reason,
+    worktree_clean: cleanliness.clean,
     files_changed: observation.files_changed,
     diff_stat: observation.diff_stat,
     diff_observed: observation.diff_observed,

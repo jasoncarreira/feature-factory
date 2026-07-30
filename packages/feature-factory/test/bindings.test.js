@@ -219,6 +219,7 @@ describe("evidence records are bound to their run and internally consistent", ()
     const record = {
       subject: "be-thing", run_id: "app-1", attempt: 1, branch: "slice",
       base_ref: "a".repeat(40), worktree: ".", status: "completed", blocked_reason: null,
+      worktree_clean: true,
       files_changed: ["src/app/thing.ts"], diff_stat: " 1 file changed", diff_observed: true,
       commands: [], tests: { cmd: "npm test", exit: 0, observed: true, skipped_reason: null },
       commit: "b".repeat(40), observed_by: "orchestrator", review_ready: true,

@@ -97,7 +97,7 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
 
   it("refuses review_ready for an unobserved test with no recorded reason", () => {
     const base = {
-      status: "completed", files_changed: ["a.ts"], diff_observed: true,
+      status: "completed", files_changed: ["a.ts"], diff_observed: true, worktree_clean: true,
       tests: { cmd: null, exit: null, observed: false, skipped_reason: null },
     };
     assert.equal(deriveReviewReady(base), false, "an unexplained absent test run is the shape a fabricated pass takes");
@@ -109,6 +109,9 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
     assert.equal(deriveReviewReady({ ...green, diff_observed: false }), false, "an unobserved diff cannot be review-ready");
     assert.equal(deriveReviewReady({ ...base, files_changed: [] }), false, "an empty diff cannot be review-ready");
     assert.equal(deriveReviewReady({ ...base, status: "blocked" }), false);
+    // A dirty tree cannot produce evidence about the commit it claims, whatever the
+    // tests said: the bytes tested are not the bytes that merge.
+    assert.equal(deriveReviewReady({ ...green, worktree_clean: false }), false);
   });
 
   it("refuses review_ready on a claim mismatch even when the observed run passes", () => {
