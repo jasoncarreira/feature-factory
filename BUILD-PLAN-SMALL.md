@@ -254,6 +254,17 @@ Estimated total: **130 + ~325 ≈ 460 lines** for the write plane, plus the CLI
 surface and observation helpers. Whole system plausibly **1,500–2,500 lines**
 against 43,013.
 
+**Revised to 2,650** after opencode's fifth review round, at 2,579 actual. The
+estimate was met until three findings needed closing: publication readiness
+centralized and invoked at Gate 3's approval rather than only in `factory pr`
+(where it runs after the push and the PR already happened), `test_plan` ratified
+on the slice row in place of `observe --skip-tests-reason`, and the gates
+contract's missing reobserve hook. Removals were made first — `lock inspect`,
+`lock --force`, `observeTree`, and three duplicated integration-head
+observations — so the raise covers only what is new. The reasoning is recorded in
+`test/ceiling.test.js` beside the assertion, which is the file a future raise has
+to edit.
+
 ## Acceptance — the attack catalogue
 
 The build is done when each attack is injected and rejected. Ported from the
