@@ -61,25 +61,37 @@ export function createSidebar({ cwd = process.cwd(), poll = pollRuns, intervalMs
   return { refresh, stop: () => clearInterval(timer), lines: () => lines };
 }
 
-// The host's contract, not a guess: a default *object* carrying a `tui(api, options, meta)` hook.
-// This module previously default-exported a function returning `{ name, start }`, which opencode
-// rejects before any of the code below runs — so the sidebar would never have appeared, and nothing
-// here could have told us. Verified against the loader's shape check rather than inferred from the
-// README, which only said the entry is read from `exports["./tui"]`.
+// The host's registration contract.
+//
+// Twice wrong before this. First a default *function* returning `{ name, start }`, which the loader
+// rejects outright. Then a default object with a `tui` hook — the right outer shape — that called
+// `api.render`/`api.update`, neither of which exists, never registered a slot, and returned a handle
+// the runtime discards. A probe reported `registered: false`. Both versions passed every test here,
+// because a shape check cannot tell a real host API from an invented one.
+//
+// Content is contributed by registering a slot, and teardown by registering a disposer. Returning
+// anything is pointless: the runtime ignores it, so an interval kept only in the returned handle
+// leaks on every reload.
 export default {
   id: "feature-factory",
   tui(api, options = {}) {
-    // `api` belongs to the host; this package neither stores nor writes through it. The sidebar is
-    // handed the directory to watch and reports upward through the host's own update channel.
     const sidebar = createSidebar({
       cwd: options.directory ?? options.cwd ?? process.cwd(),
       intervalMs: options.intervalMs ?? DEFAULT_POLL_MS,
-      onUpdate: (lines) => api?.render?.(lines) ?? api?.update?.(lines),
+      // A poll that changed nothing still asks the host to repaint; the host decides whether that
+      // is cheap. Debouncing here would need a diff of the rendered lines, which is the host's
+      // concern rather than ours.
+      onUpdate: () => api.slots?.refresh?.(),
     });
-    return {
-      lines: sidebar.lines,
-      refresh: sidebar.refresh,
-      dispose: sidebar.stop,
-    };
+
+    api.slots.register({
+      slots: {
+        sidebar_content: () => sidebar.lines(),
+      },
+    });
+
+    // The only route to cleanup. Without it every reload leaves a live interval behind polling a
+    // run nobody is watching.
+    api.lifecycle?.onDispose?.(() => sidebar.stop());
   },
 };

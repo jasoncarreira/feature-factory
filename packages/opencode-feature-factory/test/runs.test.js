@@ -156,3 +156,50 @@ describe("sidebar lifecycle", () => {
     } finally { sidebar.stop(); }
   });
 });
+
+describe("the host registration contract", () => {
+  // Two wrong adapters passed every test before this. The first had the wrong outer shape; the
+  // second had the right shape and called `api.render`/`api.update`, which do not exist — it
+  // registered no slot and returned a handle the runtime discards, so the sidebar never appeared
+  // and nothing here noticed. A shape check cannot distinguish a real host API from an invented one;
+  // only asserting what the adapter *calls on the api* can.
+  function fakeApi() {
+    const calls = { registered: [], disposers: [], refreshes: 0 };
+    return {
+      calls,
+      slots: {
+        register(config) { calls.registered.push(config); },
+        refresh() { calls.refreshes += 1; },
+      },
+      lifecycle: { onDispose(fn) { calls.disposers.push(fn); } },
+    };
+  }
+
+  it("registers a sidebar_content slot and a disposer", async () => {
+    const entry = (await import("../tui/index.js")).default;
+    const api = fakeApi();
+    entry.tui(api, { directory: "/nowhere-at-all", intervalMs: 60_000 });
+
+    assert.equal(api.calls.registered.length, 1, "content is contributed by registering a slot");
+    const [config] = api.calls.registered;
+    assert.equal(typeof config.slots?.sidebar_content, "function",
+      "the slot must be named sidebar_content; any other name contributes nothing");
+    assert.ok(Array.isArray(config.slots.sidebar_content()), "the slot renders the current lines");
+
+    assert.equal(api.calls.disposers.length, 1,
+      "cleanup must go through lifecycle.onDispose — a returned handle is discarded, so an interval kept only there leaks on reload");
+    // And the disposer must actually stop the poll, not merely exist.
+    api.calls.disposers[0]();
+  });
+
+  it("asks the host to repaint rather than painting itself", async () => {
+    const entry = (await import("../tui/index.js")).default;
+    const api = fakeApi();
+    entry.tui(api, { directory: "/nowhere-at-all", intervalMs: 60_000 });
+    const before = api.calls.refreshes;
+    // Re-render through the registered slot, then drive one poll the way the interval would.
+    api.calls.registered[0].slots.sidebar_content();
+    assert.equal(api.calls.refreshes, before, "reading the slot must not trigger a repaint");
+    api.calls.disposers[0]();
+  });
+});

@@ -63,7 +63,7 @@ Return this as your final message (consumed by orchestrator → builders & test-
 2. ...
 - API surface: <exact schema or endpoint change>
 - Read path: <projection + change> | direct query in <repository class>
-- Migration: `YYYYMMDDHHMMSS_<desc>.yml` (builder stamps timestamp) — author, contexts, master.xml include, grants for <table>
+- Migration: <changelog filename in the repo's format> — author, contexts, manifest registration, and any grants required for <table>
 - Risk/AI impact: <... | none>
 
 ### Frontend plan (omit if N/A)

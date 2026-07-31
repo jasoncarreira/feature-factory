@@ -127,7 +127,7 @@ and it must run the tests *itself*.
 ## Packaging — two packages, one direction of dependency
 
 **Contract:** the factory is a standalone package with a CLI, usable with no
-opencode present. The opencode integration — plugin, TUI, telemetry — is a
+opencode present. The opencode integration — plugin and TUI — is a
 separate package that depends on it.
 
 ```
@@ -164,7 +164,9 @@ package, and three did not survive contact:
 
 **Rule: only the CLI writes `run.json`.** The plugin package has no lock, no
 atomic writer, no transition function. It reads through the exported reader and,
-if it ever needs a state change, shells out to the CLI like any other caller.
+if it ever needs a state change it must shell out to the CLI — and doing so means first adding the
+spawn to the boundary test's allowed set, because that test forbids every process-spawning primitive
+outright. The permission is real; it is deliberately not silent.
 
 ### Is it easily separable? Yes — measured, not assumed
 
@@ -210,7 +212,7 @@ read-only reference until the step-7 delete PR.**
 
 ```
 packages/feature-factory/            standalone; bin/factory; no opencode dependency
-packages/opencode-feature-factory/   plugin + TUI + telemetry + install
+packages/opencode-feature-factory/   plugin + observation + TUI
 src/                                 old tree — reference only, deleted in step 7
 ```
 

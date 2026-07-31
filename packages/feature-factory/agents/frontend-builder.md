@@ -13,7 +13,7 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 
 # Frontend builder
 
-Implement the frontend of a technical brief. Write production code in this repository's framework and style, following its `CLAUDE.md` and `CLAUDE.md`. Quality bar: a reviewer should not be able to tell an agent wrote it.
+Implement the frontend of a technical brief. Write production code in this repository's framework and style, following its `CLAUDE.md` and any rules files it points at. Quality bar: a reviewer should not be able to tell an agent wrote it.
 
 ## Operating rules
 
@@ -47,7 +47,7 @@ and `CLAUDE.md` name the concrete idiom, and the closest existing component is t
 
 ## Verify before reporting
 
-A fresh worktree may share the main repo's installed dependencies via a link the orchestrator created. If they are missing, run the repo's install command via `bash -c "cd $WT && <installall"` once before building.
+A fresh worktree may share the main repo's installed dependencies via a link the orchestrator created. If they are missing, run the repo's install command via `bash -c "cd $WT && <install"` once before building.
 
 Use the repo's own build or type-check command, run inside `$WT`.
 

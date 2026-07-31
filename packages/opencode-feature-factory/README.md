@@ -35,7 +35,8 @@ the run when a slice worktree is the working directory.
 This package never writes run state, and that is structural rather than conventional. Its test suite
 asserts that no write or process-spawning primitive appears anywhere in it, that it imports only the
 factory's read-only surface, and that the dependency runs one way. If it needs a state change, it
-shells out to the CLI like any other caller — and today it needs none, because the orchestrator
+must shell out to the CLI, which means first amending that test to allow the spawn — the escape
+hatch exists but cannot be taken quietly. Today it needs none, because the orchestrator
 drives every transition itself.
 
 ## License

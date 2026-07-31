@@ -367,6 +367,16 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //
     // Raise this only alongside findings it closes. "We needed more tests" is the
     // sentence that produced 68,911 lines of them last time.
-    assert.ok(count <= 80, `${count} tests; the budget is 80`);
+    // 80 -> 82. The addition is `test/prompt-claims.test.js`, which closes a class that had
+    // recurred three times: prose asserting what the CLI permits, wrongly. Each of those shipped
+    // inside a fix for the previous one. That is the standard this number demands — a raise tied to
+    // findings it closes, not "we needed more tests".
+    //
+    // Note what this counts: `it(`/`test(` call sites, not executed tests. The claim table is one
+    // site driving five cases, so adding a claim row is invisible here. That is deliberate rather
+    // than an oversight — a new row is a line of data binding existing prose to existing behaviour,
+    // which is the growth this codebase wants. What the number constrains is new files and new call
+    // sites, which is where proof mass actually accumulates.
+    assert.ok(count <= 82, `${count} tests; the budget is 82`);
   });
 });
