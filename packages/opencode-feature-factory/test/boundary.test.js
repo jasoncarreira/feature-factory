@@ -20,7 +20,9 @@ function sources(dir, found = []) {
     if (entry === "node_modules" || entry.startsWith(".")) continue;
     const path = join(dir, entry);
     if (statSync(path).isDirectory()) sources(path, found);
-    else if (entry.endsWith(".js")) found.push(path);
+    // .jsx too: the reactive component lives in one, and a scanner that reads only .js would let a
+    // write primitive hide in exactly the file that was added last.
+    else if (entry.endsWith(".js") || entry.endsWith(".jsx")) found.push(path);
   }
   return found;
 }
@@ -43,6 +45,9 @@ describe("package boundary", () => {
     const offenders = [];
     for (const path of sources(opencodePkg)) {
       if (path.includes(`${opencodePkg}/test/`)) continue;
+      // Generated output: it inlines this package's own modules, which are scanned at source, plus
+      // whatever a bundler emits. Scanning it reports the bundler's internals, not our choices.
+      if (path.includes(`${opencodePkg}/tui/dist/`)) continue;
       const text = readFileSync(path, "utf8");
       for (const primitive of WRITE_PRIMITIVES) {
         if (text.includes(primitive)) offenders.push(`${path.slice(opencodePkg.length + 1)} :: ${primitive}`);

@@ -200,6 +200,9 @@ Per slice:
    factory observe <run-id> <slice-id> --worktree <path> --base <slice-base-sha> \
      --test-cmd "<the slice's test command>" [--claim <builder-report.json>]
    ```
+   `base_ref` is fixed when the slice is activated and cannot be changed afterwards — it is the branch
+   point, a fact about the past. A slice that needs a different base is a new slice.
+
    `--base` is the sha that step 1's `factory slice … running` reported as `base_ref` — not the feature
    branch by name. That command observes and records the branch point, and the merge compares the
    evidence's base to it exactly: a branch name never matches a sha, and the branch moves under you as
@@ -289,14 +292,20 @@ missing. This is deliberate: everything after this point — the push, the PR �
 the time `factory pr` runs, so this is the last refusal that can still prevent something. It requires:
 
 - the run is not terminal, and every slice is `merged` (a partial run is surfaced, not published);
-- **all three gates currently approved** — not just this one, and not "was approved once". Re-opening an
-  earlier gate withdraws publication authority, so a Story gate re-opened and stopped blocks the PR;
+- **all three gates currently approved** — not just this one, and not "was approved once". Only `pre_pr`
+  can be re-opened, so in practice this catches a run that reaches here with Story or Brief never
+  approved, and a `pre_pr` re-opened for the recovery below and not yet re-approved;
 - an approving `implementation-validator` verdict whose `reviewed_head` **is** the integration branch's
   current head, re-observed from git rather than read back from the manifest;
 - `evidence/test-verifier.json`, belonging to this run, recording tests that were observed and exited
   zero, against that same head.
 
 If the gate refuses, its message names the missing piece. Fix that and re-present — do not push.
+
+**Only Gate 3 may be re-opened.** `factory gate <run-id> story pending` on a decided Story gate is
+refused, as is Brief, and a decided gate's `--artifact` cannot be changed in place. Gate 3 is the
+exception because only its subject — the integrated diff — can legitimately change after approval. If
+an approved story turns out to be wrong, that is a new run, not an edit to this one.
 
 **If the branch moves after approval**, the approval no longer refers to what you would publish, so the
 validator verdict is frozen while the gate stands and `factory pr` refuses. Recovery is one more

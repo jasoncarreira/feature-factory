@@ -44,6 +44,25 @@ function project(name) {
   return repo;
 }
 
+// Small steps rather than one do-everything fixture: a claim should set up only what it asserts
+// about, or every failure is ambiguous about which rule fired.
+function decide(repo, gate, decision) {
+  factory(repo, ["gate", RUN, gate, "pending", "--now", NOW]);
+  return factory(repo, ["gate", RUN, gate, decision, "--now", NOW]);
+}
+
+function activateSlice(repo) {
+  seeded(repo);
+  execFileSync("git", ["checkout", "-q", "-b", "slice"], { cwd: repo });
+  writeFileSync(join(repo, "src", "work.ts"), "work\n");
+  execFileSync("git", ["add", "-A"], { cwd: repo });
+  execFileSync("git", ["commit", "-q", "-m", "work"], { cwd: repo });
+  const activated = factory(repo, ["slice", RUN, "s1", "running", "--worktree", ".", "--branch", "slice", "--now", NOW]);
+  assert.equal(activated.ok, true, activated.out);
+  const base = /base_ref: ([0-9a-f]{40})/u.exec(activated.out);
+  return base?.[1] ?? null;
+}
+
 function factory(repo, args) {
   try {
     return { ok: true, out: execFileSync("node", [CLI, ...args, "--repo", repo], { encoding: "utf8" }) };
@@ -129,6 +148,90 @@ const CLAIMS = [
     act(repo) {
       seeded(repo);
       return factory(repo, ["status", RUN, "--json"]);
+    },
+  },
+
+  // opencode's next five, in its order. Each was enforced and unstated, or stated and unproven.
+  {
+    id: "only-pre-pr-may-reopen",
+    file: "skill/SKILL.md",
+    fragment: "**Only Gate 3 may be re-opened.**",
+    expect: "refused",
+    matches: /gate 'story' cannot be re-opened once decided/u,
+    act(repo) {
+      seeded(repo);
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      return factory(repo, ["gate", RUN, "story", "pending", "--now", NOW]);
+    },
+  },
+  {
+    id: "pre-pr-may-reopen",
+    file: "skill/SKILL.md",
+    fragment: "factory gate <run-id> pre_pr pending",
+    expect: "allowed",
+    matches: /status: pending/u,
+    act(repo) {
+      seeded(repo);
+      // Decided as `changes` rather than `approved`: approving pre_pr runs the publication check,
+      // which this claim is not about.
+      assert.equal(decide(repo, "pre_pr", "changes").ok, true, "a decided gate is the precondition");
+      return factory(repo, ["gate", RUN, "pre_pr", "pending", "--now", NOW]);
+    },
+  },
+  {
+    id: "publication-needs-all-three-gates",
+    file: "skill/SKILL.md",
+    fragment: "**all three gates currently approved**",
+    expect: "refused",
+    matches: /every gate must be approved; not approved: story\(absent\), brief\(absent\)/u,
+    act(repo) {
+      seeded(repo);
+      // pre_pr alone, which is all the old check consulted.
+      return decide(repo, "pre_pr", "approved");
+    },
+  },
+  {
+    id: "merge-needs-two-parents",
+    file: "skill/SKILL.md",
+    fragment: "refuses a merge commit that does not have exactly two parents",
+    expect: "refused",
+    matches: /has 1 parent; a slice merge must be a two-parent merge \(use --no-ff\)/u,
+    act(repo) {
+      const base = activateSlice(repo);
+      // Everything the merge proof needs *except* two parents, so only that rule can explain the
+      // refusal — the masking trap this suite keeps rediscovering.
+      const observed = factory(repo, ["observe", RUN, "s1", "--worktree", ".", "--base", base,
+        "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW]);
+      assert.match(observed.out, /review_ready: true/u, observed.out);
+      const head = execFileSync("git", ["rev-parse", "slice"], { cwd: repo, encoding: "utf8" }).trim();
+      writeFileSync(join(repo, ".claude", "factory", RUN, "reviews", "s1.json"), JSON.stringify({
+        subject: "s1", reviewer: "work-reviewer", verdict: "APPROVE", attempt: 1,
+        reviewed_commit: head, findings: [], required_fixes: [], checked_against: ["brief"],
+      }));
+      factory(repo, ["slice", RUN, "s1", "review", "--evidence-ref", "evidence/s1.json",
+        "--review-ref", "reviews/s1.json", "--now", NOW]);
+      execFileSync("git", ["checkout", "-q", "feature"], { cwd: repo });
+      execFileSync("git", ["merge", "-q", "--ff-only", "slice"], { cwd: repo });
+      const merged = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+      return factory(repo, ["slice", RUN, "s1", "merged", "--merge-commit", merged, "--now", NOW]);
+    },
+  },
+  {
+    id: "base-ref-immutable-after-activation",
+    file: "skill/SKILL.md",
+    fragment: "`base_ref` is fixed when the slice is activated and cannot be changed afterwards",
+    expect: "refused",
+    matches: /base_ref is immutable once recorded/u,
+    act(repo) {
+      const base = activateSlice(repo);
+      assert.match(String(base), /^[0-9a-f]{40}$/u, "activation must report the base it recorded");
+      // Move the branch, then re-activate. The CLI observes the *new* head, so if base_ref were
+      // writable twice this would silently re-point the slice's diff baseline.
+      execFileSync("git", ["checkout", "-q", "feature"], { cwd: repo });
+      writeFileSync(join(repo, "src", "later.ts"), "later\n");
+      execFileSync("git", ["add", "-A"], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "later"], { cwd: repo });
+      return factory(repo, ["slice", RUN, "s1", "running", "--worktree", ".", "--branch", "slice", "--now", NOW]);
     },
   },
 ];

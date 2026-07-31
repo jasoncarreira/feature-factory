@@ -74,9 +74,13 @@ describe("what actually ships", () => {
 
       // observe/ is not an entrypoint, which is exactly why it was left out: both entrypoints import
       // it, and nothing that only reads `exports` would notice.
-      for (const required of ["plugin/index.js", "tui/index.js", "observe/runs.js", "README.md", "LICENSE"]) {
+      for (const required of ["plugin/index.js", "tui/dist/index.js", "observe/runs.js", "README.md", "LICENSE"]) {
         assert.ok(opencode.files.includes(required), `opencode-feature-factory must ship ${required}`);
       }
+      // The host loads the built bundle and does not transform JSX, so shipping source instead of
+      // output would fail at load with a syntax error.
+      assert.deepEqual(opencode.files.filter((file) => file.endsWith(".jsx")), [],
+        "raw JSX must not ship; the host cannot transform it");
 
       // Tests are not a release artifact. Shipping them doubles the tarball and invites a consumer to
       // run a suite against their own repository.

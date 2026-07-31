@@ -6,11 +6,11 @@
 // path handling that a mock would replace.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { controlPlaneCandidates, findControlPlane, listRuns, pollRuns, selectActiveRun } from "../observe/runs.js";
-import { renderLines } from "../tui/index.js";
+import { renderLines } from "../tui/lines.js";
 
 const RUN = (overrides = {}) => ({
   version: 1, run_id: "app-1", jira_key: null, branch: "feature/app-1", worktree: ".",
@@ -142,64 +142,88 @@ describe("run projection", () => {
   });
 });
 
-describe("sidebar lifecycle", () => {
-  it("refreshes on demand and stops cleanly, without touching the filesystem", async () => {
-    const { createSidebar } = await import("../tui/index.js");
+describe("the poll loop", () => {
+  it("renders immediately, refreshes on demand, and stops without hanging the process", async () => {
+    const { createLineSource } = await import("../tui/poll.js");
     let polls = 0;
     const snapshot = { repo: "/repo", runs: [], active: null };
-    const sidebar = createSidebar({ cwd: "/repo", intervalMs: 1000, poll: () => { polls += 1; return snapshot; } });
+    const seen = [];
+    const source = createLineSource({
+      cwd: "/repo", intervalMs: 1000, onLines: (lines) => seen.push(lines),
+      poll: () => { polls += 1; return snapshot; },
+    });
     try {
       assert.equal(polls, 1, "the first render happens immediately, not on the first tick");
-      sidebar.refresh();
+      assert.equal(seen.length, 1, "and is published to the consumer");
+      source.refresh();
       assert.equal(polls, 2);
-      assert.deepEqual(sidebar.lines(), ["/repo", "no runs recorded"]);
-    } finally { sidebar.stop(); }
+      assert.deepEqual(source.lines(), ["/repo", "no runs recorded"]);
+    } finally { source.stop(); }
+  });
+
+  it("turns a scan failure into content rather than throwing into the render loop", async () => {
+    const { createLineSource } = await import("../tui/poll.js");
+    const source = createLineSource({
+      cwd: "/repo", intervalMs: 60_000,
+      poll: () => { throw new Error("state vanished mid-tick"); },
+    });
+    try {
+      assert.deepEqual(source.lines(), ["sidebar error: state vanished mid-tick"]);
+    } finally { source.stop(); }
   });
 });
 
 describe("the host registration contract", () => {
-  // Two wrong adapters passed every test before this. The first had the wrong outer shape; the
-  // second had the right shape and called `api.render`/`api.update`, which do not exist — it
-  // registered no slot and returned a handle the runtime discards, so the sidebar never appeared
-  // and nothing here noticed. A shape check cannot distinguish a real host API from an invented one;
-  // only asserting what the adapter *calls on the api* can.
+  // Two wrong adapters passed every test before this: one with the wrong outer shape, one that called
+  // `api.render`/`api.update` — neither exists — and registered no slot at all. A shape check cannot
+  // tell a real host API from an invented one, so this asserts what the adapter *calls on the api*.
+  //
+  // Imported from tui/dist, because that is the artifact the host loads. Testing the JSX source would
+  // pass while a broken build shipped.
   function fakeApi() {
-    const calls = { registered: [], disposers: [], refreshes: 0 };
+    const calls = { registered: [], disposers: [] };
     return {
       calls,
-      slots: {
-        register(config) { calls.registered.push(config); },
-        refresh() { calls.refreshes += 1; },
-      },
+      slots: { register(config) { calls.registered.push(config); } },
       lifecycle: { onDispose(fn) { calls.disposers.push(fn); } },
     };
   }
 
-  it("registers a sidebar_content slot and a disposer", async () => {
-    const entry = (await import("../tui/index.js")).default;
+  it("registers a sidebar_content slot, from the built bundle", async () => {
+    const entry = (await import("../tui/dist/index.js")).default;
+    assert.equal(typeof entry, "object", "the host requires a default object, not a function");
+    assert.equal(typeof entry.tui, "function", "carrying a tui() hook");
+
     const api = fakeApi();
     entry.tui(api, { directory: "/nowhere-at-all", intervalMs: 60_000 });
-
     assert.equal(api.calls.registered.length, 1, "content is contributed by registering a slot");
-    const [config] = api.calls.registered;
-    assert.equal(typeof config.slots?.sidebar_content, "function",
+    assert.equal(typeof api.calls.registered[0].slots?.sidebar_content, "function",
       "the slot must be named sidebar_content; any other name contributes nothing");
-    assert.ok(Array.isArray(config.slots.sidebar_content()), "the slot renders the current lines");
 
-    assert.equal(api.calls.disposers.length, 1,
-      "cleanup must go through lifecycle.onDispose — a returned handle is discarded, so an interval kept only there leaks on reload");
-    // And the disposer must actually stop the poll, not merely exist.
-    api.calls.disposers[0]();
+    // The slot is deliberately NOT invoked. Its intrinsic elements need a live OpenTUI renderer, so
+    // calling it here fails with "No renderer found" — the honest boundary of what this suite can
+    // prove. Whether the component actually paints is a dogfood question, and the reactive machinery
+    // it depends on is tested in ./poll.js instead.
   });
 
-  it("asks the host to repaint rather than painting itself", async () => {
-    const entry = (await import("../tui/index.js")).default;
-    const api = fakeApi();
-    entry.tui(api, { directory: "/nowhere-at-all", intervalMs: 60_000 });
-    const before = api.calls.refreshes;
-    // Re-render through the registered slot, then drive one poll the way the interval would.
-    api.calls.registered[0].slots.sidebar_content();
-    assert.equal(api.calls.refreshes, before, "reading the slot must not trigger a repaint");
-    api.calls.disposers[0]();
+  it("keeps the reactive shell out of the bundle so the host's solid instance is used", async () => {
+    // Module identity, not version equality: bundling solid would give the sidebar its own reactive
+    // graph, which repaints nothing and looks exactly like the bug this replaced.
+    // Every built file, concatenated. The chunk name is content-hashed, so naming one would break on
+    // the next source edit — and worse, would pass by reading a file that no longer holds the shell.
+    const dist = new URL("../tui/dist/", import.meta.url);
+    const bundle = readdirSync(dist)
+      .filter((entry) => entry.endsWith(".js"))
+      .map((entry) => readFileSync(new URL(entry, dist), "utf8"))
+      .join("\n");
+    assert.match(bundle, /from ?"solid-js"/u, "solid-js must stay an import, not be inlined");
+    assert.match(bundle, /@opentui\/solid/u, "the jsx runtime must stay an import");
+    assert.equal(/function createSignal\(/u.test(bundle), false, "solid's implementation must not be inlined");
+
+    const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    for (const peer of ["solid-js", "@opentui/solid"]) {
+      assert.ok(manifest.peerDependencies?.[peer], `${peer} must be a peer dependency, not a bundled copy`);
+      assert.equal(manifest.dependencies?.[peer], undefined, `${peer} must not also be a direct dependency`);
+    }
   });
 });

@@ -18,8 +18,16 @@ npm run test:factory        # packages/feature-factory alone
 npm run test:opencode       # packages/opencode-feature-factory alone
 ```
 
-No lint or typecheck script, no build step, no packed-package smoke test — neither package is
-bundled or transpiled.
+No lint or typecheck script. `feature-factory` is not bundled or transpiled at all.
+
+`opencode-feature-factory` has one build step: the sidebar is authored as JSX and bundled to
+`tui/dist` by `npm run build` (also run by `prepack`, and by `npm test` before the pack check). The
+output is generated and gitignored — do not edit or commit it.
+
+`solid-js` and `@opentui/solid` are **peer** dependencies and are externalized from that bundle. The
+contract is module *identity*: the sidebar has to use the copies the host installed, or its reactive
+graph runs in isolation and repaints nothing. Bundling them produces a sidebar that renders once and
+then never updates, which looks identical to having no reactivity at all.
 
 **Run `npm run test:factory` before submitting.** The factory package declares zero dependencies and
 claims to work with no opencode present. That claim is only true if its suite passes on its own, and
@@ -52,5 +60,12 @@ Two conventions this codebase holds to, both learned the hard way:
   falsification. Several guards here were "verified" while being dead code that only read as
   enforcement.
 - **Prose is part of the contract.** `skill/SKILL.md` and `agents/*.md` are executable instructions.
-  The ceiling test checks them against the CLI, but it cannot check argument *semantics* — so when
-  you change a command, read the prose that drives it.
+  The ceiling test checks their commands and flags against the CLI, and
+  `test/prompt-claims.test.js` executes the claims they make about what the CLI permits. Add a row
+  there when prose starts asserting what will or will not be allowed — three separate times a fix
+  shipped carrying a false claim of exactly that kind.
+
+- **Know what the tests cannot see.** The sidebar component needs a running OpenTUI renderer, so it
+  cannot be instantiated here at all; its poll loop is extracted into plain JavaScript precisely so
+  that the testable part is testable. Whether the sidebar actually paints is a question only a real
+  host answers.

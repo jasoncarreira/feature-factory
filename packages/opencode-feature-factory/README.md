@@ -21,6 +21,10 @@ npm install opencode-feature-factory
 The host reads the sidebar entry from `exports["./tui"]`. The package root is the server plugin and
 has no `tui` hook, so it is never mistaken for the sidebar.
 
+Requires `solid-js` and `@opentui/solid`, declared as peer dependencies — the sidebar must use the
+copies your host installed rather than its own, or its reactive graph runs in isolation and never
+repaints.
+
 ## What it does
 
 Answers "what is this repository's run doing" — which run is live, which gate is waiting, how many
