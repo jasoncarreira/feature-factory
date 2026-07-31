@@ -324,12 +324,16 @@ the time `factory pr` runs, so this is the last refusal that can still prevent s
 
 If the gate refuses, its message names the missing piece. Fix that and re-present — do not push.
 
-**Only Gate 3 may be re-opened once approved.** `factory gate <run-id> story pending` on an
-*approved* Story gate is refused, as is Brief, and a decided gate's `--artifact` cannot be changed in
-place. Gate 3 is the exception because only its subject — the integrated diff — can legitimately
-change after approval. If an approved story turns out to be wrong, that is a new run, not an edit to
-this one. A gate that asked for `changes` re-opens freely at any gate, as above: nothing downstream
-was built on it, because every later stage requires this gate approved.
+**Once the plan is seeded, only Gate 3 may re-open.** `factory gate <run-id> story pending` on an
+approved Story gate is refused after `slices-seed`, as is Brief, and a decided gate's `--artifact`
+cannot be changed in place. Gate 3 is the exception because only its subject — the integrated diff —
+can legitimately change after approval. If an approved story turns out to be wrong *after work
+began*, that is a new run, not an edit to this one.
+
+**Before the plan is seeded, an approved gate still re-opens** — nothing has been built, so there is
+nothing judged against the old artifact to strand. This is the path for a story that turns out to
+contradict itself once you specify it: re-open Gate 1, correct the story, re-approve, carry on. Do
+not block the run for it. A gate that asked for `changes` re-opens at any point, as above.
 
 **If the branch moves after approval**, the approval no longer refers to what you would publish, so the
 validator verdict is frozen while the gate stands and `factory pr` refuses. Recovery is one more

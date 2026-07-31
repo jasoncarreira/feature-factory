@@ -607,7 +607,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       // that half is covered in prompt-claims.)
       const reopenStory = factory(p.repo, ["gate", RUN, "story", "pending", "--now", NOW(6)]);
       assert.equal(reopenStory.ok, false, "an approved gate must not re-open under completed work");
-      assert.match(reopenStory.stderr, /gate 'story' cannot be re-opened once approved; only pre_pr may/u);
+      assert.match(reopenStory.stderr, /gate 'story' cannot be re-opened once approved and its plan is seeded/u);
 
       // And the shorter route: re-deciding an approved gate to the status it already holds
       // used to skip every check, so `--artifact` swapped the document in place.

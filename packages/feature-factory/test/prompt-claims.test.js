@@ -153,15 +153,32 @@ const CLAIMS = [
 
   // opencode's next five, in its order. Each was enforced and unstated, or stated and unproven.
   {
-    id: "only-pre-pr-may-reopen-once-approved",
+    id: "seeded-plan-freezes-an-approved-gate",
     file: "skills/feature/SKILL.md",
-    fragment: "**Only Gate 3 may be re-opened once approved.**",
+    fragment: "**Once the plan is seeded, only Gate 3 may re-open.**",
     expect: "refused",
-    matches: /gate 'story' cannot be re-opened once approved/u,
+    matches: /gate 'story' cannot be re-opened once approved and its plan is seeded/u,
     act(repo) {
       seeded(repo);
       assert.equal(decide(repo, "story", "approved").ok, true);
       return factory(repo, ["gate", RUN, "story", "pending", "--now", NOW]);
+    },
+  },
+  // The other side of the same line. A run that discovers at spec time that its approved story
+  // contradicts itself has nothing built to strand, and blocking it cost a whole run.
+  {
+    id: "unseeded-approved-gate-still-reopens",
+    file: "skills/feature/SKILL.md",
+    fragment: "**Before the plan is seeded, an approved gate still re-opens**",
+    expect: "allowed",
+    matches: /"story": "approved"/u,
+    act(repo) {
+      // Initialized but *not* seeded — that is the whole distinction.
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story-v2.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "approved", "--artifact", "artifacts/story-v2.md", "--now", NOW]).ok, true);
+      return factory(repo, ["status", RUN, "--json"]);
     },
   },
   // The other half of that rule, and the reason it is stated in two halves: the first live run

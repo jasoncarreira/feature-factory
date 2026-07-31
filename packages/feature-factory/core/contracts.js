@@ -91,7 +91,7 @@ const gates = contract({
   id: "gates",
   reobserve: checkPrePrApproval,
   project: (state) => ({ ...(state.gates ?? {}) }),
-  validateTransition: ({ before, after }) => {
+  validateTransition: ({ before, after, candidate }) => {
     for (const name of GATE_NAMES) {
       const from = before[name];
       const to = after[name];
@@ -115,15 +115,15 @@ const gates = contract({
       // Every gate is compared on every gates transition, so a gate nobody touched must fall
       // through here rather than be judged again.
       if (from.status === to.status) continue;
-      // What may re-open turns on what was decided. `changes` is not a verdict but a request for
-      // another round, and nothing downstream can have been built on it — every later stage
-      // requires this gate *approved* — so any gate re-opens from `changes`. Refusing it made the
-      // ordinary iterate loop fatal: the first live run asked for a story change at Gate 1, found
-      // the gate frozen, and was abandoned for a replacement. An *approved* gate is the hazard, and
-      // there only pre_pr may: it once published Story v1's implementation under Story v2, because
-      // the Brief, validator, tests and Gate 3 that judged the old story all stayed valid.
-      if (reopening && from.status !== "changes" && name !== "pre_pr") {
-        throw new Error(`gate '${name}' cannot be re-opened once ${from.status}; only pre_pr may, because only its subject can change after approval`);
+      // Re-opening turns on what was decided and on whether anything downstream would be stranded.
+      // `changes` asks for another round and every later stage requires this gate approved, so
+      // nothing rests on it. An approved gate is the hazard — one re-opened once published Story v1's
+      // implementation under Story v2 — but that needs built work, and before seeding there is none.
+      const seeded = (candidate.slices ?? []).length > 0;
+      const mayReopen = from.status === "changes" || name === "pre_pr"
+        || (from.status === "approved" && !seeded);
+      if (reopening && !mayReopen) {
+        throw new Error(`gate '${name}' cannot be re-opened once ${from.status}${seeded ? " and its plan is seeded" : ""}`);
       }
       if (decided && !reopening) {
         throw new Error(`gate '${name}' is already decided as ${from.status}`);
