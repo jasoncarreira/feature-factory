@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as cli } from "../bin/factory.js";
 import { nextAction } from "../state/index.js";
+import { assertPublicationReady } from "../observe/review.js";
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "factory.js");
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -764,5 +765,45 @@ describe("what happens next", () => {
       "a pending gate outranks an open step: pending means a human really is waiting",
     );
     assert.equal(nextAction(state({})), "gate:story", "an empty run starts at the first gate");
+  });
+});
+
+// The validator requirement turns on the slice count, so it needs both sides. Every fixture in
+// this file is single-slice, which means the requirement would otherwise have gone untested the
+// moment single-slice runs stopped needing it.
+describe("the holistic validator is required only when there is something holistic to judge", () => {
+  const slice = (id, status = "merged") => ({
+    id, stack: "backend", depends_on: [], status, worktree: ".", branch: id, attempts: 1,
+    paths: ["src/"], test_plan: ["t"], base_ref: "a".repeat(40), evidence_ref: null,
+    review_ref: null, merge_commit: "b".repeat(40),
+  });
+  const HEAD = "c".repeat(40);
+  const state = (slices, validator = null) => ({
+    status: "running", slices, validator,
+    gates: Object.fromEntries(["story", "brief", "pre_pr"].map((n) => [n, { status: "approved" }])),
+  });
+  const refusal = (slices, validator) => {
+    try {
+      assertPublicationReady({
+        runDir: "/nonexistent", state: state(slices, validator), runId: RUN, observeHead: () => HEAD,
+      });
+      return null;
+    } catch (error) { return error.message; }
+  };
+
+  it("refuses a multi-slice run with no verdict, and lets a single-slice run past that check", () => {
+    assert.match(refusal([slice("one"), slice("two")]),
+      /a multi-slice run requires an approving validator verdict/u);
+    // The single-slice run gets past the validator and refuses later, on evidence it has not got.
+    // Asserted as "not the validator refusal" so the test cannot pass because of an unrelated throw.
+    const single = refusal([slice("one")]);
+    assert.doesNotMatch(single, /validator/u, `single-slice must clear the validator check: ${single}`);
+
+    // Skipping is permitted; ignoring is not. A recorded NO-GO blocks either way.
+    assert.match(refusal([slice("one")], { verdict: "NO-GO", reviewed_head: HEAD, report: null, loops: 1 }),
+      /the validator verdict is not an approval/u);
+    // And a recorded approval is still bound to the head it judged.
+    assert.match(refusal([slice("one")], { verdict: "GO", reviewed_head: "d".repeat(40), report: null, loops: 1 }),
+      /but the integration head is/u);
   });
 });

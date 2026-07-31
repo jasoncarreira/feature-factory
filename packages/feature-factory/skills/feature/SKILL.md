@@ -289,7 +289,12 @@ Against the integrated feature worktree, not a slice:
    zero, against the integration head as it stands. Then `work-reviewer` confirms each criterion maps to
    a real assertion.
 2. `implementation-validator` — the holistic pass across the whole diff, complementing per-slice
-   reviews. It returns GO / GO-WITH-NITS / NO-GO **and writes `reviews/implementation-validator.json`
+   reviews. **Skip it when the run has exactly one slice**: its subject is the interaction *between*
+   slices, and with one there is none, so it re-reads the diff the slice reviewer just approved —
+   a serialized pass on the critical path for no new information. Gate 3 does not require a verdict
+   for a single-slice run. Run it for every multi-slice run; the gate refuses without it.
+
+   When you do run it, it returns GO / GO-WITH-NITS / NO-GO **and writes `reviews/implementation-validator.json`
    naming the commit it judged**, exactly like any other reviewer. Then:
    ```sh
    factory validator <run-id> --report artifacts/validation-report.md
@@ -317,8 +322,10 @@ the time `factory pr` runs, so this is the last refusal that can still prevent s
 - **all three gates currently approved** — not just this one, and not "was approved once". In practice
   this catches a run that reaches here with Story or Brief still asking for changes or never approved,
   and a `pre_pr` re-opened for the recovery below and not yet re-approved;
-- an approving `implementation-validator` verdict whose `reviewed_head` **is** the integration branch's
-  current head, re-observed from git rather than read back from the manifest;
+- for a run with **more than one slice**, an approving `implementation-validator` verdict whose
+  `reviewed_head` **is** the integration branch's current head, re-observed from git rather than read
+  back from the manifest. A single-slice run does not require one — see Step 5 — but if a verdict was
+  recorded anyway it must still approve and still name the current head;
 - `evidence/test-verifier.json`, belonging to this run, recording tests that were observed and exited
   zero, against that same head.
 

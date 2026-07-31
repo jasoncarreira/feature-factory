@@ -251,15 +251,20 @@ export function assertPublicationReady({ runDir, state, runId, observeHead }) {
   if (unmerged.length > 0) {
     refuse(`every slice must be merged; not merged: ${unmerged.map((slice) => `${slice.id}(${slice.status})`).join(", ")}`);
   }
-  const validator = state.validator;
-  if (!validator || !isApproving(validator.verdict)) refuse("the validator verdict is not an approval");
-
   // Attack 4: the verdict names the head it judged, and that head is re-observed here
   // rather than read back from the manifest — the manifest records what we were told and
   // the repository records what is true.
   const head = observeHead();
   if (!head) refuse("the integration head could not be observed");
-  if (head !== validator.reviewed_head) {
+  // Required only when there is something holistic to judge: the validator's subject is the diff
+  // *across* slices, and one slice has none — it re-reads what the slice reviewer just approved,
+  // serialized before the gate. Zero slices was refused above, so this is not "skip when nothing
+  // was built". Skipping is permitted, ignoring is not: a recorded verdict must approve and must
+  // name this head either way. The published head stays bound by the test-verifier check below.
+  const validator = state.validator;
+  if (!validator && state.slices.length > 1) refuse("a multi-slice run requires an approving validator verdict");
+  if (validator && !isApproving(validator.verdict)) refuse("the validator verdict is not an approval");
+  if (validator && head !== validator.reviewed_head) {
     refuse(`the validator judged ${String(validator.reviewed_head).slice(0, 12)} but the integration head is ${head.slice(0, 12)}`);
   }
 

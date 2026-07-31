@@ -359,7 +359,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //
     // So the number is 2650 again, and the precedent is the one worth keeping: a raise is a
     // debt, and the next one should be paid the same way.
-    assert.ok(total < 2650, `production source is ${total} lines; the tripwire is 2650`);
+    //
+    // 2650 -> 2655, unpaid, for the single-slice validator rule in assertPublicationReady: the
+    // slice-count branch, and the split that keeps a *recorded* verdict binding even when one was
+    // not required. Four lines of it are the comment explaining why skipping is safe and why zero
+    // slices is not the same case, which is the part a future reader cannot reconstruct. Debt.
+    assert.ok(total < 2655, `production source is ${total} lines; the tripwire is 2655`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
@@ -386,6 +391,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // than an oversight — a new row is a line of data binding existing prose to existing behaviour,
     // which is the growth this codebase wants. What the number constrains is new files and new call
     // sites, which is where proof mass actually accumulates.
-    assert.ok(count <= 82, `${count} tests; the budget is 82`);
+    //
+    // 82 -> 83, tied to two findings from a live run. `nextAction` had no test of its output at
+    // all, and it reported `gate:brief` through the whole of research and spec. And the
+    // single-slice validator rule needed both sides proven — every publication fixture here is
+    // single-slice, so the moment one slice stopped requiring a verdict the requirement would
+    // have had no test left at all.
+    assert.ok(count <= 83, `${count} tests; the budget is 83`);
   });
 });
