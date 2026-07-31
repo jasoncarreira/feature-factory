@@ -1,12 +1,12 @@
 ---
 name: feature
 description: >
-  Software-factory orchestrator. Drives a feature from idea or ticket through a chain of focused
-  agents — research, story, design, spec, decompose, parallel build, test, validate — pausing at
-  three approval gates and ending in a draft PR. State is durable (a per-run manifest on disk,
-  written only by the `factory` CLI), evidence is observed rather than trusted from agent prose,
-  high-risk steps are reviewed, and independent slices build in parallel. Invoke as
-  `/feature <ticket key | feature idea>`.
+  Software-factory orchestrator. Accepts either an idea or ticket through story, research/design,
+  specification, and decomposition, or an explicitly caller-supplied implementation spec that is
+  verified and projected into one backend slice. Both entries converge on the same observed build,
+  integration, three approval gates, and draft-PR pipeline. State is durable, evidence is observed
+  rather than trusted from agent prose, and high-risk steps are reviewed. Invoke as
+  `/feature <ticket key | feature idea | authoritative implementation spec>`.
 ---
 
 # /feature — the software factory
@@ -50,14 +50,18 @@ repository and the host is inside your trust boundary by construction. What that
 ## The chain
 
 ```
-INTAKE ─▶ [GATE 1: Story] ─▶ RESEARCH + DESIGN ─▶ SPEC ─▶ DECOMPOSE ─▶ [GATE 2: Brief + Plan]
-       ─▶ BUILD  (waves of parallel slices; per-slice OBSERVE ▶ REVIEW ▶ serial MERGE)
-       ─▶ INTEGRATE: TEST + VALIDATE (on the merged feature branch)
-       ─▶ [GATE 3: Pre-PR] ─▶ DRAFT PR
+TICKET/IDEA ─▶ [GATE 1: Story] ─▶ RESEARCH + DESIGN ─▶ SPEC ─▶ DECOMPOSE ─▶ [GATE 2: Brief + Plan] ─┐
+SUPPLIED SPEC ─▶ VERIFY + REVIEW ─▶ PROJECT ONE BACKEND SLICE ─▶ [GATES 1 + 2: Spec + Plan] ────────┤
+                                                                                                  ▼
+                              STEP 4: BUILD (OBSERVE ▶ REVIEW ▶ MERGE) ─▶ STEP 5: TEST + VALIDATE
+                              ─▶ [GATE 3: Pre-PR] ─▶ STEP 6: DRAFT PR ─▶ STEP 7: SUMMARY
 ```
 
 `work-reviewer` runs on **high-risk steps only** — spec, decompose, each slice build, and test — and
 must APPROVE before you accept that step. Story, research, and design are not auto-reviewed.
+
+The supplied-spec entry is not a weaker or separate build pipeline. It skips story authoring/reading,
+research, design, and decomposition authoring, then joins the same Step 4–7 machinery.
 
 ## Operating modes
 
@@ -78,18 +82,33 @@ Only when the invocation explicitly requests it. Never infer it from vague wordi
   unresolved product, UX, security, or external-policy decision.
 - **Gate 2 (brief + plan)**: approve only after `work-reviewer` approves both spec and decomposition,
   every acceptance criterion maps to a slice, and same-wave slices are file-disjoint.
-- **Gate 3 (pre-PR)**: approve only on a GO or GO-WITH-NITS validator verdict with `review_ready`
-  observed evidence for the integrated branch. A NO-GO is a NO-GO.
+- **Gate 3 (pre-PR)**: with exactly one slice, approve on current-head
+  `evidence/test-verifier.json` recording an observed test run that exited zero; no validator is
+  required. With multiple slices, also require a GO or GO-WITH-NITS validator verdict naming the
+  current integration head. Any recorded validator verdict remains binding for either slice count and
+  must approve the current head. A NO-GO is a NO-GO.
 - **Never auto-merge.** Creating the draft PR is the last side effect an autonomous run may perform.
 - Write the gate question to `gates/<gate>.md` even when no human reads it, so the decision is
   auditable after the fact.
 
+For a supplied-spec run, use the supplied preconditions instead: Gate 1 may approve only when the
+latest attempt is `VERIFIED`, `work-reviewer` approved both the supplied brief and its persisted exact
+`artifacts/spec-verification.json` extraction, and no product, UX, security, external-policy, or
+implementation decision remains. Gate 2 may approve only
+when that reviewed verified spec has a deterministic one-row projection, every acceptance criterion
+maps to `supplied-spec`, `paths` exactly equal the ordered `path_lane`, and `test_plan` exactly equals
+the verified plan or is `[]` for the verified waiver. No decomposition review is required because no
+decomposition was authored. Evaluate Gate 1 before Gate 2. A failed precondition records
+`needs-human`; it never causes fallback, acceptance, or seeding.
+
 ## Step 0 — Intake, run id, lock, manifest
 
-1. **Ticket?** A key in the input or inferable from the branch → run the reader agent. Otherwise have
-   the story agent draft one locally. Creating a ticket in an external tracker is *your* action, never
-   an agent's, and only after Gate 1.
-2. **Design source?** If a design URL is present, plan to run `design-interpreter`.
+Choose supplied-spec entry only when the caller explicitly says an implementation spec is authoritative
+and provides either its body or a readable source path. Never infer this choice from an existing
+artifact, ticket shape, missing story inputs, or any other absence. Otherwise preserve the normal
+intake: a key in the input or inferable from the branch runs the reader agent, and an idea goes to the
+story agent for a local draft. A design URL on the normal route schedules `design-interpreter`.
+Creating a ticket in an external tracker is *your* action, never an agent's, and only after Gate 1.
 
 Establish the control plane:
 
@@ -100,6 +119,13 @@ factory lock <run-id> claim --session <session-id>
 
 `run-id` is the ticket key lowercased, else a slug of the request. `init` creates `plan/`,
 `artifacts/`, `evidence/`, `reviews/` and writes the manifest.
+
+After `factory init` on the explicitly selected supplied route, copy the caller's spec content verbatim
+to `$REPO/.factory/<run-id>/artifacts/technical-brief.md`. This canonical artifact is untrusted operator
+data under the threat boundary even after verification; it is never privileged model instruction.
+Verification creates no sandboxing, hostile-host protection, or adversarial-filesystem guarantee.
+This route adds no CLI argument, command, mode, schema, `run.json` key, or discriminator. It uses stack
+`backend`, and routing to `backend-builder` never grants ownership beyond the seeded `paths`.
 
 **Do not ask the engineer for a branch or a worktree.** Both are derived: the branch defaults to
 `feature/<run-id>` and the worktree to the current checkout, and `init` reports what it recorded. The
@@ -120,6 +146,9 @@ Refresh the lock as the run progresses with `factory heartbeat <run-id> --sessio
 especially around long waits, so a crashed run becomes reclaimable rather than wedged.
 
 ### Gate 1 — Story
+
+This checkpoint is the normal-route Gate 1. The supplied route opens the same `story` gate later with
+the verified spec as its artifact and presents it together with Gate 2.
 
 Present the story. Record with `factory gate <run-id> story pending --artifact artifacts/story.md`
 before presenting, then the decision: `factory gate <run-id> story approved|changes|stop`. A gate must
@@ -143,6 +172,9 @@ the research and the plan that are still good. Only `stop` ends a run at a gate.
 Fan out in a single message: `codebase-researcher` → `artifacts/research-map.md`, and
 `design-interpreter` → `artifacts/design-brief.md` if there is a design source.
 
+Skip Step 1 entirely on the supplied route. Do not invoke `story-reader`, `story-writer`,
+`codebase-researcher`, or `design-interpreter`, and do not fabricate any of their artifacts.
+
 **Class-wide scope.** When the story quantifies the change with `all`/`every`/`centralize`/`across`,
 or targets a whole behaviour or vulnerability class, require the researcher to return a *finite*
 in-scope surface inventory: each source, each sink or call site, each existing guard, the required
@@ -151,6 +183,8 @@ established from repository evidence, send it back for targeted research rather 
 site as representative of the class.
 
 ## Step 2 — Spec (reviewed)
+
+### Normal story route
 
 Run `spec-writer` with the approved story, research map, and design brief → the technical brief in
 `artifacts/technical-brief.md`. Then review it: `work-reviewer` with subject `spec-writer`. On REJECT,
@@ -177,7 +211,64 @@ Before accepting, reject mutually incompatible constraints: the required behavio
 within the brief's own allowed mechanisms, dependencies, and non-goals. Surface the smallest
 dependency or design decision needed instead of sending an impossible envelope to builders.
 
+### Supplied-spec verification route
+
+Do not author or repair the supplied spec. Before verification attempt `N`, record:
+
+```sh
+factory step <run-id> spec-writer running --attempts N
+```
+
+Invoke `spec-writer`, explicitly label the call as **supplied-spec verification**, and pass the
+canonical `artifacts/technical-brief.md`. A `REFUSED` response creates no plan. Record:
+
+```sh
+factory step <run-id> spec-writer rejected --attempts N
+```
+
+Present every reported missing or ambiguous category and request a caller-authored correction. After
+recording the current attempt `rejected`, remove `artifacts/spec-verification.json` before replacing
+the canonical brief. Only then copy the corrected caller content verbatim to
+`artifacts/technical-brief.md` and record attempt `N+1` as `running`. Never delete or replace the
+supplied brief before invalidating the old extraction. The prior `review_ref` may remain in `run.json`
+because the existing CLI has no clearing flag, but it is logically stale for the new attempt. Never
+research, infer, invent a missing portion, or fall back to the story route. Respect `max_retries`;
+exhaustion becomes `blocked`/`needs-human` under the bounded-loop policy.
+
+On `VERIFIED`, write the exact schema response, with no added fields, to the existing artifact path
+`artifacts/spec-verification.json` before review. This is the canonical extracted verification; add no
+CLI command, state field, or `run.json` key. Invoke `work-reviewer` with both
+`artifacts/technical-brief.md` and `artifacts/spec-verification.json`, so it reviews the supplied brief
+and the extraction that downstream projection will consume. A `REFUSED` response does not create this
+success artifact. On reviewer REJECT, persist `reviews/spec-writer.json`, record the attempt, request
+caller correction, and begin the complete verification and review cycle again within the retry limit:
+
+```sh
+factory step <run-id> spec-writer rejected \
+  --attempts N --review-ref reviews/spec-writer.json
+```
+
+After that rejection transition, use the same invalidation order: remove
+`artifacts/spec-verification.json`, replace the supplied brief only after the removal, then record
+attempt `N+1` as `running`. Recreate the extraction only after that current attempt returns `VERIFIED`.
+
+On reviewer APPROVE, persist the same review ref but deliberately retain `running`:
+
+```sh
+factory step <run-id> spec-writer running \
+  --attempts N --review-ref reviews/spec-writer.json
+```
+
+Reviewer approval is required before opening the checkpoint. Do not mark the step `accepted` yet,
+because an accepted step cannot reopen for a gate-requested caller revision. The verified spec is the
+Gate 1 artifact and must expose the intended test-coverage approach. Apply known repository test
+constraints at review: in this repository the syntactic test-site budget is 83 of 83 with no slack,
+coverage should use table rows or assertions inside the existing `prompt-claims.test.js` callback, and
+any genuinely necessary new `it(`/`test(` site must be raised with its reason at Gate 2.
+
 ## Step 3 — Decompose (reviewed)
+
+### Normal story route
 
 Run `work-decomposer` → `plan/slices.json` and the human-readable `plan/plan.md`. Each slice declares
 `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`.
@@ -204,7 +295,105 @@ Seeding is the **ratification point** for two decisions, and neither can be chan
 Present the brief **and** the plan — the waves, each slice's paths and acceptance criteria, and any
 serialized hotspots. The engineer approves the parallelization plan, not just the brief.
 
+### Supplied-spec projection and combined Gates 1 and 2
+
+Do not invoke `work-decomposer`. After verification and review approval, the orchestrator generates
+both plan artifacts deterministically from the reviewed `artifacts/spec-verification.json`. Never
+re-extract plan inputs from prose after review. Write `plan/slices.json` using the existing object
+envelope and exactly one row:
+
+Plan generation is authorized only when all three freshness checks hold: the verification artifact
+exists, the review referenced by the `spec-writer` step has verdict `APPROVE`, and that review's
+`attempt` exactly equals the current `spec-writer.attempts`. A stale approving review from an earlier
+attempt never authorizes projection even though its ref remains recorded.
+
+```json
+{
+  "slices": [
+    {
+      "id": "supplied-spec",
+      "stack": "backend",
+      "paths": ["<path_lane entries verbatim and in order>"],
+      "depends_on": [],
+      "acceptance": ["<acceptance_criteria entries verbatim and in order>"],
+      "test_plan": ["<test_plan entries verbatim and in order>"]
+    }
+  ]
+}
+```
+
+For a verified waiver, `test_plan` is `[]`. Add no fields, derive no paths, reorder nothing, split no
+criteria, and create no additional slice. Render `plan/plan.md` exactly in this shape:
+
+```markdown
+# Supplied-spec slice plan
+
+## `supplied-spec`
+
+- Stack: `backend`
+- Builder: `backend-builder`
+- Depends on: none
+
+### Paths
+
+1. `<first path_lane entry>`
+2. `<subsequent entries in supplied order>`
+
+### Acceptance criteria
+
+1. <first acceptance_criteria entry>
+2. <subsequent entries in supplied order>
+
+### Test plan
+
+1. <first test_plan entry>
+2. <subsequent entries in supplied order>
+```
+
+For a waiver, replace the numbered Test plan with `Waived: <verbatim test_waiver reason>`. The
+Markdown is the Brief artifact and the JSON is the immutable seeding source.
+
+Open both existing gates only after both artifacts exist:
+
+```sh
+factory gate <run-id> story pending --artifact artifacts/technical-brief.md
+factory gate <run-id> brief pending --artifact plan/plan.md
+```
+
+Present the verified spec and one-slice plan together. In interactive mode, await both decisions,
+record Story first, and decide Brief only after Story approves. In headless mode, write both existing
+gate questions and artifact refs, record `needs-human`, and stop before approval, step acceptance, or
+seeding. In autonomous mode, apply the supplied preconditions in the Autonomous mode section, evaluate
+Gate 1 before Gate 2, and record `needs-human` and stop on any failed precondition.
+
+Any Story or Brief `changes` before seeding requires caller revision of
+`artifacts/technical-brief.md`; there is no plan-only mutation because both plan files are projections
+of that spec. First mark the still-unaccepted current attempt `rejected`; next remove
+`artifacts/spec-verification.json`; only then replace the canonical brief with caller-corrected content;
+then record attempt `N+1` as `running`. Reverify, recreate the extraction only on current-attempt
+`VERIFIED`, obtain a current-attempt approving review, regenerate both plan files, and reopen and
+re-present both gates as needed. If Story was approved before Brief requested changes, reopen Story
+because the spec revision invalidates it. If Brief is pending when Story requests changes, regenerate
+and re-present Brief but do not approve it before revised Story approval. A `stop` decision follows
+existing terminal behavior and never accepts or seeds.
+
+Only after both gates approve, record acceptance and immediately seed, with no further checkpoint or
+artifact mutation:
+
+```sh
+factory step <run-id> spec-writer accepted \
+  --attempts N --review-ref reviews/spec-writer.json
+factory slices-seed <run-id> --from plan/slices.json
+```
+
+Gate 2 therefore ratifies exact `paths`, `acceptance`, and `test_plan`, including any explicit waiver,
+before they become immutable. A crash between acceptance and seeding resumes by seeding the already
+approved, unchanged plan.
+
 ## Step 4 — Build slices (you own the worktrees)
+
+Both entry routes use this step unchanged. The supplied route has one slice, but isolation,
+observation, review/retry, two-parent merge, and ownership refusal all remain mandatory.
 
 One feature branch and worktree for the run; slice worktrees branch from the current feature-branch
 HEAD so dependents contain their dependencies' code. Compute waves by topological sort of
@@ -215,8 +404,11 @@ Per slice:
 
 1. **Isolate** — create the slice worktree and branch, then
    `factory slice <run-id> <slice-id> running --worktree <path> --branch <branch>`.
-2. **Dispatch** — one agent call per slice in the wave, in a single message. Give each builder its one
-   slice spec, its worktree, the brief, and the research map.
+2. **Dispatch** — one agent call per slice in the wave, in a single message. On the normal route give
+   each builder its one slice spec, its worktree, the brief, and the research map. On the supplied route
+   dispatch the sole `backend-builder` with its isolated worktree and branch, the sole slice row, and
+   `artifacts/technical-brief.md`. Pass no fabricated story, research-map, or design-brief artifact.
+   The `backend` routing value chooses the existing builder and does not broaden exact seeded `paths`.
 3. **Observe** — when the builder returns, do not read its prose for facts:
    ```sh
    factory observe <run-id> <slice-id> --worktree <path> --base <slice-base-sha> \
@@ -279,8 +471,11 @@ blocked, the run is `partial` — surface it at the next gate rather than pushin
 
 Against the integrated feature worktree, not a slice:
 
-1. `test-verifier` writes and runs acceptance tests for the story's criteria. Observe its result on the
-   **integrated** worktree, with the run's original branch point as `--base`:
+1. `test-verifier` writes and runs acceptance tests for the story's criteria on the normal route. On
+   the supplied route, give it the integrated worktree, supplied brief, reviewed
+   `artifacts/spec-verification.json`, one-slice plan, and the extraction's verified
+   `acceptance_criteria` as the acceptance source. Observe its result on the **integrated** worktree,
+   with the run's original branch point as `--base`:
    ```sh
    factory observe <run-id> test-verifier --worktree $FEAT_WT --base <branch-point> --test-cmd "<suite>"
    ```
@@ -292,7 +487,8 @@ Against the integrated feature worktree, not a slice:
    reviews. **Skip it when the run has exactly one slice**: its subject is the interaction *between*
    slices, and with one there is none, so it re-reads the diff the slice reviewer just approved —
    a serialized pass on the critical path for no new information. Gate 3 does not require a verdict
-   for a single-slice run. Run it for every multi-slice run; the gate refuses without it.
+   for a single-slice run. This automatic omission needs no new discriminator, mode, `run.json` key,
+   CLI command, or contract. Run it for every multi-slice run; the gate refuses without it.
 
    When you do run it, it returns GO / GO-WITH-NITS / NO-GO **and writes `reviews/implementation-validator.json`
    naming the commit it judged**, exactly like any other reviewer. Then:
@@ -310,8 +506,8 @@ integration branch if it is test-only. Respect `max_retries`.
 
 ### Gate 3 — Pre-PR
 
-Present the validator verdict, the acceptance-test table, the full diff against the base branch, and
-migration, flag, and risk callouts.
+Present the validator verdict or the automatic one-slice omission, the acceptance-test table, the full
+diff against the base branch, and migration, flag, and risk callouts.
 
 **Approving this gate is the transition that authorizes publication**, so `factory gate <run-id>
 pre_pr approved` re-checks the whole publication story and *refuses the approval* if any of it is
@@ -355,6 +551,8 @@ factory gate <run-id> pre_pr approved          # present the new diff and re-app
 
 ## Step 6 — Draft PR
 
+Both entry routes preserve this push, draft-PR, idempotency, and readiness-recheck behavior unchanged.
+
 Push the feature branch, then create the PR as a **draft** and record it:
 
 ```sh
@@ -379,6 +577,10 @@ Report the ticket, the story and brief in a line each, the slice plan and per-sl
 migration and flag callouts, the acceptance-criteria/test table and validator verdict, the PR URL, the
 run directory, and any TODOs — blocked slices, accepted NO-GO findings, recorded overrides.
 
+For a supplied-spec run, report the verified supplied spec instead of a nonexistent story, the
+one-slice plan and status, acceptance evidence, the automatic validator omission or any binding
+recorded verdict, PR URL, run directory, and TODOs. Never invent skipped artifacts.
+
 ## Resuming
 
 On invocation, if the run directory exists and you hold or steal the lock, run
@@ -391,6 +593,29 @@ On invocation, if the run directory exists and you hold or steal the lock, run
 - a step not `accepted` → re-run it
 
 Never re-do a side effect the manifest shows already done — ticket creation, push, PR.
+
+Resume a supplied-spec run without adding state:
+
+- Once Gate 1 opens, its `artifacts/technical-brief.md` artifact proves the supplied route; the normal
+  route uses `artifacts/story.md`.
+- Before Gate 1 opens, a recorded `spec-writer` step plus `artifacts/technical-brief.md` while Story is
+  absent proves the supplied route. Normal spec writing follows an approved Story, so this combination
+  cannot occur normally.
+- If a crash leaves only initialization and the canonical artifact, durable records do not prove the
+  required explicit selection. Interactive mode asks the caller to reassert supplied-spec intent;
+  headless and autonomous modes record `needs-human`. Never infer a route or fall back.
+- A `running` spec-writer step without `artifacts/spec-verification.json` resumes the current attempt at
+  verification. Recreate the extraction only if that attempt returns `VERIFIED`.
+- When the extraction exists, resume by reading the referenced review. If its verdict is not `APPROVE`
+  or its `attempt` does not exactly equal current `spec-writer.attempts`, review the supplied brief and
+  persisted extraction for the current attempt. The retained ref to an earlier attempt is stale and
+  never authorizes plan generation.
+- Only an existing extraction plus a referenced `APPROVE` review whose `attempt` equals current
+  `spec-writer.attempts` resumes at deterministic plan generation and the combined checkpoint.
+- If both gates are approved while the step remains `running`, accept it and seed without another
+  checkpoint. If the step is accepted but unseeded, seed the unchanged approved JSON.
+- After seeding, the Story artifact plus fixed slice id `supplied-spec` preserves orientation. Continue
+  from `factory status.next` through the unchanged Step 4–7 pipeline.
 
 ## Guardrails
 
