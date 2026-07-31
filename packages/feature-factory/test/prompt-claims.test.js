@@ -586,16 +586,6 @@ const PROMPT_CONTRACTS = [
     ],
   },
   {
-    id: "supplied-spec-test-budget-is-ratified",
-    file: "skills/feature/SKILL.md",
-    fragments: [
-      "syntactic test-site budget is 83 of 83 with no slack",
-      "The verified spec is the\nGate 1 artifact and must expose the intended test-coverage approach.",
-      "table rows or assertions inside the existing `prompt-claims.test.js` callback",
-      "any genuinely necessary new `it(`/`test(` site must be raised with its reason at Gate 2",
-    ],
-  },
-  {
     id: "spec-writer-has-two-truthful-input-forms",
     file: "agents/spec-writer.md",
     fragments: [

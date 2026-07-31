@@ -261,10 +261,10 @@ factory step <run-id> spec-writer running \
 
 Reviewer approval is required before opening the checkpoint. Do not mark the step `accepted` yet,
 because an accepted step cannot reopen for a gate-requested caller revision. The verified spec is the
-Gate 1 artifact and must expose the intended test-coverage approach. Apply known repository test
-constraints at review: in this repository the syntactic test-site budget is 83 of 83 with no slack,
-coverage should use table rows or assertions inside the existing `prompt-claims.test.js` callback, and
-any genuinely necessary new `it(`/`test(` site must be raised with its reason at Gate 2.
+Gate 1 artifact and must expose the intended test-coverage approach. Where the repository bounds its
+own test surface — a budget on test counts, a required file, a lint — treat that bound as a constraint
+on the plan rather than something to discover later: prefer new cases inside existing tests, and raise
+any genuinely necessary new test entry point, with its reason, at Gate 2.
 
 ## Step 3 — Decompose (reviewed)
 
