@@ -35,7 +35,7 @@ Return this as your final message:
 
 **Title:** <imperative, ticket-ready, e.g. "Add bulk archive to relationships list">
 
-**As a** <role: Org Admin | Org User | Auditor | Client API consumer | VISO internal>
+**As a** <role: name one of the repository's actual user roles or audiences>
 **I want** <capability>
 **so that** <business value>
 

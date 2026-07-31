@@ -52,17 +52,18 @@ When the subject is a **class-wide** requirement (`all`/`every`/`centralize`/`ac
 ## What to check, by subject
 
 - **Doc steps (`spec-writer`, `work-decomposer`):** every required field of the output contract is filled; the artifact is consistent with its inputs (does the brief cover every AC and match the research map's real paths? does the slice DAG obey file-disjoint + hotspot-serialization rules, and does every AC map to a slice?). For class-wide subjects, the brief must include the finite implementation matrix (per §"Class-wide completeness") — a class-wide spec that lacks it is a BLOCKER.
-- **Build slices (`backend-builder` / `frontend-builder`):** apply the repo rubric — `REVIEW.md`, `.agents/rules/backend.md`, `.agents/rules/frontend.md`, `CLAUDE.md` — against the **observed diff**:
-  - Layering (Controller→Service→Repository→Entity), Blaze views for reads, GraphQL/REST boundary.
-  - Frontend: standalone + OnPush, signal APIs, native control flow, no `ngClass`/`ngStyle`, no getters, themed tokens. Dialogs holding a form/unsaved input opened via `MatDialogWrapperService` with `disableClose: true` **and** an explicit X/Cancel dismiss control.
-  - Liquibase: filename/author/context/master.xml/grants. No subtree edits. No stray code comments.
+- **Build slices (`backend-builder` / `frontend-builder`):** apply the repo's own rubric — its `CLAUDE.md` and any review or rules files it points at — against the **observed diff**:
+  - Backend: the repo's layering, its projection/read path, its API boundary.
+  - Frontend: the repo's component conventions, binding forms, state approach and design tokens.
+  - Migrations: the repo's filename, author, context, manifest-registration and permission steps.
+  - No edits to vendored or generated trees. No stray code comments.
   - **Slice discipline:** the diff stays within the slice's `paths` (out-of-lane edits are a finding).
   - The slice's `acceptance` is actually implemented, and the observed tests cover it.
 - **Test step (`test-verifier`):** each AC maps to a real assertion that would fail if the behavior broke; no test weakened to pass; observed test run is green (or honestly WRITTEN-NOT-RUN with a reason).
 
 ## Security proportionality
 
-VISO's real trust boundaries stay fully blocking: unauthenticated or authenticated users, cross-tenant access, Client API callers, and untrusted uploaded content reaching a privileged sink are always BLOCKER material. But a security BLOCKER must identify the **untrusted ingress**, the **privileged sink**, the **capability gained**, and **why the actor did not already possess that capability**; a secret-exposure BLOCKER instead identifies the sensitive source, the unauthorized disclosure sink or observer, and what was disclosed. If those elements cannot be named, record the concern as a non-blocking hardening note rather than inventing a security boundary.
+The repository's real trust boundaries stay fully blocking: unauthenticated or authenticated users, cross-tenant access, Client API callers, and untrusted uploaded content reaching a privileged sink are always BLOCKER material. But a security BLOCKER must identify the **untrusted ingress**, the **privileged sink**, the **capability gained**, and **why the actor did not already possess that capability**; a secret-exposure BLOCKER instead identifies the sensitive source, the unauthorized disclosure sink or observer, and what was disclosed. If those elements cannot be named, record the concern as a non-blocking hardening note rather than inventing a security boundary.
 
 ## Severity
 

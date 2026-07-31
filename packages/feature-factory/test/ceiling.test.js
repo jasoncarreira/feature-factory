@@ -197,6 +197,31 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // so its presence would mean a dropped stage walked back in as a file.
     assert.deepEqual(shipped.filter((name) => !AGENT_NAMES.includes(name)), [],
       "an agent ships that the declared chain does not name");
+
+    // Two properties of the agent prompts, both defects found by reading them:
+    //
+    // 1. The claim block an agent emits is parsed by `factory observe --claim` and reconciled
+    //    field by field against what the orchestrator observes. The prompts said
+    //    `"status": "pass"`, which mismatches the evidence vocabulary, so every builder
+    //    following its own prompt would record a disagreement and block its own slice.
+    //    Verified against reconcileClaim before fixing.
+    // 2. They came from one repository and named its stack throughout. A repository-neutral
+    //    package that hands an agent another project's file layout sends it looking for paths
+    //    that do not exist.
+    const agentText = shipped.map((name) => ({ name, text: readFileSync(join(pkg, "agents", `${name}.md`), "utf8") }));
+
+    const claimants = agentText.filter(({ text }) => text.includes('"status":'));
+    assert.ok(claimants.length >= 3, "the builders and the test-verifier all emit claim blocks");
+    for (const { name, text } of claimants) {
+      assert.ok(/"status": "completed\|blocked"/u.test(text),
+        `${name} must document the claim status vocabulary evidence uses; "pass" reads as a disagreement`);
+    }
+
+    const REFERENCE_STACK = /graphql|liquibase|blaze|angular|playwright|jhipster|gradle|ngclass|onpush|junit|src\/main\/|origin\/development|visotrust/iu;
+    const leaked = [...agentText, { name: "skill/SKILL.md", text: markdown }]
+      .filter(({ text }) => REFERENCE_STACK.test(text))
+      .map(({ name }) => name);
+    assert.deepEqual(leaked, [], "an agent names the reference repository's stack instead of asking this one");
   });
 
   it("declares exactly the declared run.json top-level keys", () => {

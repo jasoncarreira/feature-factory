@@ -37,7 +37,7 @@ An independently-implementable unit of the brief with:
 
 ## Rules (the reviewer checks these before Gate 2)
 
-1. **Real dependencies only.** Don't add a blanket `frontend → backend` edge. A frontend slice depends on a backend slice only if it consumes that slice's new GraphQL field / REST endpoint / generated type. Independent frontend work (e.g. an unrelated settings toggle) has `depends_on: []` and runs in wave 1 next to backend slices.
+1. **Real dependencies only.** Don't add a blanket `frontend → backend` edge. A frontend slice depends on a backend slice only if it actually consumes that slice's new field, endpoint or generated type. Independent frontend work (e.g. an unrelated settings toggle) has `depends_on: []` and runs in wave 1 next to backend slices.
 2. **Same-wave slices are file-disjoint.** If two slices would edit the same file, they cannot be in the same wave — give one a `depends_on` the other, or merge them.
 3. **Serialize integration hotspots.** These files are edited by many features and are natural collision points — any slices touching the same one go in **different waves** (serialized):
    Take the concrete list from the **research map** — the codebase-researcher names this repo's
@@ -46,7 +46,7 @@ An independently-implementable unit of the brief with:
    (regenerated rather than hand-owned, so the slice that changes the source owns the regen).
    Flag each hotspot you serialized so the orchestrator and human see why parallelism was limited.
 4. **Every AC maps to a slice.** No orphan criteria; no slice without at least one AC.
-5. **Keep slices coherent.** A slice is one layer-consistent chunk (e.g. "entity + repository", "resolver + view", "list component + its GraphQL op"), not an arbitrary file split.
+5. **Keep slices coherent.** A slice is one layer-consistent chunk (e.g. "entity + repository", "api handler + projection", "list component + its data op"), not an arbitrary file split.
 
 ## Working style
 
