@@ -29,6 +29,13 @@ export function renderLines(snapshot) {
     `${run.run_id}${run.jira_key ? `  ${run.jira_key}` : ""}`,
     `${run.status}  ${run.mode}  ${run.branch}`,
   ];
+  // Only once a step is on its second round. At attempt 1 this line would say what `next:` already
+  // says, and a restatement is what made the old gate line noise. The fraction is the point: 2/3
+  // means one round left before the step blocks and the run stalls, which is worth seeing coming.
+  if (run.step && run.step.attempts > 1) {
+    const bound = run.max_retries ? `/${run.max_retries}` : "";
+    lines.push(`${run.step.agent}  ${run.step.status} (attempt ${run.step.attempts}${bound})`);
+  }
   if (run.slice_total > 0) {
     lines.push(`slices ${run.merged}/${run.slice_total} merged`);
     for (const slice of run.slices) {

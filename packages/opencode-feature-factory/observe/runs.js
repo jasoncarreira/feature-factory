@@ -121,6 +121,12 @@ function project(runDir, runId) {
     terminal: TERMINAL.has(run.status),
     // Which gate is waiting is the one thing an operator acts on, so it is not buried in a map.
     gates: Object.entries(run.gates ?? {}).map(([name, gate]) => ({ name, status: gate?.status ?? "absent" })),
+    // The step still in flight, with its attempt count against the run's own bound. Slices carried
+    // this from the start and steps did not, so a spec-writer on its second review round looked
+    // identical to its first — and the count is the part that says whether the loop is converging or
+    // about to exhaust `max_retries` and block the run.
+    step: (Array.isArray(run.steps) ? run.steps : []).find((entry) => entry?.status !== "accepted") ?? null,
+    max_retries: run.max_retries ?? null,
     awaiting_gate: Object.entries(run.gates ?? {}).find(([, gate]) => gate?.status === "pending")?.[0] ?? null,
     slices: slices.map((slice) => ({
       id: slice.id, status: slice.status, attempts: slice.attempts, stack: slice.stack ?? null,

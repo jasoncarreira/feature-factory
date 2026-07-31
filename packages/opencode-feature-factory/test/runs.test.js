@@ -227,6 +227,20 @@ describe("run projection", () => {
       // "waiting on you" while the artifact was still being written.
       assert.match(text, />> next: gate:brief/u, "the actionable line must stand out");
       assert.equal(text.match(/brief/gu).length, 1, "the waiting gate is reported once, not twice");
+
+      // A retrying step, which slices always showed and steps never did. The fraction is the point:
+      // a spec-writer on round 2 of 3 looked identical to round 1, so there was no sign of a loop
+      // about to exhaust max_retries and block the run. Silent on the first attempt, because there
+      // `next:` already names the step and a restatement is what made the old gate line noise.
+      const stepped = (attempts) => renderLines({
+        repo: root, runs: [1],
+        active: { ...pollRuns(root).active, max_retries: 3,
+          step: { agent: "spec-writer", status: "rejected", attempts } },
+      }).join("\n");
+      assert.match(stepped(2), /spec-writer {2}rejected \(attempt 2\/3\)/u, "a retry shows its round and the bound");
+      // Narrowed to the step deliberately: a retried *slice* in this fixture already prints
+      // "(attempt 2)", so a bare /attempt/ here passes for the wrong reason.
+      assert.doesNotMatch(stepped(1), /spec-writer/u, "the first attempt adds nothing next: does not already say");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
