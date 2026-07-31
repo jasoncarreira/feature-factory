@@ -41,6 +41,15 @@ const RUN_JSON_KEYS = [
 
 const FAMILIES = ["envelope", "gates", "steps", "slices", "verdict"];
 
+// The chain BUILD-PLAN-SMALL.md settled: story -> spec -> decomposition ->
+// (impl -> review -> merge) x n -> test-verifier -> implementation-validator -> PR.
+// security-reviewer is absent deliberately; it is a declared non-goal.
+const AGENT_NAMES = [
+  "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer",
+  "work-decomposer", "work-reviewer", "test-verifier", "implementation-validator",
+  "backend-builder", "frontend-builder",
+];
+
 // Dropped subsystems. Each was a top-level run.json field or a module in the
 // predecessor; none is required by "viso + atomic transitions + autonomy".
 const FORBIDDEN_SUBSTRINGS = [
@@ -173,6 +182,21 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // against one is refused at merge — and the branch moves as siblings land.
     assert.equal(/--base\s+<feature-branch>/u.test(markdown), false,
       "observe --base must be the slice's recorded base_ref sha, not a mutable branch name");
+
+    // Every agent the skill dispatches must ship with the package. The predecessor's agent
+    // definitions lived in a separate assets/ tree, so the skill named seven agents the
+    // package did not contain and could not run a feature at all.
+    const dispatched = [...new Set([...markdown.matchAll(/`([a-z]+(?:-[a-z]+)+)`/gu)]
+      .map(([, name]) => name)
+      .filter((name) => AGENT_NAMES.includes(name)))];
+    const shipped = readdirSync(join(pkg, "agents")).filter((entry) => entry.endsWith(".md"))
+      .map((entry) => entry.replace(/\.md$/u, ""));
+    const missing = dispatched.filter((name) => !shipped.includes(name));
+    assert.deepEqual(missing, [], "the skill dispatches an agent the package does not ship");
+    // And nothing ships that the chain never runs — security-reviewer is a declared non-goal,
+    // so its presence would mean a dropped stage walked back in as a file.
+    assert.deepEqual(shipped.filter((name) => !AGENT_NAMES.includes(name)), [],
+      "an agent ships that the declared chain does not name");
   });
 
   it("declares exactly the declared run.json top-level keys", () => {

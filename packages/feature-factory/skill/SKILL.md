@@ -25,6 +25,11 @@ Two principles make this a factory rather than a session workflow:
   you run `factory observe`, which re-derives the diff and re-runs the named tests itself and records
   what it saw. `work-reviewer` judges that record, never the prose.
 
+**Who may run which commands.** Every state-changing command is yours. A subagent may read —
+`factory status <run-id> --json` to orient itself — and may never write. `factory observe` in
+particular stays with you: its entire purpose is that the party being judged is not the party
+reporting, so an agent running it would return the mechanism to prose.
+
 ## Threat boundary
 
 This is a local development tool: it runs your build and your tests, so it executes code from your
