@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { controlPlaneCandidates, findControlPlane, listRuns, pollRuns, selectActiveRun } from "../observe/runs.js";
+import { CONTROL_PLANE } from "feature-factory";
+import { findControlPlane, listRuns, pollRuns, repositoryRoot, selectActiveRun } from "../observe/runs.js";
 import { renderLines } from "../tui/lines.js";
 
 const RUN = (overrides = {}) => ({
@@ -55,12 +56,48 @@ describe("control-plane discovery", () => {
       writeFileSync(join(linked, ".git"), `gitdir: ${join(root, ".git", "worktrees", "slice-1")}\n`);
 
       assert.equal(findControlPlane(linked), root, "a slice worktree must resolve to the main repo");
-      assert.ok(controlPlaneCandidates(linked).includes(root), "the main repo must be a candidate");
+      assert.equal(repositoryRoot(linked), root, "a linked worktree resolves to the main repository");
       assert.equal(pollRuns(linked).active.run_id, "app-1");
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(linked, { recursive: true, force: true });
     }
+  });
+
+  it("never looks above the repository, even when an ancestor has a .factory", () => {
+    // Found by opening the sidebar for real: `~/.factory` exists — another tool's — so walking up for
+    // the first ancestor with a control plane matched the home directory and rendered its `skills/`
+    // subfolder as a broken run. The rename from `.claude/factory` to `.factory` made it likely; a
+    // two-segment path rarely exists by accident in a home directory, a single dotfile does.
+    const outer = mkdtempSync(join(tmpdir(), "ff-tui-ancestor-"));
+    try {
+      // An ancestor that looks like a control plane, and a repository beneath it that has none.
+      mkdirSync(join(outer, CONTROL_PLANE, "skills"), { recursive: true });
+      const inner = join(outer, "repo");
+      mkdirSync(join(inner, ".git"), { recursive: true });
+      mkdirSync(join(inner, "src"), { recursive: true });
+
+      assert.equal(repositoryRoot(join(inner, "src")), inner, "the repository bounds the search");
+      assert.equal(findControlPlane(join(inner, "src")), null,
+        "an ancestor's .factory is not this repository's control plane");
+      assert.deepEqual(pollRuns(join(inner, "src")), { repo: null, runs: [], active: null });
+    } finally { rmSync(outer, { recursive: true, force: true }); }
+  });
+
+  it("does not report a directory without a manifest as a broken run", () => {
+    // The other half of the same sighting: `skills` has no run.json, and it was rendered as
+    // `skills INVALID` with an ENOENT. A directory with no manifest is not a failed run; it is not a
+    // run. A manifest that exists and does not parse still is.
+    const root = repo("no-manifest");
+    try {
+      mkdirSync(join(root, CONTROL_PLANE, "skills"), { recursive: true });
+      mkdirSync(join(root, CONTROL_PLANE, "processes"), { recursive: true });
+      assert.deepEqual(listRuns(root), [], "directories without a manifest are not runs");
+
+      seedRun(root, "app-1", RUN());
+      assert.deepEqual(listRuns(root).map((run) => run.run_id), ["app-1"],
+        "and a real run alongside them is still found");
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it("ignores a malformed or ordinary .git rather than guessing a root", () => {

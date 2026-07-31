@@ -1,37 +1,18 @@
 // Finding and projecting runs, without asking git.
 //
 // The boundary test forbids this package from spawning a process, so `git rev-parse` is not
-// available — which turns out to be the right constraint rather than an obstacle. The control
-// plane lives at `<repo>/.factory/<run-id>/run.json`, and locating it is a filesystem
-// question: walk up from the current directory until a `.factory` appears.
+// available — which turns out to be the right constraint rather than an obstacle. The control plane
+// lives at `<repo>/.factory/<run-id>/run.json`, so locating it is a filesystem question.
 //
 // The case that makes this non-trivial is a *linked worktree*. The orchestrator creates one per
-// slice, and a linked worktree has no `.factory` of its own — the control plane stays in
-// the main repository. Its `.git` is a file rather than a directory, containing
+// slice, and a linked worktree has no `.factory` of its own — the control plane stays in the main
+// repository. Its `.git` is a file rather than a directory, containing
 // `gitdir: /main/repo/.git/worktrees/<name>`, so the main repository is derivable from that text
 // alone. Without this, opening the sidebar while a slice worktree is the cwd shows no run at all,
 // which is precisely when an operator most wants to see one.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { CONTROL_PLANE, nextAction, readRunUnchecked } from "feature-factory";
-
-
-
-// Every directory worth checking, nearest first: each ancestor of `startDir`, and for any that is
-// a linked worktree, the main repository it points at.
-export function controlPlaneCandidates(startDir) {
-  const candidates = [];
-  const add = (dir) => { if (dir && !candidates.includes(dir)) candidates.push(dir); };
-  let current = resolve(startDir);
-  while (true) {
-    add(current);
-    add(mainRepositoryOf(current));
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return candidates;
-}
 
 // `gitdir: <path>/.git/worktrees/<name>` → `<path>`. Returns null for an ordinary checkout, where
 // `.git` is a directory, and for anything that does not parse — a malformed pointer is not a
@@ -45,8 +26,7 @@ function mainRepositoryOf(dir) {
   try { text = readFileSync(pointer, "utf8"); } catch { return null; }
   // Matched with String.match rather than the RegExp method, whose name is one of the
   // process-spawning tokens the boundary test forbids. That guard is a plain substring scan and
-  // deliberately blunt; complying is cheaper than teaching it exceptions, and a guard with
-  // exceptions is the one that eventually lets the real thing past.
+  // deliberately blunt; complying is cheaper than teaching it exceptions.
   const match = text.match(/^gitdir:\s*(.+?)\s*$/mu);
   if (!match) return null;
   const worktreesDir = dirname(dirname(match[1]));
@@ -54,11 +34,35 @@ function mainRepositoryOf(dir) {
   return dirname(worktreesDir);
 }
 
-export function findControlPlane(startDir) {
-  for (const candidate of controlPlaneCandidates(startDir)) {
-    if (existsSync(join(candidate, CONTROL_PLANE))) return candidate;
+// The repository this directory belongs to, and nothing above it.
+//
+// This walked up looking for `.factory` and accepted the first ancestor that had one — which found
+// `~/.factory`, a directory belonging to another tool entirely, and rendered its `skills/` subfolder
+// as a broken run. Found by opening the sidebar for real. The rename from `.claude/factory` to
+// `.factory` is what made it likely: a two-segment path rarely exists by accident in a home
+// directory, a single dotfile does.
+//
+// A control plane belongs to a repository, so the repository is the boundary: find the repo root
+// first, then look inside it. Never above it.
+export function repositoryRoot(startDir) {
+  let current = resolve(startDir);
+  while (true) {
+    const pointer = join(current, ".git");
+    if (existsSync(pointer)) {
+      // A linked worktree's `.git` is a file pointing into the main repository, which is where the
+      // control plane lives — a slice worktree has none of its own.
+      return mainRepositoryOf(current) ?? current;
+    }
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
   }
-  return null;
+}
+
+export function findControlPlane(startDir) {
+  const repo = repositoryRoot(startDir);
+  if (!repo) return null;
+  return existsSync(join(repo, CONTROL_PLANE)) ? repo : null;
 }
 
 // Every run under a repository's control plane, newest first. A record that does not parse is
@@ -70,6 +74,10 @@ export function listRuns(repo) {
   try { entries = readdirSync(root, { withFileTypes: true }); } catch { return []; }
   const runs = entries
     .filter((entry) => entry.isDirectory())
+    // A directory with no run.json is not a broken run, it is not a run — the control plane may hold
+    // anything else. Reporting one as INVALID is how another tool's `skills/` folder appeared as a
+    // failed run. `readRunUnchecked` still reports a manifest that exists and does not parse.
+    .filter((entry) => existsSync(join(root, entry.name, "run.json")))
     .map((entry) => project(join(root, entry.name), entry.name));
   return runs.sort((left, right) => String(right.updated_at ?? "").localeCompare(String(left.updated_at ?? "")));
 }
