@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as cli } from "../bin/factory.js";
+import { nextAction } from "../state/index.js";
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "factory.js");
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -736,5 +737,32 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       assert.equal(gate.ok, false);
       assert.match(gate.stderr, /the validator verdict is not an approval/u);
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  });
+});
+
+// The one field `factory status` and the sidebar both read, and it had no test of its own.
+// Found by watching a live run report `gate:brief` for the whole of research and spec: naming a
+// gate that has not been opened reads as "waiting on you" while an agent is mid-round.
+describe("what happens next", () => {
+  const state = (overrides) => ({
+    status: "running", gates: {}, steps: [], slices: [], pr_url: null, max_retries: 3, ...overrides,
+  });
+  const approved = { status: "approved", at: "2026-07-30T12:00:00.000Z", artifact: null };
+  const running = [{ agent: "spec-writer", status: "running", attempts: 1 }];
+
+  it("names the open step while a gate is merely absent, and the gate once it is pending", () => {
+    assert.equal(nextAction(state({ gates: { story: approved }, steps: running })), "step:spec-writer",
+      "an absent gate with work in flight is not waiting on a human");
+    assert.equal(nextAction(state({ gates: { story: approved } })), "gate:brief",
+      "with nothing recorded, the gate is still the next thing — absent is not done");
+    assert.equal(
+      nextAction(state({
+        gates: { story: approved, brief: { status: "pending", at: null, artifact: null } },
+        steps: running,
+      })),
+      "gate:brief",
+      "a pending gate outranks an open step: pending means a human really is waiting",
+    );
+    assert.equal(nextAction(state({})), "gate:story", "an empty run starts at the first gate");
   });
 });

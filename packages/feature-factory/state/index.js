@@ -35,12 +35,14 @@ export function readRunUnchecked(runDir) {
 // unaccepted step re-runs.
 export function nextAction(run) {
   if (TERMINAL_STATUSES.includes(run.status)) return `terminal:${run.status}`;
+  const openStep = run.steps.find((step) => step.status !== "accepted");
   for (const name of GATE_NAMES) {
-    // Absent means that phase has not started; pending means it is waiting on a
-    // human. Either way the gate is the next thing to happen, and treating absent
-    // as "done" would report a run as further along than it is.
     const gate = run.gates[name];
-    if (gate === undefined || gate.status === "pending") return `gate:${name}`;
+    // `pending` waits on a human; absent means the phase has not been reached, which is
+    // still not "done". But naming an absent gate while an agent is mid-round reads as
+    // "waiting on you" — so the open step, the work actually happening, is named instead.
+    if (gate === undefined) return openStep ? `step:${openStep.agent}` : `gate:${name}`;
+    if (gate.status === "pending") return `gate:${name}`;
     if (gate.status === "stop") return `stopped-at-gate:${name}`;
     if (gate.status === "changes") return `changes-at-gate:${name}`;
   }
@@ -50,7 +52,6 @@ export function nextAction(run) {
   if (activeSlice) return `observe-slice:${activeSlice.id}`;
   const pendingSlice = run.slices.find((slice) => slice.status === "pending");
   if (pendingSlice) return `dispatch-slice:${pendingSlice.id}`;
-  const openStep = run.steps.find((step) => step.status !== "accepted");
   if (openStep) return `step:${openStep.agent}`;
   if (!run.pr_url) return "pr";
   return "complete";
