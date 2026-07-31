@@ -3,9 +3,11 @@
 // A gate waiting on a human is the only line an operator must act on, so it is the only one marked.
 // A sidebar that flags everything flags nothing.
 export function renderLines(snapshot) {
-  if (!snapshot.repo) return ["no control plane found", "run `factory init` to start one"];
+  // One line for both empty cases: no control plane, and a control plane with nothing in it. The
+  // distinction is ours, not the reader's — and the old text told them to run `factory init`, which
+  // is not their command. The orchestrator runs it; a human types /feature.
+  if (!snapshot.repo || !snapshot.active) return ["no runs"];
   const run = snapshot.active;
-  if (!run) return [snapshot.repo, "no runs recorded"];
   // A record that exists but does not validate is shown as broken rather than omitted. Omitting it
   // leaves an operator with no way to learn it is there.
   if (!run.valid) return [`${run.run_id}  INVALID`, run.error ?? "run.json could not be read"];

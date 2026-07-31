@@ -29,6 +29,10 @@ export default {
     // to `process.cwd()`, the host process's directory, which is not the repository. That would have
     // shown "no control plane found" forever and been indistinguishable from a broken slot.
     api.slots.register({
+      // Sorted ascending with a default of 0, so a positive order puts this after the host's own
+      // contributions — read from the registry's comparator (`leftOrder - rightOrder`) rather than
+      // guessed. Raise it if something still lands below.
+      order: 100,
       slots: {
         sidebar_content: (ctx) => (
           <Sidebar

@@ -174,7 +174,7 @@ describe("run projection", () => {
     const empty = mkdtempSync(join(tmpdir(), "ff-tui-empty-"));
     try {
       assert.deepEqual(pollRuns(empty), { repo: null, runs: [], active: null });
-      assert.match(renderLines(pollRuns(empty)).join("\n"), /no control plane found/u);
+      assert.deepEqual(renderLines(pollRuns(empty)), ["no runs"], "one line for an absent control plane");
     } finally { rmSync(empty, { recursive: true, force: true }); }
   });
 });
@@ -194,7 +194,7 @@ describe("the poll loop", () => {
       assert.equal(seen.length, 1, "and is published to the consumer");
       source.refresh();
       assert.equal(polls, 2);
-      assert.deepEqual(source.lines(), ["/repo", "no runs recorded"]);
+      assert.deepEqual(source.lines(), ["no runs"]);
     } finally { source.stop(); }
   });
 
@@ -240,6 +240,11 @@ describe("the host registration contract", () => {
     assert.equal(typeof api.calls.registered[0].slots?.sidebar_content, "function",
       "the slot must be named sidebar_content; any other name contributes nothing");
 
+    // Ordering and the header are host-facing and invisible to renderLines, so they are asserted from
+    // the registration and the built bundle rather than by rendering.
+    assert.equal(api.calls.registered[0].order, 100,
+      "a positive order places the panel after the host's contributions; the registry sorts ascending from 0");
+
     // The slot is deliberately NOT invoked: its intrinsic elements need a live OpenTUI renderer, so
     // calling it here fails with "No renderer found". That is the honest boundary of this suite —
     // whether the component paints is a dogfood question, and the machinery it depends on is tested
@@ -260,6 +265,7 @@ describe("the host registration contract", () => {
     // And the theme is read through `.current`, so a theme change recolours instead of being frozen
     // at mount by a one-time spread.
     assert.match(bundle, /theme\?\.current|theme\.current/u, "the theme must be read reactively");
+    assert.match(bundle, /Feature Factory/u, "the panel carries its own header; the host's sidebar_title is the session's");
   });
 
   it("keeps the reactive shell out of the bundle so the host's solid instance is used", async () => {

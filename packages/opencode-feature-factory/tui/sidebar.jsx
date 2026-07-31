@@ -36,6 +36,7 @@ export function Sidebar(props) {
 
   return (
     <box flexDirection="column">
+      <text fg={props.theme?.current?.textMuted}>Feature Factory</text>
       <For each={lines()}>{(line) => <text fg={lineColor(props.theme?.current, line)}>{line}</text>}</For>
     </box>
   );
