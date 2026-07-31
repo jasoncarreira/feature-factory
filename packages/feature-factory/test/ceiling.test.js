@@ -365,13 +365,17 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // not required. Four lines of it are the comment explaining why skipping is safe and why zero
     // slices is not the same case, which is the part a future reader cannot reconstruct. Debt.
     //
-    // 2655 -> 2662, for a correctness fix rather than a feature: the steal path compared only the
-    // lock directory's dev/ino, and Linux reuses inode numbers, so a lock deleted and recreated at
-    // the same path presented the recorded identity and a *live* lock was renamed away. CI caught it
-    // and it reproduces locally by replacing owner.json in place. The added lines are the owner-nonce
-    // comparison and the note explaining why the pre-check exists again after being removed — the
-    // earlier falsification of its removal ran only where inodes are not reused.
-    assert.ok(total < 2662, `production source is ${total} lines; the tripwire is 2662`);
+    // 2655 -> 2666, one correctness fix in the lock steal, in two parts because the first part
+    // exposed the second. The steal established "still the lock I judged stale" from the lock
+    // directory's dev/ino alone, and Linux reuses inode numbers, so a lock deleted and recreated at
+    // the same path presented the recorded identity and a *live* lock was renamed away — green on
+    // APFS, red on Linux. Comparing the owner nonce fixed that and widened the window between
+    // observing the identity and renaming, which surfaced the second part: losing the race threw
+    // instead of retrying, because only ENOENT counted as losing. Both are now retries.
+    //
+    // Neither part is a feature, and the lines are the two checks plus the notes recording that the
+    // original falsification of this pre-check's removal ran only where inodes are not reused.
+    assert.ok(total < 2666, `production source is ${total} lines; the tripwire is 2666`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

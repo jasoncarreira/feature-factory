@@ -125,8 +125,10 @@ async function stealByRename(runDir, lockDir, observedIdentity, observedEvidence
   try {
     quarantine = await renameOwnedLockToQuarantine(runDir, lockDir, observedIdentity);
   } catch (error) {
-    // ENOENT means another racer got there first: fall back to the acquire loop.
-    if (error?.code === "ENOENT") return false;
+    // Losing the race is a retry, not a failure: ENOENT is the rename losing the path, ELOCKIDENTITY
+    // is noticing the winner before renaming. Only ENOENT was handled, so the second case failed the
+    // whole run — rare until the owner pre-check widened that window, and then CI hit it.
+    if (error?.code === "ENOENT" || error?.code === "ELOCKIDENTITY") return false;
     throw error;
   }
   await rm(quarantine, { recursive: true, force: true });
@@ -154,7 +156,9 @@ async function quarantineAndRemoveOwnedLock(runDir, lockDir, expectedIdentity) {
 
 async function renameOwnedLockToQuarantine(runDir, lockDir, expectedIdentity) {
   if (!sameLockDirectoryIdentity(expectedIdentity, await lockDirectoryIdentity(lockDir))) {
-    throw new Error(`run.json lock directory identity changed at ${lockDir}`);
+    // Coded so a *steal* can treat it as losing a race and retry. Release and cleanup check identity
+    // first, so for them it stays the error it is.
+    throw Object.assign(new Error(`run.json lock directory identity changed at ${lockDir}`), { code: "ELOCKIDENTITY" });
   }
   const quarantine = join(runDir, `.run-json.lock-quarantine-${randomUUID()}`);
   await rename(lockDir, quarantine);
