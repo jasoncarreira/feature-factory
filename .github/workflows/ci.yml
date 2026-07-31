@@ -14,11 +14,11 @@ jobs:
       fail-fast: false
       matrix:
         node-version: [22, 24]
-        shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
-    # The suite is sharded 4-way by size-balanced file assignment (see
-    # scripts/run-unit-tests.mjs --shard), so a healthy shard completes well
-    # under the cap; an overrun means a hang or a real performance regression.
+    # No sharding. The 4-way size-balanced shard runner existed because the old suite was
+    # 2,322 tests across 116k lines and child-process heavy. Both packages together are now
+    # 99 tests and run in well under a minute, so a shard matrix would be four times the
+    # setup cost to parallelise something that is no longer slow.
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
@@ -27,9 +27,13 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
-      # The packed-package smoke test needs npm_execpath, so both variants run
-      # through npm scripts; it executes once per node version (shard 1).
-      - run: npm run ${{ matrix.shard == 1 && 'check' || 'test:unit' }} -- --shard ${{ matrix.shard }}/4
+      # Runs both workspaces. The factory package must also pass on its own, with no opencode
+      # present, because that is the standalone claim its zero-dependency manifest makes.
+      # `npm test` is both workspaces plus the packed-tarball check. The last one matters most on
+      # CI: three release blockers once shipped past 99 green unit tests because nothing looked at
+      # what `npm pack` actually produces.
+      - run: npm test
+      - run: npm test --workspace feature-factory
 
   # Single required status for branch protection so the check set stays stable
   # if the shard count changes.

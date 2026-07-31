@@ -1,30 +1,40 @@
 # Releasing
 
-> **Status:** This is the current repository-only release guide. The GitHub publish workflow is the source of automation behavior.
+Repository-only guide. The GitHub publish workflow is the source of automation behaviour.
 
-## Publish trigger and sequence
+## Two packages, versioned independently
 
-Publishing starts only when a tag matching `v*` is pushed. The tag must exactly equal `v<version>`, where `<version>` is the `version` in `package.json` (for package version `0.2.1`, the matching tag is `v0.2.1`). A non-matching `v*` tag starts the workflow but fails the exact tag/version guard before checks or publication.
+The workspace root is private and publishes nothing. `packages/feature-factory` and
+`packages/opencode-feature-factory` publish separately and carry their own versions, so a release
+tag has to name its package:
 
-The publish job then performs this sequence:
+```
+feature-factory-v0.1.0
+opencode-feature-factory-v0.3.0
+```
 
-1. Checks out the pushed tag.
-2. Selects Node.js 24 and configures the npm registry.
-3. Runs `npm ci`.
-4. Verifies that `GITHUB_REF_NAME` exactly equals `v${package.json.version}`.
-5. Runs `npm run check`.
-6. Runs `npm publish`.
+A bare `v1.2.3` tag no longer starts the workflow. It used to read the root manifest's version,
+which no longer exists.
 
-The job uses the GitHub Actions `npm` environment and grants `id-token: write` for npm trusted publishing. It also has read-only repository-content permission.
+## Sequence
 
-## Maintainer responsibilities
+Pushing a matching tag runs `.github/workflows/publish.yml`, which:
 
-Before pushing the tag, a maintainer must update and commit `package.json` and `package-lock.json` as needed, maintain this changelog, and create and push the matching tag. Confirm that the intended commit is the one referenced by the tag.
+1. Checks out the tag, selects Node.js 24, `npm ci`.
+2. Resolves the package from the tag prefix — longest first, because
+   `opencode-feature-factory-v…` also ends with `feature-factory-v…`, and testing the shorter name
+   first would publish the wrong package under the right tag.
+3. Verifies the resolved package's manifest name and that its version exactly equals the tag's.
+4. Runs `npm test --workspaces`, then `npm test --workspace feature-factory` on its own.
+5. `npm publish --workspace <resolved package>`.
 
-The workflow does **not**:
+## Before tagging
 
-- publish from a branch or support manual dispatch;
-- choose or bump the package version;
-- update the changelog;
-- create or push commits or tags; or
-- create a GitHub Release.
+- Bump the version in that package's `package.json` and commit it, along with `package-lock.json`.
+- If you bumped `feature-factory`, also bump the pin in `packages/opencode-feature-factory`'s
+  `dependencies`. The boundary test asserts the pin equals the factory's version exactly, so a
+  mismatch fails before publish rather than shipping an integration built against another version.
+- Update `CHANGELOG.md`.
+- Confirm the tag points at the commit you mean.
+
+The workflow does not bump versions, write the changelog, or create tags.

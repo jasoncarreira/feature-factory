@@ -1,9 +1,12 @@
 {
-  "name": "opencode-feature-factory",
-  "version": "0.2.1",
-  "description": "Hybrid opencode plugin and scriptable feature factory workflow.",
+  "name": "feature-factory-monorepo",
+  "private": true,
+  "description": "Workspace root. The publishable packages are under packages/ \u2014 this root ships nothing.",
   "type": "module",
-  "main": "src/opencode-plugin.js",
+  "workspaces": [
+    "packages/feature-factory",
+    "packages/opencode-feature-factory"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jasoncarreira/opencode-feature-factory.git"
@@ -12,58 +15,15 @@
     "url": "https://github.com/jasoncarreira/opencode-feature-factory/issues"
   },
   "homepage": "https://github.com/jasoncarreira/opencode-feature-factory#readme",
-  "exports": {
-    ".": "./src/opencode-plugin.js",
-    "./server": "./src/opencode-plugin.js",
-    "./tui": "./dist/tui.js",
-    "./cli": "./src/cli.js"
-  },
-  "bin": {
-    "feature-factory": "src/cli.js"
-  },
-  "files": [
-    "assets",
-    "dist",
-    "src/**/*.js",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
-    "build:tui": "esbuild src/tui.jsx --bundle --platform=node --format=esm --jsx=automatic --jsx-import-source=@opentui/solid --packages=external --outfile=dist/tui.js",
-    "prepack": "npm run build:tui",
-    "doctor": "node src/cli.js doctor",
-    "doctor:local": "node src/cli.js doctor --local",
-    "test": "npm run test:unit",
-    "test:unit": "node scripts/run-unit-tests.mjs",
-    "smoke:pack": "node --test test/package-smoke.mjs",
-    "check": "node scripts/run-unit-tests.mjs --with-smoke"
-  },
-  "keywords": [
-    "opencode",
-    "plugin",
-    "agent",
-    "automation",
-    "workflow"
-  ],
-  "dependencies": {
-    "@opentelemetry/api": "^1.9.1",
-    "jsonc-parser": "^3.3.1"
-  },
-  "peerDependencies": {
-    "@opentui/solid": "^0.4.1",
-    "solid-js": "^1.9.10"
-  },
-  "devDependencies": {
-    "@babel/parser": "^7.29.7",
-    "@opentui/solid": "^0.4.3",
-    "esbuild": "^0.25.0",
-    "solid-js": "^1.9.10"
+    "test": "npm run test:packages && npm run test:pack",
+    "test:packages": "npm test --workspaces",
+    "test:pack": "npm run build --workspace opencode-feature-factory && node --test test/pack.test.js",
+    "test:factory": "npm test --workspace feature-factory",
+    "test:opencode": "npm test --workspace opencode-feature-factory"
   },
   "engines": {
-    "node": ">=20"
-  },
-  "publishConfig": {
-    "access": "public"
+    "node": ">=22"
   },
   "license": "MIT"
 }
