@@ -1,36 +1,56 @@
 # Contributing
 
-> **Status:** This is the current repository-only contributor guide. It is not included in the published npm package.
+Repository-only guide; not included in either published package.
 
-## Node.js and setup
+## Setup
 
-The package supports Node.js `>=20`. Repository tooling pins Node.js `24.11.1` in `.tool-versions`, so use that version for local development when possible. CI verifies Node.js 22 and 24; Node.js 20 is supported but is not part of the CI matrix.
-
-Install the exact locked dependencies before running checks:
+Node.js `>=22`. `.tool-versions` pins the version used locally; CI runs 22 and 24.
 
 ```sh
-npm ci
+npm ci          # installs both workspaces
 ```
 
-## Deterministic checks
-
-Run the focused checks in this order while developing:
+## Checks
 
 ```sh
-npm run test:unit
-npm run smoke:pack
+npm test                    # both packages
+npm run test:factory        # packages/feature-factory alone
+npm run test:opencode       # packages/opencode-feature-factory alone
 ```
 
-Before submitting a change, run the aggregate gate:
+No lint or typecheck script, no build step, no packed-package smoke test — neither package is
+bundled or transpiled.
 
-```sh
-npm run check
-```
+**Run `npm run test:factory` before submitting.** The factory package declares zero dependencies and
+claims to work with no opencode present. That claim is only true if its suite passes on its own, and
+CI runs it separately for the same reason.
 
-`npm run check` runs `node scripts/run-unit-tests.mjs --with-smoke`: the same unit files as `npm run test:unit` plus the `npm run smoke:pack` package smoke test, all in one `node --test` invocation so the smoke test overlaps with unit files instead of running as a serial tail. The runner caps file concurrency below node's one-process-per-core default because the suite is child-process heavy and oversubscription costs wall time and causes spurious failures under load. The repository does not currently define a lint or typecheck script.
+## Two tests you will meet
 
-The package smoke test packs the project, which invokes `prepack` and generates `dist/tui.js` from `src/tui.jsx`. `dist/tui.js` is generated output: do not edit it, stage it, or commit it. It is ignored by Git and may be removed after local checks.
+**`packages/feature-factory/test/ceiling.test.js`** is the scope lock. It asserts the exact CLI
+command set, the exact `run.json` key set, the family list, the absence of every dropped subsystem
+under any spelling — including in agent prose — that the skill invokes only commands and flags the
+CLI accepts, that every agent the skill dispatches ships, and a hard line budget on production
+source.
 
-## Machine-dependent diagnostics
+If it fails, that is usually the correct answer rather than an obstacle. Widening it means editing
+that file, so the decision appears in a diff instead of arriving as a reasonable-sounding addition.
+Raising the line budget is a debt: pay it down with a deletion in the same change, or record in the
+test why you could not.
 
-`npm run doctor:local` checks the local checkout and depends on the developer's machine and opencode installation. Provider smoke is also machine-dependent: `node src/cli.js doctor --provider-smoke` makes real `opencode run` calls using configured models and credentials, and may consume quota or incur cost. These diagnostics are useful for local investigation but are not deterministic unit, package-smoke, CI, or release gates.
+**`packages/opencode-feature-factory/test/boundary.test.js`** proves the opencode package cannot
+write run state. It scans for write and process-spawning primitives as plain substrings across whole
+files, *comments included*. That bluntness is deliberate and it does bite — a comment explaining why
+a spawn is absent trips it exactly as a spawn would. Reword rather than adding an exception.
+
+## Changing behaviour
+
+Two conventions this codebase holds to, both learned the hard way:
+
+- **Falsify the guard.** After adding or changing a check, remove it and confirm a test fails.
+  Assert the anchor is present before removing it, so a silent no-op edit cannot masquerade as a
+  falsification. Several guards here were "verified" while being dead code that only read as
+  enforcement.
+- **Prose is part of the contract.** `skill/SKILL.md` and `agents/*.md` are executable instructions.
+  The ceiling test checks them against the CLI, but it cannot check argument *semantics* — so when
+  you change a command, read the prose that drives it.
