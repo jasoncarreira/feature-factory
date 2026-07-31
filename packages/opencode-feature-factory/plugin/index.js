@@ -32,7 +32,10 @@ export { registerWorkflow, registerAgents, registerSkill, registerCommand, parse
 export default async function plugin(_input, options = {}) {
   return {
     async config(cfg) {
-      registerWorkflow(cfg, { profiles: options.profiles ?? {} });
+      // Everything the operator can configure, forwarded whole: `models` maps the agents' declared
+      // tiers to concrete ids, `profiles` overrides per agent, and a project's own opencode.json
+      // outranks both because the host has already merged it into `cfg`.
+      registerWorkflow(cfg, { models: options.models ?? {}, profiles: options.profiles ?? {} });
     },
   };
 }

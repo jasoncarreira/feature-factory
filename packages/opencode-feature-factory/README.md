@@ -25,6 +25,32 @@ Requires `solid-js` and `@opentui/solid`, declared as peer dependencies — the 
 copies your host installed rather than its own, or its reactive graph runs in isolation and never
 repaints.
 
+## Configuring the agents
+
+The agents declare *tiers*, not model ids — `model: sonnet|opus` and `effort: low..xhigh` — because
+which role deserves the deep model is a property of the chain, not of a vendor. No model default ships;
+with none configured the host's default applies and `effort` still maps to `variant`.
+
+Map the tiers once, in the plugin's options:
+
+```jsonc
+["opencode-feature-factory", {
+  "models": { "sonnet": "openai/gpt-5.6-terra", "opus": "openai/gpt-5.6-sol" }
+}]
+```
+
+Or override a single agent, either there under `profiles`, or **per project** in the repository's own
+`opencode.json` — the host merges that before this plugin runs, so a project's choice wins:
+
+```jsonc
+{ "agent": { "work-reviewer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" } } }
+```
+
+What configuration cannot change: **who may edit, and who may delegate.** Those come from each agent's
+declared tools, because a reviewer that can modify the code it judges breaks the separation the chain
+depends on, and a delegating subagent makes the orchestration tree unbounded. Change the agent
+definition if you need different tools.
+
 ## What it does
 
 Answers "what is this repository's run doing" — which run is live, which gate is waiting, how many

@@ -353,6 +353,45 @@ describe("registering the workflow with the host", () => {
       "a reviewer may run the tests it judges, but not change them");
   });
 
+  it("maps declared tiers to configured models, with no vendor baked in", async () => {
+    // The agents declare tiers — `model: sonnet|opus`, `effort: low..xhigh` — because which role
+    // deserves the deep model is a property of the chain. The concrete id is configuration: shipping
+    // an `openai/…` default would be the same mistake as naming one host's instructions file.
+    const bare = await configured();
+    assert.equal(bare.agent["spec-writer"].model, undefined, "no model without configuration");
+    assert.equal(bare.agent["spec-writer"].variant, "xhigh", "but effort still maps to variant");
+
+    const tiered = await configured({ models: { sonnet: "vendor/fast", opus: "vendor/deep" } });
+    assert.equal(tiered.agent["spec-writer"].model, "vendor/deep", "spec-writer declares opus");
+    assert.equal(tiered.agent["backend-builder"].model, "vendor/fast", "builders declare sonnet");
+    assert.equal(tiered.agent["feature-factory"].model, "vendor/deep", "the orchestrator holds the chain");
+  });
+
+  it("lets a project configure agents without being overwritten", async () => {
+    // The host merges a repository's opencode.json before this hook runs, so anything already in the
+    // config is the project's choice and must win. This used to assign unconditionally, which
+    // discarded it silently — the reason per-project configuration appeared impossible.
+    const plugin = (await import("../plugin/index.js")).default;
+    const hooks = await plugin({}, { models: { opus: "vendor/deep" }, profiles: { "work-reviewer": { model: "vendor/from-profile" } } });
+    const cfg = { agent: { "work-reviewer": { model: "project/choice", variant: "low" } } };
+    await hooks.config(cfg);
+    assert.equal(cfg.agent["work-reviewer"].model, "project/choice", "the project outranks profile and default");
+    assert.equal(cfg.agent["work-reviewer"].variant, "low");
+    assert.equal(cfg.agent["spec-writer"].model, "vendor/deep", "agents it did not mention keep the default");
+  });
+
+  it("refuses to let configuration grant a judge edit rights or delegation", async () => {
+    // Model and effort are preferences. Who may edit is not: a reviewer that can change the code it
+    // judges breaks the separation the chain is built on, and a delegating subagent makes the tree
+    // unbounded. Configuration cannot reach either.
+    const plugin = (await import("../plugin/index.js")).default;
+    const hooks = await plugin({}, {});
+    const cfg = { agent: { "implementation-validator": { permission: { edit: "allow", task: "allow" } } } };
+    await hooks.config(cfg);
+    assert.equal(cfg.agent["implementation-validator"].permission.edit, "deny");
+    assert.equal(cfg.agent["implementation-validator"].permission.task, "deny");
+  });
+
   it("lets an operator profile set the model but never grant delegation", async () => {
     // One level of orchestration is a property of the chain. An operator's profile may choose models —
     // theirs already does — but a subagent that can dispatch turns the tree unbounded.
