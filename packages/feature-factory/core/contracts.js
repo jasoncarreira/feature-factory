@@ -115,15 +115,15 @@ const gates = contract({
       // Every gate is compared on every gates transition, so a gate nobody touched must fall
       // through here rather than be judged again.
       if (from.status === to.status) continue;
-      // Re-opening exists for exactly one reason: the integration head can move after Gate 3
-      // is approved, and without a way back the verdict freeze strands the run. So only
-      // pre_pr may re-open. Extending it to every gate was generality nobody asked for, and
-      // it published Story v1's implementation under Story v2 — re-open Story, point it at a
-      // new document, re-approve, and the Brief, validator, tests and Gate 3 that all judged
-      // the old story stayed valid. A story that really changed is a new run, not a mutation
-      // of this one, which is the rule paths, test_plan and base_ref already follow.
-      if (reopening && name !== "pre_pr") {
-        throw new Error(`gate '${name}' cannot be re-opened once decided; only pre_pr may, because only its subject can change after approval`);
+      // What may re-open turns on what was decided. `changes` is not a verdict but a request for
+      // another round, and nothing downstream can have been built on it — every later stage
+      // requires this gate *approved* — so any gate re-opens from `changes`. Refusing it made the
+      // ordinary iterate loop fatal: the first live run asked for a story change at Gate 1, found
+      // the gate frozen, and was abandoned for a replacement. An *approved* gate is the hazard, and
+      // there only pre_pr may: it once published Story v1's implementation under Story v2, because
+      // the Brief, validator, tests and Gate 3 that judged the old story all stayed valid.
+      if (reopening && from.status !== "changes" && name !== "pre_pr") {
+        throw new Error(`gate '${name}' cannot be re-opened once ${from.status}; only pre_pr may, because only its subject can change after approval`);
       }
       if (decided && !reopening) {
         throw new Error(`gate '${name}' is already decided as ${from.status}`);

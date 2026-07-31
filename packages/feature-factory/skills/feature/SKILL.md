@@ -126,6 +126,18 @@ before presenting, then the decision: `factory gate <run-id> story approved|chan
 be opened as `pending` before it can be decided — a gate that appears already approved is a decision
 nobody made, and the CLI refuses it.
 
+**`changes` is a request for another round, not the end of the run.** `factory status` reports
+`changes-at-gate:<name>`, and the loop is: revise the artifact, re-open the gate, re-present.
+
+```sh
+factory gate <run-id> story pending --artifact artifacts/story.md   # re-open after a `changes`
+factory gate <run-id> story approved                                # the revised story's decision
+```
+
+This holds at **every** gate. Do not start a replacement run and do not block the run because a gate
+asked for changes — iterating is what the decision means, and abandoning the run loses the story,
+the research and the plan that are still good. Only `stop` ends a run at a gate.
+
 ## Step 1 — Research and design (parallel)
 
 Fan out in a single message: `codebase-researcher` → `artifacts/research-map.md`, and
@@ -302,9 +314,9 @@ missing. This is deliberate: everything after this point — the push, the PR �
 the time `factory pr` runs, so this is the last refusal that can still prevent something. It requires:
 
 - the run is not terminal, and every slice is `merged` (a partial run is surfaced, not published);
-- **all three gates currently approved** — not just this one, and not "was approved once". Only `pre_pr`
-  can be re-opened, so in practice this catches a run that reaches here with Story or Brief never
-  approved, and a `pre_pr` re-opened for the recovery below and not yet re-approved;
+- **all three gates currently approved** — not just this one, and not "was approved once". In practice
+  this catches a run that reaches here with Story or Brief still asking for changes or never approved,
+  and a `pre_pr` re-opened for the recovery below and not yet re-approved;
 - an approving `implementation-validator` verdict whose `reviewed_head` **is** the integration branch's
   current head, re-observed from git rather than read back from the manifest;
 - `evidence/test-verifier.json`, belonging to this run, recording tests that were observed and exited
@@ -312,10 +324,12 @@ the time `factory pr` runs, so this is the last refusal that can still prevent s
 
 If the gate refuses, its message names the missing piece. Fix that and re-present — do not push.
 
-**Only Gate 3 may be re-opened.** `factory gate <run-id> story pending` on a decided Story gate is
-refused, as is Brief, and a decided gate's `--artifact` cannot be changed in place. Gate 3 is the
-exception because only its subject — the integrated diff — can legitimately change after approval. If
-an approved story turns out to be wrong, that is a new run, not an edit to this one.
+**Only Gate 3 may be re-opened once approved.** `factory gate <run-id> story pending` on an
+*approved* Story gate is refused, as is Brief, and a decided gate's `--artifact` cannot be changed in
+place. Gate 3 is the exception because only its subject — the integrated diff — can legitimately
+change after approval. If an approved story turns out to be wrong, that is a new run, not an edit to
+this one. A gate that asked for `changes` re-opens freely at any gate, as above: nothing downstream
+was built on it, because every later stage requires this gate approved.
 
 **If the branch moves after approval**, the approval no longer refers to what you would publish, so the
 validator verdict is frozen while the gate stands and `factory pr` refuses. Recovery is one more

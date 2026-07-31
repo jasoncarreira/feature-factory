@@ -597,14 +597,16 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       // changed underneath everything that was judged against it. Both routes are asserted,
       // because the second needs no re-opening at all.
       //
-      // Re-opening any gate was permitted for one round, to give the late-head recovery a way
-      // out. That let Story be re-opened, pointed at a new document and re-approved, while the
-      // Brief, validator, tests and Gate 3 that all judged the *old* story stayed valid — the
-      // run then published Story v1's implementation under Story v2. Only pre_pr re-opens now,
-      // because only its subject can legitimately change after approval.
+      // Re-opening any *approved* gate was permitted for one round, to give the late-head recovery
+      // a way out. That let Story be re-opened, pointed at a new document and re-approved, while
+      // the Brief, validator, tests and Gate 3 that all judged the *old* story stayed valid — the
+      // run then published Story v1's implementation under Story v2. Only pre_pr re-opens from
+      // approved now, because only its subject can legitimately change after approval. (A gate
+      // that asked for `changes` re-opens anywhere — nothing downstream exists to contradict, and
+      // that half is covered in prompt-claims.)
       const reopenStory = factory(p.repo, ["gate", RUN, "story", "pending", "--now", NOW(6)]);
-      assert.equal(reopenStory.ok, false, "an earlier gate must not re-open under completed work");
-      assert.match(reopenStory.stderr, /gate 'story' cannot be re-opened once decided; only pre_pr may/u);
+      assert.equal(reopenStory.ok, false, "an approved gate must not re-open under completed work");
+      assert.match(reopenStory.stderr, /gate 'story' cannot be re-opened once approved; only pre_pr may/u);
 
       // And the shorter route: re-deciding an approved gate to the status it already holds
       // used to skip every check, so `--artifact` swapped the document in place.

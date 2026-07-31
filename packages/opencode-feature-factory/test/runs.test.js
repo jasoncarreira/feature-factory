@@ -188,11 +188,15 @@ describe("run projection", () => {
 
       const text = renderLines(pollRuns(root)).join("\n");
       assert.match(text, /app-1  APP-1/u);
-      assert.match(text, />> gate brief is waiting on you/u, "the actionable line must stand out");
       assert.match(text, /slices 1\/2 merged/u);
       assert.match(text, /be-two {2}running \(attempt 2\)/u, "a retried slice shows its attempt");
-      // Derived by the factory package, so the sidebar cannot disagree with `factory status`.
-      assert.match(text, /next: gate:brief/u);
+      // Derived by the factory package, so the sidebar cannot disagree with `factory status`, and
+      // marked because an undecided gate is what an operator acts on. One line, not two: the mark
+      // used to be a separate `>> gate brief is waiting on you`, which restated `next` and claimed
+      // more than the state knows — a gate is `pending` from the moment its stage opens, so it read
+      // "waiting on you" while the artifact was still being written.
+      assert.match(text, />> next: gate:brief/u, "the actionable line must stand out");
+      assert.equal(text.match(/brief/gu).length, 1, "the waiting gate is reported once, not twice");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

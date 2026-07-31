@@ -153,15 +153,34 @@ const CLAIMS = [
 
   // opencode's next five, in its order. Each was enforced and unstated, or stated and unproven.
   {
-    id: "only-pre-pr-may-reopen",
+    id: "only-pre-pr-may-reopen-once-approved",
     file: "skills/feature/SKILL.md",
-    fragment: "**Only Gate 3 may be re-opened.**",
+    fragment: "**Only Gate 3 may be re-opened once approved.**",
     expect: "refused",
-    matches: /gate 'story' cannot be re-opened once decided/u,
+    matches: /gate 'story' cannot be re-opened once approved/u,
     act(repo) {
       seeded(repo);
       assert.equal(decide(repo, "story", "approved").ok, true);
       return factory(repo, ["gate", RUN, "story", "pending", "--now", NOW]);
+    },
+  },
+  // The other half of that rule, and the reason it is stated in two halves: the first live run
+  // asked for a story change at Gate 1, found the gate frozen, and abandoned the run for a
+  // replacement. `changes` asks for another round, so the round has to be reachable.
+  {
+    id: "changes-reopens-at-any-gate",
+    file: "skills/feature/SKILL.md",
+    fragment: "**`changes` is a request for another round, not the end of the run.**",
+    expect: "allowed",
+    matches: /"story": "approved"/u,
+    act(repo) {
+      seeded(repo);
+      assert.equal(decide(repo, "story", "changes").ok, true);
+      // The revision is a *different* document, which is the point: a decided gate's artifact is
+      // frozen, so pointing at the new one has to go through the re-open.
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story-v2.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "approved", "--artifact", "artifacts/story-v2.md", "--now", NOW]).ok, true);
+      return factory(repo, ["status", RUN, "--json"]);
     },
   },
   {
