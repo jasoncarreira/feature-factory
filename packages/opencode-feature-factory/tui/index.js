@@ -81,6 +81,10 @@ export default {
       // A poll that changed nothing still asks the host to repaint; the host decides whether that
       // is cheap. Debouncing here would need a diff of the rendered lines, which is the host's
       // concern rather than ours.
+      // UNVERIFIED: `slots.refresh` is my invention, not a documented method. It is optional-chained
+      // so a wrong name cannot throw — which means if it is wrong the sidebar renders once and never
+      // repaints, silently. That is the same failure mode as the last two adapters, and the reason
+      // this one line is flagged rather than trusted.
       onUpdate: () => api.slots?.refresh?.(),
     });
 
@@ -90,8 +94,10 @@ export default {
       },
     });
 
-    // The only route to cleanup. Without it every reload leaves a live interval behind polling a
-    // run nobody is watching.
-    api.lifecycle?.onDispose?.(() => sidebar.stop());
+    // The only route to cleanup: without it every reload leaves a live interval polling a run nobody
+    // is watching. Called without optional chaining on purpose — a missing `lifecycle.onDispose`
+    // should fail loudly at registration rather than silently skip teardown, which is how the
+    // previous adapter's defects stayed invisible.
+    api.lifecycle.onDispose(() => sidebar.stop());
   },
 };
