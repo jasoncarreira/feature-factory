@@ -29,7 +29,7 @@ Almost all of this system is prose. Code exists only where prose cannot enforce 
   judged, a merge must prove it contributed exactly what was reviewed, and a test result must have
   been observed rather than reported.
 
-Run state lives at `<repo>/.claude/factory/<run-id>/run.json`, which must be gitignored: a tracked
+Run state lives at `<repo>/.factory/<run-id>/run.json`, which must be gitignored: a tracked
 control plane puts manifest churn in every slice diff and trips the privileged-path refusal on every
 merge.
 

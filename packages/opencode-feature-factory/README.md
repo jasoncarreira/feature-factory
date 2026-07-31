@@ -30,7 +30,7 @@ repaints.
 Answers "what is this repository's run doing" — which run is live, which gate is waiting, how many
 slices have merged, and what happens next.
 
-Discovery is filesystem-only: it walks up from the current directory for `.claude/factory`, and
+Discovery is filesystem-only: it walks up from the current directory for `.factory`, and
 follows a linked worktree's `.git` pointer back to the main repository, so the sidebar still shows
 the run when a slice worktree is the working directory.
 

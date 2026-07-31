@@ -71,7 +71,7 @@ describe("package boundary", () => {
     // Widening this list is the signal that the boundary is wrong, not that the
     // export surface is too small.
     // `transition` is deliberately absent: it no longer exists in the package root.
-    const allowed = ["readRun", "readRunUnchecked", "nextAction", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION"];
+    const allowed = ["readRun", "readRunUnchecked", "nextAction", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION", "CONTROL_PLANE"];
     const unexpected = [...imported].filter((name) => !allowed.includes(name));
     assert.deepEqual(unexpected, [], `unexpected imports from feature-factory: ${unexpected.join(", ")}`);
   });
@@ -110,7 +110,7 @@ describe("package boundary", () => {
     // resume order in the TUI. One read-only export removes a drift risk; it does not grant
     // authority, and the reachability check below still proves it cannot write.
     const allowed = [
-      "readRun", "readRunUnchecked", "nextAction", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION",
+      "readRun", "readRunUnchecked", "nextAction", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION", "CONTROL_PLANE",
       "RUN_STATUSES", "TERMINAL_STATUSES", "MODES", "GATE_NAMES", "GATE_STATUSES",
       "STEP_STATUSES", "SLICE_STATUSES", "VALIDATOR_VERDICTS",
     ];

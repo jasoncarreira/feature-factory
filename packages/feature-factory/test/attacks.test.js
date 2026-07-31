@@ -21,7 +21,7 @@ function baseRun(overrides = {}) {
     run_id: "app-1",
     jira_key: "APP-1",
     branch: "APP-1-thing",
-    worktree: "/repo/.claude/worktrees/APP-1-thing",
+    worktree: "/repo/.worktrees/APP-1-thing",
     created_at: NOW,
     updated_at: NOW,
     status: "running",
@@ -40,7 +40,7 @@ function baseRun(overrides = {}) {
 
 function fixture(name, overrides) {
   const root = mkdtempSync(join(tmpdir(), `ff-${name}-`));
-  const runDir = join(root, ".claude", "factory", "app-1");
+  const runDir = join(root, ".factory", "app-1");
   mkdirSync(runDir, { recursive: true });
   const run = baseRun(overrides);
   writeFileSync(join(runDir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);

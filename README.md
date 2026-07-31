@@ -84,7 +84,7 @@ factory pr <run-id> --url URL
 factory terminal <run-id> <completed|blocked|partial|needs-human> --reason TEXT
 ```
 
-Run state lives at `<repo>/.claude/factory/<run-id>/run.json` and should be gitignored — if it is
+Run state lives at `<repo>/.factory/<run-id>/run.json` and should be gitignored — if it is
 tracked, every slice diff carries manifest churn and every merge trips the privileged-path refusal.
 
 ## What it refuses

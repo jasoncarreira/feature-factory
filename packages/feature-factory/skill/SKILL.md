@@ -18,7 +18,7 @@ scope, own the worktree/PR lifecycle, and own a durable control plane on disk.
 Two principles make this a factory rather than a session workflow:
 
 - **State lives in files, not the chat.** Every run has a control plane at
-  `$REPO/.claude/factory/<run-id>/`. A dead session or a next-day return resumes from it. You never
+  `$REPO/.factory/<run-id>/`. A dead session or a next-day return resumes from it. You never
   hand-write `run.json` — every state change goes through a `factory` command, because a
   hand-written manifest is the single most reliable way to corrupt a run.
 - **Observe, don't trust.** A subagent's report is a *claim*. Before accepting a build or test step

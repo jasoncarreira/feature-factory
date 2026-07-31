@@ -18,6 +18,10 @@
 
 export const SCHEMA_VERSION = 1;
 
+// Where run state lives, relative to the repository. Was `.claude/factory`, and the privileged-path
+// list hedged with `.opencode/factory` too: two host dotfiles in a host-agnostic package.
+export const CONTROL_PLANE = ".factory";
+
 export const RUN_KEYS = Object.freeze([
   "version", "run_id", "jira_key", "branch", "worktree", "created_at", "updated_at",
   "status", "mode", "max_parallel_slices", "max_retries",

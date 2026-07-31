@@ -2,20 +2,20 @@
 //
 // The boundary test forbids this package from spawning a process, so `git rev-parse` is not
 // available — which turns out to be the right constraint rather than an obstacle. The control
-// plane lives at `<repo>/.claude/factory/<run-id>/run.json`, and locating it is a filesystem
-// question: walk up from the current directory until a `.claude/factory` appears.
+// plane lives at `<repo>/.factory/<run-id>/run.json`, and locating it is a filesystem
+// question: walk up from the current directory until a `.factory` appears.
 //
 // The case that makes this non-trivial is a *linked worktree*. The orchestrator creates one per
-// slice, and a linked worktree has no `.claude/factory` of its own — the control plane stays in
+// slice, and a linked worktree has no `.factory` of its own — the control plane stays in
 // the main repository. Its `.git` is a file rather than a directory, containing
 // `gitdir: /main/repo/.git/worktrees/<name>`, so the main repository is derivable from that text
 // alone. Without this, opening the sidebar while a slice worktree is the cwd shows no run at all,
 // which is precisely when an operator most wants to see one.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { nextAction, readRunUnchecked } from "feature-factory";
+import { CONTROL_PLANE, nextAction, readRunUnchecked } from "feature-factory";
 
-export const CONTROL_PLANE = join(".claude", "factory");
+
 
 // Every directory worth checking, nearest first: each ancestor of `startDir`, and for any that is
 // a linked worktree, the main repository it points at.

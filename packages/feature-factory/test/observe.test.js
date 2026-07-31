@@ -157,12 +157,12 @@ describe("attack 5 — a slice changes paths it does not own", () => {
   });
 
   it("reports privileged control-plane paths regardless of declaration", () => {
-    const changed = [".claude/factory/app-1/run.json", ".git/config", "package.json", "src/app/ok.ts"];
+    const changed = [".factory/app-1/run.json", ".git/config", "package.json", "src/app/ok.ts"];
     assert.deepEqual(privilegedPaths(changed).sort(),
-      [".claude/factory/app-1/run.json", ".git/config", "package.json"].sort());
+      [".factory/app-1/run.json", ".git/config", "package.json"].sort());
     // Declaring them does not grant them.
-    assert.deepEqual(unownedPaths([".claude/factory/app-1/run.json"], [".claude/"]), []);
-    assert.equal(privilegedPaths([".claude/factory/app-1/run.json"]).length, 1,
+    assert.deepEqual(unownedPaths([".factory/app-1/run.json"], [".factory/"]), []);
+    assert.equal(privilegedPaths([".factory/app-1/run.json"]).length, 1,
       "ownership and privilege are separate questions; declaring a privileged path must not clear it");
   });
 

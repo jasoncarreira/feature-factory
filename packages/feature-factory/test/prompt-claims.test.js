@@ -38,7 +38,7 @@ function project(name) {
   git("config", "user.name", "T");
   mkdirSync(join(repo, "src"), { recursive: true });
   writeFileSync(join(repo, "src", "base.ts"), "base\n");
-  writeFileSync(join(repo, ".gitignore"), ".claude/\n");
+  writeFileSync(join(repo, ".gitignore"), ".factory/\n");
   git("add", "-A");
   git("commit", "-q", "-m", "base");
   return repo;
@@ -73,7 +73,7 @@ function factory(repo, args) {
 
 function seeded(repo) {
   assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
-  writeFileSync(join(repo, ".claude", "factory", RUN, "plan", "slices.json"), JSON.stringify(PLAN));
+  writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify(PLAN));
   assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW]).ok, true);
 }
 
@@ -88,7 +88,7 @@ const CLAIMS = [
     matches: /slices are already seeded/u,
     act(repo) {
       seeded(repo);
-      writeFileSync(join(repo, ".claude", "factory", RUN, "plan", "slices.json"),
+      writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"),
         JSON.stringify({ slices: [{ ...PLAN.slices[0], paths: ["src/", "lib/"] }] }));
       return factory(repo, ["slices-seed", RUN, "--now", NOW]);
     },
@@ -112,7 +112,7 @@ const CLAIMS = [
     matches: /review_ready: true/u,
     act(repo) {
       assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
-      writeFileSync(join(repo, ".claude", "factory", RUN, "plan", "slices.json"),
+      writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"),
         JSON.stringify({ slices: [{ ...PLAN.slices[0], test_plan: [] }] }));
       assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW]).ok, true);
       execFileSync("git", ["checkout", "-q", "-b", "slice"], { cwd: repo });
@@ -134,7 +134,7 @@ const CLAIMS = [
     act(repo) {
       assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
       const { test_plan: _omitted, ...withoutTestPlan } = PLAN.slices[0];
-      writeFileSync(join(repo, ".claude", "factory", RUN, "plan", "slices.json"),
+      writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"),
         JSON.stringify({ slices: [withoutTestPlan] }));
       return factory(repo, ["slices-seed", RUN, "--now", NOW]);
     },
@@ -204,7 +204,7 @@ const CLAIMS = [
         "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW]);
       assert.match(observed.out, /review_ready: true/u, observed.out);
       const head = execFileSync("git", ["rev-parse", "slice"], { cwd: repo, encoding: "utf8" }).trim();
-      writeFileSync(join(repo, ".claude", "factory", RUN, "reviews", "s1.json"), JSON.stringify({
+      writeFileSync(join(repo, ".factory", RUN, "reviews", "s1.json"), JSON.stringify({
         subject: "s1", reviewer: "work-reviewer", verdict: "APPROVE", attempt: 1,
         reviewed_commit: head, findings: [], required_fixes: [], checked_against: ["brief"],
       }));

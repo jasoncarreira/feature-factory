@@ -27,7 +27,7 @@ function repo(name) {
 }
 
 function seedRun(root, runId, run) {
-  const dir = join(root, ".claude", "factory", runId);
+  const dir = join(root, ".factory", runId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
   return dir;
@@ -95,7 +95,7 @@ describe("run projection", () => {
   it("reports an unreadable record instead of omitting it", () => {
     const root = repo("broken");
     try {
-      const dir = join(root, ".claude", "factory", "app-1");
+      const dir = join(root, ".factory", "app-1");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "run.json"), "{ not json\n");
 

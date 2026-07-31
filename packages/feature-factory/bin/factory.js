@@ -18,7 +18,7 @@ import { transition } from "../state/transition.js";
 import { buildEvidence, evidenceRef, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
-import { SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
+import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SessionLockHeldError,
 } from "../state/session-lock.js";
@@ -87,7 +87,7 @@ const key = (flag) => flag.slice(2).replace(/-([a-z])/gu, (_match, letter) => le
 
 function runDirFor(flags, runId) {
   if (!runId) throw new CliError("a <run-id> is required");
-  return join(resolve(flags.repo ?? process.cwd()), ".claude", "factory", runId);
+  return join(resolve(flags.repo ?? process.cwd()), CONTROL_PLANE, runId);
 }
 
 // The integration branch's worktree and currently observed head. Three call sites asked
@@ -605,7 +605,6 @@ const HANDLERS = {
   },
 };
 
-
 function integer(value, fallback, flag) {
   if (value === undefined) return fallback;
   const parsed = Number(value);
@@ -634,8 +633,7 @@ function emit(flags, payload) {
 function usage() {
   process.stdout.write(`factory — durable control plane for /feature runs
 
-  factory init <run-id> [--branch B] [--worktree W] [--jira KEY] [--mode interactive|headless|autonomous]
-                        branch defaults to feature/<run-id>, worktree to .
+  factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--jira KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID

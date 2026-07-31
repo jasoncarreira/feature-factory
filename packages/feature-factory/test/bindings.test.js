@@ -34,7 +34,7 @@ function fixture(name) {
   run(root, "commit", "-q", "-m", "slice");
   const sliceHead = run(root, "rev-parse", "HEAD");
 
-  const runDir = join(root, ".claude", "factory", "app-1");
+  const runDir = join(root, ".factory", "app-1");
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   return { root, runDir, featureBase, sliceHead };
 }

@@ -3,10 +3,12 @@ node_modules/
 
 # run state (per-repo control plane, never committed here)
 #
-# `.claude/factory/<run-id>/` is where the factory keeps run.json. It must stay untracked: if it is
+# `.factory/<run-id>/` is where the factory keeps run.json. It must stay untracked: if it is
 # committed, every slice diff carries manifest churn and every merge trips the privileged-path
 # refusal, because a slice that edits the control plane is not doing the work it was dispatched for.
 # This repository runs the factory on itself, so the rule applies here too.
+.factory/
+# Host config and per-repo seeded skills/agents, which are machine-local.
 .claude/
 .opencode/
 

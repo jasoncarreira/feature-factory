@@ -10,6 +10,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
+import { CONTROL_PLANE } from "../state/schema.js";
 
 export const EVIDENCE_KEYS = Object.freeze([
   "subject", "run_id", "attempt", "branch", "base_ref", "worktree", "status", "blocked_reason",
@@ -162,7 +163,7 @@ function coversPath(declared, file) {
 // Privileged control-plane paths are refused for every slice regardless of what it
 // declared: a builder that edits the factory's own state is not doing the work it
 // was dispatched for.
-const PRIVILEGED_PREFIXES = Object.freeze([".claude/factory", ".opencode/factory", ".git"]);
+const PRIVILEGED_PREFIXES = Object.freeze([CONTROL_PLANE, ".git"]);
 const PRIVILEGED_EXACT = Object.freeze([".gitignore", "package.json", "package-lock.json"]);
 
 export function privilegedPaths(filesChanged) {

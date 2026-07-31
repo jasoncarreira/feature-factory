@@ -43,11 +43,11 @@ function project(name, { seed = true, testPlan = ["t"] } = {}) {
   // every slice diff and every merge trips the privileged-path refusal - which is
   // how this fixture first failed, and is a real deployment requirement rather than
   // a test detail.
-  writeFileSync(join(repo, ".gitignore"), ".claude/\n");
+  writeFileSync(join(repo, ".gitignore"), ".factory/\n");
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "base");
 
-  const runDir = join(repo, ".claude", "factory", RUN);
+  const runDir = join(repo, ".factory", RUN);
   const init = factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW(0)]);
   assert.equal(init.ok, true, init.stderr);
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({
@@ -154,7 +154,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
   });
 
   it("refuses a slice that touched a privileged control-plane path", () => {
-    // package.json rather than .claude/: the control plane is gitignored, so it can
+    // package.json rather than .factory/: the control plane is gitignored, so it can
     // never reach a diff. A slice quietly adding a dependency is the realistic case
     // and is trackable.
     const p = upToReview("privileged", { extra: "package.json" });
