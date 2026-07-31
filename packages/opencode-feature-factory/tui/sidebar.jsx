@@ -10,8 +10,7 @@
 // Everything that can be tested lives in ./poll.js. This file cannot be instantiated outside a host,
 // because its intrinsic elements need an OpenTUI renderer, so it is kept to the smallest thing that
 // still expresses the reactivity.
-import { createSignal, For, onCleanup } from "solid-js";
-import { createLineSource } from "./poll.js";
+import { For, Show } from "solid-js";
 
 // Only the semantic lines get a colour. Everything else leaves `fg` unset so it inherits the host's
 // own foreground — the previous defaults hardcoded white and gray, which is invisible on a light theme.
@@ -26,27 +25,28 @@ function lineColor(theme, line) {
   return theme?.textMuted;
 }
 
+// A pure view over props: the poll and the signals live in the `tui()` hook, so the *slot function*
+// reads them and the host has something to re-run. This held the signal itself and still painted only
+// its first frame — reactively correct, visually dead.
 export function Sidebar(props) {
-  // `equals: false` because the predecessor needed it in this same host — `createSignal(runs, {
-  // equals: false })` alongside a monotonic version counter. Every tick here does build a fresh
-  // array, so referential equality should already differ and this should be redundant; it is kept
-  // because "should" is doing the work in that sentence and the cost is one option.
-  const [lines, setLines] = createSignal([], { equals: false });
-  const source = createLineSource({
-    cwd: props.cwd,
-    intervalMs: props.intervalMs,
-    poll: props.poll,
-    onLines: setLines,
-  });
-  onCleanup(source.stop);
-
   const theme = () => props.theme?.current;
+  // `<Show keyed>` on a value that only ever changes is the repaint mechanism, ported from the
+  // predecessor. `keyed` *recreates* the subtree when `when` changes instead of reconciling it, and
+  // reconciling `<text>` children in place is exactly what did not reach the screen. The children
+  // must be a function or `keyed` has nothing to re-invoke.
+  //
   // The flex props matter in a panel that shares vertical space with the host's sections: without
   // them a long run list pushes everything else off instead of clipping.
   return (
     <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
       <text fg={theme()?.text}><b>Feature Factory</b></text>
-      <For each={lines()}>{(line) => <text fg={lineColor(theme(), line)}>{line}</text>}</For>
+      <Show keyed when={props.version}>
+        {() => (
+          <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
+            <For each={props.lines}>{(line) => <text fg={lineColor(theme(), line)}>{line}</text>}</For>
+          </box>
+        )}
+      </Show>
     </box>
   );
 }

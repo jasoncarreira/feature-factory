@@ -11,7 +11,9 @@
 // and declared as peer dependencies, because the contract is module *identity* — the sidebar must use
 // the single copies the host installation provides, or its reactive graph runs in isolation and repaints
 // nothing.
+import { createSignal } from "solid-js";
 import { Sidebar } from "./sidebar.jsx";
+import { createLineSource } from "./poll.js";
 import { ORDER, SLOT } from "./sidebar-config.js";
 
 export { renderLines } from "./lines.js";
@@ -21,27 +23,32 @@ export { DEFAULT_POLL_MS, ORDER, SLOT } from "./sidebar-config.js";
 export default {
   id: "feature-factory",
   tui(api, options = {}) {
-    // Content is contributed by registering a slot, and the slot returns a *component* — not a string
-    // or an array. The host calls the slot once to obtain its child, so reactivity has to live inside
-    // that child; returning today's lines would render them forever.
+    // The state lives *here*, in the hook, and the slot function reads it — which is the predecessor's
+    // structure, arrived at the hard way and ported after mine failed in the same place. Holding the
+    // signal inside the component is reactively correct and still does not repaint: the host invokes
+    // the slot once to obtain a child, and a `<For>` reconciling text nodes in place inside that child
+    // updated the graph while the screen kept the frame it mounted with. Reading the signals in the
+    // slot function is what gives the host something to re-run.
     //
-    // Both inputs come from the host, not from `options`. `options` is user-supplied plugin
-    // configuration, which OpenCode never populates with a directory — reading it meant falling back
-    // to `process.cwd()`, the host process's directory, which is not the repository. That would have
-    // shown "no control plane found" forever and been indistinguishable from a broken slot.
+    // `version` is the second half. It exists only to be different, and `<Show keyed>` in the
+    // component turns that difference into a *recreated* subtree rather than a reconciled one. That is
+    // the part that actually paints.
+    const [lines, setLines] = createSignal([], { equals: false });
+    const [version, setVersion] = createSignal(1);
+    // Both locations the host reports, `directory` first. They are the same in an ordinary checkout
+    // and differ in a linked worktree, and passing only `directory` showed "no runs" through a whole
+    // live run whose control plane was under the other one.
+    const source = createLineSource({
+      cwd: [api.state.path.directory, api.state.path.worktree],
+      intervalMs: options.intervalMs,
+      onLines: (next) => { setLines(next); setVersion((count) => count + 1); },
+    });
+    // The host's own disposal hook, as the predecessor used. The interval is unref'd as a backstop.
+    api.lifecycle?.onDispose?.(() => source.stop());
     api.slots.register({
       order: ORDER,
       slots: {
-        // Both locations the host reports, `directory` first. They are the same in an ordinary
-        // checkout and differ in a linked worktree, and passing only `directory` showed "no runs"
-        // through a whole live run whose control plane was under the other one.
-        [SLOT]: (ctx) => (
-          <Sidebar
-            cwd={[api.state.path.directory, api.state.path.worktree]}
-            intervalMs={options.intervalMs}
-            theme={ctx.theme}
-          />
-        ),
+        [SLOT]: (ctx) => <Sidebar lines={lines()} version={version()} theme={ctx.theme} />,
       },
     });
   },

@@ -303,11 +303,12 @@ describe("the host registration contract", () => {
   // Shaped like the host, and deliberately *without* the fields the adapter used to read. `options`
   // carries no directory in reality, so a fake that supplied one would have let the wrong source pass.
   function fakeApi(directory = "/nowhere-at-all") {
-    const calls = { registered: [] };
+    const calls = { registered: [], disposers: [] };
     return {
       calls,
       state: { path: { directory, worktree: `${directory}/wt` } },
       theme: { current: { warning: "amber" } },
+      lifecycle: { onDispose(fn) { calls.disposers.push(fn); } },
       slots: { register(config) { calls.registered.push(config); } },
     };
   }
@@ -352,6 +353,28 @@ describe("the host registration contract", () => {
     // at mount by a one-time spread.
     assert.match(bundle, /theme\?\.current|theme\.current/u, "the theme must be read reactively");
     assert.match(bundle, /Feature Factory/u, "the panel carries its own header; the host's sidebar_title is the session's");
+  });
+
+  it("holds its state in the hook and recreates the subtree, so a change reaches the screen", async () => {
+    // The structure, asserted because every wrong version of it passed this suite. Holding the signal
+    // inside the component is reactively correct and painted only its first frame: the host invokes
+    // the slot once, and a `<For>` reconciling text nodes in place inside that child never reached the
+    // screen. So the signals live in the hook, the *slot function* reads them — giving the host
+    // something to re-run — and a keyed `Show` on a monotonic counter recreates the subtree instead of
+    // reconciling it. All three are invisible to renderLines and cannot be rendered here, so they are
+    // asserted from the built bundle, the same boundary the directory and theme use.
+    const bundle = readFileSync(new URL("../tui/dist/index.js", import.meta.url), "utf8");
+    assert.match(bundle, /createSignal\(\[\], \{ equals: false \}\)/u,
+      "the lines signal lives in the hook, and does not suppress equal-looking updates");
+    assert.match(bundle, /keyed/u, "a keyed Show is what recreates the subtree; without it nothing repaints");
+    assert.match(bundle, /setVersion|version/u, "a monotonic value must exist for the keyed Show to key on");
+
+    // And the poll is started by the hook, not by the component, so it is running before the slot is
+    // ever invoked — and it is handed to the host's own disposal hook rather than a component cleanup.
+    const api = fakeApi();
+    (await import("../tui/dist/index.js")).default.tui(api, { intervalMs: 60_000 });
+    assert.equal(api.calls.disposers.length, 1, "the poll must be registered for host disposal");
+    assert.doesNotThrow(() => api.calls.disposers[0](), "and disposing it must not throw");
   });
 
   it("keeps the reactive shell out of the bundle so the host's solid instance is used", async () => {
