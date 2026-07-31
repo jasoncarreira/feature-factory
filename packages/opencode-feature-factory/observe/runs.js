@@ -68,7 +68,14 @@ export function findControlPlane(startDirs) {
   const candidates = (Array.isArray(startDirs) ? startDirs : [startDirs]).filter(Boolean);
   const searched = [];
   for (const start of candidates) {
-    for (const root of repositoryRoots(start)) {
+    const roots = repositoryRoots(start);
+    // Outside a repository there is no root to name — and that is the case most worth naming, because
+    // it means the host is pointed somewhere unexpected: a deleted worktree, a home directory, a path
+    // that moved. Reporting nothing here made "not in a repository" render as a bare "no runs",
+    // identical to a broken plugin, which is the confusion this whole line exists to remove. It cost
+    // a debugging round on a directory that had been removed out from under a running session.
+    if (roots.length === 0 && !searched.includes(start)) searched.push(start);
+    for (const root of roots) {
       if (searched.includes(root)) continue;
       searched.push(root);
       if (existsSync(join(root, CONTROL_PLANE))) return { repo: root, searched };

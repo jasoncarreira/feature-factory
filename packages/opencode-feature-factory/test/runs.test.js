@@ -248,10 +248,14 @@ describe("run projection", () => {
   it("says so when there is no control plane at all", () => {
     const empty = mkdtempSync(join(tmpdir(), "ff-tui-empty-"));
     try {
-      // Outside a repository there is no candidate root at all, so there is nothing to name — one
-      // line, unlike the in-a-repository-but-no-control-plane case above.
-      assert.deepEqual(pollRuns(empty), { repo: null, runs: [], active: null, searched: [] });
-      assert.deepEqual(renderLines(pollRuns(empty)), ["no runs"], "one line when there is no root to report");
+      // This once asserted a bare "no runs", on the reasoning that outside a repository there is no
+      // root to name. That was exactly backwards, and it cost a debugging round: a session left
+      // pointing at a worktree that had been removed under it rendered a bare "no runs" —
+      // indistinguishable from a plugin that failed to load. The case with no repository is the one
+      // where naming the directory matters most, because it means the host is somewhere unexpected.
+      assert.deepEqual(pollRuns(empty), { repo: null, runs: [], active: null, searched: [empty] });
+      assert.deepEqual(renderLines(pollRuns(empty)), ["no runs", `searched ${empty}`],
+        "a directory outside any repository must still say which directory it was");
     } finally { rmSync(empty, { recursive: true, force: true }); }
   });
 });
