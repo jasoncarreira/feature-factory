@@ -23,13 +23,18 @@ export default {
     // Content is contributed by registering a slot, and the slot returns a *component* — not a string
     // or an array. The host calls the slot once to obtain its child, so reactivity has to live inside
     // that child; returning today's lines would render them forever.
+    //
+    // Both inputs come from the host, not from `options`. `options` is user-supplied plugin
+    // configuration, which OpenCode never populates with a directory — reading it meant falling back
+    // to `process.cwd()`, the host process's directory, which is not the repository. That would have
+    // shown "no control plane found" forever and been indistinguishable from a broken slot.
     api.slots.register({
       slots: {
-        sidebar_content: () => (
+        sidebar_content: (ctx) => (
           <Sidebar
-            cwd={options.directory ?? options.cwd ?? process.cwd()}
+            cwd={api.state.path.directory}
             intervalMs={options.intervalMs}
-            theme={options.theme}
+            theme={ctx.theme}
           />
         ),
       },

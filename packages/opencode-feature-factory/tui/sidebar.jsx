@@ -13,20 +13,18 @@
 import { createSignal, For, onCleanup } from "solid-js";
 import { createLineSource } from "./poll.js";
 
-const DEFAULT_THEME = { text: "white", textMuted: "gray", error: "red", warning: "yellow", info: "cyan" };
-
-// The one line a human has to answer is the only one coloured for attention. Colouring everything
-// communicates nothing.
+// Only the semantic lines get a colour. Everything else leaves `fg` unset so it inherits the host's
+// own foreground — the previous defaults hardcoded white and gray, which is invisible on a light theme.
+// A default is the host's business; naming a colour should mean "this line is different".
 function lineColor(theme, line) {
-  if (line.startsWith(">>")) return theme.warning;
-  if (line.includes("INVALID") || line.startsWith("sidebar error")) return theme.error;
-  if (line.startsWith("next:")) return theme.info;
-  if (line.startsWith("  ") || line.startsWith("(")) return theme.textMuted;
-  return theme.text;
+  if (line.startsWith(">>")) return theme?.warning ?? "yellow";
+  if (line.includes("INVALID") || line.startsWith("sidebar error")) return theme?.error ?? "red";
+  if (line.startsWith("next:")) return theme?.info ?? "cyan";
+  if (line.startsWith("  ") || line.startsWith("(")) return theme?.textMuted;
+  return undefined;
 }
 
 export function Sidebar(props) {
-  const theme = { ...DEFAULT_THEME, ...(props.theme ?? {}) };
   const [lines, setLines] = createSignal([]);
   const source = createLineSource({
     cwd: props.cwd,
@@ -38,7 +36,7 @@ export function Sidebar(props) {
 
   return (
     <box flexDirection="column">
-      <For each={lines()}>{(line) => <text fg={lineColor(theme, line)}>{line}</text>}</For>
+      <For each={lines()}>{(line) => <text fg={lineColor(props.theme?.current, line)}>{line}</text>}</For>
     </box>
   );
 }

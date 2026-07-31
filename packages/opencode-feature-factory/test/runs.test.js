@@ -180,12 +180,15 @@ describe("the host registration contract", () => {
   //
   // Imported from tui/dist, because that is the artifact the host loads. Testing the JSX source would
   // pass while a broken build shipped.
-  function fakeApi() {
-    const calls = { registered: [], disposers: [] };
+  // Shaped like the host, and deliberately *without* the fields the adapter used to read. `options`
+  // carries no directory in reality, so a fake that supplied one would have let the wrong source pass.
+  function fakeApi(directory = "/nowhere-at-all") {
+    const calls = { registered: [] };
     return {
       calls,
+      state: { path: { directory, worktree: `${directory}/wt` } },
+      theme: { current: { warning: "amber" } },
       slots: { register(config) { calls.registered.push(config); } },
-      lifecycle: { onDispose(fn) { calls.disposers.push(fn); } },
     };
   }
 
@@ -195,15 +198,31 @@ describe("the host registration contract", () => {
     assert.equal(typeof entry.tui, "function", "carrying a tui() hook");
 
     const api = fakeApi();
-    entry.tui(api, { directory: "/nowhere-at-all", intervalMs: 60_000 });
+    entry.tui(api, { intervalMs: 60_000 });
     assert.equal(api.calls.registered.length, 1, "content is contributed by registering a slot");
     assert.equal(typeof api.calls.registered[0].slots?.sidebar_content, "function",
       "the slot must be named sidebar_content; any other name contributes nothing");
 
-    // The slot is deliberately NOT invoked. Its intrinsic elements need a live OpenTUI renderer, so
-    // calling it here fails with "No renderer found" — the honest boundary of what this suite can
-    // prove. Whether the component actually paints is a dogfood question, and the reactive machinery
-    // it depends on is tested in ./poll.js instead.
+    // The slot is deliberately NOT invoked: its intrinsic elements need a live OpenTUI renderer, so
+    // calling it here fails with "No renderer found". That is the honest boundary of this suite —
+    // whether the component paints is a dogfood question, and the machinery it depends on is tested
+    // in ./poll.js.
+  });
+
+  it("takes the directory and theme from the host, not from plugin options", async () => {
+    // Both were read from `options`, which OpenCode never populates with either. The directory then
+    // fell back to `process.cwd()` — the host process, not the repository — so the sidebar would have
+    // reported "no control plane found" forever, indistinguishable from a broken slot. Asserted by
+    // source text because the component cannot be instantiated to observe its props.
+    const bundle = readFileSync(new URL("../tui/dist/index.js", import.meta.url), "utf8");
+    assert.match(bundle, /api\.state\.path\.directory/u,
+      "the working directory must come from api.state.path.directory");
+    assert.match(bundle, /ctx\.theme|theme:\s*\w+\.theme/u, "the theme must come from the slot context");
+    assert.equal(/options\.directory|options\.cwd|options\.theme/u.test(bundle), false,
+      "options is user configuration; it carries neither the directory nor the theme");
+    // And the theme is read through `.current`, so a theme change recolours instead of being frozen
+    // at mount by a one-time spread.
+    assert.match(bundle, /theme\?\.current|theme\.current/u, "the theme must be read reactively");
   });
 
   it("keeps the reactive shell out of the bundle so the host's solid instance is used", async () => {
