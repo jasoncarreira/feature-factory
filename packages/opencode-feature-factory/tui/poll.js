@@ -9,13 +9,16 @@ import { renderLines } from "./lines.js";
 import { DEFAULT_POLL_MS } from "./sidebar-config.js";
 
 export function createLineSource({ cwd, poll = pollRuns, intervalMs = DEFAULT_POLL_MS, onLines } = {}) {
+  // Both the lines and the snapshot they came from: the sidebar renders the lines, and the command
+  // palette needs the runs themselves to offer a jump to each one's session.
   const read = () => {
     try {
-      return renderLines(poll(cwd));
+      const snapshot = poll(cwd);
+      return { snapshot, lines: renderLines(snapshot) };
     } catch (error) {
       // A transient scan failure — a cleanup deleting run state mid-tick — must never throw into the
       // host's render loop. It becomes content instead, so the operator sees it.
-      return [`sidebar error: ${error.message}`];
+      return { snapshot: null, lines: [`sidebar error: ${error.message}`] };
     }
   };
 
@@ -27,16 +30,16 @@ export function createLineSource({ cwd, poll = pollRuns, intervalMs = DEFAULT_PO
   // does downstream of that write runs inside this callback. A throw there strands the last frame
   // on screen with the timer still ticking, which reads exactly like a dead plugin.
   const publish = (next) => {
-    try { onLines?.(next); } catch { /* the frame is lost; the loop is not */ }
+    try { onLines?.(next.lines, next.snapshot); } catch { /* the frame is lost; the loop is not */ }
   };
 
-  let lines = read();
-  publish(lines);
+  let current = read();
+  publish(current);
 
   const refresh = () => {
-    lines = read();
-    publish(lines);
-    return lines;
+    current = read();
+    publish(current);
+    return current.lines;
   };
 
   const timer = setInterval(refresh, intervalMs);
@@ -46,5 +49,10 @@ export function createLineSource({ cwd, poll = pollRuns, intervalMs = DEFAULT_PO
   // "No renderer found" error, not this. So this line is defensive and unproven by any test here.
   timer.unref?.();
 
-  return { refresh, stop: () => clearInterval(timer), lines: () => lines };
+  return {
+    refresh,
+    stop: () => clearInterval(timer),
+    lines: () => current.lines,
+    snapshot: () => current.snapshot,
+  };
 }

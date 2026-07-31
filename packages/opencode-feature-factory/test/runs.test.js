@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { CONTROL_PLANE } from "feature-factory";
 import { findControlPlane, listRuns, pollRuns, repositoryRoots, selectActiveRun } from "../observe/runs.js";
 import { renderLines } from "../tui/lines.js";
+import { runCommands } from "../tui/commands.js";
 import { ORDER, SLOT } from "../tui/sidebar-config.js";
 
 const RUN = (overrides = {}) => ({
@@ -367,6 +368,40 @@ describe("the host registration contract", () => {
     // at mount by a one-time spread.
     assert.match(bundle, /theme\?\.current|theme\.current/u, "the theme must be read reactively");
     assert.match(bundle, /Feature Factory/u, "the panel carries its own header; the host's sidebar_title is the session's");
+  });
+
+  it("offers a jump to the session that owns each run", async () => {
+    // The association was already on disk and nothing surfaced it: `factory lock` records the
+    // claiming session beside the manifest, and the host can navigate to a session by id. So this is
+    // a projection plus a route call — no process, no write.
+    const navigations = [];
+    const commands = runCommands([
+      { run_id: "app-1", valid: true, session: "SESSION-A", next: "gate:story" },
+      // No session: the lock was released, so there is nothing to open and offering it would
+      // navigate nowhere.
+      { run_id: "app-2", valid: true, session: null, next: "gate:brief" },
+      // Unreadable manifests are shown in the sidebar but cannot be jumped to.
+      { run_id: "app-3", valid: false, session: "SESSION-C", next: null },
+    ], { navigate: (name, params) => navigations.push([name, params]) });
+
+    assert.deepEqual(commands.map((command) => command.value), ["feature-factory.open.app-1"],
+      "only a valid run with a recorded session can be opened");
+    assert.match(commands[0].description, /gate:story/u, "the palette says which run needs attention");
+    commands[0].onSelect();
+    assert.deepEqual(navigations, [["session", { sessionID: "SESSION-A" }]],
+      "selecting it navigates to that session, by id");
+  });
+
+  it("reads the owning session from the run's lock", () => {
+    const root = repo("session");
+    try {
+      const dir = seedRun(root, "app-1", RUN());
+      assert.equal(pollRuns(root).active.session, null, "no lock means no session to open");
+      writeFileSync(join(dir, "factory.lock"), JSON.stringify({ session: "SESSION-Z", pid: 1 }));
+      assert.equal(pollRuns(root).active.session, "SESSION-Z");
+      writeFileSync(join(dir, "factory.lock"), "{ not json");
+      assert.equal(pollRuns(root).active.session, null, "an unreadable lock is unknown, not fatal");
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it("holds its state in the hook and recreates the subtree, so a change reaches the screen", async () => {
