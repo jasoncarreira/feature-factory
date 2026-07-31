@@ -27,7 +27,11 @@ function lineColor(theme, line) {
 }
 
 export function Sidebar(props) {
-  const [lines, setLines] = createSignal([]);
+  // `equals: false` because the predecessor needed it in this same host — `createSignal(runs, {
+  // equals: false })` alongside a monotonic version counter. Every tick here does build a fresh
+  // array, so referential equality should already differ and this should be redundant; it is kept
+  // because "should" is doing the work in that sentence and the cost is one option.
+  const [lines, setLines] = createSignal([], { equals: false });
   const source = createLineSource({
     cwd: props.cwd,
     intervalMs: props.intervalMs,

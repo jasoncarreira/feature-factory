@@ -19,12 +19,23 @@ export function createLineSource({ cwd, poll = pollRuns, intervalMs = DEFAULT_PO
     }
   };
 
+  // Nothing escapes a tick — the *publish*, not just the scan. The predecessor lost the sidebar to
+  // this and wrote down why: "a factory cleanup deleting run state mid-tick — exactly the transition
+  // to 'no current runs' — could propagate an exception into the host interval or slot render and
+  // freeze the sidebar until restart." Its fix guarded the scan. Guarding only the scan is what I
+  // did too, and it is not enough: `onLines` writes a signal, and whatever the host's reconciler
+  // does downstream of that write runs inside this callback. A throw there strands the last frame
+  // on screen with the timer still ticking, which reads exactly like a dead plugin.
+  const publish = (next) => {
+    try { onLines?.(next); } catch { /* the frame is lost; the loop is not */ }
+  };
+
   let lines = read();
-  onLines?.(lines);
+  publish(lines);
 
   const refresh = () => {
     lines = read();
-    onLines?.(lines);
+    publish(lines);
     return lines;
   };
 

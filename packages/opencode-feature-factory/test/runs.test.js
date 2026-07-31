@@ -269,6 +269,27 @@ describe("the poll loop", () => {
     try {
       assert.deepEqual(source.lines(), ["sidebar error: state vanished mid-tick"]);
     } finally { source.stop(); }
+
+    // The other half, and the one that actually cost a sidebar. The predecessor's note on this:
+    // "a factory cleanup deleting run state mid-tick — exactly the transition to 'no current runs' —
+    // could propagate an exception into the host interval or slot render and freeze the sidebar
+    // until restart." Guarding the scan is not enough, because publishing writes a signal and the
+    // host's reconciler runs downstream of that write, inside this callback. A throw there leaves
+    // the last frame on screen with the timer still ticking — indistinguishable from a dead plugin.
+    let ticks = 0;
+    const brittle = createLineSource({
+      cwd: "/repo", intervalMs: 60_000,
+      poll: () => ({ repo: "/repo", runs: [], active: null, searched: ["/repo"] }),
+      onLines: () => { ticks += 1; throw new Error("reconciler blew up"); },
+    });
+    try {
+      assert.equal(ticks, 1, "the first publish is attempted");
+      assert.doesNotThrow(() => brittle.refresh(), "a failed publish must not reach the host's interval");
+      assert.equal(ticks, 2, "and the loop keeps publishing after one throws");
+      // A control plane that exists and holds nothing: one line, no `searched` — that is reported
+      // only when no control plane was found at all.
+      assert.deepEqual(brittle.lines(), ["no runs"], "the scan result is still current");
+    } finally { brittle.stop(); }
   });
 });
 
