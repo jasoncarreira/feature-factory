@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONTROL_PLANE } from "feature-factory";
-import { findControlPlane, listRuns, pollRuns, repositoryRoot, selectActiveRun } from "../observe/runs.js";
+import { findControlPlane, listRuns, pollRuns, repositoryRoots, selectActiveRun } from "../observe/runs.js";
 import { renderLines } from "../tui/lines.js";
 import { ORDER, SLOT } from "../tui/sidebar-config.js";
 
@@ -57,7 +57,7 @@ describe("control-plane discovery", () => {
       writeFileSync(join(linked, ".git"), `gitdir: ${join(root, ".git", "worktrees", "slice-1")}\n`);
 
       assert.equal(findControlPlane(linked), root, "a slice worktree must resolve to the main repo");
-      assert.equal(repositoryRoot(linked), root, "a linked worktree resolves to the main repository");
+      assert.deepEqual(repositoryRoots(linked), [linked, root], "itself first, then the main repository");
       assert.equal(pollRuns(linked).active.run_id, "app-1");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -78,11 +78,36 @@ describe("control-plane discovery", () => {
       mkdirSync(join(inner, ".git"), { recursive: true });
       mkdirSync(join(inner, "src"), { recursive: true });
 
-      assert.equal(repositoryRoot(join(inner, "src")), inner, "the repository bounds the search");
+      assert.deepEqual(repositoryRoots(join(inner, "src")), [inner], "the repository bounds the search");
       assert.equal(findControlPlane(join(inner, "src")), null,
         "an ancestor's .factory is not this repository's control plane");
       assert.deepEqual(pollRuns(join(inner, "src")), { repo: null, runs: [], active: null });
     } finally { rmSync(outer, { recursive: true, force: true }); }
+  });
+
+  it("prefers a linked worktree's own control plane over the main repository's", () => {
+    // Found during a real run, and caused by the previous fix. A slice worktree has no control plane
+    // of its own, so it must resolve to the main repository — but a linked worktree used as the
+    // *project* root does have one, because `factory init` writes to the directory it runs in.
+    // Resolving only to the main repository reported "no runs" while a valid run sat in the worktree.
+    const main = repo("linked-own");
+    const linked = mkdtempSync(join(tmpdir(), "ff-tui-linked-own-"));
+    try {
+      writeFileSync(join(linked, ".git"), `gitdir: ${join(main, ".git", "worktrees", "wt")}\n`);
+      seedRun(main, "in-main", RUN({ run_id: "in-main" }));
+      seedRun(linked, "in-worktree", RUN({ run_id: "in-worktree" }));
+
+      assert.equal(findControlPlane(linked), linked, "the worktree's own run is the one being driven");
+      assert.equal(pollRuns(linked).active.run_id, "in-worktree");
+
+      // And with nothing of its own, it still falls back — the slice-worktree case.
+      rmSync(join(linked, CONTROL_PLANE), { recursive: true, force: true });
+      assert.equal(findControlPlane(linked), main, "a slice worktree resolves to the main repository");
+      assert.equal(pollRuns(linked).active.run_id, "in-main");
+    } finally {
+      rmSync(main, { recursive: true, force: true });
+      rmSync(linked, { recursive: true, force: true });
+    }
   });
 
   it("does not report a directory without a manifest as a broken run", () => {

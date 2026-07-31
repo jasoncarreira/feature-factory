@@ -34,35 +34,37 @@ function mainRepositoryOf(dir) {
   return dirname(worktreesDir);
 }
 
-// The repository this directory belongs to, and nothing above it.
+// The repositories a directory could keep its control plane in: itself, and — if it is a linked
+// worktree — the main repository it points at. Nothing above either.
 //
-// This walked up looking for `.factory` and accepted the first ancestor that had one — which found
-// `~/.factory`, a directory belonging to another tool entirely, and rendered its `skills/` subfolder
-// as a broken run. Found by opening the sidebar for real. The rename from `.claude/factory` to
-// `.factory` is what made it likely: a two-segment path rarely exists by accident in a home
-// directory, a single dotfile does.
+// Both are needed, and getting this wrong broke the sidebar during a real run. The orchestrator makes
+// one linked worktree per slice, and those have no control plane of their own, so a slice worktree has
+// to resolve to the main repository. But a linked worktree used as the *project* root legitimately has
+// its own: `factory init` writes to whatever directory it is run in. Resolving only to the main
+// repository reported "no runs" while a valid run sat in the worktree; resolving only to the directory
+// itself would blank the sidebar inside every slice worktree.
 //
-// A control plane belongs to a repository, so the repository is the boundary: find the repo root
-// first, then look inside it. Never above it.
-export function repositoryRoot(startDir) {
+// Order matters: the directory's own control plane wins, because that is the run someone working here
+// is driving. An earlier version walked up until *any* ancestor had one, which found `~/.factory` —
+// a different tool's — so the search still stops at the repository.
+export function repositoryRoots(startDir) {
   let current = resolve(startDir);
   while (true) {
-    const pointer = join(current, ".git");
-    if (existsSync(pointer)) {
-      // A linked worktree's `.git` is a file pointing into the main repository, which is where the
-      // control plane lives — a slice worktree has none of its own.
-      return mainRepositoryOf(current) ?? current;
+    if (existsSync(join(current, ".git"))) {
+      const main = mainRepositoryOf(current);
+      return main && main !== current ? [current, main] : [current];
     }
     const parent = dirname(current);
-    if (parent === current) return null;
+    if (parent === current) return [];
     current = parent;
   }
 }
 
 export function findControlPlane(startDir) {
-  const repo = repositoryRoot(startDir);
-  if (!repo) return null;
-  return existsSync(join(repo, CONTROL_PLANE)) ? repo : null;
+  for (const root of repositoryRoots(startDir)) {
+    if (existsSync(join(root, CONTROL_PLANE))) return root;
+  }
+  return null;
 }
 
 // Every run under a repository's control plane, newest first. A record that does not parse is
