@@ -531,6 +531,7 @@ const PROMPT_CONTRACTS = [
       "only then replace the canonical brief with caller-corrected content",
       "If Story was approved before Brief requested changes, reopen Story",
       "A `stop` decision follows\nexisting terminal behavior and never accepts or seeds.",
+      "Gate 2 therefore ratifies exact `paths`, `acceptance`, and `test_plan`, including any explicit waiver,\nbefore they become immutable.",
       "before they become immutable",
     ],
   },
@@ -589,6 +590,7 @@ const PROMPT_CONTRACTS = [
     file: "skills/feature/SKILL.md",
     fragments: [
       "syntactic test-site budget is 83 of 83 with no slack",
+      "The verified spec is the\nGate 1 artifact and must expose the intended test-coverage approach.",
       "table rows or assertions inside the existing `prompt-claims.test.js` callback",
       "any genuinely necessary new `it(`/`test(` site must be raised with its reason at Gate 2",
     ],
@@ -632,6 +634,7 @@ const PROMPT_CONTRACTS = [
       "\"status\": \"REFUSED\",\n  \"artifact\": \"artifacts/technical-brief.md\",\n  \"missing\": [\"path lane\"],\n  \"ambiguous\": []",
       "`missing` and `ambiguous` may contain only `path lane`, `acceptance criteria`, and `test plan or explicit test waiver`.",
       "At least one array must be non-empty, and each category appears at most once across both arrays.",
+      "An absent or empty category is `missing`.",
       "An empty, non-string, or non-deterministically extractable test-plan entry makes `test plan or explicit test waiver` ambiguous.",
     ],
   },
