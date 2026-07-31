@@ -32,9 +32,12 @@ export default {
     api.slots.register({
       order: ORDER,
       slots: {
+        // Both locations the host reports, `directory` first. They are the same in an ordinary
+        // checkout and differ in a linked worktree, and passing only `directory` showed "no runs"
+        // through a whole live run whose control plane was under the other one.
         [SLOT]: (ctx) => (
           <Sidebar
-            cwd={api.state.path.directory}
+            cwd={[api.state.path.directory, api.state.path.worktree]}
             intervalMs={options.intervalMs}
             theme={ctx.theme}
           />

@@ -60,11 +60,21 @@ export function repositoryRoots(startDir) {
   }
 }
 
-export function findControlPlane(startDir) {
-  for (const root of repositoryRoots(startDir)) {
-    if (existsSync(join(root, CONTROL_PLANE))) return root;
+// The host reports *four* locations — `state`, `config`, `worktree`, `directory` — and which one
+// holds the run is not ours to decide. Taking only `directory` rendered "no runs" while a live run
+// sat one path away, because for a linked worktree the two differ. So this takes candidates in
+// priority order and returns the first that has a control plane, along with everywhere it looked.
+export function findControlPlane(startDirs) {
+  const candidates = (Array.isArray(startDirs) ? startDirs : [startDirs]).filter(Boolean);
+  const searched = [];
+  for (const start of candidates) {
+    for (const root of repositoryRoots(start)) {
+      if (searched.includes(root)) continue;
+      searched.push(root);
+      if (existsSync(join(root, CONTROL_PLANE))) return { repo: root, searched };
+    }
   }
-  return null;
+  return { repo: null, searched };
 }
 
 // Every run under a repository's control plane, newest first. A record that does not parse is
@@ -126,10 +136,11 @@ function project(runDir, runId) {
   };
 }
 
-// One poll: where the control plane is, every run in it, and which one is live.
-export function pollRuns(startDir) {
-  const repo = findControlPlane(startDir);
-  if (!repo) return { repo: null, runs: [], active: null };
+// One poll: where the control plane is, every run in it, which one is live, and — when there is
+// none — the directories that were checked, so an empty sidebar can say why it is empty.
+export function pollRuns(startDirs) {
+  const { repo, searched } = findControlPlane(startDirs);
+  if (!repo) return { repo: null, runs: [], active: null, searched };
   const runs = listRuns(repo);
-  return { repo, runs, active: selectActiveRun(runs) };
+  return { repo, runs, active: selectActiveRun(runs), searched };
 }

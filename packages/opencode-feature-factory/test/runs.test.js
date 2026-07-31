@@ -41,7 +41,7 @@ describe("control-plane discovery", () => {
     try {
       seedRun(root, "app-1", RUN());
       mkdirSync(join(root, "src", "deep", "deeper"), { recursive: true });
-      assert.equal(findControlPlane(join(root, "src", "deep", "deeper")), root);
+      assert.equal(findControlPlane(join(root, "src", "deep", "deeper")).repo, root);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -56,7 +56,7 @@ describe("control-plane discovery", () => {
       seedRun(root, "app-1", RUN());
       writeFileSync(join(linked, ".git"), `gitdir: ${join(root, ".git", "worktrees", "slice-1")}\n`);
 
-      assert.equal(findControlPlane(linked), root, "a slice worktree must resolve to the main repo");
+      assert.equal(findControlPlane(linked).repo, root, "a slice worktree must resolve to the main repo");
       assert.deepEqual(repositoryRoots(linked), [linked, root], "itself first, then the main repository");
       assert.equal(pollRuns(linked).active.run_id, "app-1");
     } finally {
@@ -79,10 +79,40 @@ describe("control-plane discovery", () => {
       mkdirSync(join(inner, "src"), { recursive: true });
 
       assert.deepEqual(repositoryRoots(join(inner, "src")), [inner], "the repository bounds the search");
-      assert.equal(findControlPlane(join(inner, "src")), null,
+      assert.equal(findControlPlane(join(inner, "src")).repo, null,
         "an ancestor's .factory is not this repository's control plane");
-      assert.deepEqual(pollRuns(join(inner, "src")), { repo: null, runs: [], active: null });
+      assert.deepEqual(pollRuns(join(inner, "src")),
+        { repo: null, runs: [], active: null, searched: [inner] });
     } finally { rmSync(outer, { recursive: true, force: true }); }
+  });
+
+  it("tries every location the host reports, and says which it checked", () => {
+    // The host's TUI state carries four paths — `state`, `config`, `worktree`, `directory` — and
+    // which one holds the run is not ours to decide. Passing only `directory` rendered "no runs"
+    // through an entire live run whose control plane was under `worktree`, and a bare "no runs" gave
+    // no way to tell a wrong directory from a broken plugin. Both halves are fixed here: try the
+    // candidates in order, and report where you looked when you find nothing.
+    const withRun = repo("candidate-b");
+    const without = repo("candidate-a");
+    try {
+      seedRun(withRun, "app-1", RUN());
+
+      const found = pollRuns([without, withRun]);
+      assert.equal(found.repo, withRun, "the second candidate wins when the first has no control plane");
+      assert.equal(found.active.run_id, "app-1");
+      assert.deepEqual(found.searched, [without, withRun], "in order, first hit last");
+
+      const empty = pollRuns([without]);
+      assert.equal(empty.repo, null);
+      assert.deepEqual(renderLines(empty), ["no runs", `searched ${without}`],
+        "an empty sidebar names the directory, because that is the whole diagnosis");
+
+      // A single string still works — every other caller passes one.
+      assert.equal(pollRuns(withRun).repo, withRun);
+    } finally {
+      rmSync(withRun, { recursive: true, force: true });
+      rmSync(without, { recursive: true, force: true });
+    }
   });
 
   it("prefers a linked worktree's own control plane over the main repository's", () => {
@@ -97,12 +127,12 @@ describe("control-plane discovery", () => {
       seedRun(main, "in-main", RUN({ run_id: "in-main" }));
       seedRun(linked, "in-worktree", RUN({ run_id: "in-worktree" }));
 
-      assert.equal(findControlPlane(linked), linked, "the worktree's own run is the one being driven");
+      assert.equal(findControlPlane(linked).repo, linked, "the worktree's own run is the one being driven");
       assert.equal(pollRuns(linked).active.run_id, "in-worktree");
 
       // And with nothing of its own, it still falls back — the slice-worktree case.
       rmSync(join(linked, CONTROL_PLANE), { recursive: true, force: true });
-      assert.equal(findControlPlane(linked), main, "a slice worktree resolves to the main repository");
+      assert.equal(findControlPlane(linked).repo, main, "a slice worktree resolves to the main repository");
       assert.equal(pollRuns(linked).active.run_id, "in-main");
     } finally {
       rmSync(main, { recursive: true, force: true });
@@ -130,9 +160,9 @@ describe("control-plane discovery", () => {
     const stray = mkdtempSync(join(tmpdir(), "ff-tui-stray-"));
     try {
       writeFileSync(join(stray, ".git"), "not a gitdir pointer\n");
-      assert.equal(findControlPlane(stray), null, "a malformed pointer is not a repository root");
+      assert.equal(findControlPlane(stray).repo, null, "a malformed pointer is not a repository root");
       writeFileSync(join(stray, ".git"), "gitdir: /nowhere/useful\n");
-      assert.equal(findControlPlane(stray), null, "a pointer that is not under .git/worktrees is refused");
+      assert.equal(findControlPlane(stray).repo, null, "a pointer that is not under .git/worktrees is refused");
     } finally { rmSync(stray, { recursive: true, force: true }); }
   });
 });
@@ -203,8 +233,10 @@ describe("run projection", () => {
   it("says so when there is no control plane at all", () => {
     const empty = mkdtempSync(join(tmpdir(), "ff-tui-empty-"));
     try {
-      assert.deepEqual(pollRuns(empty), { repo: null, runs: [], active: null });
-      assert.deepEqual(renderLines(pollRuns(empty)), ["no runs"], "one line for an absent control plane");
+      // Outside a repository there is no candidate root at all, so there is nothing to name — one
+      // line, unlike the in-a-repository-but-no-control-plane case above.
+      assert.deepEqual(pollRuns(empty), { repo: null, runs: [], active: null, searched: [] });
+      assert.deepEqual(renderLines(pollRuns(empty)), ["no runs"], "one line when there is no root to report");
     } finally { rmSync(empty, { recursive: true, force: true }); }
   });
 });

@@ -10,10 +10,16 @@
 // conversation's job; the sidebar's job is state. So `next` carries the mark instead of a
 // paraphrase of it, and stays in the same vocabulary `factory status` prints.
 export function renderLines(snapshot) {
-  // One line for both empty cases: no control plane, and a control plane with nothing in it. The
-  // distinction is ours, not the reader's — and the old text told them to run `factory init`, which
-  // is not their command. The orchestrator runs it; a human types /feature.
-  if (!snapshot.repo || !snapshot.active) return ["no runs"];
+  // The empty state names where it looked. Collapsing "no control plane here" into a bare "no runs"
+  // was a mistake I made twice over: an empty sidebar is indistinguishable from a broken one, and
+  // both times a live run was sitting one directory away while this said nothing was happening. The
+  // path is the whole diagnosis, so it is on screen. It still does not tell anyone to run
+  // `factory init` — the orchestrator's command, not theirs.
+  if (!snapshot.repo) {
+    const searched = snapshot.searched ?? [];
+    return searched.length > 0 ? ["no runs", ...searched.map((dir) => `searched ${dir}`)] : ["no runs"];
+  }
+  if (!snapshot.active) return ["no runs"];
   const run = snapshot.active;
   // A record that exists but does not validate is shown as broken rather than omitted. Omitting it
   // leaves an operator with no way to learn it is there.
