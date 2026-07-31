@@ -7,7 +7,7 @@
 // exported from package.json and is imported only by bin/factory.js.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { validateRun } from "./schema.js";
+import { GATE_NAMES, TERMINAL_STATUSES, validateRun } from "./schema.js";
 
 export { validateRun, SchemaError, RUN_KEYS, SCHEMA_VERSION, RUN_STATUSES, TERMINAL_STATUSES, MODES,
   GATE_NAMES, GATE_STATUSES, STEP_STATUSES, SLICE_STATUSES, VALIDATOR_VERDICTS } from "./schema.js";
@@ -24,4 +24,34 @@ export function readRunUnchecked(runDir) {
   } catch (error) {
     return { ok: false, error: error.message };
   }
+}
+
+// The single answer to "what happens next". Both `factory status` and the opencode
+// sidebar need it, and two implementations of resume order would drift — which is the
+// defect class this codebase keeps finding. Read-only, so it belongs here.
+//
+// Resume: the first thing a returning session needs to know. Mirrors viso's
+// resume rules — a pending gate re-presents, a running slice re-observes, an
+// unaccepted step re-runs.
+export function nextAction(run) {
+  if (TERMINAL_STATUSES.includes(run.status)) return `terminal:${run.status}`;
+  for (const name of GATE_NAMES) {
+    // Absent means that phase has not started; pending means it is waiting on a
+    // human. Either way the gate is the next thing to happen, and treating absent
+    // as "done" would report a run as further along than it is.
+    const gate = run.gates[name];
+    if (gate === undefined || gate.status === "pending") return `gate:${name}`;
+    if (gate.status === "stop") return `stopped-at-gate:${name}`;
+    if (gate.status === "changes") return `changes-at-gate:${name}`;
+  }
+  const blockedSlice = run.slices.find((slice) => slice.status === "blocked");
+  if (blockedSlice) return `blocked-slice:${blockedSlice.id}`;
+  const activeSlice = run.slices.find((slice) => ["running", "review"].includes(slice.status));
+  if (activeSlice) return `observe-slice:${activeSlice.id}`;
+  const pendingSlice = run.slices.find((slice) => slice.status === "pending");
+  if (pendingSlice) return `dispatch-slice:${pendingSlice.id}`;
+  const openStep = run.steps.find((step) => step.status !== "accepted");
+  if (openStep) return `step:${openStep.agent}`;
+  if (!run.pr_url) return "pr";
+  return "complete";
 }

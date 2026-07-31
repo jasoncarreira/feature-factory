@@ -29,6 +29,9 @@ function sources(dir, found = []) {
 // import and the boundary test passed. Shelling out to the CLI is the *documented*
 // escape hatch, but it must be visible, so process-spawning is listed here too and a
 // legitimate use has to be added deliberately.
+// Matched as plain substrings against the whole file, comments included. That is intentional and
+// it does bite: a comment *explaining* why a spawn is absent trips it just as a spawn would. The
+// cost is occasional rewording; the benefit is a guard with no exceptions to reason about.
 const WRITE_PRIMITIVES = [
   "withRunJsonLock", "writeProtectedJsonAtomic", "writeProtectedFileAtomic",
   "writeFileSync", "writeFile", "renameSync", "coordinateRunJsonTransition", "transition(",
@@ -63,7 +66,7 @@ describe("package boundary", () => {
     // Widening this list is the signal that the boundary is wrong, not that the
     // export surface is too small.
     // `transition` is deliberately absent: it no longer exists in the package root.
-    const allowed = ["readRun", "readRunUnchecked", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION"];
+    const allowed = ["readRun", "readRunUnchecked", "nextAction", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION"];
     const unexpected = [...imported].filter((name) => !allowed.includes(name));
     assert.deepEqual(unexpected, [], `unexpected imports from feature-factory: ${unexpected.join(", ")}`);
   });
@@ -96,8 +99,13 @@ describe("package boundary", () => {
     const manifest = JSON.parse(readFileSync(join(factoryPkg, "package.json"), "utf8"));
     const root = (manifest.exports?.["."] ?? manifest.main).replace(/^\.\//u, "");
     const module = await import(new URL(`file://${join(factoryPkg, root)}`).href);
+    // `nextAction` was added deliberately. Widening this list is normally the signal that the
+    // boundary is wrong — but this is a pure read-only derivation over run state that both
+    // `factory status` and the sidebar must agree on, and the alternative was a second copy of
+    // resume order in the TUI. One read-only export removes a drift risk; it does not grant
+    // authority, and the reachability check below still proves it cannot write.
     const allowed = [
-      "readRun", "readRunUnchecked", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION",
+      "readRun", "readRunUnchecked", "nextAction", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION",
       "RUN_STATUSES", "TERMINAL_STATUSES", "MODES", "GATE_NAMES", "GATE_STATUSES",
       "STEP_STATUSES", "SLICE_STATUSES", "VALIDATOR_VERDICTS",
     ];

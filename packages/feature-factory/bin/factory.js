@@ -12,7 +12,7 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
-import { readRun, readRunUnchecked } from "../state/index.js";
+import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { buildEvidence, evidenceRef, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
@@ -466,7 +466,7 @@ const HANDLERS = {
       validator: run.validator?.verdict ?? null,
       pr_url: run.pr_url,
       terminal_result: run.terminal_result,
-      next: nextIncomplete(run),
+      next: nextAction(run),
     });
   },
 
@@ -596,31 +596,6 @@ const HANDLERS = {
   },
 };
 
-// Resume: the first thing a returning session needs to know. Mirrors viso's
-// resume rules — a pending gate re-presents, a running slice re-observes, an
-// unaccepted step re-runs.
-function nextIncomplete(run) {
-  if (TERMINAL_STATUSES.includes(run.status)) return `terminal:${run.status}`;
-  for (const name of GATE_NAMES) {
-    // Absent means that phase has not started; pending means it is waiting on a
-    // human. Either way the gate is the next thing to happen, and treating absent
-    // as "done" would report a run as further along than it is.
-    const gate = run.gates[name];
-    if (gate === undefined || gate.status === "pending") return `gate:${name}`;
-    if (gate.status === "stop") return `stopped-at-gate:${name}`;
-    if (gate.status === "changes") return `changes-at-gate:${name}`;
-  }
-  const blockedSlice = run.slices.find((slice) => slice.status === "blocked");
-  if (blockedSlice) return `blocked-slice:${blockedSlice.id}`;
-  const activeSlice = run.slices.find((slice) => ["running", "review"].includes(slice.status));
-  if (activeSlice) return `observe-slice:${activeSlice.id}`;
-  const pendingSlice = run.slices.find((slice) => slice.status === "pending");
-  if (pendingSlice) return `dispatch-slice:${pendingSlice.id}`;
-  const openStep = run.steps.find((step) => step.status !== "accepted");
-  if (openStep) return `step:${openStep.agent}`;
-  if (!run.pr_url) return "pr";
-  return "complete";
-}
 
 function integer(value, fallback, flag) {
   if (value === undefined) return fallback;
