@@ -23,7 +23,7 @@
     "feature-factory": "0.1.0"
   },
   "scripts": {
-    "build": "rm -rf tui/dist && esbuild tui/index.jsx tui/sidebar.jsx --bundle --splitting --platform=node --format=esm --jsx=automatic --jsx-import-source=@opentui/solid --packages=external --outdir=tui/dist",
+    "build": "rm -rf tui/dist && esbuild tui/index.jsx --bundle --platform=node --format=esm --jsx=automatic --jsx-import-source=@opentui/solid --packages=external --outfile=tui/dist/index.js",
     "prepack": "npm run build",
     "test": "npm run build && node --test test/*.test.js"
   },

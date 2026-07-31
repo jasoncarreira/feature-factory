@@ -140,6 +140,14 @@ describe("what actually ships", () => {
       const status = execFileSync("node", [shim, "status", "nope", "--json"],
         { cwd: consumer, encoding: "utf8" });
       assert.match(status, /"valid": false/u, "the CLI must report an absent run rather than crash");
+
+      // Executed *directly*, not through `node`. That is the only way the shebang and the executable
+      // bit get exercised: npm sets the mode when packing a `bin` entry, and a tarball missing either
+      // gives "permission denied" or "syntax error" on a machine where nobody thought to prefix node.
+      const direct = execFileSync(shim, ["--help"], { cwd: consumer, encoding: "utf8" });
+      assert.match(direct, /factory init <run-id>/u, "the shim must be directly executable");
+      const source = readFileSync(join(consumer, "node_modules", "feature-factory", "bin", "factory.js"), "utf8");
+      assert.match(source, /^#!\/usr\/bin\/env node\n/u, "and carry a shebang, or direct execution is a syntax error");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

@@ -59,6 +59,12 @@ Two conventions this codebase holds to, both learned the hard way:
   Assert the anchor is present before removing it, so a silent no-op edit cannot masquerade as a
   falsification. Several guards here were "verified" while being dead code that only read as
   enforcement.
+
+  Two ways that goes wrong, both of which happened repeatedly: **judge the result by the pass/fail
+  count, not by grepping for your assertion message** — a guard that fires with a different error
+  (`ENOEXEC`, a thrown exception) looks like a dead guard to a grep. And **probe one thing at a
+  time**: two mutations at once means the first failure masks the second, and you record a live guard
+  as dead.
 - **Prose is part of the contract.** `skill/SKILL.md` and `agents/*.md` are executable instructions.
   The ceiling test checks their commands and flags against the CLI, and
   `test/prompt-claims.test.js` executes the claims they make about what the CLI permits. Add a row

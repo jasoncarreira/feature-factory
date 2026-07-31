@@ -209,13 +209,11 @@ describe("the host registration contract", () => {
   it("keeps the reactive shell out of the bundle so the host's solid instance is used", async () => {
     // Module identity, not version equality: bundling solid would give the sidebar its own reactive
     // graph, which repaints nothing and looks exactly like the bug this replaced.
-    // Every built file, concatenated. The chunk name is content-hashed, so naming one would break on
-    // the next source edit — and worse, would pass by reading a file that no longer holds the shell.
-    const dist = new URL("../tui/dist/", import.meta.url);
-    const bundle = readdirSync(dist)
-      .filter((entry) => entry.endsWith(".js"))
-      .map((entry) => readFileSync(new URL(entry, dist), "utf8"))
-      .join("\n");
+    // One bundle, one file. It was three with content-hashed chunk names, which meant a stale build
+    // could leave a file this test read instead of the current one.
+    const dist = readdirSync(new URL("../tui/dist/", import.meta.url));
+    assert.deepEqual(dist, ["index.js"], "the sidebar must build to exactly one file");
+    const bundle = readFileSync(new URL("../tui/dist/index.js", import.meta.url), "utf8");
     assert.match(bundle, /from ?"solid-js"/u, "solid-js must stay an import, not be inlined");
     assert.match(bundle, /@opentui\/solid/u, "the jsx runtime must stay an import");
     assert.equal(/function createSignal\(/u.test(bundle), false, "solid's implementation must not be inlined");
