@@ -63,7 +63,7 @@ When the subject is a **class-wide** requirement (`all`/`every`/`centralize`/`ac
 
 ## Security proportionality
 
-The repository's real trust boundaries stay fully blocking: unauthenticated or authenticated users, cross-tenant access, Client API callers, and untrusted uploaded content reaching a privileged sink are always BLOCKER material. But a security BLOCKER must identify the **untrusted ingress**, the **privileged sink**, the **capability gained**, and **why the actor did not already possess that capability**; a secret-exposure BLOCKER instead identifies the sensitive source, the unauthorized disclosure sink or observer, and what was disclosed. If those elements cannot be named, record the concern as a non-blocking hardening note rather than inventing a security boundary.
+The repository's real trust boundaries stay fully blocking: unauthenticated or authenticated users, cross-tenant access, external API callers, and untrusted uploaded content reaching a privileged sink are always BLOCKER material. But a security BLOCKER must identify the **untrusted ingress**, the **privileged sink**, the **capability gained**, and **why the actor did not already possess that capability**; a secret-exposure BLOCKER instead identifies the sensitive source, the unauthorized disclosure sink or observer, and what was disclosed. If those elements cannot be named, record the concern as a non-blocking hardening note rather than inventing a security boundary.
 
 ## Severity
 

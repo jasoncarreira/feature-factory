@@ -29,7 +29,10 @@ jobs:
       - run: npm ci
       # Runs both workspaces. The factory package must also pass on its own, with no opencode
       # present, because that is the standalone claim its zero-dependency manifest makes.
-      - run: npm test --workspaces
+      # `npm test` is both workspaces plus the packed-tarball check. The last one matters most on
+      # CI: three release blockers once shipped past 99 green unit tests because nothing looked at
+      # what `npm pack` actually produces.
+      - run: npm test
       - run: npm test --workspace feature-factory
 
   # Single required status for branch protection so the check set stays stable

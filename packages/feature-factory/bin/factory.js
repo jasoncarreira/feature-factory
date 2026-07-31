@@ -9,8 +9,9 @@
 // Flags are declared per command and an unknown flag is an error. The predecessor
 // silently ignored unknown flags on ~36 of ~40 subcommands, which turns a typo
 // into a missing field.
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { readFileSync } from "node:fs";
 import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
@@ -662,7 +663,22 @@ export function describeError(error, depth = 0) {
   return lines.join("\n");
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Invoked as a program rather than imported. Compared through realpath and pathToFileURL, not by
+// building a `file://` string by hand: `process.argv[1]` is the path as typed, while
+// `import.meta.url` is resolved, so a symlink anywhere in it makes the two differ and the CLI exits
+// 0 having done nothing. That is not exotic — on macOS every temp directory is /var -> /private/var,
+// and npm bin shims are symlinks. It was invisible to the whole suite because every test invokes the
+// CLI through an already-resolved absolute path; the packed-tarball test found it immediately.
+const invokedAsProgram = () => {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+};
+
+if (invokedAsProgram()) {
   run(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${describeError(error)}\n`);
     process.exitCode = 1;

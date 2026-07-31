@@ -34,17 +34,17 @@ Resolve every ambiguity so builders don't have to. Follow `CLAUDE.md` and any ru
 - Read path: extend the existing projection or add a new query? Name the concrete view or method.
 - API surface: exact schema addition (which file, which type/field) or route
 - **Migration**: if the schema changes — proposed changelog filename in the repo's format, author,
-  environment contexts, manifest registration, and the `metabaseusr_ro` / `iam_readonly_limited` grants for any new table. (Don't pick the timestamp — note "builder stamps at write time".)
+  environment contexts, manifest registration, and whatever grants or permissions this repo requires for a new table. (Don't pick the timestamp — note "builder stamps at write time".)
 - Domain-risk impact: if the change touches a sensitive or high-risk area this repo calls out, name it
 
 **Frontend:**
 - Component(s) to add/change by path, following the repo's component conventions
-- State: local signals vs Signal Store — justify if store is needed
+- State: local vs shared — justify if shared state is needed
 - Client data operations to add/change and the generated types affected
 - Design-brief mapping: which tokens/components/states from the design brief go where
 
 **Cross-cutting:**
-- Feature flag needed? (LaunchDarkly + `FeatureFlagGuard`)
+- Feature flag needed? Name the repo's flag mechanism and its guard
 - Auth/role gating
 - Test plan: unit tests, and acceptance (which criterion maps to which test, and at what level)
 - **Class-wide work:** convert the research inventory into a closed implementation matrix — one row per sink/call site, each assigned an exact primitive/policy, a compatibility (preserve/migrate) or explicit exclusion decision, and a mapped test. No sink is left to the builder to discover.
@@ -68,7 +68,7 @@ Return this as your final message (consumed by orchestrator → builders & test-
 
 ### Frontend plan (omit if N/A)
 1. `path` — <add/change> — <what>
-- State: local signals | Signal Store (reason)
+- State: local | shared (reason)
 - Client data operations: <...>
 - Design mapping: <token/component/state → where>
 

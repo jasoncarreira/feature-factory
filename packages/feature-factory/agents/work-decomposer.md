@@ -41,8 +41,13 @@ An independently-implementable unit of the brief with:
 
 **`paths` and `test_plan` are ratified when the plan is seeded and cannot be changed afterwards.**
 Every later ownership check judges against the paths recorded then, and the test waiver cannot be
-granted after the fact. Get both right here: a slice needing more scope means amending the plan and
-re-reviewing it, not widening quietly during the build.
+granted after the fact.
+
+There is no amend-and-reseed path — `factory slices-seed` refuses a second seed and both fields are
+immutable once written, by design. If a slice turns out to need scope the plan did not give it, the
+run ends (`factory terminal <run-id> needs-human --reason "<what the plan got wrong>"`) and a new run
+starts from a corrected plan. That is expensive, which is the point: get the boundaries right here,
+where it costs a re-read rather than a run.
 - **`depends_on`** — the slice ids whose output this slice genuinely consumes.
 
 ## Rules (the reviewer checks these before Gate 2)

@@ -29,7 +29,15 @@ Use the brief's test plan as your checklist. For each acceptance criterion pick 
   scope its build tool allows — a single class or file, not the whole suite.
 - **Frontend unit:** the repo's unit-spec files, run by its own unit-test runner (check the `test` script; do not assume the package manager's built-in runner):
   Run it inside `$WT`. If the worktree's dependencies are missing, install them there first.
-- **End-to-end UI:** a spec in the repo's e2e directory, using the stable test selectors the frontend-builder added (base URL `http://localhost:9000`). See the `e2e-cli` skill for spec patterns, selectors, and mocking. Only write E2E for criteria that genuinely need a browser — and note E2E runs against the dev stack on `:9000`, which serves the **main checkout, not this worktree's code**. So unless the engineer has the worktree branch running locally, write the spec and report it `WRITTEN-NOT-RUN` rather than executing it against stale code.
+- **End-to-end UI:** a spec in the repo's e2e directory, using the stable test selectors the frontend-builder added, and the base URL from the repo's e2e
+  configuration. Follow the repo's existing specs for patterns, selectors and mocking. Only write
+  end-to-end for criteria that genuinely need a browser.
+
+  **Check what the dev server is actually serving before running one.** If it serves the main
+  checkout rather than this worktree, the spec runs against stale code and its result is meaningless
+  — write the spec and report it `WRITTEN-NOT-RUN` instead of executing it. Running a green E2E
+  against code that is not under test is a false pass, and the worst kind, because it looks like
+  the strongest evidence available.
 
 Prefer fast deterministic tests. Don't add flaky timing-based waits — assert on text/state.
 

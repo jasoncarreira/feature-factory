@@ -61,11 +61,25 @@ export function createSidebar({ cwd = process.cwd(), poll = pollRuns, intervalMs
   return { refresh, stop: () => clearInterval(timer), lines: () => lines };
 }
 
-export default function tui() {
-  return {
-    name: "feature-factory",
-    start(options = {}) {
-      return createSidebar(options);
-    },
-  };
-}
+// The host's contract, not a guess: a default *object* carrying a `tui(api, options, meta)` hook.
+// This module previously default-exported a function returning `{ name, start }`, which opencode
+// rejects before any of the code below runs — so the sidebar would never have appeared, and nothing
+// here could have told us. Verified against the loader's shape check rather than inferred from the
+// README, which only said the entry is read from `exports["./tui"]`.
+export default {
+  id: "feature-factory",
+  tui(api, options = {}) {
+    // `api` belongs to the host; this package neither stores nor writes through it. The sidebar is
+    // handed the directory to watch and reports upward through the host's own update channel.
+    const sidebar = createSidebar({
+      cwd: options.directory ?? options.cwd ?? process.cwd(),
+      intervalMs: options.intervalMs ?? DEFAULT_POLL_MS,
+      onUpdate: (lines) => api?.render?.(lines) ?? api?.update?.(lines),
+    });
+    return {
+      lines: sidebar.lines,
+      refresh: sidebar.refresh,
+      dispose: sidebar.stop,
+    };
+  },
+};

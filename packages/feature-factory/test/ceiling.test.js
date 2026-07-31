@@ -217,7 +217,22 @@ describe("ceiling — scope cannot grow without editing this file", () => {
         `${name} must document the claim status vocabulary evidence uses; "pass" reads as a disagreement`);
     }
 
-    const REFERENCE_STACK = /graphql|liquibase|blaze|angular|playwright|jhipster|gradle|ngclass|onpush|junit|src\/main\/|origin\/development|visotrust/iu;
+    // Widened after a review found survivors: my first pass listed frameworks and file trees and
+    // missed *named products and fixtures* — database grant roles, a feature-flag vendor, a commit
+    // hook, a formatter, a package manager, a selector attribute, a hardcoded port. Those are the
+    // ones that read as generic advice while only being true of one repository.
+    const REFERENCE_STACK = new RegExp([
+      // frameworks, build tools, test runners
+      "graphql", "liquibase", "blaze", "angular", "playwright", "jhipster", "gradle", "junit",
+      "\\bjest\\b", "\\bbun\\b", "husky", "prettier", "vitest", "\\bnpx\\b",
+      // framework idioms that only exist in one framework
+      "ngclass", "onpush", "signal store", "standalone: true",
+      // named products, roles and fixtures
+      "launchdarkly", "featureflagguard", "metabaseusr", "iam_readonly", "visotrust",
+      "client api", "data-pw", "e2e-cli", "build:local", "format:write",
+      // paths, branches and ports that are one repository's
+      "src\\/main\\/", "origin\\/development", "localhost:\\d+", ":9000",
+    ].join("|"), "iu");
     const leaked = [...agentText, { name: "skill/SKILL.md", text: markdown }]
       .filter(({ text }) => REFERENCE_STACK.test(text))
       .map(({ name }) => name);

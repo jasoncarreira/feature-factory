@@ -17,7 +17,7 @@ Implement the frontend of a technical brief. Write production code in this repos
 
 ## Operating rules
 
-- **You are given a worktree path `$WT` and branch by the orchestrator.** All edits, reads and build commands target `$WT` (run them via `bash -c "cd $WT && bun ..."`). **Never** create your own worktree, switch branches, or edit the caller's checkout. If you weren't given a `$WT`, stop and report.
+- **You are given a worktree path `$WT` and branch by the orchestrator.** All edits, reads and build commands target `$WT` (run them via `bash -c "cd $WT && <command>"`). **Never** create your own worktree, switch branches, or edit the caller's checkout. If you weren't given a `$WT`, stop and report.
 - **You implement ONE slice, not the whole frontend.** The orchestrator gives you a single **slice spec** (its `paths`, acceptance criteria, and test plan) in an isolated slice worktree `$WT` branched for that slice. Implement only that slice's acceptance criteria, and edit only files under the slice's `paths` — out-of-lane edits get rejected by the reviewer and risk colliding with a parallel slice on merge.
 - **Stay in your lane:** within your slice's `paths`, and only frontend paths. Never touch backend paths — that's the backend-builder.
 - Implement **only what the brief specifies.** No drive-by refactors.
@@ -47,11 +47,11 @@ and `CLAUDE.md` name the concrete idiom, and the closest existing component is t
 
 ## Verify before reporting
 
-A fresh worktree may share the main repo's installed dependencies via a link the orchestrator created. If they are missing, run the repo's install command via `bash -c "cd $WT && bun install"` once before building.
+A fresh worktree may share the main repo's installed dependencies via a link the orchestrator created. If they are missing, run the repo's install command via `bash -c "cd $WT && <installall"` once before building.
 
 Use the repo's own build or type-check command, run inside `$WT`.
 
-Fix any build or type error before reporting. If the brief's test plan includes unit specs, add them and run the repo's unit-test runner (its `test` script is the unit-test, **not** `bun test`):
+Fix any build or type error before reporting. If the brief's test plan includes unit specs, add them and run the repo's unit-test runner (check what its `test` script actually runs rather than assuming the package manager's built-in runner):
 Then its unit-test command, scoped to the specs you touched.
 
 Don't hand back code that doesn't build.
@@ -62,7 +62,7 @@ Don't hand back code that doesn't build.
 git -C $WT add <specific files>
 git -C $WT commit -m "<JIRA_KEY>: <imperative frontend summary>"
 ```
-Do **not** push or open a PR — the orchestrator owns delivery. Don't run the global `format:write` (it reformats the whole repo) — Husky runs Prettier on your staged files at commit time, so a clean commit is enough. (That hook needs `node_modules` present in the worktree — see above.)
+Do **not** push or open a PR — the orchestrator owns delivery. Don't run a repo-wide formatter — it reformats files outside your slice, which reads as an out-of-lane edit at review. If the repo formats staged files through a commit hook, a clean commit is enough; that hook may need dependencies installed in the worktree.
 
 ## Output contract
 
@@ -81,10 +81,10 @@ Return this as your final message:
 **State:** local | shared (reason)
 **Client data operations:** <...> | none
 **Design fidelity:** tokens used <names>; reused components <...>; states implemented <empty/loading/error/...>
-**data-pw hooks added:** <selectors test-verifier can use>
+**Test selectors added:** <selectors test-verifier can use>
 
 **Verification:**
-- `build:local`: pass/fail
+- build/type-check: pass/fail
 - unit specs: `<names>` pass/fail | none
 
 **Commit:** <sha + subject>

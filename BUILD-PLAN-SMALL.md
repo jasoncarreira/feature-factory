@@ -138,12 +138,29 @@ feature-factory              (standalone; no opencode dependency)
   state/                     schema + READ-ONLY reader, exported for consumers
   skill/                     the /feature orchestrator prose + agent definitions
 
-feature-factory-opencode     (depends on feature-factory; never writes state)
-  plugin                     session/task observation, checked context injection
+opencode-feature-factory     (depends on feature-factory; never writes state)
+  plugin/                    package root; registers no hooks — see below
+  observe/                   control-plane discovery and run projection
   tui/                       read-only run rendering
-  telemetry/                 spans
-  install/                   copies skill/agents into .opencode, version checks
 ```
+
+**Corrected after building it.** The sketch above originally promised four things from the opencode
+package, and three did not survive contact:
+
+- *"checked context injection"* was the predecessor's mechanism for handing a builder a plugin-owned
+  authority block. It went with the dropped subsystems — the skill passes each builder its slice spec
+  directly — so promising it here was promising a non-goal.
+- *"session/task observation"* implied hooks. There is no hook worth registering: the orchestrator
+  drives every state change through the CLI, so no session or task event is load-bearing for
+  correctness, and this package cannot write state anyway. The plugin returns no hooks, and the
+  observation helpers are ordinary module exports the sidebar consumes.
+- *`telemetry/`* is out of scope. The factory package takes zero dependencies by ceiling assertion, so
+  an OTel SDK could only live here, and not in the form the old SPEC described (its span taxonomy
+  covered subsystems that no longer exist). Issue #72 was closed on that basis.
+- *`install/`* is not built. Copying the skill and agents into a host config directory means writing
+  files, which the boundary test forbids anywhere in this package — and putting it in the factory
+  package would make a thirteenth CLI command. Setup is manual and documented in the README. If
+  dogfooding shows that hurts, it earns a decision rather than arriving as a convenience.
 
 **Rule: only the CLI writes `run.json`.** The plugin package has no lock, no
 atomic writer, no transition function. It reads through the exported reader and,

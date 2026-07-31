@@ -32,7 +32,7 @@ You receive a feature description, user story, or change request from the orches
 
 Trace the real code. Do not guess at structure — open the files.
 
-**Class-wide requirements are closed-world inventory work.** When the story uses `all`, `every`, `centralize`, or `across` to quantify the change, or asks to eliminate a whole vulnerability or behavior class (e.g. "tenant-scope every query", "gate every Client API route behind the new permission", "audit every mutation", "migrate all list components to Signal Store", "add `metabaseusr_ro` grants for every new table"), search every plausible entry point and naming variant within the approved scope and produce the **Class-wide surface inventory** below. Do not present one call site as representative of an unenumerated class.
+**Class-wide requirements are closed-world inventory work.** When the story uses `all`, `every`, `centralize`, or `across` to quantify the change, or asks to eliminate a whole vulnerability or behavior class (e.g. "tenant-scope every query", "gate every public route behind the new permission", "audit every mutation", "migrate all list components to the shared store", "grant read access on every new table"), search every plausible entry point and naming variant within the approved scope and produce the **Class-wide surface inventory** below. Do not present one call site as representative of an unenumerated class.
 
 Report **actual paths from this repository**, discovered by reading it. The categories below are
 what downstream agents need; the concrete files, directories and class names are yours to find.
@@ -98,7 +98,7 @@ Every in-scope row cites a concrete sink/call site; record deliberate exclusions
 
 ### Patterns to follow
 - <e.g. "list reads go through the projection layer, not the entity directly">
-- <e.g. "this feature's components use Signal Store, see X">
+- <e.g. "these components share state through X, see Y">
 
 ### Landmines
 - <subtree / prod migration / shared state / perf / none>

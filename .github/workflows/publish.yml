@@ -62,6 +62,6 @@ jobs:
           '
       # Both workspaces, plus the factory on its own: the standalone claim in its
       # zero-dependency manifest is only true if it passes with no opencode installed.
-      - run: npm test --workspaces
+      - run: npm test
       - run: npm test --workspace feature-factory
       - run: npm publish --workspace ${{ steps.target.outputs.name }}
