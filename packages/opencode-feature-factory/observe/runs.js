@@ -102,6 +102,17 @@ export function selectActiveRun(runs) {
 
 const TERMINAL = new Set(["completed", "blocked", "partial", "needs-human"]);
 
+// The session that owns a run, so the sidebar can offer to jump to it. Already on disk: the `lock`
+// command records the claiming session beside the manifest, which is the only place a run and an
+// opencode session are associated. Absent, unreadable or unparseable is simply "unknown" — a run
+// whose lock has been released is still a run.
+function owningSession(runDir) {
+  try {
+    const owner = JSON.parse(readFileSync(join(runDir, "factory.lock"), "utf8"));
+    return typeof owner?.session === "string" && owner.session ? owner.session : null;
+  } catch { return null; }
+}
+
 function project(runDir, runId) {
   const observed = readRunUnchecked(runDir);
   if (!observed.ok) {
@@ -118,6 +129,7 @@ function project(runDir, runId) {
     branch: run.branch,
     jira_key: run.jira_key ?? null,
     updated_at: run.updated_at ?? null,
+    session: owningSession(runDir),
     terminal: TERMINAL.has(run.status),
     // Which gate is waiting is the one thing an operator acts on, so it is not buried in a map.
     gates: Object.entries(run.gates ?? {}).map(([name, gate]) => ({ name, status: gate?.status ?? "absent" })),

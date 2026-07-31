@@ -14,9 +14,11 @@
 import { createSignal } from "solid-js";
 import { Sidebar } from "./sidebar.jsx";
 import { createLineSource } from "./poll.js";
+import { runCommands } from "./commands.js";
 import { ORDER, SLOT } from "./sidebar-config.js";
 
 export { renderLines } from "./lines.js";
+export { runCommands } from "./commands.js";
 export { pollRuns } from "../observe/runs.js";
 export { DEFAULT_POLL_MS, ORDER, SLOT } from "./sidebar-config.js";
 
@@ -34,6 +36,7 @@ export default {
     // component turns that difference into a *recreated* subtree rather than a reconciled one. That is
     // the part that actually paints.
     const [lines, setLines] = createSignal([], { equals: false });
+    const [runs, setRuns] = createSignal([], { equals: false });
     const [version, setVersion] = createSignal(1);
     // Both locations the host reports, `directory` first. They are the same in an ordinary checkout
     // and differ in a linked worktree, and passing only `directory` showed "no runs" through a whole
@@ -41,10 +44,21 @@ export default {
     const source = createLineSource({
       cwd: [api.state.path.directory, api.state.path.worktree],
       intervalMs: options.intervalMs,
-      onLines: (next) => { setLines(next); setVersion((count) => count + 1); },
+      onLines: (next, snapshot) => {
+        setLines(next);
+        setRuns(snapshot?.runs ?? []);
+        setVersion((count) => count + 1);
+      },
     });
     // The host's own disposal hook, as the predecessor used. The interval is unref'd as a backstop.
     api.lifecycle?.onDispose?.(() => source.stop());
+    // One palette entry per run, jumping to the session that owns it. The callback is invoked by the
+    // host when the palette opens, so reading the signal here yields the current runs rather than
+    // whatever existed at registration. Every call is optional: a host without a command palette or
+    // a route table loses the jump and keeps the sidebar.
+    const dropCommands = api.commands?.register?.(() =>
+      runCommands(runs(), { navigate: (name, params) => api.route?.navigate?.(name, params) }));
+    if (dropCommands) api.lifecycle?.onDispose?.(dropCommands);
     api.slots.register({
       order: ORDER,
       slots: {
