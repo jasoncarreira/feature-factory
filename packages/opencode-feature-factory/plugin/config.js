@@ -43,18 +43,36 @@ export function parseFrontmatter(source) {
   return { meta, body: match[2] };
 }
 
-// Claude Code frontmatter → an opencode agent. `model` is dropped deliberately: "sonnet" is not an
-// opencode model id, and per-agent models belong in the operator's own `profiles` option, which is
-// where they already are.
+// Claude Code frontmatter → an opencode agent.
+//
+// `model` and `effort` are dropped: "sonnet" and "xhigh" are Claude Code's vocabulary, not opencode
+// model ids, and per-agent model choice belongs in the operator's `profiles` option. Without a
+// profile an agent runs on the host's default, which is the right failure — a foreign model id would
+// simply not resolve.
+//
+// `tools` is *not* dropped, and flattening it was a real defect. Every subagent was given
+// `edit: allow`, including `implementation-validator`, whose own prompt says "Read-only: no edits, no
+// commits", and `work-reviewer` — so a reviewer could modify the code it was judging. Separating the
+// party being judged from the party judging is the premise of the whole chain, and a uniform
+// permission map quietly removed it. Permissions are derived from what each agent declares.
+function permissionFor(tools) {
+  const declared = String(tools ?? "").split(",").map((entry) => entry.trim().toLowerCase());
+  const has = (name) => declared.includes(name);
+  return {
+    edit: has("edit") || has("write") ? "allow" : "deny",
+    bash: has("bash") ? "allow" : "deny",
+    webfetch: has("webfetch") ? "allow" : "deny",
+    // One level of orchestration is a property of the chain, not a preference.
+    task: "deny",
+  };
+}
+
 function toOpencodeAgent(name, source) {
   const { meta, body } = parseFrontmatter(source);
   return {
     description: meta.description || `feature-factory ${name}`,
     mode: "subagent",
-    // Subagents may read, edit and run commands inside the worktree they are given; they may not
-    // delegate. One level of orchestration is a property of the chain, not a preference — spread
-    // last so no frontmatter can re-enable it.
-    permission: { edit: "allow", bash: "allow", webfetch: "allow", task: "deny" },
+    permission: permissionFor(meta.tools),
     prompt: body.trim(),
   };
 }

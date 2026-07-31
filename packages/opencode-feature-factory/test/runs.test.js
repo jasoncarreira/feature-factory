@@ -333,6 +333,26 @@ describe("registering the workflow with the host", () => {
     assert.equal(agent.model, undefined, "a foreign model id would fail to resolve");
   });
 
+  it("derives each agent's permissions from the tools it declares", async () => {
+    // Flattening this was a real defect: every subagent got `edit: allow`, including
+    // `implementation-validator`, whose prompt says "Read-only: no edits, no commits", and
+    // `work-reviewer` — so a reviewer could modify the code it was judging. Separating the party
+    // being judged from the party judging is the premise of the chain.
+    const cfg = await configured();
+    const editors = Object.entries(cfg.agent)
+      .filter(([name, agent]) => name !== "feature-factory" && agent.permission.edit === "allow")
+      .map(([name]) => name).sort();
+    assert.deepEqual(editors, ["backend-builder", "frontend-builder", "test-verifier"],
+      "only the agents that write code may edit; a judge with edit rights can make its subject pass");
+
+    // And the ones that declare no shell get none, so a reader cannot run a build.
+    for (const name of ["spec-writer", "story-writer", "story-reader", "design-interpreter"]) {
+      assert.equal(cfg.agent[name].permission.bash, "deny", `${name} declares no Bash`);
+    }
+    assert.equal(cfg.agent["work-reviewer"].permission.bash, "allow",
+      "a reviewer may run the tests it judges, but not change them");
+  });
+
   it("lets an operator profile set the model but never grant delegation", async () => {
     // One level of orchestration is a property of the chain. An operator's profile may choose models —
     // theirs already does — but a subagent that can dispatch turns the tree unbounded.
