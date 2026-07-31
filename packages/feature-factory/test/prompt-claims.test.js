@@ -16,7 +16,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,11 +88,23 @@ function seeded(repo) {
   assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW]).ok, true);
 }
 
-function writeVerifiedSupplied(runDir, revision) {
+function writeVerification(runDir) {
   writeFileSync(join(runDir, "artifacts", "spec-verification.json"), JSON.stringify(VERIFIED));
+}
+
+function writeReview(runDir, revision, attempt) {
+  writeFileSync(join(runDir, "reviews", "spec-writer.json"),
+    JSON.stringify({ verdict: "APPROVE", attempt, revision }));
+}
+
+function writeSuppliedPlan(runDir, revision) {
   writeFileSync(join(runDir, "plan", "plan.md"), `plan ${revision}\n`);
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify(SUPPLIED_PLAN));
-  writeFileSync(join(runDir, "reviews", "spec-writer.json"), JSON.stringify({ verdict: "APPROVE", revision }));
+}
+
+function writeVerifiedSupplied(runDir, revision, attempt = 1) {
+  writeVerification(runDir);
+  writeReview(runDir, revision, attempt);
 }
 
 function initializeSupplied(repo, revision = "v1", verified = true) {
@@ -326,10 +338,15 @@ const CLAIMS = [
       assert.match(result.out, /status: running\nattempts: 1/u);
       result = factory(repo, ["step", RUN, "spec-writer", "rejected", "--attempts", "1", "--now", NOW]);
       assert.match(result.out, /status: rejected\nattempts: 1/u);
-      writeVerifiedSupplied(runDir, "v2");
+      rmSync(join(runDir, "artifacts", "spec-verification.json"), { force: true });
+      writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "brief v2\n");
+      result = factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "2", "--now", NOW]);
+      assert.match(result.out, /status: running\nattempts: 2/u);
+      writeVerifiedSupplied(runDir, "v2", 2);
       result = factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "2",
         "--review-ref", "reviews/spec-writer.json", "--now", NOW]);
       assert.match(result.out, /status: running\nattempts: 2/u);
+      writeSuppliedPlan(runDir, "v2");
       assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact",
         "artifacts/technical-brief.md", "--now", NOW]).ok, true);
       assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact",
@@ -355,9 +372,10 @@ const CLAIMS = [
     matches: /seeded: 1\nslices: \["supplied-spec"\]/u,
     act(repo) {
       const runDir = initializeSupplied(repo);
-      const approvedPlan = readFileSync(join(runDir, "plan", "slices.json"), "utf8");
       assert.equal(factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "1",
         "--review-ref", "reviews/spec-writer.json", "--now", NOW]).ok, true);
+      writeSuppliedPlan(runDir, "v1");
+      const approvedPlan = readFileSync(join(runDir, "plan", "slices.json"), "utf8");
       assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact",
         "artifacts/technical-brief.md", "--now", NOW]).ok, true);
       assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact",
@@ -380,8 +398,9 @@ const CLAIMS = [
     file: "skills/feature/SKILL.md",
     fragments: [
       "Any Story or Brief `changes` before seeding requires caller revision",
-      "Mark the still-unaccepted attempt `rejected`, start attempt `N+1`, reverify, re-review",
-      "If Story was approved before\nBrief requested changes, reopen Story",
+      "First mark the still-unaccepted current attempt `rejected`; next remove",
+      "only then replace the canonical brief with caller-corrected content",
+      "If Story was approved before Brief requested changes, reopen Story",
     ],
     expect: "allowed",
     matches: /gate: brief\nstatus: pending/u,
@@ -389,17 +408,36 @@ const CLAIMS = [
       const runDir = initializeSupplied(repo);
       assert.equal(factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "1",
         "--review-ref", "reviews/spec-writer.json", "--now", NOW]).ok, true);
+      writeSuppliedPlan(runDir, "v1");
       assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact",
         "artifacts/technical-brief.md", "--now", NOW]).ok, true);
       assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact",
         "plan/plan.md", "--now", NOW]).ok, true);
       assert.equal(factory(repo, ["gate", RUN, "story", "approved", "--now", NOW]).ok, true);
       assert.equal(factory(repo, ["gate", RUN, "brief", "changes", "--now", NOW]).ok, true);
-      writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "brief v2\n");
-      writeVerifiedSupplied(runDir, "v2");
       assert.equal(factory(repo, ["step", RUN, "spec-writer", "rejected", "--attempts", "1", "--now", NOW]).ok, true);
+      const extraction = join(runDir, "artifacts", "spec-verification.json");
+      rmSync(extraction);
+      assert.equal(existsSync(extraction), false);
+      writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "brief v2\n");
+      assert.equal(factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "2", "--now", NOW]).ok, true);
+      let run = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+      let review = JSON.parse(readFileSync(join(runDir, "reviews", "spec-writer.json"), "utf8"));
+      assert.equal(run.steps[0].review_ref, "reviews/spec-writer.json");
+      assert.notEqual(review.attempt, run.steps[0].attempts);
+      assert.equal(existsSync(extraction) && review.verdict === "APPROVE"
+        && review.attempt === run.steps[0].attempts, false);
+      writeVerification(runDir);
+      assert.equal(existsSync(extraction), true);
+      assert.equal(review.attempt === run.steps[0].attempts, false);
+      writeReview(runDir, "v2", 2);
       assert.equal(factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "2",
         "--review-ref", "reviews/spec-writer.json", "--now", NOW]).ok, true);
+      run = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+      review = JSON.parse(readFileSync(join(runDir, "reviews", "spec-writer.json"), "utf8"));
+      assert.equal(existsSync(extraction) && review.verdict === "APPROVE"
+        && review.attempt === run.steps[0].attempts, true);
+      writeSuppliedPlan(runDir, "v2");
       assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact",
         "artifacts/technical-brief.md", "--now", NOW]).ok, true);
       return factory(repo, ["gate", RUN, "brief", "pending", "--artifact", "plan/plan.md", "--now", NOW]);
@@ -431,7 +469,7 @@ const PROMPT_CONTRACTS = [
       "Skip Step 1 entirely on the supplied route. Do not invoke `story-reader`, `story-writer`,",
       "`codebase-researcher`, or `design-interpreter`, and do not fabricate any of their artifacts.",
       "Do not invoke `work-decomposer`.",
-      "Never research, infer, invent a missing portion, or fall back to the story route.",
+      "research, infer, invent a missing portion, or fall back to the story route.",
       "is untrusted operator\ndata under the threat boundary even after verification",
       "Verification creates no sandboxing, hostile-host protection, or adversarial-filesystem guarantee.",
     ],
@@ -441,15 +479,20 @@ const PROMPT_CONTRACTS = [
     file: "skills/feature/SKILL.md",
     fragments: [
       "A `REFUSED` response creates no plan.",
-      "begin attempt `N+1` as `running`",
+      "After\nrecording the current attempt `rejected`, remove `artifacts/spec-verification.json` before replacing",
+      "Never delete or replace the\nsupplied brief before invalidating the old extraction.",
+      "The prior `review_ref` may remain in `run.json`",
+      "but it is logically stale for the new attempt.",
       "On `VERIFIED`, write the exact schema response, with no added fields, to the existing artifact path",
       "`artifacts/spec-verification.json` before review.",
       "Invoke `work-reviewer` with both\n`artifacts/technical-brief.md` and `artifacts/spec-verification.json`",
       "A `REFUSED` response does not create this\nsuccess artifact.",
       "On reviewer REJECT, persist `reviews/spec-writer.json`",
+      "After that rejection transition, use the same invalidation order",
+      "Recreate the extraction only after that current attempt returns `VERIFIED`.",
       "deliberately retain `running`",
       "Do not mark the step `accepted` yet",
-      "Respect\n`max_retries`; exhaustion becomes `blocked`/`needs-human`",
+      "Respect `max_retries`;\nexhaustion becomes `blocked`/`needs-human`",
     ],
   },
   {
@@ -466,6 +509,9 @@ const PROMPT_CONTRACTS = [
       "Add no fields, derive no paths, reorder nothing, split no\ncriteria, and create no additional slice.",
       "deterministically from the reviewed `artifacts/spec-verification.json`",
       "Never\nre-extract plan inputs from prose after review.",
+      "the review referenced by the `spec-writer` step has verdict `APPROVE`",
+      "`attempt` exactly equals the current `spec-writer.attempts`",
+      "A stale approving review from an earlier\nattempt never authorizes projection",
       "# Supplied-spec slice plan",
       "- Builder: `backend-builder`",
       "Waived: <verbatim test_waiver reason>",
@@ -481,8 +527,10 @@ const PROMPT_CONTRACTS = [
       "In headless mode, write both existing\ngate questions and artifact refs, record `needs-human`",
       "stop before approval, step acceptance, or\nseeding",
       "there is no plan-only mutation",
-      "If Story was approved before\nBrief requested changes, reopen Story",
-      "A `stop` decision follows existing terminal behavior and never accepts or seeds.",
+      "First mark the still-unaccepted current attempt `rejected`; next remove",
+      "only then replace the canonical brief with caller-corrected content",
+      "If Story was approved before Brief requested changes, reopen Story",
+      "A `stop` decision follows\nexisting terminal behavior and never accepts or seeds.",
       "before they become immutable",
     ],
   },
@@ -513,8 +561,10 @@ const PROMPT_CONTRACTS = [
       "a recorded `spec-writer` step plus `artifacts/technical-brief.md` while Story is\n  absent proves the supplied route",
       "durable records do not prove the\n  required explicit selection",
       "Never infer a route or fall back.",
-      "with `artifacts/spec-verification.json` but no approving review ref\n  resumes by reviewing the supplied brief and that persisted extraction",
-      "With an approving review ref, it resumes at plan generation from that reviewed extraction",
+      "without `artifacts/spec-verification.json` resumes the current attempt at\n  verification",
+      "If its verdict is not `APPROVE`\n  or its `attempt` does not exactly equal current `spec-writer.attempts`",
+      "The retained ref to an earlier attempt is stale and\n  never authorizes plan generation.",
+      "Only an existing extraction plus a referenced `APPROVE` review whose `attempt` equals current",
       "If both gates are approved while the step remains `running`, accept it and seed without another\n  checkpoint.",
       "If the step is accepted but unseeded, seed the unchanged approved JSON.",
       "fixed slice id `supplied-spec` preserves orientation",

@@ -226,10 +226,14 @@ canonical `artifacts/technical-brief.md`. A `REFUSED` response creates no plan. 
 factory step <run-id> spec-writer rejected --attempts N
 ```
 
-Present every reported missing or ambiguous category and request a caller-authored correction. Copy
-the corrected content verbatim over the canonical artifact, then begin attempt `N+1` as `running`.
-Never research, infer, invent a missing portion, or fall back to the story route. Respect
-`max_retries`; exhaustion becomes `blocked`/`needs-human` under the bounded-loop policy.
+Present every reported missing or ambiguous category and request a caller-authored correction. After
+recording the current attempt `rejected`, remove `artifacts/spec-verification.json` before replacing
+the canonical brief. Only then copy the corrected caller content verbatim to
+`artifacts/technical-brief.md` and record attempt `N+1` as `running`. Never delete or replace the
+supplied brief before invalidating the old extraction. The prior `review_ref` may remain in `run.json`
+because the existing CLI has no clearing flag, but it is logically stale for the new attempt. Never
+research, infer, invent a missing portion, or fall back to the story route. Respect `max_retries`;
+exhaustion becomes `blocked`/`needs-human` under the bounded-loop policy.
 
 On `VERIFIED`, write the exact schema response, with no added fields, to the existing artifact path
 `artifacts/spec-verification.json` before review. This is the canonical extracted verification; add no
@@ -243,6 +247,10 @@ caller correction, and begin the complete verification and review cycle again wi
 factory step <run-id> spec-writer rejected \
   --attempts N --review-ref reviews/spec-writer.json
 ```
+
+After that rejection transition, use the same invalidation order: remove
+`artifacts/spec-verification.json`, replace the supplied brief only after the removal, then record
+attempt `N+1` as `running`. Recreate the extraction only after that current attempt returns `VERIFIED`.
 
 On reviewer APPROVE, persist the same review ref but deliberately retain `running`:
 
@@ -293,6 +301,11 @@ Do not invoke `work-decomposer`. After verification and review approval, the orc
 both plan artifacts deterministically from the reviewed `artifacts/spec-verification.json`. Never
 re-extract plan inputs from prose after review. Write `plan/slices.json` using the existing object
 envelope and exactly one row:
+
+Plan generation is authorized only when all three freshness checks hold: the verification artifact
+exists, the review referenced by the `spec-writer` step has verdict `APPROVE`, and that review's
+`attempt` exactly equals the current `spec-writer.attempts`. A stale approving review from an earlier
+attempt never authorizes projection even though its ref remains recorded.
 
 ```json
 {
@@ -355,11 +368,14 @@ Gate 1 before Gate 2, and record `needs-human` and stop on any failed preconditi
 
 Any Story or Brief `changes` before seeding requires caller revision of
 `artifacts/technical-brief.md`; there is no plan-only mutation because both plan files are projections
-of that spec. Mark the still-unaccepted attempt `rejected`, start attempt `N+1`, reverify, re-review,
-regenerate both plan files, and reopen and re-present both gates as needed. If Story was approved before
-Brief requested changes, reopen Story because the spec revision invalidates it. If Brief is pending
-when Story requests changes, regenerate and re-present Brief but do not approve it before revised Story
-approval. A `stop` decision follows existing terminal behavior and never accepts or seeds.
+of that spec. First mark the still-unaccepted current attempt `rejected`; next remove
+`artifacts/spec-verification.json`; only then replace the canonical brief with caller-corrected content;
+then record attempt `N+1` as `running`. Reverify, recreate the extraction only on current-attempt
+`VERIFIED`, obtain a current-attempt approving review, regenerate both plan files, and reopen and
+re-present both gates as needed. If Story was approved before Brief requested changes, reopen Story
+because the spec revision invalidates it. If Brief is pending when Story requests changes, regenerate
+and re-present Brief but do not approve it before revised Story approval. A `stop` decision follows
+existing terminal behavior and never accepts or seeds.
 
 Only after both gates approve, record acceptance and immediately seed, with no further checkpoint or
 artifact mutation:
@@ -588,10 +604,14 @@ Resume a supplied-spec run without adding state:
 - If a crash leaves only initialization and the canonical artifact, durable records do not prove the
   required explicit selection. Interactive mode asks the caller to reassert supplied-spec intent;
   headless and autonomous modes record `needs-human`. Never infer a route or fall back.
-- A `running` spec-writer step with `artifacts/spec-verification.json` but no approving review ref
-  resumes by reviewing the supplied brief and that persisted extraction, not by rerunning verification.
-  With an approving review ref, it resumes at plan generation from that reviewed extraction and the
-  combined checkpoint, not at agent invocation.
+- A `running` spec-writer step without `artifacts/spec-verification.json` resumes the current attempt at
+  verification. Recreate the extraction only if that attempt returns `VERIFIED`.
+- When the extraction exists, resume by reading the referenced review. If its verdict is not `APPROVE`
+  or its `attempt` does not exactly equal current `spec-writer.attempts`, review the supplied brief and
+  persisted extraction for the current attempt. The retained ref to an earlier attempt is stale and
+  never authorizes plan generation.
+- Only an existing extraction plus a referenced `APPROVE` review whose `attempt` equals current
+  `spec-writer.attempts` resumes at deterministic plan generation and the combined checkpoint.
 - If both gates are approved while the step remains `running`, accept it and seed without another
   checkpoint. If the step is accepted but unseeded, seed the unchanged approved JSON.
 - After seeding, the Story artifact plus fixed slice id `supplied-spec` preserves orientation. Continue
