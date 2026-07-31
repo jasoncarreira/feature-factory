@@ -233,10 +233,19 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // paths, branches and ports that are one repository's
       "src\\/main\\/", "origin\\/development", "localhost:\\d+", ":9000",
     ].join("|"), "iu");
-    const leaked = [...agentText, { name: "skill/SKILL.md", text: markdown }]
-      .filter(({ text }) => REFERENCE_STACK.test(text))
-      .map(({ name }) => name);
+    const prose = [...agentText, { name: "skill/SKILL.md", text: markdown }];
+    const leaked = prose.filter(({ text }) => REFERENCE_STACK.test(text)).map(({ name }) => name);
     assert.deepEqual(leaked, [], "an agent names the reference repository's stack instead of asking this one");
+
+    // Host neutrality, which is a different axis from stack neutrality and was missed by the regex
+    // above. Genericising the agents replaced viso's stack with `CLAUDE.md` throughout — one host's
+    // filename, in a package whose own description says host-agnostic, shipped to run under opencode,
+    // which reads AGENTS.md. Naming either file alone is the defect; naming both is the fix.
+    const oneSided = prose
+      .filter(({ text }) => text.includes("CLAUDE.md") !== text.includes("AGENTS.md"))
+      .map(({ name }) => name);
+    assert.deepEqual(oneSided, [],
+      "prose names one host's instructions file alone; name both AGENTS.md and CLAUDE.md");
   });
 
   it("declares exactly the declared run.json top-level keys", () => {

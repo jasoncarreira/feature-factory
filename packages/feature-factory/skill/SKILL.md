@@ -104,7 +104,8 @@ factory lock <run-id> claim --session <session-id>
 **Do not ask the engineer for a branch or a worktree.** Both are derived: the branch defaults to
 `feature/<run-id>` and the worktree to the current checkout, and `init` reports what it recorded. The
 engineer supplies a branch only if they say so in the invocation, or if this repository has a naming
-convention that says otherwise — check `CLAUDE.md` before overriding, and pass `--branch` if it does.
+convention that says otherwise — check the repository's agent instructions (`AGENTS.md` or
+`CLAUDE.md`, whichever this repo has) before overriding, and pass `--branch` if it does.
 
 The recorded branch is a statement of intent, not something that exists yet. You create it in Step 4,
 and it must match exactly what `init` reported: the first slice activation observes that branch and

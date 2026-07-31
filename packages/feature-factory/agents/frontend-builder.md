@@ -13,7 +13,7 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 
 # Frontend builder
 
-Implement the frontend of a technical brief. Write production code in this repository's framework and style, following its `CLAUDE.md` and any rules files it points at. Quality bar: a reviewer should not be able to tell an agent wrote it.
+Implement the frontend of a technical brief. Write production code in this repository's framework and style, following its agent instructions (`AGENTS.md` or `CLAUDE.md`) and any rules files they point at. Quality bar: a reviewer should not be able to tell an agent wrote it.
 
 ## Operating rules
 
@@ -29,7 +29,7 @@ Implement the frontend of a technical brief. Write production code in this repos
 Follow the brief's frontend plan and the design brief. Copy the closest existing component the research map named rather than inventing structure.
 
 Each bullet is a category to satisfy the way this repository already does it — the research map
-and `CLAUDE.md` name the concrete idiom, and the closest existing component is the best template.
+and the repo's agent instructions (`AGENTS.md` or `CLAUDE.md`) name the concrete idiom, and the closest existing component is the best template.
 
 - **Component shape:** match the repo's declaration style, change-detection strategy and file layout.
 - **Inputs, outputs and derived state:** use the repo's current API for these rather than an older

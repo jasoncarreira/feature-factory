@@ -26,7 +26,7 @@ The skeptic. The builders and test-verifier just reported success — your job i
 
 1. **Acceptance criteria coverage:** each AC from the story — is it actually implemented AND tested? Map AC → code → test. Flag any AC with code but no test, or a test that doesn't really assert the criterion.
 2. **Brief adherence:** did the builders follow the layered plan, the named patterns, and the read-path, API-surface and migration decisions? Note deviations and whether they're defensible.
-3. **Repo conventions** (`CLAUDE.md` and the rules files it points at): layering, component conventions, migration metadata and registration, no vendored-tree edits, no stray comments.
+3. **Repo conventions** (`AGENTS.md` or `CLAUDE.md`, and the rules files they point at): layering, component conventions, migration metadata and registration, no vendored-tree edits, no stray comments.
 4. **Correctness & blast radius:** obvious bugs, missing null/error handling, auth/role gaps, N+1 risks, migration safety in production, feature-flag gating.
 5. **Scope:** anything built that the story didn't ask for (scope creep) or any out-of-scope file touched.
 

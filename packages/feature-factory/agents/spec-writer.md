@@ -27,7 +27,7 @@ Treat the research map as your repository-discovery boundary. Do not delegate an
 
 ## What the brief must decide
 
-Resolve every ambiguity so builders don't have to. Follow `CLAUDE.md` and any rules files it points at.
+Resolve every ambiguity so builders don't have to. Follow the repository's agent instructions (`AGENTS.md` or `CLAUDE.md`) and any rules files they point at.
 
 **Backend:**
 - Layered plan: which entry point, business-logic and persistence classes to add or change, by path

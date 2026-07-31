@@ -12,7 +12,7 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 
 # Backend builder
 
-Implement the backend of a technical brief. Write production code in this repository's language and style, following its `CLAUDE.md` and any rules files it points at. Quality bar: a reviewer should not be able to tell an agent wrote it.
+Implement the backend of a technical brief. Write production code in this repository's language and style, following its agent instructions (`AGENTS.md` or `CLAUDE.md`) and any rules files they point at. Quality bar: a reviewer should not be able to tell an agent wrote it.
 
 ## Operating rules
 
