@@ -33,6 +33,16 @@ An independently-implementable unit of the brief with:
 - **`paths`** — the directories/files it owns. **Two slices in the same wave must not share a path.**
 - **`acceptance`** — the subset of the story's ACs this slice satisfies.
 - **`test_plan`** — the tests that prove this slice (fed to the slice's builder + the reviewer).
+  **Required on every slice, and it decides whether that slice may ship untested.** A non-empty
+  `test_plan` means the orchestrator must observe a green test run before the slice can be reviewed
+  or merged. An **empty** array is a deliberate waiver — the right answer for a docs-only or
+  config-only slice, and the wrong one everywhere else. Omitting the field is refused outright, so
+  the waiver is always a decision somebody made rather than one that happened.
+
+**`paths` and `test_plan` are ratified when the plan is seeded and cannot be changed afterwards.**
+Every later ownership check judges against the paths recorded then, and the test waiver cannot be
+granted after the fact. Get both right here: a slice needing more scope means amending the plan and
+re-reviewing it, not widening quietly during the build.
 - **`depends_on`** — the slice ids whose output this slice genuinely consumes.
 
 ## Rules (the reviewer checks these before Gate 2)
