@@ -9,6 +9,7 @@ description: >
   it judges, it never edits or fixes.
 model: opus
 effort: high
+role: reviewer
 tools: Read, Grep, Glob, Bash
 ---
 

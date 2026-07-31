@@ -8,6 +8,7 @@ description: >
   FROM Figma, it does not write designs into Figma.
 model: opus
 effort: high
+role: design
 tools: mcp__claude_ai_Figma__get_design_context, mcp__claude_ai_Figma__get_screenshot, mcp__claude_ai_Figma__get_metadata, mcp__claude_ai_Figma__get_variable_defs, mcp__claude_ai_Figma__get_code_connect_map, mcp__atlassian__getJiraIssue, Read, Grep, Glob
 ---
 

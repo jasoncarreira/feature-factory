@@ -7,6 +7,7 @@ description: >
   story-writer) whenever the work already has an APP- ticket. Read-only — never edits Jira.
 model: sonnet
 effort: low
+role: story
 tools: mcp__atlassian__getJiraIssue, mcp__atlassian__searchJiraIssuesUsingJql, mcp__atlassian__getJiraIssueRemoteIssueLinks, Read, Grep, Glob
 ---
 

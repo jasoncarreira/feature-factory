@@ -45,30 +45,48 @@ export function parseFrontmatter(source) {
 
 // Claude Code frontmatter → an opencode agent.
 //
-// The agents declare *tiers*, not model ids: `model: sonnet|opus` says how much thinking the role
-// deserves, and `effort: low|medium|high|xhigh` how much of it to spend. Those are Claude Code's
-// words, and they are the portable part — which role needs the deep model is a property of the chain,
-// not of a vendor. So the tier is mapped to a concrete model through configuration, and `effort` is
-// passed to `variant`, whose values are already the same four.
+// Model selection is a port of the predecessor's, which was a better design than the one I invented.
+// I had mapped the declared `model: sonnet|opus` tier to a configured id — and checking it against a
+// real configuration showed the tier is the wrong vocabulary: two agents declaring `sonnet` were
+// deliberately given the *strong* model, because writing production code is the hard part. Mapping
+// `sonnet` to a cheaper id would have quietly downgraded both builders.
 //
-// No vendor default is shipped. A hardcoded `openai/…` here would be the same mistake as naming one
-// host's instructions file or one repo's stack: correct for the operator who set it and wrong for
-// everyone else, and model names churn faster than this package will. With no configuration the host
-// default applies, which is a visible, harmless outcome rather than a broken model id.
+// The old plugin resolved a profile through four levels instead, most specific first:
 //
-// Two ways to configure, and per-agent wins:
+//   profiles[<agent>]  ->  profiles[<role>]  ->  profiles.default  ->  profile
 //
-//   "models":   { "sonnet": "openai/gpt-5.6-terra", "opus": "openai/gpt-5.6-sol" }
-//   "profiles": { "work-reviewer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" } }
+// Roles — planning, story, research, design, builder, test, reviewer — are a vocabulary that actually
+// fits: against one real config, five of seven roles were uniform, and the two that were not are
+// exactly what the per-agent level is for. A new agent inherits its role rather than needing a new
+// entry, which the tier map could not do either.
 //
-// The tier map is two entries where profiles would be twelve, and it keeps the per-role judgement in
-// the agent definitions where it was made.
-function modelFor(meta, { models = {} } = {}) {
-  const spec = {};
-  const model = models[meta.model];
-  if (model) spec.model = model;
-  if (meta.effort) spec.variant = meta.effort;
-  return spec;
+// The role is declared in each agent's frontmatter rather than in a table here, because a table
+// drifts from the agent set, and which stage of the chain an agent serves is a fact about the chain.
+//
+// `effort` still becomes `variant` as a baseline, since the agent knows how hard its own job is; any
+// profile overrides it. `model` from frontmatter is ignored: "sonnet" is not a model id anywhere.
+function usable(profile) {
+  if (!profile || typeof profile !== "object") return null;
+  return profile.model || profile.variant ? profile : null;
+}
+
+export function profileFor(name, role, { profiles = {}, profile } = {}) {
+  return usable(profiles[name]) ?? usable(role ? profiles[role] : null)
+    ?? usable(profiles.default) ?? usable(profile);
+}
+
+function toOpencodeAgent(name, source, options = {}) {
+  const { meta, body } = parseFrontmatter(source);
+  const selected = profileFor(name, meta.role, options) ?? {};
+  return {
+    description: meta.description || `feature-factory ${name}`,
+    mode: "subagent",
+    ...(meta.effort ? { variant: meta.effort } : {}),
+    ...(selected.model ? { model: selected.model } : {}),
+    ...(selected.variant ? { variant: selected.variant } : {}),
+    permission: permissionFor(meta.tools),
+    prompt: body.trim(),
+  };
 }
 
 // `tools` is *not* dropped, and flattening it was a real defect. Every subagent was given
@@ -88,17 +106,6 @@ function permissionFor(tools) {
   };
 }
 
-function toOpencodeAgent(name, source, options) {
-  const { meta, body } = parseFrontmatter(source);
-  return {
-    description: meta.description || `feature-factory ${name}`,
-    mode: "subagent",
-    ...modelFor(meta, options),
-    permission: permissionFor(meta.tools),
-    prompt: body.trim(),
-  };
-}
-
 const ORCHESTRATOR = {
   description: "Primary orchestrator for the durable feature-factory workflow. Drives a feature from "
     + "idea to draft PR through the /feature skill, stopping at every human gate.",
@@ -112,14 +119,15 @@ const ORCHESTRATOR = {
     + "for autonomous mode.",
 };
 
-export function registerAgents(cfg, { root = factoryRoot(), profiles = {}, models = {} } = {}) {
+export function registerAgents(cfg, { root = factoryRoot(), ...options } = {}) {
   cfg.agent ??= {};
   // The orchestrator has no frontmatter file, so its tier is stated here: the deep model, since it
   // holds the whole chain and every gate decision.
   cfg.agent["feature-factory"] = {
     ...ORCHESTRATOR,
-    ...modelFor({ model: "opus", effort: "high" }, { models }),
-    ...(profiles["feature-factory"] ?? {}),
+    // The orchestrator has no frontmatter file, so its role is named here: it plans.
+    variant: "xhigh",
+    ...(profileFor("feature-factory", "planning", options) ?? {}),
     ...(cfg.agent["feature-factory"] ?? {}),
     permission: { ...(cfg.agent["feature-factory"]?.permission ?? {}), ...ORCHESTRATOR.permission },
   };
@@ -127,7 +135,7 @@ export function registerAgents(cfg, { root = factoryRoot(), profiles = {}, model
   const names = [];
   for (const file of readdirSync(dir).filter((entry) => entry.endsWith(".md"))) {
     const name = file.replace(/\.md$/u, "");
-    const agent = toOpencodeAgent(name, readFileSync(join(dir, file), "utf8"), { models });
+    const agent = toOpencodeAgent(name, readFileSync(join(dir, file), "utf8"), options);
     // Precedence, last wins: what this package derives from the agent's own frontmatter, then the
     // plugin's `profiles` option, then whatever is *already* in the config — which is how per-project
     // configuration works. The host merges a repository's `opencode.json` before calling this hook,
@@ -140,8 +148,7 @@ export function registerAgents(cfg, { root = factoryRoot(), profiles = {}, model
     // declared tools, and the honest place to change them is the agent definition.
     cfg.agent[name] = {
       ...agent,
-      ...(profiles[name] ?? {}),
-      ...(cfg.agent[name] ?? {}),
+        ...(cfg.agent[name] ?? {}),
       permission: { ...(cfg.agent[name]?.permission ?? {}), ...agent.permission },
     };
     names.push(name);
@@ -180,6 +187,6 @@ export function registerWorkflow(cfg, options = {}) {
   const root = options.root ?? factoryRoot();
   registerCommand(cfg);
   const skill = registerSkill(cfg, { root });
-  const agents = registerAgents(cfg, { root, profiles: options.profiles ?? {}, models: options.models ?? {} });
+  const agents = registerAgents(cfg, { root, ...options });
   return { root, skill, agents };
 }

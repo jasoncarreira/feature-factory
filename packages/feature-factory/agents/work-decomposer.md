@@ -9,6 +9,7 @@ description: >
   Read-only — it plans the build, it doesn't build. Runs after spec, before any code.
 model: opus
 effort: xhigh
+role: planning
 tools: Read, Grep, Glob, Bash
 ---
 

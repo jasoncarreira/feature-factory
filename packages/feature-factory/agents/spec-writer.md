@@ -8,6 +8,7 @@ description: >
   doesn't build. Runs after the story gate, before any code is written.
 model: opus
 effort: xhigh
+role: planning
 tools: Read, Grep, Glob
 ---
 

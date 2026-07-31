@@ -8,6 +8,7 @@ description: >
   START of any feature so the spec and builders work from real code, not assumptions.
 model: sonnet
 effort: medium
+role: research
 tools: Read, Grep, Glob, Bash
 ---
 

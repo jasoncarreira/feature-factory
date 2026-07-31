@@ -8,6 +8,7 @@ description: >
   engineer approves at the story gate. For work that already has a ticket, use story-reader.
 model: opus
 effort: high
+role: story
 tools: Read, Grep, Glob
 ---
 

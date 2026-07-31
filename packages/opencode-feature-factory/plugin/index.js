@@ -35,7 +35,9 @@ export default async function plugin(_input, options = {}) {
       // Everything the operator can configure, forwarded whole: `models` maps the agents' declared
       // tiers to concrete ids, `profiles` overrides per agent, and a project's own opencode.json
       // outranks both because the host has already merged it into `cfg`.
-      registerWorkflow(cfg, { models: options.models ?? {}, profiles: options.profiles ?? {} });
+      // Forwarded whole. Naming individual keys here is how the `profile` level went missing and the
+      // tier map went inert: the resolver owns the vocabulary, this hook just hands it over.
+      registerWorkflow(cfg, options);
     },
   };
 }

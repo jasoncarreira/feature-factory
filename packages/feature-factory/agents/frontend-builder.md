@@ -8,6 +8,7 @@ description: >
   frontend paths.
 model: sonnet
 effort: medium
+role: builder
 tools: Read, Edit, Write, Grep, Glob, Bash
 ---
 

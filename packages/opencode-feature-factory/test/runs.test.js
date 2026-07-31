@@ -353,18 +353,45 @@ describe("registering the workflow with the host", () => {
       "a reviewer may run the tests it judges, but not change them");
   });
 
-  it("maps declared tiers to configured models, with no vendor baked in", async () => {
-    // The agents declare tiers — `model: sonnet|opus`, `effort: low..xhigh` — because which role
-    // deserves the deep model is a property of the chain. The concrete id is configuration: shipping
-    // an `openai/…` default would be the same mistake as naming one host's instructions file.
-    const bare = await configured();
-    assert.equal(bare.agent["spec-writer"].model, undefined, "no model without configuration");
-    assert.equal(bare.agent["spec-writer"].variant, "xhigh", "but effort still maps to variant");
+  it("resolves a model through agent, then role, then default, then one-for-all", async () => {
+    // Ported from the predecessor, which had a better vocabulary than the tier map I first wrote.
+    // Against a real configuration, five of seven roles were uniform and the two that were not are
+    // exactly what the per-agent level exists for — and a new agent inherits its role rather than
+    // needing a new entry.
+    const cfg = await configured({ profiles: {
+      "work-reviewer": { model: "exact/agent" },
+      reviewer: { model: "by/role", variant: "xhigh" },
+      default: { model: "the/default" },
+    }, profile: { model: "one/for-all" } });
 
-    const tiered = await configured({ models: { sonnet: "vendor/fast", opus: "vendor/deep" } });
-    assert.equal(tiered.agent["spec-writer"].model, "vendor/deep", "spec-writer declares opus");
-    assert.equal(tiered.agent["backend-builder"].model, "vendor/fast", "builders declare sonnet");
-    assert.equal(tiered.agent["feature-factory"].model, "vendor/deep", "the orchestrator holds the chain");
+    assert.equal(cfg.agent["work-reviewer"].model, "exact/agent", "the agent's own entry wins");
+    assert.equal(cfg.agent["implementation-validator"].model, "by/role", "then its role");
+    assert.equal(cfg.agent["implementation-validator"].variant, "xhigh", "role sets variant too");
+    assert.equal(cfg.agent["spec-writer"].model, "the/default", "then the default");
+
+    const only = await configured({ profile: { model: "one/for-all" } });
+    assert.equal(only.agent["spec-writer"].model, "one/for-all", "then a single profile for everything");
+  });
+
+  it("uses the agent's declared effort when no profile sets a variant", async () => {
+    // The agent knows how hard its own job is; a profile may still override it.
+    const bare = await configured();
+    assert.equal(bare.agent["spec-writer"].variant, "xhigh", "spec-writer declares xhigh");
+    assert.equal(bare.agent["story-reader"].variant, "low", "story-reader declares low");
+    assert.equal(bare.agent["spec-writer"].model, undefined, "and no model is invented");
+
+    const overridden = await configured({ profiles: { planning: { variant: "medium" } } });
+    assert.equal(overridden.agent["spec-writer"].variant, "medium", "a profile overrides the declaration");
+  });
+
+  it("declares a role for every agent, so none falls through to the default", async () => {
+    // The role lives in frontmatter rather than a table here, because a table drifts from the agent
+    // set — an agent with no role would silently skip the role level of the chain.
+    const dir = new URL("../../feature-factory/agents/", import.meta.url);
+    for (const file of readdirSync(dir).filter((entry) => entry.endsWith(".md"))) {
+      const text = readFileSync(new URL(file, dir), "utf8");
+      assert.match(text, /^role:\s*\S+/mu, `${file} must declare a role`);
+    }
   });
 
   it("lets a project configure agents without being overwritten", async () => {
@@ -372,12 +399,15 @@ describe("registering the workflow with the host", () => {
     // config is the project's choice and must win. This used to assign unconditionally, which
     // discarded it silently — the reason per-project configuration appeared impossible.
     const plugin = (await import("../plugin/index.js")).default;
-    const hooks = await plugin({}, { models: { opus: "vendor/deep" }, profiles: { "work-reviewer": { model: "vendor/from-profile" } } });
+    const hooks = await plugin({}, { profiles: {
+      default: { model: "vendor/default" },
+      "work-reviewer": { model: "vendor/from-profile" },
+    } });
     const cfg = { agent: { "work-reviewer": { model: "project/choice", variant: "low" } } };
     await hooks.config(cfg);
     assert.equal(cfg.agent["work-reviewer"].model, "project/choice", "the project outranks profile and default");
     assert.equal(cfg.agent["work-reviewer"].variant, "low");
-    assert.equal(cfg.agent["spec-writer"].model, "vendor/deep", "agents it did not mention keep the default");
+    assert.equal(cfg.agent["spec-writer"].model, "vendor/default", "agents it did not mention keep the default");
   });
 
   it("refuses to let configuration grant a judge edit rights or delegation", async () => {

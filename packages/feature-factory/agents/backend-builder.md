@@ -7,6 +7,7 @@ description: >
   touches the caller's working tree. Restricted to backend paths.
 model: sonnet
 effort: medium
+role: builder
 tools: Read, Edit, Write, Grep, Glob, Bash
 ---
 

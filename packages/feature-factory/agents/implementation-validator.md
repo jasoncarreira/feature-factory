@@ -7,6 +7,7 @@ description: >
   step before the pre-PR approval gate.
 model: opus
 effort: xhigh
+role: reviewer
 tools: Read, Grep, Glob, Bash
 ---
 

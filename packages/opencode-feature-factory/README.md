@@ -27,20 +27,37 @@ repaints.
 
 ## Configuring the agents
 
-The agents declare *tiers*, not model ids — `model: sonnet|opus` and `effort: low..xhigh` — because
-which role deserves the deep model is a property of the chain, not of a vendor. No model default ships;
-with none configured the host's default applies and `effort` still maps to `variant`.
+Each agent declares a **role** — `planning`, `story`, `research`, `design`, `builder`, `test`,
+`reviewer` — and an `effort`. No model ships as a default: with nothing configured, agents use the
+host's normal model resolution and keep their declared effort as `variant`.
 
-Map the tiers once, in the plugin's options:
+A model resolves through four levels, most specific first:
+
+```
+profiles[<agent>]  →  profiles[<role>]  →  profiles.default  →  profile
+```
+
+So one entry can cover everything:
+
+```jsonc
+["opencode-feature-factory", { "profile": { "model": "openai/gpt-5.6-sol", "variant": "high" } }]
+```
+
+or by role, with per-agent exceptions where a role is not uniform:
 
 ```jsonc
 ["opencode-feature-factory", {
-  "models": { "sonnet": "openai/gpt-5.6-terra", "opus": "openai/gpt-5.6-sol" }
+  "profiles": {
+    "planning": { "model": "openai/gpt-5.6-sol",   "variant": "xhigh" },
+    "builder":  { "model": "openai/gpt-5.6-sol",   "variant": "high"  },
+    "research": { "model": "openai/gpt-5.6-terra", "variant": "high"  },
+    "story-reader": { "model": "openai/gpt-5.6-luna", "variant": "medium" }
+  }
 }]
 ```
 
-Or override a single agent, either there under `profiles`, or **per project** in the repository's own
-`opencode.json` — the host merges that before this plugin runs, so a project's choice wins:
+**Per project**, a repository's own `opencode.json` outranks all of it, because the host merges that
+before this plugin runs:
 
 ```jsonc
 { "agent": { "work-reviewer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" } } }

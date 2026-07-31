@@ -7,6 +7,7 @@ description: >
   criterion. Edits only test files inside the given worktree.
 model: sonnet
 effort: medium
+role: test
 tools: Read, Edit, Write, Grep, Glob, Bash
 ---
 
