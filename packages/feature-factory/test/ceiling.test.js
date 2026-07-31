@@ -364,7 +364,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // slice-count branch, and the split that keeps a *recorded* verdict binding even when one was
     // not required. Four lines of it are the comment explaining why skipping is safe and why zero
     // slices is not the same case, which is the part a future reader cannot reconstruct. Debt.
-    assert.ok(total < 2655, `production source is ${total} lines; the tripwire is 2655`);
+    //
+    // 2655 -> 2662, for a correctness fix rather than a feature: the steal path compared only the
+    // lock directory's dev/ino, and Linux reuses inode numbers, so a lock deleted and recreated at
+    // the same path presented the recorded identity and a *live* lock was renamed away. CI caught it
+    // and it reproduces locally by replacing owner.json in place. The added lines are the owner-nonce
+    // comparison and the note explaining why the pre-check exists again after being removed — the
+    // earlier falsification of its removal ran only where inodes are not reused.
+    assert.ok(total < 2662, `production source is ${total} lines; the tripwire is 2662`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

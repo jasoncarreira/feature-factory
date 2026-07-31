@@ -3,7 +3,7 @@
 // untested claim in crash-safety code is worse than no claim.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
@@ -234,6 +234,40 @@ describe("stealing a stale lock is one atomic rename", () => {
         "a lock re-acquired inside the steal window must not be taken",
       );
       assert.equal(injected, true, "the seam must have fired");
+
+      // The same re-acquisition with the directory's inode held steady, which is the case the
+      // rm+mkdir version above cannot produce on APFS and Linux produces by inode reuse. It is why
+      // this test passed on macOS and failed on CI: the steal compared only the directory's dev/ino,
+      // a recreated lock presented the identity that was recorded, and a live lock was renamed away.
+      // Replacing owner.json in place reproduces it on every platform — the nonce is what changed.
+      const stable = seed("reacquired-stable");
+      try {
+        const stableLock = join(stable, "run-json.lock");
+        const inodeBefore = statSync(stableLock).ino;
+        let replaced = false;
+        await assert.rejects(
+          () => withRunJsonLock(stable, async () => {}, {
+            staleLockMs: 5000, timeoutMs: 200,
+            onBeforeSteal: () => {
+              if (replaced) return;
+              replaced = true;
+              writeFileSync(join(stableLock, "owner.json"), `${JSON.stringify({
+                pid: process.pid, hostname: hostname(),
+                acquired_at: new Date().toISOString(),
+                nonce: "44444444-4444-4444-8444-444444444444",
+              })}\n`);
+            },
+          }),
+          (error) => {
+            assert.match(String(error.message), /lock|contend|timed out/iu);
+            return true;
+          },
+          "a re-acquired lock must be refused even when the inode is unchanged",
+        );
+        assert.equal(replaced, true, "the seam must have fired");
+        assert.equal(statSync(stableLock).ino, inodeBefore,
+          "the fixture is only meaningful while the inode is genuinely stable");
+      } finally { rmSync(stable, { recursive: true, force: true }); }
       assert.equal(JSON.parse(readFileSync(join(lockDir, "owner.json"), "utf8")).nonce,
         "33333333-3333-4333-8333-333333333333", "the live owner must still hold the lock");
     } finally { rmSync(dir, { recursive: true, force: true }); }
