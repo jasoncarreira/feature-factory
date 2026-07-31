@@ -16,12 +16,14 @@ import { createLineSource } from "./poll.js";
 // Only the semantic lines get a colour. Everything else leaves `fg` unset so it inherits the host's
 // own foreground — the previous defaults hardcoded white and gray, which is invisible on a light theme.
 // A default is the host's business; naming a colour should mean "this line is different".
+// Matching the host's own sections: a bold, bright header over dimmer content. Mine were inverted —
+// muted header, default-bright body — which read as the odd panel out. The actionable line keeps its
+// attention colour; colouring everything communicates nothing.
 function lineColor(theme, line) {
   if (line.startsWith(">>")) return theme?.warning ?? "yellow";
   if (line.includes("INVALID") || line.startsWith("sidebar error")) return theme?.error ?? "red";
   if (line.startsWith("next:")) return theme?.info ?? "cyan";
-  if (line.startsWith("  ") || line.startsWith("(")) return theme?.textMuted;
-  return undefined;
+  return theme?.textMuted;
 }
 
 export function Sidebar(props) {
@@ -34,10 +36,13 @@ export function Sidebar(props) {
   });
   onCleanup(source.stop);
 
+  const theme = () => props.theme?.current;
+  // The flex props matter in a panel that shares vertical space with the host's sections: without
+  // them a long run list pushes everything else off instead of clipping.
   return (
-    <box flexDirection="column">
-      <text fg={props.theme?.current?.textMuted}>Feature Factory</text>
-      <For each={lines()}>{(line) => <text fg={lineColor(props.theme?.current, line)}>{line}</text>}</For>
+    <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
+      <text fg={theme()?.text}><b>Feature Factory</b></text>
+      <For each={lines()}>{(line) => <text fg={lineColor(theme(), line)}>{line}</text>}</For>
     </box>
   );
 }

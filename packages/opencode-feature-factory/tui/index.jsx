@@ -12,10 +12,11 @@
 // the single copies the host installation provides, or its reactive graph runs in isolation and repaints
 // nothing.
 import { Sidebar } from "./sidebar.jsx";
+import { ORDER, SLOT } from "./sidebar-config.js";
 
 export { renderLines } from "./lines.js";
 export { pollRuns } from "../observe/runs.js";
-export { DEFAULT_POLL_MS } from "./sidebar-config.js";
+export { DEFAULT_POLL_MS, ORDER, SLOT } from "./sidebar-config.js";
 
 export default {
   id: "feature-factory",
@@ -29,12 +30,9 @@ export default {
     // to `process.cwd()`, the host process's directory, which is not the repository. That would have
     // shown "no control plane found" forever and been indistinguishable from a broken slot.
     api.slots.register({
-      // Sorted ascending with a default of 0, so a positive order puts this after the host's own
-      // contributions — read from the registry's comparator (`leftOrder - rightOrder`) rather than
-      // guessed. Raise it if something still lands below.
-      order: 100,
+      order: ORDER,
       slots: {
-        sidebar_content: (ctx) => (
+        [SLOT]: (ctx) => (
           <Sidebar
             cwd={api.state.path.directory}
             intervalMs={options.intervalMs}

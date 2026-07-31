@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { CONTROL_PLANE } from "feature-factory";
 import { findControlPlane, listRuns, pollRuns, repositoryRoot, selectActiveRun } from "../observe/runs.js";
 import { renderLines } from "../tui/lines.js";
+import { ORDER, SLOT } from "../tui/sidebar-config.js";
 
 const RUN = (overrides = {}) => ({
   version: 1, run_id: "app-1", jira_key: null, branch: "feature/app-1", worktree: ".",
@@ -237,13 +238,16 @@ describe("the host registration contract", () => {
     const api = fakeApi();
     entry.tui(api, { intervalMs: 60_000 });
     assert.equal(api.calls.registered.length, 1, "content is contributed by registering a slot");
-    assert.equal(typeof api.calls.registered[0].slots?.sidebar_content, "function",
-      "the slot must be named sidebar_content; any other name contributes nothing");
+    assert.equal(typeof api.calls.registered[0].slots?.[SLOT], "function",
+      `the panel must contribute to ${SLOT}; any other name contributes nothing`);
+    // The host renders MCP and LSP itself, so `order` cannot place the panel below them — the slot
+    // choice does. Asserted so a silent revert to sidebar_content is visible.
+    assert.equal(ORDER, 450, "100 was too low: the host's MCP and LSP sections sort between 100 and 450");
 
     // Ordering and the header are host-facing and invisible to renderLines, so they are asserted from
     // the registration and the built bundle rather than by rendering.
-    assert.equal(api.calls.registered[0].order, 100,
-      "a positive order places the panel after the host's contributions; the registry sorts ascending from 0");
+    assert.equal(api.calls.registered[0].order, ORDER,
+      "the order must place the panel after the host's internal sections");
 
     // The slot is deliberately NOT invoked: its intrinsic elements need a live OpenTUI renderer, so
     // calling it here fails with "No renderer found". That is the honest boundary of this suite —
