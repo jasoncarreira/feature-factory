@@ -29,6 +29,17 @@ const NOW = "2026-07-30T12:00:00Z";
 const PLAN = {
   slices: [{ id: "s1", stack: "backend", paths: ["src/"], depends_on: [], acceptance: ["AC1"], test_plan: ["t"] }],
 };
+const SUPPLIED_PLAN = {
+  slices: [{ id: "supplied-spec", stack: "backend", paths: ["src/"], depends_on: [], acceptance: ["AC1"], test_plan: ["t"] }],
+};
+const VERIFIED = {
+  status: "VERIFIED",
+  artifact: "artifacts/technical-brief.md",
+  path_lane: ["src/"],
+  acceptance_criteria: ["AC1"],
+  test_plan: ["t"],
+  test_waiver: null,
+};
 
 function project(name) {
   const repo = mkdtempSync(join(tmpdir(), `ff-claim-${name}-`));
@@ -75,6 +86,22 @@ function seeded(repo) {
   assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
   writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify(PLAN));
   assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW]).ok, true);
+}
+
+function writeVerifiedSupplied(runDir, revision) {
+  writeFileSync(join(runDir, "artifacts", "spec-verification.json"), JSON.stringify(VERIFIED));
+  writeFileSync(join(runDir, "plan", "plan.md"), `plan ${revision}\n`);
+  writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify(SUPPLIED_PLAN));
+  writeFileSync(join(runDir, "reviews", "spec-writer.json"), JSON.stringify({ verdict: "APPROVE", revision }));
+}
+
+function initializeSupplied(repo, revision = "v1", verified = true) {
+  const initialized = factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+  assert.equal(initialized.ok, true, initialized.out);
+  const runDir = join(repo, ".factory", RUN);
+  writeFileSync(join(runDir, "artifacts", "technical-brief.md"), `brief ${revision}\n`);
+  if (verified) writeVerifiedSupplied(runDir, revision);
+  return runDir;
 }
 
 // Each claim: where the prose lives, the exact fragment that makes the claim, and the behaviour it
@@ -282,6 +309,102 @@ const CLAIMS = [
       return factory(repo, ["init", RUN, "--now", NOW]);
     },
   },
+  {
+    id: "supplied-step-retries-then-accepts",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "factory step <run-id> spec-writer running --attempts N",
+      "factory step <run-id> spec-writer rejected --attempts N",
+      "On reviewer APPROVE, persist the same review ref but deliberately retain `running`",
+      "Only after both gates approve, record acceptance and immediately seed",
+    ],
+    expect: "allowed",
+    matches: /agent: spec-writer\nstatus: accepted\nattempts: 2/u,
+    act(repo) {
+      const runDir = initializeSupplied(repo, "v1", false);
+      let result = factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "1", "--now", NOW]);
+      assert.match(result.out, /status: running\nattempts: 1/u);
+      result = factory(repo, ["step", RUN, "spec-writer", "rejected", "--attempts", "1", "--now", NOW]);
+      assert.match(result.out, /status: rejected\nattempts: 1/u);
+      writeVerifiedSupplied(runDir, "v2");
+      result = factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "2",
+        "--review-ref", "reviews/spec-writer.json", "--now", NOW]);
+      assert.match(result.out, /status: running\nattempts: 2/u);
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact",
+        "artifacts/technical-brief.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact",
+        "plan/plan.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "approved", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "approved", "--now", NOW]).ok, true);
+      result = factory(repo, ["step", RUN, "spec-writer", "accepted", "--attempts", "2", "--now", NOW]);
+      const run = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+      assert.equal(run.steps[0].review_ref, "reviews/spec-writer.json");
+      return result;
+    },
+  },
+  {
+    id: "supplied-combined-gates-precede-seeding",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "factory gate <run-id> story pending --artifact artifacts/technical-brief.md",
+      "factory gate <run-id> brief pending --artifact plan/plan.md",
+      "record Story first, and decide Brief only after Story approves",
+      "factory slices-seed <run-id> --from plan/slices.json",
+    ],
+    expect: "allowed",
+    matches: /seeded: 1\nslices: \["supplied-spec"\]/u,
+    act(repo) {
+      const runDir = initializeSupplied(repo);
+      const approvedPlan = readFileSync(join(runDir, "plan", "slices.json"), "utf8");
+      assert.equal(factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "1",
+        "--review-ref", "reviews/spec-writer.json", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact",
+        "artifacts/technical-brief.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact",
+        "plan/plan.md", "--now", NOW]).ok, true);
+      let run = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+      assert.equal(run.gates.story.artifact, "artifacts/technical-brief.md");
+      assert.equal(run.gates.brief.artifact, "plan/plan.md");
+      assert.equal(factory(repo, ["gate", RUN, "story", "approved", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "approved", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["step", RUN, "spec-writer", "accepted", "--attempts", "1",
+        "--review-ref", "reviews/spec-writer.json", "--now", NOW]).ok, true);
+      run = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+      assert.equal(run.steps[0].status, "accepted");
+      assert.equal(readFileSync(join(runDir, "plan", "slices.json"), "utf8"), approvedPlan);
+      return factory(repo, ["slices-seed", RUN, "--from", "plan/slices.json", "--now", NOW]);
+    },
+  },
+  {
+    id: "supplied-brief-changes-reopen-both-gates",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "Any Story or Brief `changes` before seeding requires caller revision",
+      "Mark the still-unaccepted attempt `rejected`, start attempt `N+1`, reverify, re-review",
+      "If Story was approved before\nBrief requested changes, reopen Story",
+    ],
+    expect: "allowed",
+    matches: /gate: brief\nstatus: pending/u,
+    act(repo) {
+      const runDir = initializeSupplied(repo);
+      assert.equal(factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "1",
+        "--review-ref", "reviews/spec-writer.json", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact",
+        "artifacts/technical-brief.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact",
+        "plan/plan.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "approved", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "changes", "--now", NOW]).ok, true);
+      writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "brief v2\n");
+      writeVerifiedSupplied(runDir, "v2");
+      assert.equal(factory(repo, ["step", RUN, "spec-writer", "rejected", "--attempts", "1", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["step", RUN, "spec-writer", "running", "--attempts", "2",
+        "--review-ref", "reviews/spec-writer.json", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact",
+        "artifacts/technical-brief.md", "--now", NOW]).ok, true);
+      return factory(repo, ["gate", RUN, "brief", "pending", "--artifact", "plan/plan.md", "--now", NOW]);
+    },
+  },
 ];
 
 const PROMPT_CONTRACTS = [
@@ -292,6 +415,9 @@ const PROMPT_CONTRACTS = [
       "Accepts either an idea or ticket through story, research/design,",
       "an explicitly caller-supplied implementation spec that is",
       "Both entries converge on the same observed build,",
+      "DECOMPOSE ─▶ [GATE 2: Brief + Plan]",
+      "SUPPLIED SPEC ─▶ VERIFY + REVIEW ─▶ PROJECT ONE BACKEND SLICE ─▶ [GATES 1 + 2: Spec + Plan]",
+      "STEP 4: BUILD (OBSERVE ▶ REVIEW ▶ MERGE) ─▶ STEP 5: TEST + VALIDATE",
       "Choose supplied-spec entry only when the caller explicitly says an implementation spec is authoritative",
       "copy the caller's spec content verbatim",
       "$REPO/.factory/<run-id>/artifacts/technical-brief.md",
@@ -314,18 +440,16 @@ const PROMPT_CONTRACTS = [
     id: "supplied-spec-lifecycle-delays-acceptance",
     file: "skills/feature/SKILL.md",
     fragments: [
-      "factory step <run-id> spec-writer running --attempts N",
       "A `REFUSED` response creates no plan.",
-      "factory step <run-id> spec-writer rejected --attempts N",
       "begin attempt `N+1` as `running`",
-      "On `VERIFIED`, invoke `work-reviewer` with the canonical artifact and the exact verification response.",
+      "On `VERIFIED`, write the exact schema response, with no added fields, to the existing artifact path",
+      "`artifacts/spec-verification.json` before review.",
+      "Invoke `work-reviewer` with both\n`artifacts/technical-brief.md` and `artifacts/spec-verification.json`",
+      "A `REFUSED` response does not create this\nsuccess artifact.",
       "On reviewer REJECT, persist `reviews/spec-writer.json`",
-      "--attempts N --review-ref reviews/spec-writer.json",
       "deliberately retain `running`",
       "Do not mark the step `accepted` yet",
       "Respect\n`max_retries`; exhaustion becomes `blocked`/`needs-human`",
-      "factory step <run-id> spec-writer accepted",
-      "factory slices-seed <run-id> --from plan/slices.json",
     ],
   },
   {
@@ -340,6 +464,8 @@ const PROMPT_CONTRACTS = [
       "\"test_plan\": [\"<test_plan entries verbatim and in order>\"]",
       "For a verified waiver, `test_plan` is `[]`.",
       "Add no fields, derive no paths, reorder nothing, split no\ncriteria, and create no additional slice.",
+      "deterministically from the reviewed `artifacts/spec-verification.json`",
+      "Never\nre-extract plan inputs from prose after review.",
       "# Supplied-spec slice plan",
       "- Builder: `backend-builder`",
       "Waived: <verbatim test_waiver reason>",
@@ -349,8 +475,6 @@ const PROMPT_CONTRACTS = [
     id: "supplied-spec-gates-are-combined-and-ordered",
     file: "skills/feature/SKILL.md",
     fragments: [
-      "factory gate <run-id> story pending --artifact artifacts/technical-brief.md",
-      "factory gate <run-id> brief pending --artifact plan/plan.md",
       "Present the verified spec and one-slice plan together.",
       "In interactive mode, await both decisions",
       "record Story first, and decide Brief only after Story approves",
@@ -366,13 +490,19 @@ const PROMPT_CONTRACTS = [
     id: "supplied-spec-autonomous-gates-have-per-gate-preconditions",
     file: "skills/feature/SKILL.md",
     fragments: [
-      "latest attempt is `VERIFIED`, `work-reviewer` approved that exact verification and artifact",
-      "no\nproduct, UX, security, external-policy, or implementation decision remains",
+      "latest attempt is `VERIFIED`, `work-reviewer` approved both the supplied brief and its persisted exact",
+      "`artifacts/spec-verification.json` extraction",
+      "and no product, UX, security, external-policy, or\nimplementation decision remains",
       "every acceptance criterion\nmaps to `supplied-spec`",
       "`paths` exactly equal the ordered `path_lane`",
       "`test_plan` exactly equals\nthe verified plan or is `[]` for the verified waiver",
       "No decomposition review is required because no\ndecomposition was authored.",
       "A failed precondition records\n`needs-human`; it never causes fallback, acceptance, or seeding.",
+      "with exactly one slice, approve on current-head",
+      "`evidence/test-verifier.json` recording an observed test run that exited zero; no validator is\n  required",
+      "With multiple slices, also require a GO or GO-WITH-NITS validator verdict naming the\n  current integration head.",
+      "Any recorded validator verdict remains binding for either slice count",
+      "Present the validator verdict or the automatic one-slice omission",
     ],
   },
   {
@@ -383,7 +513,8 @@ const PROMPT_CONTRACTS = [
       "a recorded `spec-writer` step plus `artifacts/technical-brief.md` while Story is\n  absent proves the supplied route",
       "durable records do not prove the\n  required explicit selection",
       "Never infer a route or fall back.",
-      "resumes at plan generation and the combined\n  checkpoint, not at agent invocation",
+      "with `artifacts/spec-verification.json` but no approving review ref\n  resumes by reviewing the supplied brief and that persisted extraction",
+      "With an approving review ref, it resumes at plan generation from that reviewed extraction",
       "If both gates are approved while the step remains `running`, accept it and seed without another\n  checkpoint.",
       "If the step is accepted but unseeded, seed the unchanged approved JSON.",
       "fixed slice id `supplied-spec` preserves orientation",
@@ -396,7 +527,7 @@ const PROMPT_CONTRACTS = [
       "isolation,\nobservation, review/retry, two-parent merge, and ownership refusal all remain mandatory",
       "dispatch the sole `backend-builder`",
       "Pass no fabricated story, research-map, or design-brief artifact.",
-      "verified `acceptance_criteria` as the acceptance source",
+      "the extraction's verified\n   `acceptance_criteria` as the acceptance source",
       "automatic omission needs no new discriminator, mode, `run.json` key,\n   CLI command, or contract",
       "if a verdict was\n  recorded anyway it must still approve and still name the current head",
       "preserve this push, draft-PR, idempotency, and readiness-recheck behavior unchanged",
@@ -446,10 +577,12 @@ const PROMPT_CONTRACTS = [
     fragments: [
       "\"status\": \"VERIFIED\",\n  \"artifact\": \"artifacts/technical-brief.md\",\n  \"path_lane\": [\"non-empty string\"],\n  \"acceptance_criteria\": [\"non-empty string\"],\n  \"test_plan\": [\"non-empty string\"],\n  \"test_waiver\": null",
       "Exactly one of a non-empty `test_plan` or a non-empty `test_waiver` is present.",
+      "every entry is a non-empty string reproduced verbatim and in declared order",
       "For a waiver, return `test_plan: []` and the verbatim non-empty reason in `test_waiver`.",
       "\"status\": \"REFUSED\",\n  \"artifact\": \"artifacts/technical-brief.md\",\n  \"missing\": [\"path lane\"],\n  \"ambiguous\": []",
       "`missing` and `ambiguous` may contain only `path lane`, `acceptance criteria`, and `test plan or explicit test waiver`.",
       "At least one array must be non-empty, and each category appears at most once across both arrays.",
+      "An empty, non-string, or non-deterministically extractable test-plan entry makes `test plan or explicit test waiver` ambiguous.",
     ],
   },
 ];
@@ -460,15 +593,11 @@ describe("prose claims about what the CLI permits", () => {
       // The fragment must still be in the prose. Reword the prose and this fails, which is the point:
       // the claim and its proof cannot drift apart quietly.
       const prose = readFileSync(join(pkg, claim.file), "utf8");
-      if (claim.fragments) {
-        for (const fragment of claim.fragments) {
-          assert.ok(prose.includes(fragment),
-            `${claim.file} no longer contains the static prompt contract:\n  ${fragment}`);
-        }
-        return;
+      for (const fragment of claim.fragments ?? [claim.fragment]) {
+        assert.ok(prose.includes(fragment),
+          `${claim.file} no longer contains the prompt contract:\n  ${fragment}`);
       }
-      assert.ok(prose.includes(claim.fragment),
-        `${claim.file} no longer contains the claim this test proves:\n  ${claim.fragment}`);
+      if (!claim.act) return;
 
       const repo = project(claim.id);
       try {

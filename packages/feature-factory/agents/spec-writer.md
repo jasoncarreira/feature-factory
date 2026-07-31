@@ -56,7 +56,7 @@ verification schema and must not be emitted in this form.
 }
 ```
 
-`status` and `artifact` are exact. `path_lane` and `acceptance_criteria` are non-empty arrays of non-empty strings reproduced verbatim and in declared order. `test_plan` is a string array and `test_waiver` is a string or `null`. Exactly one of a non-empty `test_plan` or a non-empty `test_waiver` is present. For a waiver, return `test_plan: []` and the verbatim non-empty reason in `test_waiver`.
+`status` and `artifact` are exact. `path_lane` and `acceptance_criteria` are non-empty arrays of non-empty strings reproduced verbatim and in declared order. `test_plan` is an array in which every entry is a non-empty string reproduced verbatim and in declared order, and `test_waiver` is a string or `null`. Exactly one of a non-empty `test_plan` or a non-empty `test_waiver` is present. For a waiver, return `test_plan: []` and the verbatim non-empty reason in `test_waiver`.
 
 **REFUSED**
 
@@ -69,7 +69,7 @@ verification schema and must not be emitted in this form.
 }
 ```
 
-`status` and `artifact` are exact. `missing` and `ambiguous` may contain only `path lane`, `acceptance criteria`, and `test plan or explicit test waiver`. At least one array must be non-empty, and each category appears at most once across both arrays. An absent or empty category is `missing`. A present category that cannot be extracted deterministically is `ambiguous`; supplying both a test plan and a waiver is ambiguous.
+`status` and `artifact` are exact. `missing` and `ambiguous` may contain only `path lane`, `acceptance criteria`, and `test plan or explicit test waiver`. At least one array must be non-empty, and each category appears at most once across both arrays. An absent or empty category is `missing`. A present category that cannot be extracted deterministically is `ambiguous`; supplying both a test plan and a waiver is ambiguous. An empty, non-string, or non-deterministically extractable test-plan entry makes `test plan or explicit test waiver` ambiguous.
 
 Report every defective category in one pass. Do not research, infer, rewrite, author a replacement, suggest invented content, invoke another agent, or fall back to normal authoring. The caller, not this agent, corrects a refused artifact.
 
