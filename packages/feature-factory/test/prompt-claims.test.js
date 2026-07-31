@@ -234,6 +234,18 @@ const CLAIMS = [
       return factory(repo, ["slice", RUN, "s1", "running", "--worktree", ".", "--branch", "slice", "--now", NOW]);
     },
   },
+  {
+    id: "init-needs-no-branch-or-worktree",
+    file: "skill/SKILL.md",
+    fragment: "**Do not ask the engineer for a branch or a worktree.**",
+    expect: "allowed",
+    matches: /branch: feature\/app-1\nworktree: \./u,
+    act(repo) {
+      // The whole invocation an orchestrator should need. Both required flags are gone, and what was
+      // recorded is reported back so the branch it must create is not left implicit.
+      return factory(repo, ["init", RUN, "--now", NOW]);
+    },
+  },
 ];
 
 describe("prose claims about what the CLI permits", () => {

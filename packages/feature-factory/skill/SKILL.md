@@ -94,12 +94,21 @@ Only when the invocation explicitly requests it. Never infer it from vague wordi
 Establish the control plane:
 
 ```sh
-factory init <run-id> --branch <branch> --worktree <path> [--jira <KEY>] [--mode <mode>]
+factory init <run-id> [--jira <KEY>] [--mode <mode>]
 factory lock <run-id> claim --session <session-id>
 ```
 
-`run-id` is the ticket key lowercased, else the branch slug. `init` creates `plan/`, `artifacts/`,
-`evidence/`, `reviews/` and writes the manifest.
+`run-id` is the ticket key lowercased, else a slug of the request. `init` creates `plan/`,
+`artifacts/`, `evidence/`, `reviews/` and writes the manifest.
+
+**Do not ask the engineer for a branch or a worktree.** Both are derived: the branch defaults to
+`feature/<run-id>` and the worktree to the current checkout, and `init` reports what it recorded. The
+engineer supplies a branch only if they say so in the invocation, or if this repository has a naming
+convention that says otherwise — check `CLAUDE.md` before overriding, and pass `--branch` if it does.
+
+The recorded branch is a statement of intent, not something that exists yet. You create it in Step 4,
+and it must match exactly what `init` reported: the first slice activation observes that branch and
+fails if it is absent.
 
 If `factory lock` reports the run is held by another session, it tells you the owner: **resume** with
 that session id, **steal** it (`factory lock <run-id> steal --session <session-id>`) if the holder is gone, or abort. If

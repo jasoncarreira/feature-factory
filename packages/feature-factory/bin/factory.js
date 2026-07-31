@@ -405,7 +405,13 @@ const HANDLERS = {
     });
   },
   async init([runId], flags) {
-    if (!flags.branch || !flags.worktree) throw new CliError("factory init requires --branch and --worktree");
+    // Both derived by default: the run-id already carries the identity, so requiring the same fact
+    // twice is a second place for it to be wrong, caught only three commands later when the first
+    // slice observes its head. Safe to derive because the name is a *record*, not an action — this
+    // CLI never creates a branch, so it states intent the orchestrator must satisfy and activation
+    // verifies. A caller wanting a different branch still passes one.
+    const branch = flags.branch ?? `feature/${runId}`;
+    const worktree = flags.worktree ?? ".";
     const mode = flags.mode ?? "interactive";
     if (!MODES.includes(mode)) throw new CliError(`--mode must be one of ${MODES.join(" | ")}`);
     const runDir = runDirFor(flags, runId);
@@ -417,8 +423,8 @@ const HANDLERS = {
       version: SCHEMA_VERSION,
       run_id: runId,
       jira_key: flags.jira ?? null,
-      branch: flags.branch,
-      worktree: flags.worktree,
+      branch,
+      worktree,
       created_at: at,
       updated_at: at,
       status: "running",
@@ -437,7 +443,9 @@ const HANDLERS = {
     const { writeProtectedJsonAtomic } = await import("../core/atomic-write.js");
     const { validateRun } = await import("../state/schema.js");
     await writeProtectedJsonAtomic(runDir, "run.json", validateRun(run));
-    return emit(flags, { run_id: runId, run_dir: runDir, status: "running", mode });
+    // Reported because they may have been derived: the caller needs to know which branch the
+    // orchestrator is now expected to create.
+    return emit(flags, { run_id: runId, run_dir: runDir, branch, worktree, status: "running", mode });
   },
 
   status([runId], flags) {
@@ -626,7 +634,8 @@ function emit(flags, payload) {
 function usage() {
   process.stdout.write(`factory — durable control plane for /feature runs
 
-  factory init <run-id> --branch B --worktree W [--jira KEY] [--mode interactive|headless|autonomous]
+  factory init <run-id> [--branch B] [--worktree W] [--jira KEY] [--mode interactive|headless|autonomous]
+                        branch defaults to feature/<run-id>, worktree to .
   factory status <run-id> [--json]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID
