@@ -45,7 +45,7 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
         const observedEvidence = await readLockOwnerEvidence(ownerPath);
         if (canStealRunJsonLock(observedEvidence?.owner, options)) {
           stealAttempted = true;
-          if (observedIdentity && await stealByRename(runDir, lockDir, observedIdentity, observedEvidence.owner, onBeforeSteal)) continue;
+          if (observedIdentity && await stealByRename(runDir, lockDir, observedIdentity, observedEvidence, onBeforeSteal)) continue;
         } else if (!observedEvidence && await ownerlessLockIsReclaimable(lockDir, ownerPath, options)) {
           stealAttempted = true;
           if (observedIdentity && await stealByRename(runDir, lockDir, observedIdentity, null, onBeforeSteal)) continue;
@@ -108,12 +108,19 @@ async function readLockOwnerEvidence(ownerPath) {
 // The identity check still earns its place: it refuses to rename away a lock that
 // is no longer the one we judged stale, which is the case where another process
 // already stole and re-acquired.
-async function stealByRename(runDir, lockDir, observedIdentity, observedOwner, onBeforeSteal) {
-  if (onBeforeSteal) await onBeforeSteal({ runDir, lockDir, owner: observedOwner });
-  // No identity pre-check here on purpose. renameOwnedLockToQuarantine re-checks
-  // dev/ino *after* the rename and throws, which covers the re-acquisition case
-  // and is not subject to a check-then-act window. A pre-check was added here and
-  // removed once falsification showed its removal was undetectable.
+async function stealByRename(runDir, lockDir, observedIdentity, observedEvidence, onBeforeSteal) {
+  if (onBeforeSteal) await onBeforeSteal({ runDir, lockDir, owner: observedEvidence?.owner ?? null });
+  // The owner must still be the one we judged stale, and the directory's dev/ino cannot establish
+  // that: Linux reuses inode numbers, so a lock deleted and recreated here presents the identity we
+  // recorded and the post-rename check sees nothing wrong while a live lock is renamed away. The
+  // nonce is the discriminator. The note that once stood here — a pre-check is undetectable — was
+  // falsified only on APFS, which does not reuse the inode; CI failed on Linux and passed on macOS.
+  // The post-rename check stays, the two together are narrower, and the write core is still the
+  // real boundary, so the residual check-then-act window cannot produce a lost update.
+  if (observedEvidence
+    && !sameLockOwnerEvidence(observedEvidence, await readLockOwnerEvidence(join(lockDir, LOCK_OWNER_FILE)))) {
+    return false;
+  }
   let quarantine;
   try {
     quarantine = await renameOwnedLockToQuarantine(runDir, lockDir, observedIdentity);
