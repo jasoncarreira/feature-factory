@@ -56,13 +56,20 @@ const FORBIDDEN_SUBSTRINGS = [
 // counts.
 const SKIP_DIRS = new Set(["node_modules", ".git"]);
 const SOURCE_EXTENSIONS = [".js", ".mjs", ".cjs", ".json"];
+// Prose is scanned for dropped subsystems too, but not counted toward the line
+// tripwire. The agents and the skill are instructions to a model, so a subsystem
+// deleted from the code can walk straight back in as a paragraph telling an agent to
+// write a receipt or honour a checkpoint — and every one of these files arrived from
+// the predecessor carrying exactly that. The tripwire stays code-only because prose
+// length is not the scope risk; a dropped subsystem reappearing is.
+const PROSE_EXTENSIONS = [".md"];
 
-function sourceFiles(dir = pkg, found = []) {
+function sourceFiles(dir = pkg, found = [], extensions = SOURCE_EXTENSIONS) {
   for (const entry of readdirSync(dir)) {
     if (SKIP_DIRS.has(entry)) continue;
     const path = join(dir, entry);
-    if (statSync(path).isDirectory()) sourceFiles(path, found);
-    else if (SOURCE_EXTENSIONS.some((extension) => entry.endsWith(extension))) found.push(path);
+    if (statSync(path).isDirectory()) sourceFiles(path, found, extensions);
+    else if (extensions.some((extension) => entry.endsWith(extension))) found.push(path);
   }
   return found;
 }
@@ -76,6 +83,7 @@ function normalize(text) {
 
 const files = sourceFiles();
 const productionFiles = files.filter((path) => !path.includes(`${pkg}/test/`));
+const proseFiles = sourceFiles(pkg, [], PROSE_EXTENSIONS);
 
 describe("ceiling — scope cannot grow without editing this file", () => {
   it("exposes exactly the declared CLI commands, and the skill invokes only those", () => {
@@ -178,7 +186,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("contains no trace of a dropped subsystem, under any spelling", () => {
     const offenders = [];
-    for (const path of productionFiles) {
+    for (const path of [...productionFiles, ...proseFiles]) {
       const normalized = normalize(readFileSync(path, "utf8"));
       for (const needle of FORBIDDEN_SUBSTRINGS) {
         // The ceiling test names them to forbid them, so it exempts itself.
