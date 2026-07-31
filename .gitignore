@@ -12,6 +12,9 @@ node_modules/
 .claude/
 .opencode/
 
+# packed tarballs, produced by `npm pack` for local installs
+*.tgz
+
 # build / coverage / caches
 dist/
 coverage/
