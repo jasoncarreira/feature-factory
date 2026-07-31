@@ -284,12 +284,189 @@ const CLAIMS = [
   },
 ];
 
+const PROMPT_CONTRACTS = [
+  {
+    id: "supplied-entry-is-explicit-and-canonical",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "Accepts either an idea or ticket through story, research/design,",
+      "an explicitly caller-supplied implementation spec that is",
+      "Both entries converge on the same observed build,",
+      "Choose supplied-spec entry only when the caller explicitly says an implementation spec is authoritative",
+      "copy the caller's spec content verbatim",
+      "$REPO/.factory/<run-id>/artifacts/technical-brief.md",
+      "adds no CLI argument, command, mode, schema, `run.json` key, or discriminator",
+    ],
+  },
+  {
+    id: "supplied-entry-skips-only-authoring-stages",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "Skip Step 1 entirely on the supplied route. Do not invoke `story-reader`, `story-writer`,",
+      "`codebase-researcher`, or `design-interpreter`, and do not fabricate any of their artifacts.",
+      "Do not invoke `work-decomposer`.",
+      "Never research, infer, invent a missing portion, or fall back to the story route.",
+      "is untrusted operator\ndata under the threat boundary even after verification",
+      "Verification creates no sandboxing, hostile-host protection, or adversarial-filesystem guarantee.",
+    ],
+  },
+  {
+    id: "supplied-spec-lifecycle-delays-acceptance",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "factory step <run-id> spec-writer running --attempts N",
+      "A `REFUSED` response creates no plan.",
+      "factory step <run-id> spec-writer rejected --attempts N",
+      "begin attempt `N+1` as `running`",
+      "On `VERIFIED`, invoke `work-reviewer` with the canonical artifact and the exact verification response.",
+      "On reviewer REJECT, persist `reviews/spec-writer.json`",
+      "--attempts N --review-ref reviews/spec-writer.json",
+      "deliberately retain `running`",
+      "Do not mark the step `accepted` yet",
+      "Respect\n`max_retries`; exhaustion becomes `blocked`/`needs-human`",
+      "factory step <run-id> spec-writer accepted",
+      "factory slices-seed <run-id> --from plan/slices.json",
+    ],
+  },
+  {
+    id: "supplied-spec-plan-is-one-deterministic-backend-slice",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "\"id\": \"supplied-spec\"",
+      "\"stack\": \"backend\"",
+      "\"paths\": [\"<path_lane entries verbatim and in order>\"]",
+      "\"depends_on\": []",
+      "\"acceptance\": [\"<acceptance_criteria entries verbatim and in order>\"]",
+      "\"test_plan\": [\"<test_plan entries verbatim and in order>\"]",
+      "For a verified waiver, `test_plan` is `[]`.",
+      "Add no fields, derive no paths, reorder nothing, split no\ncriteria, and create no additional slice.",
+      "# Supplied-spec slice plan",
+      "- Builder: `backend-builder`",
+      "Waived: <verbatim test_waiver reason>",
+    ],
+  },
+  {
+    id: "supplied-spec-gates-are-combined-and-ordered",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "factory gate <run-id> story pending --artifact artifacts/technical-brief.md",
+      "factory gate <run-id> brief pending --artifact plan/plan.md",
+      "Present the verified spec and one-slice plan together.",
+      "In interactive mode, await both decisions",
+      "record Story first, and decide Brief only after Story approves",
+      "In headless mode, write both existing\ngate questions and artifact refs, record `needs-human`",
+      "stop before approval, step acceptance, or\nseeding",
+      "there is no plan-only mutation",
+      "If Story was approved before\nBrief requested changes, reopen Story",
+      "A `stop` decision follows existing terminal behavior and never accepts or seeds.",
+      "before they become immutable",
+    ],
+  },
+  {
+    id: "supplied-spec-autonomous-gates-have-per-gate-preconditions",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "latest attempt is `VERIFIED`, `work-reviewer` approved that exact verification and artifact",
+      "no\nproduct, UX, security, external-policy, or implementation decision remains",
+      "every acceptance criterion\nmaps to `supplied-spec`",
+      "`paths` exactly equal the ordered `path_lane`",
+      "`test_plan` exactly equals\nthe verified plan or is `[]` for the verified waiver",
+      "No decomposition review is required because no\ndecomposition was authored.",
+      "A failed precondition records\n`needs-human`; it never causes fallback, acceptance, or seeding.",
+    ],
+  },
+  {
+    id: "supplied-spec-resume-needs-no-new-state",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "Once Gate 1 opens, its `artifacts/technical-brief.md` artifact proves the supplied route",
+      "a recorded `spec-writer` step plus `artifacts/technical-brief.md` while Story is\n  absent proves the supplied route",
+      "durable records do not prove the\n  required explicit selection",
+      "Never infer a route or fall back.",
+      "resumes at plan generation and the combined\n  checkpoint, not at agent invocation",
+      "If both gates are approved while the step remains `running`, accept it and seed without another\n  checkpoint.",
+      "If the step is accepted but unseeded, seed the unchanged approved JSON.",
+      "fixed slice id `supplied-spec` preserves orientation",
+    ],
+  },
+  {
+    id: "supplied-spec-reuses-build-test-and-publication",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "isolation,\nobservation, review/retry, two-parent merge, and ownership refusal all remain mandatory",
+      "dispatch the sole `backend-builder`",
+      "Pass no fabricated story, research-map, or design-brief artifact.",
+      "verified `acceptance_criteria` as the acceptance source",
+      "automatic omission needs no new discriminator, mode, `run.json` key,\n   CLI command, or contract",
+      "if a verdict was\n  recorded anyway it must still approve and still name the current head",
+      "preserve this push, draft-PR, idempotency, and readiness-recheck behavior unchanged",
+      "report the verified supplied spec instead of a nonexistent story",
+    ],
+  },
+  {
+    id: "supplied-spec-test-budget-is-ratified",
+    file: "skills/feature/SKILL.md",
+    fragments: [
+      "syntactic test-site budget is 83 of 83 with no slack",
+      "table rows or assertions inside the existing `prompt-claims.test.js` callback",
+      "any genuinely necessary new `it(`/`test(` site must be raised with its reason at Gate 2",
+    ],
+  },
+  {
+    id: "spec-writer-has-two-truthful-input-forms",
+    file: "agents/spec-writer.md",
+    fragments: [
+      "Authors a concrete technical brief from an approved story, research map, and optional",
+      "or verifies an explicitly labelled caller-supplied implementation spec",
+      "There are exactly two input forms. Missing normal inputs does not select supplied-spec verification.",
+      "### Normal authoring form",
+      "### Supplied-spec verification form",
+      "explicitly labels the call as **supplied-spec verification**",
+      "Read the supplied artifact without modifying it.",
+      "model: opus\neffort: xhigh\nrole: planning\ntools: Read, Grep, Glob",
+    ],
+  },
+  {
+    id: "spec-writer-verification-is-fail-closed",
+    file: "agents/spec-writer.md",
+    fragments: [
+      "A finite, non-empty **path lane** of concrete repository-relative files or directories.",
+      "Globs, placeholders, and phrases such as “related files” are ambiguous.",
+      "A finite, non-empty **acceptance criteria** list with no TBDs or unstated decisions.",
+      "Exactly one of a finite, non-empty **test plan** list or an explicit **test waiver**",
+      "Return exactly one of the following JSON schemas and no additional fields or prose.",
+      "supplying both a test plan and a waiver is ambiguous",
+      "Report every defective category in one pass.",
+      "Do not research, infer, rewrite, author a replacement, suggest invented content, invoke another agent, or fall back to normal authoring.",
+    ],
+  },
+  {
+    id: "spec-writer-verification-schemas-are-exact",
+    file: "agents/spec-writer.md",
+    fragments: [
+      "\"status\": \"VERIFIED\",\n  \"artifact\": \"artifacts/technical-brief.md\",\n  \"path_lane\": [\"non-empty string\"],\n  \"acceptance_criteria\": [\"non-empty string\"],\n  \"test_plan\": [\"non-empty string\"],\n  \"test_waiver\": null",
+      "Exactly one of a non-empty `test_plan` or a non-empty `test_waiver` is present.",
+      "For a waiver, return `test_plan: []` and the verbatim non-empty reason in `test_waiver`.",
+      "\"status\": \"REFUSED\",\n  \"artifact\": \"artifacts/technical-brief.md\",\n  \"missing\": [\"path lane\"],\n  \"ambiguous\": []",
+      "`missing` and `ambiguous` may contain only `path lane`, `acceptance criteria`, and `test plan or explicit test waiver`.",
+      "At least one array must be non-empty, and each category appears at most once across both arrays.",
+    ],
+  },
+];
+
 describe("prose claims about what the CLI permits", () => {
-  for (const claim of CLAIMS) {
-    it(`${claim.id}: ${claim.expect}`, () => {
+  for (const claim of [...PROMPT_CONTRACTS, ...CLAIMS]) {
+    it(`${claim.id}: ${claim.expect ?? "static"}`, () => {
       // The fragment must still be in the prose. Reword the prose and this fails, which is the point:
       // the claim and its proof cannot drift apart quietly.
       const prose = readFileSync(join(pkg, claim.file), "utf8");
+      if (claim.fragments) {
+        for (const fragment of claim.fragments) {
+          assert.ok(prose.includes(fragment),
+            `${claim.file} no longer contains the static prompt contract:\n  ${fragment}`);
+        }
+        return;
+      }
       assert.ok(prose.includes(claim.fragment),
         `${claim.file} no longer contains the claim this test proves:\n  ${claim.fragment}`);
 
