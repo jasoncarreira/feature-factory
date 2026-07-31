@@ -291,3 +291,56 @@ describe("the host registration contract", () => {
     }
   });
 });
+
+describe("registering the workflow with the host", () => {
+  // The gap that made a dogfood run fail: the operator was left to install a skill and eleven agents
+  // by hand, and when they had not, the run loaded a stale skill from a previous era and began
+  // reverse-engineering how to hand-write run.json. Registration through the `config` hook removes the
+  // install step entirely — and writes nothing, so it needs no exemption from the boundary test.
+  async function configured(options = {}) {
+    const plugin = (await import("../plugin/index.js")).default;
+    const hooks = await plugin({}, options);
+    const cfg = {};
+    await hooks.config(cfg);
+    return cfg;
+  }
+
+  it("registers the command, the skill path, and every agent the skill dispatches", async () => {
+    const cfg = await configured();
+    assert.equal(cfg.command.feature.agent, "feature-factory", "the command runs as the orchestrator");
+
+    // The host discovers a skill from a directory, so the path must be the one the package ships.
+    assert.equal(cfg.skills.paths.length, 1);
+    assert.match(cfg.skills.paths[0], /feature-factory\/skills$/u);
+    const shipped = readdirSync(new URL("../../feature-factory/agents/", import.meta.url))
+      .filter((entry) => entry.endsWith(".md")).map((entry) => entry.replace(/\.md$/u, ""));
+    for (const name of shipped) {
+      assert.ok(cfg.agent[name], `${name} must be registered, or a task call for it fails`);
+    }
+    assert.equal(Object.keys(cfg.agent).length, shipped.length + 1, "the agents plus one orchestrator");
+  });
+
+  it("translates Claude Code frontmatter into an opencode agent", async () => {
+    const cfg = await configured();
+    const agent = cfg.agent["backend-builder"];
+    // The prose is host-agnostic; the frontmatter is not. `mode` and `permission` are opencode's.
+    assert.equal(agent.mode, "subagent");
+    assert.equal(agent.permission.edit, "allow");
+    assert.ok(agent.description.length > 40, "the folded description block must be parsed, not dropped");
+    assert.ok(agent.prompt.includes("Stay in your lane"), "the body becomes the prompt");
+    assert.equal(agent.prompt.startsWith("---"), false, "frontmatter must not leak into the prompt");
+    // `model: sonnet` is Claude Code's, not an opencode model id, so it must not be passed through.
+    assert.equal(agent.model, undefined, "a foreign model id would fail to resolve");
+  });
+
+  it("lets an operator profile set the model but never grant delegation", async () => {
+    // One level of orchestration is a property of the chain. An operator's profile may choose models —
+    // theirs already does — but a subagent that can dispatch turns the tree unbounded.
+    const cfg = await configured({ profiles: {
+      "work-reviewer": { model: "openai/gpt-5.6-sol", permission: { task: "allow" } },
+    } });
+    assert.equal(cfg.agent["work-reviewer"].model, "openai/gpt-5.6-sol", "profiles set the model");
+    assert.equal(cfg.agent["work-reviewer"].permission.task, "deny", "and cannot re-enable delegation");
+    assert.equal(cfg.agent["feature-factory"].permission.task, "allow", "only the orchestrator delegates");
+  });
+});

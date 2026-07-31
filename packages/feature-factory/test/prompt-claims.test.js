@@ -141,7 +141,7 @@ const CLAIMS = [
   },
   {
     id: "agents-may-read-never-write",
-    file: "skill/SKILL.md",
+    file: "skills/feature/SKILL.md",
     fragment: "A subagent may read —\n`factory status <run-id> --json` to orient itself — and may never write.",
     expect: "allowed",
     matches: /"valid": true/u,
@@ -154,7 +154,7 @@ const CLAIMS = [
   // opencode's next five, in its order. Each was enforced and unstated, or stated and unproven.
   {
     id: "only-pre-pr-may-reopen",
-    file: "skill/SKILL.md",
+    file: "skills/feature/SKILL.md",
     fragment: "**Only Gate 3 may be re-opened.**",
     expect: "refused",
     matches: /gate 'story' cannot be re-opened once decided/u,
@@ -166,7 +166,7 @@ const CLAIMS = [
   },
   {
     id: "pre-pr-may-reopen",
-    file: "skill/SKILL.md",
+    file: "skills/feature/SKILL.md",
     fragment: "factory gate <run-id> pre_pr pending",
     expect: "allowed",
     matches: /status: pending/u,
@@ -180,7 +180,7 @@ const CLAIMS = [
   },
   {
     id: "publication-needs-all-three-gates",
-    file: "skill/SKILL.md",
+    file: "skills/feature/SKILL.md",
     fragment: "**all three gates currently approved**",
     expect: "refused",
     matches: /every gate must be approved; not approved: story\(absent\), brief\(absent\)/u,
@@ -192,7 +192,7 @@ const CLAIMS = [
   },
   {
     id: "merge-needs-two-parents",
-    file: "skill/SKILL.md",
+    file: "skills/feature/SKILL.md",
     fragment: "refuses a merge commit that does not have exactly two parents",
     expect: "refused",
     matches: /has 1 parent; a slice merge must be a two-parent merge \(use --no-ff\)/u,
@@ -218,7 +218,7 @@ const CLAIMS = [
   },
   {
     id: "base-ref-immutable-after-activation",
-    file: "skill/SKILL.md",
+    file: "skills/feature/SKILL.md",
     fragment: "`base_ref` is fixed when the slice is activated and cannot be changed afterwards",
     expect: "refused",
     matches: /base_ref is immutable once recorded/u,
@@ -236,7 +236,7 @@ const CLAIMS = [
   },
   {
     id: "init-needs-no-branch-or-worktree",
-    file: "skill/SKILL.md",
+    file: "skills/feature/SKILL.md",
     fragment: "**Do not ask the engineer for a branch or a worktree.**",
     expect: "allowed",
     matches: /branch: feature\/app-1\nworktree: \./u,

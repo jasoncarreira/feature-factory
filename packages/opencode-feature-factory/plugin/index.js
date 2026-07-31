@@ -11,26 +11,28 @@
 // correctness work for a plugin hook to do. Its job is to answer "what is this repository's run
 // doing", for the sidebar and for anything else that asks.
 import { pollRuns } from "../observe/runs.js";
+import { registerWorkflow } from "./config.js";
 
 export { readRun, readRunUnchecked, nextAction } from "feature-factory";
 export { pollRuns, findControlPlane, listRuns, selectActiveRun } from "../observe/runs.js";
+export { registerWorkflow, registerAgents, registerSkill, registerCommand, parseFrontmatter } from "./config.js";
 
-// **This plugin registers no hooks, deliberately.**
+// The plugin's one job: register the workflow with the host.
 //
-// It previously returned `{ name, status, runs }`, none of which opencode recognises — an object the
-// host accepts and then ignores, which is worse than registering nothing because it reads as
-// integration. The honest position is that there is no hook worth registering: the orchestrator
-// drives every state change through the CLI, so no session or task event needs to be observed for
-// correctness, and this package is forbidden from writing state anyway.
+// It previously returned no hooks, on the reasoning that no session or task event is load-bearing
+// when the orchestrator drives every transition through the CLI. That was right about *events* and
+// wrong about the plugin, because it left the operator to install a skill and eleven agents by hand —
+// and when they had not, a run loaded a stale 94 KB skill from a previous era and spent its first
+// minutes reverse-engineering how to hand-write run.json from deleted source. Which is the one thing
+// this whole design exists to prevent.
 //
-// The plan's original sketch said "session/task observation, checked context injection". Context
-// injection was the predecessor's mechanism for handing builders a plugin-owned authority block, and
-// it went with the subsystems this rebuild dropped — the skill passes each builder its slice spec
-// directly. BUILD-PLAN-SMALL.md has been corrected rather than left promising it.
-//
-// The observation helpers are exported as ordinary module exports, which is how the sidebar and any
-// other caller use them. When a hook earns its place, it goes here and gets a test that fails
-// without it.
-export default async function plugin() {
-  return {};
+// `config` is the hook that fixes it, and it writes nothing: the host takes the command, the skill
+// path and the agent definitions in memory. Upgrading the package upgrades all three, with no install
+// step and nothing stale left in a config directory.
+export default async function plugin(_input, options = {}) {
+  return {
+    async config(cfg) {
+      registerWorkflow(cfg, { profiles: options.profiles ?? {} });
+    },
+  };
 }

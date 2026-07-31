@@ -9,15 +9,14 @@
   },
   "main": "state/index.js",
   "exports": {
-    ".": "./state/index.js",
-    "./skill": "./skill/SKILL.md"
+    ".": "./state/index.js"
   },
   "files": [
     "bin",
     "core",
     "observe",
     "state",
-    "skill",
+    "skills",
     "agents",
     "README.md",
     "LICENSE"

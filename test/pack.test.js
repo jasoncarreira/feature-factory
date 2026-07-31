@@ -66,7 +66,7 @@ describe("what actually ships", () => {
       const opencode = pack("opencode-feature-factory", dir);
 
       // The skill is useless without the agents it dispatches, and both READMEs promise them.
-      for (const required of ["skill/SKILL.md", "bin/factory.js", "state/index.js", "README.md", "LICENSE"]) {
+      for (const required of ["skills/feature/SKILL.md", "bin/factory.js", "state/index.js", "README.md", "LICENSE"]) {
         assert.ok(factory.files.includes(required), `feature-factory must ship ${required}`);
       }
       const agents = factory.files.filter((file) => file.startsWith("agents/"));

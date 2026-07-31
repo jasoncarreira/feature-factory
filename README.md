@@ -49,7 +49,7 @@ The CLI, the skill and the agents:
 npm install feature-factory
 ```
 
-Then point your agent host at `node_modules/feature-factory/skill/SKILL.md` and
+Then point your agent host at `node_modules/feature-factory/skills/feature/SKILL.md` and
 `node_modules/feature-factory/agents/`.
 
 For opencode, additionally install the integration where the host's modules resolve, and name it in

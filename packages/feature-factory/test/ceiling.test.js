@@ -103,7 +103,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // late-head recovery — including one this session introduced while correcting the same
     // command elsewhere in the same round. Every prose fix so far was found by reading, which
     // is why they kept coming back.
-    const markdown = readFileSync(join(pkg, "skill", "SKILL.md"), "utf8");
+    const markdown = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
     // Join shell continuations so one command is one string, then read only code — fenced
     // blocks and inline spans — so prose cannot be mistaken for an invocation.
     const text = markdown.replace(/\\\n\s*/gu, " ");
@@ -233,7 +233,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // paths, branches and ports that are one repository's
       "src\\/main\\/", "origin\\/development", "localhost:\\d+", ":9000",
     ].join("|"), "iu");
-    const prose = [...agentText, { name: "skill/SKILL.md", text: markdown }];
+    const prose = [...agentText, { name: "skills/feature/SKILL.md", text: markdown }];
     const leaked = prose.filter(({ text }) => REFERENCE_STACK.test(text)).map(({ name }) => name);
     assert.deepEqual(leaked, [], "an agent names the reference repository's stack instead of asking this one");
 

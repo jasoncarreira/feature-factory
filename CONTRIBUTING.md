@@ -65,7 +65,7 @@ Two conventions this codebase holds to, both learned the hard way:
   (`ENOEXEC`, a thrown exception) looks like a dead guard to a grep. And **probe one thing at a
   time**: two mutations at once means the first failure masks the second, and you record a live guard
   as dead.
-- **Prose is part of the contract.** `skill/SKILL.md` and `agents/*.md` are executable instructions.
+- **Prose is part of the contract.** `skills/feature/SKILL.md` and `agents/*.md` are executable instructions.
   The ceiling test checks their commands and flags against the CLI, and
   `test/prompt-claims.test.js` executes the claims they make about what the CLI permits. Add a row
   there when prose starts asserting what will or will not be allowed — three separate times a fix

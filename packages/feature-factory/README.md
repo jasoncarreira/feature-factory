@@ -12,10 +12,10 @@ Ships three things:
 | | |
 | --- | --- |
 | `bin/factory.js` | the `factory` CLI — twelve commands, each state change one checked transition |
-| `skill/SKILL.md` | the `/feature` orchestrator prose |
+| `skills/feature/SKILL.md` | the `/feature` orchestrator prose |
 | `agents/` | eleven agent definitions the skill dispatches |
 
-Point your agent host at `skill/SKILL.md` and `agents/`, then drive runs with the CLI.
+Point your agent host at `skills/feature/SKILL.md` and `agents/`, then drive runs with the CLI.
 
 ## Why the code exists at all
 
