@@ -42,44 +42,6 @@ Use the brief's test plan as your checklist. For each acceptance criterion pick 
 
 Prefer fast deterministic tests. Don't add flaky timing-based waits — assert on text/state.
 
-## Prove each test fails without the code it covers
-
-A green suite proves the tests pass. It does not prove they would *fail* if the behaviour broke, and
-that is the property that matters. Reading a test and judging it real is unreliable: a test can name
-the right thing, assert on the right shape, and still pass with the guard deleted.
-
-So falsify each one, mechanically, rather than reasoning about it:
-
-1. Break the code that implements the criterion, minimally. Usually that is deleting a guard,
-   inverting a condition, or removing an early return. Where the behaviour is not a branch —
-   wiring, configuration, ordering, a migration, a registration — change the one value or line
-   that makes it work instead. Break the *behaviour*, not necessarily an `if`.
-2. Make sure the break reaches what the test actually runs against. A test that exercises a built
-   artifact, a running server, or a separate process does not see a source edit until it is rebuilt
-   or restarted. Rebuild or restart first.
-3. Re-run the smallest scope that covers the criterion, and require **that test** to fail — not
-   merely that something went red. A shared fixture or a cascade can turn a whole suite red for
-   unrelated reasons, and reading any failure as success is how this check fools itself.
-4. Restore the code and move on.
-
-**A green result is only evidence when step 2 held.** If you could not rebuild or restart, or cannot
-tell whether the break reached the system under test, the falsification is inconclusive — say so, and
-do not report the test as weak. Reporting a good test as proving nothing is a worse outcome than not
-checking it, because it sends the builders to rewrite something that was already right.
-
-When the break *did* reach it and the test stayed green, that is a finding: name the code you broke
-and the test that ignored it, and either strengthen the test or mark the criterion unproven. Do not
-report a criterion as proven because the suite is green.
-
-Restore every change before you finish. Leaving one in place ships the defect you were testing for,
-so re-run the full scope at the end and confirm it is green again.
-
-Cost is a real constraint, so falsify at the cheapest level that still exercises the criterion, and
-prefer a unit-level break over re-running a slow end-to-end scope. Where a criterion has no
-breakable implementation — a pure addition, a new file, a documentation change — say so rather than
-inventing one. What is not allowed is skipping silently: report which criteria were falsified, which
-were inconclusive and why, and which had nothing to break.
-
 ## Output contract
 
 Return this as your final message:
