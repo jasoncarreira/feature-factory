@@ -25,6 +25,20 @@ export function renderLines(snapshot) {
   // leaves an operator with no way to learn it is there.
   if (!run.valid) return [`${run.run_id}  INVALID`, run.error ?? "run.json could not be read"];
 
+  // A finished run is reported, not featured. `selectActiveRun` prefers a live run and falls back to
+  // the newest, so with nothing running the newest dead one became the headline — four lines of
+  // branch, mode, next action and terminal reason, shaped exactly like a run in progress and never
+  // going away. The outcome is worth keeping on screen; the full block is not, and `factory status`
+  // still has the detail.
+  if (run.terminal) {
+    const outcome = run.pr_url ? `${run.status}  ${run.pr_url}` : run.status;
+    const lines = [`${run.run_id}  ${outcome}`];
+    if (snapshot.runs.length > 1) {
+      lines.push(`(${snapshot.runs.length - 1} other run${snapshot.runs.length === 2 ? "" : "s"})`);
+    }
+    return lines;
+  }
+
   const lines = [
     `${run.run_id}${run.jira_key ? `  ${run.jira_key}` : ""}`,
     `${run.status}  ${run.mode}  ${run.branch}`,

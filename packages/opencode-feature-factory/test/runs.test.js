@@ -183,6 +183,23 @@ describe("run projection", () => {
       assert.equal(runs[0].run_id, "old-1", "listing is newest first");
       assert.equal(active.run_id, "app-2", "the still-running run is the active one");
       assert.equal(runs.find((run) => run.run_id === "old-1").terminal, true);
+
+      // And with nothing live, the fallback features the newest *terminal* run. It is reported, not
+      // featured: one line, no branch, mode, next action or terminal reason. Shaped like a run in
+      // progress it never went away and read as though something were still happening.
+      rmSync(join(root, CONTROL_PLANE, "app-2"), { recursive: true, force: true });
+      const dead = pollRuns(root);
+      assert.equal(dead.active.run_id, "old-1", "with nothing live, the newest run is still shown");
+      assert.deepEqual(renderLines(dead), ["old-1  completed"],
+        "a finished run is one line, not the full in-progress block");
+
+      // A completed run that produced a PR carries the URL, because that is the thing worth clicking.
+      seedRun(root, "old-2", RUN({
+        run_id: "old-2", status: "completed", updated_at: "2026-07-30T10:00:00.000Z",
+        pr_url: "https://example.test/pr/7",
+      }));
+      assert.deepEqual(renderLines(pollRuns(root)),
+        ["old-2  completed  https://example.test/pr/7", "(1 other run)"]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
