@@ -478,6 +478,42 @@ const CLAIMS = [
       return factory(repo, ["status", RUN, "--json"]);
     },
   },
+  {
+    id: "no-mode-persists-interactive",
+    file: "skills/feature/SKILL.md",
+    fragment: "With no recognized leading mode token, omit `--mode`; existing `factory init` records\n     `interactive`.",
+    expect: "allowed",
+    matches: /"mode": "interactive"/u,
+    act(repo) {
+      const initialized = factory(repo, ["init", RUN, "--now", NOW]);
+      assert.equal(initialized.ok, true, initialized.out);
+      return factory(repo, ["status", RUN, "--json"]);
+    },
+  },
+  {
+    id: "autonomous-mode-persists",
+    file: "skills/feature/SKILL.md",
+    fragment: "`--autonomous` maps only to `factory init --mode autonomous`.",
+    expect: "allowed",
+    matches: /"mode": "autonomous"/u,
+    act(repo) {
+      const initialized = factory(repo, ["init", RUN, "--mode", "autonomous", "--now", NOW]);
+      assert.equal(initialized.ok, true, initialized.out);
+      return factory(repo, ["status", RUN, "--json"]);
+    },
+  },
+  {
+    id: "headless-mode-persists",
+    file: "skills/feature/SKILL.md",
+    fragment: "`--headless` maps only to `factory init --mode headless`.",
+    expect: "allowed",
+    matches: /"mode": "headless"/u,
+    act(repo) {
+      const initialized = factory(repo, ["init", RUN, "--mode", "headless", "--now", NOW]);
+      assert.equal(initialized.ok, true, initialized.out);
+      return factory(repo, ["status", RUN, "--json"]);
+    },
+  },
 ];
 
 describe("prose claims about what the CLI permits", () => {
