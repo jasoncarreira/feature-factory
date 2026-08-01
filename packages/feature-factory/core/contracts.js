@@ -43,6 +43,7 @@ const envelope = contract({
     mode: state.mode,
     branch: state.branch,
     worktree: state.worktree,
+    pr_base: state.pr_base,
     created_at: state.created_at,
     updated_at: state.updated_at,
     terminal_result: state.terminal_result ?? null,
@@ -50,7 +51,7 @@ const envelope = contract({
   validateTransition: ({ mode, before, after }) => {
     // Identity is immutable for the life of a run. Nothing legitimate renames a
     // run, and allowing it would let a transition retarget another run's record.
-    for (const key of ["run_id", "created_at"]) {
+    for (const key of ["run_id", "created_at", "pr_base"]) {
       if (before[key] !== after[key]) throw new Error(`envelope.${key} is immutable`);
     }
     if (Date.parse(after.updated_at) < Date.parse(before.updated_at)) {

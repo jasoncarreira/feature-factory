@@ -1,20 +1,9 @@
-// run.json — viso's 15 fields plus exactly two justified additions.
-//
-//   mode            a resumed run must know whether it may auto-decide gates; that
-//                   intent cannot be re-derived, so it is durable even though no code
-//                   branches on it. The orchestrator reads it; status and the TUI
-//                   display it.
-//   terminal_result "check later" needs a machine-readable why
-//
-// base_commit was here and is gone. It was justified as "the merge proof needs the
-// base the reviewed tree derives from", which was wrong: the merge proof compares the
-// reviewed commit's tree to the merge commit's tree, both looked up directly, and the
-// per-slice diff uses slice.base_ref. Nothing read it. A field is routed on or it is
-// not required.
-//
-// Closed key sets everywhere. An unknown key is a rejection, not a warning: the
-// whole reason this package exists is that agents cannot be trusted to produce a
-// schema-perfect record, so the schema is the thing that refuses.
+// run.json adds mode, terminal_result, and pr_base to viso's fifteen fields.
+// pr_base comes from init, is immutable through the envelope, and feeds status and Step 6.
+// mode preserves autonomous intent; terminal_result records why a run stopped.
+// base_commit was removed because no consumer used it and existing refs answer its questions.
+// Every durable field needs a source, immutable route, and consumer.
+// Closed key sets reject unknown agent-produced state instead of warning.
 
 export const SCHEMA_VERSION = 1;
 
@@ -23,7 +12,7 @@ export const SCHEMA_VERSION = 1;
 export const CONTROL_PLANE = ".factory";
 
 export const RUN_KEYS = Object.freeze([
-  "version", "run_id", "jira_key", "branch", "worktree", "created_at", "updated_at",
+  "version", "run_id", "jira_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
   "status", "mode", "max_parallel_slices", "max_retries",
   "gates", "steps", "slices", "validator", "terminal_result", "pr_url",
 ]);
@@ -115,7 +104,7 @@ export function validateRun(run) {
   for (const key of ["branch", "worktree"]) required(errors, run, key, "run");
   for (const key of ["created_at", "updated_at"]) pattern(errors, run, key, ISO, "run");
   for (const key of ["max_parallel_slices", "max_retries"]) positiveInt(errors, run, key, "run");
-  for (const key of ["jira_key", "pr_url"]) optionalString(errors, run, key, "run");
+  for (const key of ["jira_key", "pr_base", "pr_url"]) optionalString(errors, run, key, "run");
 
   gates(errors, run.gates);
   steps(errors, run.steps);
