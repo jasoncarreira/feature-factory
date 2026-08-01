@@ -42,6 +42,30 @@ Use the brief's test plan as your checklist. For each acceptance criterion pick 
 
 Prefer fast deterministic tests. Don't add flaky timing-based waits — assert on text/state.
 
+## Prove each test fails without the code it covers
+
+A green suite proves the tests pass. It does not prove they would *fail* if the behaviour broke, and
+that is the property that matters. Reading a test and judging it real is unreliable: a test can name
+the right thing, assert on the right shape, and still pass with the guard deleted.
+
+So falsify each one, mechanically, rather than reasoning about it:
+
+1. For each guard, branch or condition the builders added for an acceptance criterion, remove it —
+   comment it out, invert it, or delete the early return.
+2. Re-run the narrowest test scope that covers it.
+3. It **must** fail. Restore the code and move on.
+4. A test that stays green with its guard removed proves nothing. Report it as a finding naming the
+   guard and the test, and either strengthen the test or mark that criterion unproven. Do not report
+   the criterion as proven because the suite is green.
+
+Restore every deletion before you finish. Leaving one in place ships the defect you were testing for,
+so re-run the full scope at the end and confirm it is green again.
+
+This is cheap and it is the check that catches the defect class reviewers miss most: a test written
+against the wrong seam, or one whose assertion holds whether or not the feature exists. Where a
+criterion has no removable guard — a pure addition, a new file, a documentation change — say so
+instead of inventing one.
+
 ## Output contract
 
 Return this as your final message:

@@ -60,7 +60,7 @@ When the subject is a **class-wide** requirement (`all`/`every`/`centralize`/`ac
   - No edits to vendored or generated trees. No stray code comments.
   - **Slice discipline:** the diff stays within the slice's `paths` (out-of-lane edits are a finding).
   - The slice's `acceptance` is actually implemented, and the observed tests cover it.
-- **Test step (`test-verifier`):** each AC maps to a real assertion that would fail if the behavior broke; no test weakened to pass; observed test run is green (or honestly WRITTEN-NOT-RUN with a reason).
+- **Test step (`test-verifier`):** each AC maps to a real assertion that would fail if the behavior broke — and the report says so because the guard was *removed and the test observed failing*, not because the diff reads convincingly; no test weakened to pass; observed test run is green (or honestly WRITTEN-NOT-RUN with a reason). A criterion reported as proven with no falsification, and no statement that it has no removable guard, is a finding.
 
 ## Security proportionality
 
