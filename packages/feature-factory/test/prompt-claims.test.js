@@ -305,7 +305,12 @@ const CLAIMS = [
     matches: /worktree: configured\npr_base: integration/u,
     act(repo) {
       addWorktree(repo);
-      return factory(repo, ["init", RUN, "--worktree", "configured", "--now", NOW]);
+      const initialized = factory(repo, ["init", RUN, "--worktree", "configured", "--now", NOW]);
+      assert.equal(initialized.ok, true, initialized.out);
+      const status = factory(repo, ["status", RUN, "--json"]);
+      assert.equal(status.ok, true, status.out);
+      assert.equal(JSON.parse(status.out).pr_base, "integration");
+      return initialized;
     },
   },
   {
@@ -315,7 +320,12 @@ const CLAIMS = [
     expect: "allowed",
     matches: /worktree: missing\npr_base: release\/1/u,
     act(repo) {
-      return factory(repo, ["init", RUN, "--worktree", "missing", "--pr-base", "release/1", "--now", NOW]);
+      const initialized = factory(repo, ["init", RUN, "--worktree", "missing", "--pr-base", "release/1", "--now", NOW]);
+      assert.equal(initialized.ok, true, initialized.out);
+      const status = factory(repo, ["status", RUN, "--json"]);
+      assert.equal(status.ok, true, status.out);
+      assert.equal(JSON.parse(status.out).pr_base, "release/1");
+      return initialized;
     },
   },
   {

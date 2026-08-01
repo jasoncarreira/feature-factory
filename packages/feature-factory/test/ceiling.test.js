@@ -159,6 +159,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     const cliSource = readFileSync(join(pkg, "bin", "factory.js"), "utf8");
     const readme = readFileSync(resolve(pkg, "..", "..", "README.md"), "utf8");
     assert.ok(COMMANDS.init.includes("--pr-base"));
+    const initHandler = /async init\(\[runId\], flags\) \{([\s\S]*?)\n  \},\n\n  status/u.exec(cliSource)?.[1];
+    assert.ok(initHandler, "could not locate the init handler for its publication contract");
+    assert.match(initHandler, /await writeProtectedJsonAtomic\(runDir, "run\.json", run, \{ createOnly: true \}\)/u,
+      "init must publish run.json through the create-only writer; ordinary rename would let a racer replace it");
     assert.ok(cliSource.includes("[--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET]"));
     assert.ok(markdown.includes("factory init <run-id> [--jira <KEY>] [--mode <mode>] [--pr-base <target-branch>]"));
     assert.ok(readme.includes("factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET]"));
