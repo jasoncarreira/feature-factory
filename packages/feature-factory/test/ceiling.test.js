@@ -118,6 +118,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "mode admission must run before operating-mode behavior and all intake");
     for (const fragment of [
       "Before any intake action, including ticket, story, or design detection, branch intent, run-id\nderivation, manifest or state reads, and every `factory` command, process the raw invocation arguments",
+      "Ignore leading whitespace.",
       "The **mode prefix** is the maximal consecutive sequence of\n   whitespace-delimited tokens that are exactly and case-sensitively `--autonomous` or `--headless`.",
       "The first other token ends the prefix.",
       "If both distinct flags occur in that prefix, in either order, return exactly:",
