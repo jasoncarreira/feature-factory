@@ -6,7 +6,7 @@ description: >
   three approval gates and ending in a draft PR. State is durable (a per-run manifest on disk,
   written only by the `factory` CLI), evidence is observed rather than trusted from agent prose,
   high-risk steps are reviewed, and independent slices build in parallel. Invoke as
-  `/feature <ticket key | feature idea>`.
+  `/feature [--autonomous | --headless] <ticket key | feature idea>`.
 ---
 
 # /feature — the software factory
@@ -59,6 +59,37 @@ INTAKE ─▶ [GATE 1: Story] ─▶ RESEARCH + DESIGN ─▶ SPEC ─▶ DECOMP
 `work-reviewer` runs on **high-risk steps only** — spec, decompose, each slice build, and test — and
 must APPROVE before you accept that step. Story, research, and design are not auto-reviewed.
 
+## Mode admission
+
+Before any intake action, including ticket, story, or design detection, branch intent, run-id
+derivation, manifest or state reads, and every `factory` command, process the raw invocation arguments
+as follows:
+
+1. Ignore leading whitespace. The **mode prefix** is the maximal consecutive sequence of
+   whitespace-delimited tokens that are exactly and case-sensitively `--autonomous` or `--headless`.
+   The first other token ends the prefix.
+2. If both distinct flags occur in that prefix, in either order, return exactly:
+   `conflicting mode flags: --autonomous and --headless; choose one`. Return immediately, before any
+   intake, run-id derivation, state read, or CLI action. Never fall back to interactive or another
+   mode.
+3. Otherwise remove every token in the recognized prefix and its separating whitespace. Use only the
+   unchanged remainder for ticket detection, story content, design detection, branch intent, and
+   run-id derivation.
+4. Apply exactly one mapping for a new manifest:
+   - `--autonomous` maps only to `factory init --mode autonomous`.
+   - `--headless` maps only to `factory init --mode headless`.
+   - With no recognized leading mode token, omit `--mode`; existing `factory init` records
+     `interactive`.
+
+Repeated copies of one recognized flag are idempotent: remove them all and select that mode once. An
+exact mode token after the first other token is request content and neither selects nor conflicts.
+Natural-language intent, `--interactive`, capitalization variants, abbreviations, assignment or
+punctuation forms, quoted lookalikes, and near misses are request content, not selectors. Do not add a
+generic malformed-option rejection.
+
+After successful nonconflicting admission, an existing manifest always resumes its immutable persisted
+mode. Invocation flags never reinitialize, compare, or mutate an existing run's mode.
+
 ## Operating modes
 
 `run.json.mode` is set at `factory init` and decides gate handling:
@@ -70,7 +101,7 @@ must APPROVE before you accept that step. Story, research, and design are not au
 
 ## Autonomous mode
 
-Only when the invocation explicitly requests it. Never infer it from vague wording.
+These rules apply when mode admission selected the exact leading `--autonomous` token.
 
 - Each gate has a stated precondition. If it does not hold, record `needs-human` with
   `factory terminal <run-id> needs-human --reason TEXT` and **stop** — do not approve to keep moving.
@@ -85,6 +116,8 @@ Only when the invocation explicitly requests it. Never infer it from vague wordi
   auditable after the fact.
 
 ## Step 0 — Intake, run id, lock, manifest
+
+Using only the request remainder produced by mode admission:
 
 1. **Ticket?** A key in the input or inferable from the branch → run the reader agent. Otherwise have
    the story agent draft one locally. Creating a ticket in an external tracker is *your* action, never

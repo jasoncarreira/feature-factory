@@ -491,6 +491,23 @@ describe("registering the workflow with the host", () => {
   it("registers the command, the skill path, and every agent the skill dispatches", async () => {
     const cfg = await configured();
     assert.equal(cfg.command.feature.agent, "feature-factory", "the command runs as the orchestrator");
+    assert.equal(cfg.command.feature.description,
+      "Take a feature, ticket or idea end to end: story, spec, decomposition, parallel build, "
+      + "integration, gates, draft PR. Syntax: /feature [--autonomous | --headless] "
+      + "<ticket key | feature idea>; no mode flag is interactive.");
+    assert.match(cfg.command.feature.template, /Request: \$ARGUMENTS/u,
+      "the host must transport the raw invocation to the skill");
+    assert.match(cfg.agent["feature-factory"].prompt,
+      /Apply the loaded skill's mode-admission algorithm before intake/u,
+      "the skill owns mode admission");
+    assert.match(cfg.agent["feature-factory"].prompt,
+      /only exact standalone leading `--autonomous` and `--headless` tokens select a noninteractive mode/u,
+      "only the settled exact flags select noninteractive modes");
+    assert.match(cfg.agent["feature-factory"].prompt, /never infer mode from request prose/u,
+      "request prose cannot select a mode");
+    assert.doesNotMatch(cfg.agent["feature-factory"].prompt,
+      /unless the invocation explicitly asked for autonomous mode/u,
+      "the old prose selector must not remain");
 
     // The host discovers a skill from a directory, so the path must be the one the package ships.
     assert.equal(cfg.skills.paths.length, 1);

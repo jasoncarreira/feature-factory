@@ -115,8 +115,9 @@ const ORCHESTRATOR = {
   prompt: "You are the feature-factory orchestrator. Follow the loaded `feature` skill exactly: it is "
     + "the authority on the chain, the gates, and which commands are yours. Every state change goes "
     + "through a `factory` command — never hand-write run.json. Re-derive evidence yourself rather "
-    + "than trusting a subagent's prose. Stop at every gate unless the invocation explicitly asked "
-    + "for autonomous mode.",
+    + "than trusting a subagent's prose. Apply the loaded skill's mode-admission algorithm before "
+    + "intake: only exact standalone leading `--autonomous` and `--headless` tokens select a "
+    + "noninteractive mode; never infer mode from request prose.",
 };
 
 export function registerAgents(cfg, { root = factoryRoot(), ...options } = {}) {
@@ -172,7 +173,8 @@ export function registerCommand(cfg) {
   cfg.command ??= {};
   cfg.command.feature = {
     description: "Take a feature, ticket or idea end to end: story, spec, decomposition, parallel "
-      + "build, integration, three human gates, draft PR.",
+      + "build, integration, gates, draft PR. Syntax: /feature [--autonomous | --headless] "
+      + "<ticket key | feature idea>; no mode flag is interactive.",
     agent: "feature-factory",
     template: "Load the `feature` skill and run it as the orchestrator for this request.\n\n"
       + "Request: $ARGUMENTS\n\n"

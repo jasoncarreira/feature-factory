@@ -16,7 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMANDS } from "../bin/factory.js";
 import { FAMILY_IDS } from "../core/contracts.js";
-import { RUN_KEYS } from "../state/schema.js";
+import { MODES, RUN_KEYS } from "../state/schema.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -97,6 +97,11 @@ const proseFiles = sourceFiles(pkg, [], PROSE_EXTENSIONS);
 describe("ceiling — scope cannot grow without editing this file", () => {
   it("exposes exactly the declared CLI commands, and the skill invokes only those", () => {
     assert.deepEqual(Object.keys(COMMANDS).sort(), [...CLI_COMMANDS].sort());
+    assert.deepEqual(COMMANDS.init, [
+      "--repo", "--branch", "--worktree", "--pr-base", "--jira", "--mode",
+      "--max-parallel-slices", "--max-retries", "--now", "--json",
+    ]);
+    assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
     // The skill is the authoritative instruction set, and nothing checked it against the CLI
     // it drives. Four of its examples had drifted far enough to block a normal merge and the
@@ -104,6 +109,33 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // command elsewhere in the same round. Every prose fix so far was found by reading, which
     // is why they kept coming back.
     const markdown = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+    const frontmatter = /^---\n([\s\S]*?)\n---/u.exec(markdown)?.[1];
+    assert.ok(frontmatter?.includes("`/feature [--autonomous | --headless] <ticket key | feature idea>`."));
+    const admissionIndex = markdown.indexOf("## Mode admission");
+    const operatingModesIndex = markdown.indexOf("## Operating modes");
+    const intakeIndex = markdown.indexOf("## Step 0 — Intake, run id, lock, manifest");
+    assert.ok(admissionIndex >= 0 && admissionIndex < operatingModesIndex && operatingModesIndex < intakeIndex,
+      "mode admission must run before operating-mode behavior and all intake");
+    for (const fragment of [
+      "Before any intake action, including ticket, story, or design detection, branch intent, run-id\nderivation, manifest or state reads, and every `factory` command, process the raw invocation arguments",
+      "Ignore leading whitespace.",
+      "The **mode prefix** is the maximal consecutive sequence of\n   whitespace-delimited tokens that are exactly and case-sensitively `--autonomous` or `--headless`.",
+      "The first other token ends the prefix.",
+      "If both distinct flags occur in that prefix, in either order, return exactly:",
+      "`conflicting mode flags: --autonomous and --headless; choose one`.",
+      "Return immediately, before any\n   intake, run-id derivation, state read, or CLI action. Never fall back to interactive or another\n   mode.",
+      "remove every token in the recognized prefix and its separating whitespace. Use only the\n   unchanged remainder for ticket detection, story content, design detection, branch intent, and\n   run-id derivation.",
+      "`--autonomous` maps only to `factory init --mode autonomous`.",
+      "`--headless` maps only to `factory init --mode headless`.",
+      "With no recognized leading mode token, omit `--mode`; existing `factory init` records\n     `interactive`.",
+      "Repeated copies of one recognized flag are idempotent: remove them all and select that mode once.",
+      "An\nexact mode token after the first other token is request content and neither selects nor conflicts.",
+      "Natural-language intent, `--interactive`, capitalization variants, abbreviations, assignment or\npunctuation forms, quoted lookalikes, and near misses are request content, not selectors.",
+      "an existing manifest always resumes its immutable persisted\nmode. Invocation flags never reinitialize, compare, or mutate an existing run's mode.",
+      "Using only the request remainder produced by mode admission:",
+    ]) assert.ok(markdown.includes(fragment), `skill mode-admission contract is missing: ${fragment}`);
+    assert.equal(markdown.includes("Only when the invocation explicitly requests it."), false);
+    assert.equal(markdown.includes("Never infer it from vague wording."), false);
     // Join shell continuations so one command is one string, then read only code — fenced
     // blocks and inline spans — so prose cannot be mistaken for an invocation.
     const text = markdown.replace(/\\\n\s*/gu, " ");
