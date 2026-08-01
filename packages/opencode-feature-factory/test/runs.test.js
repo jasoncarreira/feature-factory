@@ -175,14 +175,22 @@ describe("run projection", () => {
       seedRun(root, "old-1", RUN({
         run_id: "old-1", status: "completed", updated_at: "2026-07-30T09:00:00.000Z",
       }));
-      seedRun(root, "app-2", RUN({ run_id: "app-2", updated_at: "2026-07-30T08:00:00.000Z" }));
+      seedRun(root, "app-2", RUN({
+        run_id: "app-2", updated_at: "2026-07-30T08:00:00.000Z", pr_base: "integration",
+      }));
 
-      const { runs, active } = pollRuns(root);
+      const snapshot = pollRuns(root);
+      const { runs, active } = snapshot;
       assert.equal(runs.length, 2);
+      assert.deepEqual(runs.map((run) => [run.run_id, run.valid]), [["old-1", true], ["app-2", true]],
+        "pre-change and pr_base-bearing manifests are both listed as valid");
       // Newer by timestamp, but terminal: it must not become the headline.
       assert.equal(runs[0].run_id, "old-1", "listing is newest first");
       assert.equal(active.run_id, "app-2", "the still-running run is the active one");
       assert.equal(runs.find((run) => run.run_id === "old-1").terminal, true);
+      assert.deepEqual(renderLines(snapshot), [
+        "app-2", "running  interactive  feature/app-1", "next: gate:story", "(1 other run)",
+      ], "the recorded PR base does not change sidebar rendering");
 
       // And with nothing live, the fallback features the newest *terminal* run. It is reported, not
       // featured: one line, no branch, mode, next action or terminal reason. Shaped like a run in

@@ -1,22 +1,15 @@
-// The single write path. Deliberately NOT part of the package's public exports:
-// package.json exposes state/index.js as the root, and handing consumers a mutation
-// entry point would contradict the read-only boundary the plugin package relies on.
-// Only bin/factory.js imports this.
+// The sole run.json write path is private to bin/factory.js.
+// The package root exports reads, preserving the plugin's read-only boundary.
 //
 //   lock -> read -> validate -> apply -> validate -> CAS -> reobserve -> CAS -> rename
 //
-// `apply` receives a structured clone and returns the next state. It never sees the
-// lock, the file, or the rename.
+// Contracts validate every family before atomic rename replacement.
+// `apply` receives a structured clone, never the lock, file, or rename.
+// Initialization is the only write outside this path and uses create-only publication.
 import { validateRun } from "./schema.js";
 import { coordinateRunJsonTransition } from "../core/write-core.js";
 import { FAMILY_CONTRACTS } from "../core/contracts.js";
 
-// The single write path. Every CLI command is one call to this.
-//
-//   lock -> read -> validate -> apply -> validate -> re-read+compare (CAS) -> rename
-//
-// `apply` receives a structured clone and returns the next state. It never sees
-// the lock, the file, or the rename.
 export async function transition(runDir, { participants, apply, reobservers, hooks } = {}) {
   const descriptor = Object.freeze({
     participants: Object.freeze((participants ?? []).map((entry) => Object.freeze({ ...entry }))),

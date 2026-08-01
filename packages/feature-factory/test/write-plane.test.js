@@ -21,6 +21,10 @@ describe("atomic writer", () => {
     try {
       await writeProtectedJsonAtomic(dir, "run.json", { version: 1 });
       assert.deepEqual(JSON.parse(readFileSync(join(dir, "run.json"), "utf8")), { version: 1 });
+      await writeProtectedJsonAtomic(dir, "run.json", { version: 2 });
+      await assert.rejects(() => writeProtectedJsonAtomic(dir, "run.json", { version: 3 }, { createOnly: true }),
+        /protected create target already exists/u);
+      assert.deepEqual(JSON.parse(readFileSync(join(dir, "run.json"), "utf8")), { version: 2 });
       assert.deepEqual(hidden(dir), [], "no temp file may survive a successful write");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -79,6 +83,16 @@ describe("atomic writer", () => {
       }), /protected file commit failed/u);
       assert.equal(readFileSync(join(dir, "run.json"), "utf8"), before, "a refused write must not be partially visible");
       assert.deepEqual(hidden(dir), []);
+
+      const race = root("create-race");
+      try {
+        await assert.rejects(() => writeProtectedJsonAtomic(race, "run.json", { writer: "loser" }, {
+          createOnly: true,
+          hooks: { beforeCommit: () => writeProtectedJsonAtomic(race, "run.json", { writer: "winner" }, { createOnly: true }) },
+        }), /protected create target already exists/u);
+        assert.deepEqual(JSON.parse(readFileSync(join(race, "run.json"), "utf8")), { writer: "winner" });
+        assert.deepEqual(hidden(race), []);
+      } finally { rmSync(race, { recursive: true, force: true }); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 

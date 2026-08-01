@@ -76,6 +76,9 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
       [(run) => { run.slices = [{ id: "fe", stack: "frontend", depends_on: ["nope"], status: "pending", worktree: null, branch: null, attempts: 1, evidence_ref: null, review_ref: null, merge_commit: null }]; }, /unknown slice 'nope'/u],
       [(run) => { run.slices = [{ id: "be", stack: "backend", depends_on: [], status: "merged", worktree: null, branch: null, attempts: 1, evidence_ref: null, review_ref: null, merge_commit: null }]; }, /merge_commit: is required when a slice is merged/u],
       [(run) => { run.status = "blocked"; }, /terminal_result: is required when status is blocked/u],
+      [(run) => { run.pr_base = ""; }, /run\.pr_base: must be a non-empty string/u],
+      [(run) => { run.pr_base = "   "; }, /run\.pr_base: must be a non-empty string/u],
+      [(run) => { run.pr_base = 42; }, /run\.pr_base: must be a non-empty string/u],
     ]) {
       const run = baseRun();
       mutate(run);
@@ -103,6 +106,8 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
 
   it("accepts the baseline record it is meant to accept", () => {
     assert.equal(validateRun(baseRun()).run_id, "app-1");
+    assert.equal(validateRun(baseRun({ pr_base: null })).pr_base, null);
+    assert.equal(validateRun(baseRun({ pr_base: "integration" })).pr_base, "integration");
   });
 });
 
@@ -181,6 +186,13 @@ describe("attack 11 — a concurrent writer changes run.json mid-transition", ()
 describe("family contracts refuse transitions the schema alone would allow", () => {
   const cases = [
     ["run identity is immutable", (state) => ({ ...state, run_id: "app-2", updated_at: LATER }), /run_id is immutable/u],
+    ["an absent PR base cannot become null", (state) => ({ ...state, pr_base: null, updated_at: LATER }), /envelope\.pr_base is immutable/u],
+    ["an absent PR base cannot become a string", (state) => ({ ...state, pr_base: "main", updated_at: LATER }), /envelope\.pr_base is immutable/u],
+    ["a null PR base cannot become absent", (state) => { const next = { ...state, updated_at: LATER }; delete next.pr_base; return next; }, /envelope\.pr_base is immutable/u, { pr_base: null }],
+    ["a null PR base cannot become a string", (state) => ({ ...state, pr_base: "main", updated_at: LATER }), /envelope\.pr_base is immutable/u, { pr_base: null }],
+    ["a string PR base cannot become absent", (state) => { const next = { ...state, updated_at: LATER }; delete next.pr_base; return next; }, /envelope\.pr_base is immutable/u, { pr_base: "main" }],
+    ["a string PR base cannot become null", (state) => ({ ...state, pr_base: null, updated_at: LATER }), /envelope\.pr_base is immutable/u, { pr_base: "main" }],
+    ["a string PR base cannot change", (state) => ({ ...state, pr_base: "release", updated_at: LATER }), /envelope\.pr_base is immutable/u, { pr_base: "main" }],
     ["updated_at cannot move backwards", (state) => ({ ...state, updated_at: "2026-07-29T00:00:00.000Z" }), /cannot move backwards/u],
     ["a gate cannot open already approved", (state) => ({ ...state, updated_at: LATER, gates: { ...state.gates, brief: { status: "approved", at: LATER, artifact: null } } }), /must open as pending/u],
     ["a decided gate cannot be re-decided", (state) => ({ ...state, updated_at: LATER, gates: { story: { status: "approved", at: LATER, artifact: "artifacts/story.md" } } }), null],
@@ -188,10 +200,10 @@ describe("family contracts refuse transitions the schema alone would allow", () 
     ["only a terminalize transition may enter blocked", (state) => ({ ...state, updated_at: LATER, status: "blocked", terminal_result: { status: "blocked", reason: "sneaked in" } }), /only a terminalize transition may enter blocked/u],
   ];
 
-  for (const [label, apply, pattern] of cases) {
+  for (const [label, apply, pattern, overrides] of cases) {
     if (!pattern) continue;
     it(label, async () => {
-      const f = fixture(`contract-${label.replace(/\W+/gu, "-").slice(0, 20)}`);
+      const f = fixture(`contract-${label.replace(/\W+/gu, "-").slice(0, 20)}`, overrides);
       try {
         const before = bytes(f.runDir);
         await assert.rejects(() => transition(f.runDir, {
@@ -204,14 +216,20 @@ describe("family contracts refuse transitions the schema alone would allow", () 
   }
 
   it("permits a legitimate gate decision", async () => {
-    const f = fixture("gate-ok");
-    try {
-      const next = await transition(f.runDir, {
-        participants: [{ familyId: "gates", mode: "decide" }],
-        apply: (state) => ({ ...state, updated_at: LATER, gates: { story: { status: "approved", at: LATER, artifact: "artifacts/story.md" } } }),
-      });
-      assert.equal(next.gates.story.status, "approved");
-    } finally { rmSync(f.root, { recursive: true, force: true }); }
+    for (const [name, overrides, expected] of [
+      ["absent", undefined, undefined], ["null", { pr_base: null }, null], ["string", { pr_base: "main" }, "main"],
+    ]) {
+      const f = fixture(`gate-ok-${name}`, overrides);
+      try {
+        const next = await transition(f.runDir, {
+          participants: [{ familyId: "gates", mode: "decide" }],
+          apply: (state) => ({ ...state, updated_at: LATER, gates: { story: { status: "approved", at: LATER, artifact: "artifacts/story.md" } } }),
+        });
+        assert.equal(next.gates.story.status, "approved");
+        assert.equal(next.pr_base, expected);
+        assert.equal(Object.hasOwn(next, "pr_base"), name !== "absent");
+      } finally { rmSync(f.root, { recursive: true, force: true }); }
+    }
   });
 
   it("terminalizes through the declared mode", async () => {

@@ -16,7 +16,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,21 @@ function project(name) {
   git("add", "-A");
   git("commit", "-q", "-m", "base");
   return repo;
+}
+
+function addWorktree(repo, branch = "integration") {
+  const path = join(repo, "configured");
+  execFileSync("git", ["branch", branch], { cwd: repo });
+  execFileSync("git", ["worktree", "add", "-q", path, branch], { cwd: repo });
+  return path;
+}
+
+function removePrBase(repo) {
+  const path = join(repo, ".factory", RUN, "run.json");
+  const run = JSON.parse(readFileSync(path, "utf8"));
+  delete run.pr_base;
+  writeFileSync(path, `${JSON.stringify(run, null, 2)}\n`);
+  return path;
 }
 
 // Small steps rather than one do-everything fixture: a claim should set up only what it asserts
@@ -280,6 +295,187 @@ const CLAIMS = [
       // The whole invocation an orchestrator should need. Both required flags are gone, and what was
       // recorded is reported back so the branch it must create is not left implicit.
       return factory(repo, ["init", RUN, "--now", NOW]);
+    },
+  },
+  {
+    id: "pr-base-uses-configured-worktree",
+    file: "skills/feature/SKILL.md",
+    fragment: "By default, `pr_base` is the symbolic branch checked out in that configured worktree",
+    expect: "allowed",
+    matches: /worktree: configured\npr_base: integration/u,
+    act(repo) {
+      addWorktree(repo);
+      const initialized = factory(repo, ["init", RUN, "--worktree", "configured", "--now", NOW]);
+      assert.equal(initialized.ok, true, initialized.out);
+      const status = factory(repo, ["status", RUN, "--json"]);
+      assert.equal(status.ok, true, status.out);
+      assert.equal(JSON.parse(status.out).pr_base, "integration");
+      return initialized;
+    },
+  },
+  {
+    id: "pr-base-override-bypasses-worktree-observation",
+    file: "skills/feature/SKILL.md",
+    fragment: "`--pr-base <target-branch>` takes precedence and bypasses worktree",
+    expect: "allowed",
+    matches: /worktree: missing\npr_base: release\/1/u,
+    act(repo) {
+      const initialized = factory(repo, ["init", RUN, "--worktree", "missing", "--pr-base", "release/1", "--now", NOW]);
+      assert.equal(initialized.ok, true, initialized.out);
+      const status = factory(repo, ["status", RUN, "--json"]);
+      assert.equal(status.ok, true, status.out);
+      assert.equal(JSON.parse(status.out).pr_base, "release/1");
+      return initialized;
+    },
+  },
+  {
+    id: "detached-pr-base-is-refused",
+    file: "skills/feature/SKILL.md",
+    fragment: "Without an override, a detached, missing, or outside-repository configured worktree is",
+    expect: "refused",
+    matches: /could not observe a symbolic branch in PR base worktree '\.'; pass --pr-base <branch> explicitly/u,
+    act(repo) {
+      execFileSync("git", ["checkout", "-q", "--detach"], { cwd: repo });
+      const result = factory(repo, ["init", RUN, "--now", NOW]);
+      assert.equal(existsSync(join(repo, ".factory", RUN)), false);
+      return result;
+    },
+  },
+  {
+    id: "missing-pr-base-worktree-is-refused",
+    file: "skills/feature/SKILL.md",
+    fragment: "Without an override, a detached, missing, or outside-repository configured worktree is",
+    expect: "refused",
+    matches: /PR base worktree 'missing' is not observable/u,
+    act(repo) {
+      const result = factory(repo, ["init", RUN, "--worktree", "missing", "--now", NOW]);
+      assert.equal(existsSync(join(repo, ".factory", RUN)), false);
+      return result;
+    },
+  },
+  {
+    id: "outside-pr-base-worktree-is-refused",
+    file: "skills/feature/SKILL.md",
+    fragment: "Without an override, a detached, missing, or outside-repository configured worktree is",
+    expect: "refused",
+    matches: /PR base worktree '\.\.' is not observable/u,
+    act(repo) {
+      const result = factory(repo, ["init", RUN, "--worktree", "..", "--now", NOW]);
+      assert.equal(existsSync(join(repo, ".factory", RUN)), false);
+      return result;
+    },
+  },
+  {
+    id: "existing-new-manifest-is-resumed-not-reinitialized",
+    file: "skills/feature/SKILL.md",
+    fragment: "do not call `factory init` again.",
+    expect: "refused",
+    matches: /run 'app-1' already exists; run 'factory status app-1 --json' and resume/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
+      const path = join(repo, ".factory", RUN, "run.json");
+      const before = readFileSync(path, "utf8");
+      const result = factory(repo, ["init", RUN, "--pr-base", "other", "--now", NOW]);
+      assert.equal(readFileSync(path, "utf8"), before);
+      return result;
+    },
+  },
+  {
+    id: "existing-manifest-resumes-from-status",
+    file: "skills/feature/SKILL.md",
+    fragment: "run `factory status <run-id> --json` and resume; never",
+    expect: "allowed",
+    matches: /"valid": true[\s\S]*"next": "gate:story"/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
+      return factory(repo, ["status", RUN, "--json"]);
+    },
+  },
+  {
+    id: "existing-legacy-manifest-is-resumed-not-backfilled",
+    file: "skills/feature/SKILL.md",
+    fragment: "existing manifest is never replaced,",
+    expect: "refused",
+    matches: /run 'app-1' already exists; run 'factory status app-1 --json' and resume/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
+      const path = removePrBase(repo);
+      const before = readFileSync(path, "utf8");
+      const result = factory(repo, ["init", RUN, "--pr-base", "other", "--now", NOW]);
+      assert.equal(readFileSync(path, "utf8"), before);
+      assert.equal(Object.hasOwn(JSON.parse(before), "pr_base"), false);
+      return result;
+    },
+  },
+  {
+    id: "scaffold-only-init-is-retryable",
+    file: "skills/feature/SKILL.md",
+    fragment: "A scaffold-only run directory without\n`run.json` is retryable.",
+    expect: "allowed",
+    matches: /pr_base: feature/u,
+    act(repo) {
+      mkdirSync(join(repo, ".factory", RUN, "plan"), { recursive: true });
+      return factory(repo, ["init", RUN, "--now", NOW]);
+    },
+  },
+  {
+    id: "new-status-exposes-pr-base",
+    file: "skills/feature/SKILL.md",
+    fragment: "resolve the unknown create outcome with",
+    expect: "allowed",
+    matches: /pr_base: feature/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
+      const json = factory(repo, ["status", RUN, "--json"]);
+      assert.equal(JSON.parse(json.out).pr_base, "feature");
+      return factory(repo, ["status", RUN]);
+    },
+  },
+  {
+    id: "unknown-init-outcome-stops-on-invalid-manifest",
+    file: "skills/feature/SKILL.md",
+    fragment: "an invalid manifest means stop and surface it without overwriting it.",
+    expect: "allowed",
+    matches: /"valid": false[\s\S]*"error": "run: unknown keys: unexpected"/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
+      const path = join(repo, ".factory", RUN, "run.json");
+      const run = JSON.parse(readFileSync(path, "utf8"));
+      run.unexpected = true;
+      writeFileSync(path, `${JSON.stringify(run, null, 2)}\n`);
+      const before = readFileSync(path, "utf8");
+      const result = factory(repo, ["status", RUN, "--json"]);
+      assert.equal(readFileSync(path, "utf8"), before);
+      return result;
+    },
+  },
+  {
+    id: "legacy-step-six-requires-human-base-without-inference-or-backfill",
+    file: "skills/feature/SKILL.md",
+    fragment: "For a legacy manifest where `pr_base` is absent or null, stop and\nrequire a human/operator to choose or confirm the exact target, then pass that value through\n`gh pr create --base`. Never infer it from HEAD, the feature branch, repository or forge defaults, and\nnever backfill the legacy manifest.",
+    expect: "allowed",
+    matches: /"pr_base": null/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
+      const path = removePrBase(repo);
+      const before = readFileSync(path, "utf8");
+      const plain = factory(repo, ["status", RUN]);
+      assert.equal(plain.out.includes("pr_base:"), false);
+      const result = factory(repo, ["status", RUN, "--json"]);
+      assert.equal(readFileSync(path, "utf8"), before);
+      assert.equal(Object.hasOwn(JSON.parse(before), "pr_base"), false);
+      return result;
+    },
+  },
+  {
+    id: "step-six-reads-recorded-pr-base",
+    file: "skills/feature/SKILL.md",
+    fragment: "gh pr create --draft --base \"<pr_base>\" --head \"<branch>\" --title \"<title>\" --body-file \"<body-file>\"",
+    expect: "allowed",
+    matches: /"pr_base": "feature"/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
+      return factory(repo, ["status", RUN, "--json"]);
     },
   },
 ];
