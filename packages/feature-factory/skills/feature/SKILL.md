@@ -91,30 +91,48 @@ Only when the invocation explicitly requests it. Never infer it from vague wordi
    an agent's, and only after Gate 1.
 2. **Design source?** If a design URL is present, plan to run `design-interpreter`.
 
-Establish the control plane:
+Before initialization, check the exact manifest path at `.factory/<run-id>/run.json`. If `run.json`
+exists, do not call `factory init` again. This applies equally to current and legacy manifests: read
+status, claim or resume the lock, and continue from `next`.
+
+For a run with no manifest, establish the control plane:
 
 ```sh
-factory init <run-id> [--jira <KEY>] [--mode <mode>]
+factory init <run-id> [--jira <KEY>] [--mode <mode>] [--pr-base <target-branch>]
 factory lock <run-id> claim --session <session-id>
 ```
 
 `run-id` is the ticket key lowercased, else a slug of the request. `init` creates `plan/`,
-`artifacts/`, `evidence/`, `reviews/` and writes the manifest.
+`artifacts/`, `evidence/`, `reviews/` and writes the manifest. A scaffold-only run directory without
+`run.json` is retryable. Initialization is create-only: an existing manifest is never replaced,
+validated into a new shape, or backfilled.
 
-**Do not ask the engineer for a branch or a worktree.** Both are derived: the branch defaults to
-`feature/<run-id>` and the worktree to the current checkout, and `init` reports what it recorded. The
-engineer supplies a branch only if they say so in the invocation, or if this repository has a naming
-convention that says otherwise — check the repository's agent instructions (`AGENTS.md` or
-`CLAUDE.md`, whichever this repo has) before overriding, and pass `--branch` if it does.
+**Do not ask the engineer for a branch or a worktree.** The feature branch defaults to
+`feature/<run-id>`, the worktree defaults to the current checkout, and `init` reports what it
+recorded. By default, `pr_base` is the symbolic branch checked out in that configured worktree, not
+the process working directory. `--pr-base <target-branch>` takes precedence and bypasses worktree
+observation. Without an override, a detached, missing, or outside-repository configured worktree is
+refused rather than replaced with a SHA, feature branch, repository default, or forge default.
+
+The engineer supplies a feature branch only if they say so in the invocation, or if this repository
+has a naming convention that says otherwise — check the repository's agent instructions (`AGENTS.md`
+or `CLAUDE.md`, whichever this repo has) before overriding, and pass `--branch` if it does. Supply
+`--pr-base` only for an explicit target override; ordinary PR-base input is derived rather than asked
+of the engineer.
 
 The recorded branch is a statement of intent, not something that exists yet. You create it in Step 4,
 and it must match exactly what `init` reported: the first slice activation observes that branch and
 fails if it is absent.
 
+If init reports that the run already exists, run `factory status <run-id> --json` and resume; never
+retry init. If init says the run may already be initialized, resolve the unknown create outcome with
+status before retrying: valid state means claim or resume and never retry; no manifest with scaffolding
+only means init may be retried; an invalid manifest means stop and surface it without overwriting it.
+
 If `factory lock` reports the run is held by another session, it tells you the owner: **resume** with
 that session id, **steal** it (`factory lock <run-id> steal --session <session-id>`) if the holder is gone, or abort. If
-`run.json` already exists this is a **resume** — read `factory status <run-id> --json` and continue
-from its `next` field rather than restarting.
+`run.json` already exists this is a **resume** — continue from the status result's `next` field rather
+than restarting.
 
 Refresh the lock as the run progresses with `factory heartbeat <run-id> --session <session-id>`,
 especially around long waits, so a crashed run becomes reclaimable rather than wedged.
@@ -355,15 +373,24 @@ factory gate <run-id> pre_pr approved          # present the new diff and re-app
 
 ## Step 6 — Draft PR
 
-Push the feature branch, then create the PR as a **draft** and record it:
+Read the delivery intent from status immediately before the external effects. Push the recorded feature
+branch, create the PR as a **draft** against the exact recorded target, and then record its URL:
 
 ```sh
+factory status <run-id> --json
+gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"
 factory pr <run-id> --url <pr-url>
 ```
 
+The `gh` call is the orchestrator's external effect; the package makes no forge call and `factory pr`
+does not verify the forge's base. For a legacy manifest where `pr_base` is absent or null, stop and
+require a human/operator to choose or confirm the exact target, then pass that value through
+`gh pr create --base`. Never infer it from HEAD, the feature branch, repository or forge defaults, and
+never backfill the legacy manifest.
+
 `pr_url` is immutable once recorded — a run has one PR, and overwriting the URL would hide a second
-one. If PR creation returns an unknown outcome, re-observe whether the PR exists before retrying, and
-record the existing PR rather than creating another.
+one. If PR creation returns an unknown outcome, re-observe whether the PR exists before retrying and
+record the existing PR rather than creating another. On a confirmed retry, use the same explicit base.
 
 `factory pr` re-runs every Gate 3 readiness check rather than trusting the approval. That is not
 redundancy: between the approval and this call the integration head can move, and if it has, the PR
