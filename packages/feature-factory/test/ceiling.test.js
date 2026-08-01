@@ -32,9 +32,9 @@ const CLI_COMMANDS = [
 
 const RUN_JSON_KEYS = [
   // viso's fifteen
-  "version", "run_id", "jira_key", "branch", "worktree", "created_at", "updated_at",
+  "version", "run_id", "jira_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
   "status", "max_parallel_slices", "max_retries", "gates", "steps", "slices", "validator", "pr_url",
-  // the two justified additions. base_commit was dropped: it was written and never
+  // the three justified additions. base_commit was dropped: it was written and never
   // read, which is the standard a durable field has to meet.
   "mode", "terminal_result",
 ];
@@ -156,6 +156,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       }
     }
     assert.deepEqual(unknown, [], "the skill documents a command or flag the CLI does not accept");
+    const cliSource = readFileSync(join(pkg, "bin", "factory.js"), "utf8");
+    const readme = readFileSync(resolve(pkg, "..", "..", "README.md"), "utf8");
+    assert.ok(COMMANDS.init.includes("--pr-base"));
+    assert.ok(cliSource.includes("[--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET]"));
+    assert.ok(markdown.includes("factory init <run-id> [--jira <KEY>] [--mode <mode>] [--pr-base <target-branch>]"));
+    assert.ok(readme.includes("factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET]"));
+    assert.ok(markdown.includes('gh pr create --draft --base "<pr_base>" --head "<branch>"'));
 
     // Omissions and wrong argument *values* cannot be derived from the flag lists, so the few
     // that blocked the path are named. Each entry is one refusal a reader would otherwise hit.
@@ -250,7 +257,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 17, "seventeen: viso's fifteen plus mode and terminal_result");
+    assert.equal(RUN_KEYS.length, 18, "eighteen: viso's fifteen plus mode, terminal_result, and pr_base");
   });
 
   it("registers exactly the declared families", () => {

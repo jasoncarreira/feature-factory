@@ -70,7 +70,7 @@ Twelve commands. Every one that changes state is a single checked transition, an
 an error rather than a silently ignored typo.
 
 ```
-factory init <run-id> --branch B --worktree W [--jira KEY] [--mode interactive|headless|autonomous]
+factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--jira KEY] [--mode interactive|headless|autonomous]
 factory status <run-id> [--json]
 factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
 factory heartbeat <run-id> --session ID
@@ -86,6 +86,31 @@ factory terminal <run-id> <completed|blocked|partial|needs-human> --reason TEXT
 
 Run state lives at `<repo>/.factory/<run-id>/run.json` and should be gitignored — if it is
 tracked, every slice diff carries manifest churn and every merge trips the privileged-path refusal.
+
+`branch` is the feature branch the run builds and pushes. `pr_base` is the intended moving branch
+that the draft PR targets; it is not a slice `base_ref` SHA. By default, init records the symbolic
+branch checked out in the configured worktree, resolved from `--repo`, even when the process is
+running elsewhere. `--pr-base` is an explicit override and bypasses that observation. Without an
+override, detached HEAD or an unobservable configured worktree fails closed. The recorded value is
+immutable and appears in both plain and JSON status.
+
+Initialization is create-only. If `run.json` already exists, use `factory status <run-id> --json` and
+resume instead of running init again; existing current and legacy manifests are never overwritten or
+backfilled. A scaffold-only `.factory/<run-id>/` directory without `run.json` is safe to retry. If init
+reports that creation may already have succeeded, status resolves the unknown outcome before any
+retry: resume valid state, retry only when no manifest exists, and stop on invalid state.
+
+The orchestrator creates the external draft PR with the recorded values before recording its URL:
+
+```sh
+factory status <run-id> --json
+gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"
+factory pr <run-id> --url <pr-url>
+```
+
+For a pre-change manifest whose `pr_base` is absent or null, a human/operator must choose or confirm
+the exact target passed to `gh --base`. Do not infer or backfill it. The factory records delivery
+intent but does not query the forge to verify the PR's actual base.
 
 ## What it refuses
 
