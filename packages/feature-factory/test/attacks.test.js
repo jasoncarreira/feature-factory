@@ -193,6 +193,14 @@ describe("family contracts refuse transitions the schema alone would allow", () 
     ["a string PR base cannot become absent", (state) => { const next = { ...state, updated_at: LATER }; delete next.pr_base; return next; }, /envelope\.pr_base is immutable/u, { pr_base: "main" }],
     ["a string PR base cannot become null", (state) => ({ ...state, pr_base: null, updated_at: LATER }), /envelope\.pr_base is immutable/u, { pr_base: "main" }],
     ["a string PR base cannot change", (state) => ({ ...state, pr_base: "release", updated_at: LATER }), /envelope\.pr_base is immutable/u, { pr_base: "main" }],
+    // Mode decides who may decide the gates: interactive stops at each one, headless records
+    // needs-human, autonomous decides without a human. It is set once by `init` and nothing reads it
+    // afterwards, which is why it was missed — a field that looks inert. Left writable, a run could be
+    // flipped to autonomous mid-flight and the manifest would read as though it always had been: the
+    // record of who was entitled to decide, rewritable by the party deciding. This does not make a
+    // decision verifiable — the factory cannot tell a human's approval from an agent's, both being the
+    // same command — it makes the recorded intent durable.
+    ["mode cannot change after init", (state) => ({ ...state, mode: "autonomous", updated_at: LATER }), /envelope\.mode is immutable/u],
     ["updated_at cannot move backwards", (state) => ({ ...state, updated_at: "2026-07-29T00:00:00.000Z" }), /cannot move backwards/u],
     ["a gate cannot open already approved", (state) => ({ ...state, updated_at: LATER, gates: { ...state.gates, brief: { status: "approved", at: LATER, artifact: null } } }), /must open as pending/u],
     ["a decided gate cannot be re-decided", (state) => ({ ...state, updated_at: LATER, gates: { story: { status: "approved", at: LATER, artifact: "artifacts/story.md" } } }), null],
