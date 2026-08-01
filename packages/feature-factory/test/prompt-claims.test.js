@@ -422,17 +422,39 @@ const CLAIMS = [
     },
   },
   {
-    id: "legacy-status-exposes-null-only-in-json",
+    id: "unknown-init-outcome-stops-on-invalid-manifest",
     file: "skills/feature/SKILL.md",
-    fragment: "For a legacy manifest where `pr_base` is absent or null, stop and",
+    fragment: "an invalid manifest means stop and surface it without overwriting it.",
+    expect: "allowed",
+    matches: /"valid": false[\s\S]*"error": "run: unknown keys: unexpected"/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
+      const path = join(repo, ".factory", RUN, "run.json");
+      const run = JSON.parse(readFileSync(path, "utf8"));
+      run.unexpected = true;
+      writeFileSync(path, `${JSON.stringify(run, null, 2)}\n`);
+      const before = readFileSync(path, "utf8");
+      const result = factory(repo, ["status", RUN, "--json"]);
+      assert.equal(readFileSync(path, "utf8"), before);
+      return result;
+    },
+  },
+  {
+    id: "legacy-step-six-requires-human-base-without-inference-or-backfill",
+    file: "skills/feature/SKILL.md",
+    fragment: "For a legacy manifest where `pr_base` is absent or null, stop and\nrequire a human/operator to choose or confirm the exact target, then pass that value through\n`gh pr create --base`. Never infer it from HEAD, the feature branch, repository or forge defaults, and\nnever backfill the legacy manifest.",
     expect: "allowed",
     matches: /"pr_base": null/u,
     act(repo) {
       assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
-      removePrBase(repo);
+      const path = removePrBase(repo);
+      const before = readFileSync(path, "utf8");
       const plain = factory(repo, ["status", RUN]);
       assert.equal(plain.out.includes("pr_base:"), false);
-      return factory(repo, ["status", RUN, "--json"]);
+      const result = factory(repo, ["status", RUN, "--json"]);
+      assert.equal(readFileSync(path, "utf8"), before);
+      assert.equal(Object.hasOwn(JSON.parse(before), "pr_base"), false);
+      return result;
     },
   },
   {
