@@ -1,9 +1,9 @@
-// Protected writes use an exclusive same-directory temp, file fsync, and directory fsync.
-// Ordinary writes recheck target safety before atomic rename replacement.
-// Create-only writes preflight absence and atomically publish with a hard link.
-// The target is authoritative after publication; cleanup removes only the temp name.
-// Directory fsync makes a completed publication durable across crashes.
-// beforeCommit is the final race seam used by compare-and-swap and create-only tests.
+// Exclusive same-directory temp, then fsync of the file and of the directory. The directory fsync is
+// what makes a completed publication survive power loss, and attack 9 (crash-recovery replay) rests
+// on it. Ordinary writes recheck the target immediately before the rename, not only up front: this
+// writes into a working tree, so a local process swapping run.json for a symlink inside that window
+// is a real failure mode and an up-front-only check is a TOCTOU hole. Create-only writes preflight
+// absence and publish by link. beforeCommit is the last race seam, used by CAS and create-only tests.
 import { link as fsLink, lstat, open, rename as fsRename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join, resolve, sep } from "node:path";
