@@ -1,30 +1,25 @@
 #!/usr/bin/env node
-// The factory CLI. Every command that changes state is one checked transition:
-//
-//   lock -> read -> validate -> apply -> validate -> compare-and-swap -> rename
-//
-// Nothing else writes run.json. The orchestrating model calls these commands
-// instead of hand-writing JSON, which is the entire reason this package exists.
-//
-// Flags are declared per command and an unknown flag is an error. The predecessor
-// silently ignored unknown flags on ~36 of ~40 subcommands, which turns a typo
-// into a missing field.
-import { mkdirSync, realpathSync } from "node:fs";
+// Every mutating command uses a checked transition and atomic compare-and-swap rename.
+// Initialization alone creates run.json through atomic no-clobber publication.
+// The orchestrator calls this CLI instead of writing control-plane state directly.
+// Flags are declared per command; unknown options fail rather than becoming missing fields.
+// Schema validation surrounds every state write.
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { readFileSync } from "node:fs";
 import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
-import { buildEvidence, evidenceRef, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
+import { buildEvidence, evidenceRef, git, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
-import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
-import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
+import { ProtectedWriteError, writeProtectedJsonAtomic } from "../core/atomic-write.js";
+import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, validateRun } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SessionLockHeldError,
 } from "../state/session-lock.js";
 
 export const COMMANDS = Object.freeze({
-  init: Object.freeze(["--repo", "--branch", "--worktree", "--jira", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
+  init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--jira", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
   // No --force: `lock <id> steal` is the same operation with a name that says what it
   // does, and two spellings of "take someone else's lock" is one too many.
@@ -405,26 +400,32 @@ const HANDLERS = {
     });
   },
   async init([runId], flags) {
-    // Both derived by default: the run-id already carries the identity, so requiring the same fact
-    // twice is a second place for it to be wrong, caught only three commands later when the first
-    // slice observes its head. Safe to derive because the name is a *record*, not an action — this
-    // CLI never creates a branch, so it states intent the orchestrator must satisfy and activation
-    // verifies. A caller wanting a different branch still passes one.
+    const runDir = runDirFor(flags, runId);
+    const existingError = `run '${runId}' already exists; run 'factory status ${runId} --json' and resume`;
+    if (existsSync(join(runDir, "run.json"))) throw new CliError(existingError);
+    // Derived branch and worktree record intent without performing repository actions.
+    // Explicit values still win when the caller needs a different shape.
     const branch = flags.branch ?? `feature/${runId}`;
     const worktree = flags.worktree ?? ".";
     const mode = flags.mode ?? "interactive";
     if (!MODES.includes(mode)) throw new CliError(`--mode must be one of ${MODES.join(" | ")}`);
-    const runDir = runDirFor(flags, runId);
-    for (const dir of ["plan", "artifacts", "evidence", "reviews"]) {
-      mkdirSync(join(runDir, dir), { recursive: true });
+    const repo = resolve(flags.repo ?? process.cwd());
+    let prBase = flags.prBase;
+    if (prBase === undefined) {
+      const resolvedWorktree = resolveWorktree(repo, worktree);
+      if (!resolvedWorktree) throw new CliError(`PR base worktree '${worktree}' is not observable`);
+      const observed = git(resolvedWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+      prBase = observed.ok ? observed.stdout.trim() : "";
+      if (!prBase) throw new CliError(`could not observe a symbolic branch in PR base worktree '${worktree}'; pass --pr-base <branch> explicitly`);
     }
     const at = stamp(flags);
-    const run = {
+    const run = validateRun({
       version: SCHEMA_VERSION,
       run_id: runId,
       jira_key: flags.jira ?? null,
       branch,
       worktree,
+      pr_base: prBase,
       created_at: at,
       updated_at: at,
       status: "running",
@@ -437,15 +438,22 @@ const HANDLERS = {
       validator: null,
       terminal_result: null,
       pr_url: null,
-    };
-    // init is the one write with no prior state, so it goes through the schema
-    // directly rather than through a transition.
-    const { writeProtectedJsonAtomic } = await import("../core/atomic-write.js");
-    const { validateRun } = await import("../state/schema.js");
-    await writeProtectedJsonAtomic(runDir, "run.json", validateRun(run));
-    // Reported because they may have been derived: the caller needs to know which branch the
-    // orchestrator is now expected to create.
-    return emit(flags, { run_id: runId, run_dir: runDir, branch, worktree, status: "running", mode });
+    });
+    for (const dir of ["plan", "artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
+    try {
+      await writeProtectedJsonAtomic(runDir, "run.json", run, { createOnly: true });
+    } catch (error) {
+      if (error instanceof ProtectedWriteError && error.message === "protected create target already exists") throw new CliError(existingError);
+      if (error instanceof ProtectedWriteError && [
+        "protected create published target but initial temporary cleanup failed",
+        "protected create published target but temporary cleanup is indeterminate",
+        "protected target is committed but directory sync failed",
+      ].includes(error.message)) {
+        throw new CliError(`run '${runId}' may already be initialized; run 'factory status ${runId} --json' before retrying`);
+      }
+      throw error;
+    }
+    return emit(flags, { run_id: runId, run_dir: runDir, branch, worktree, pr_base: prBase, status: "running", mode });
   },
 
   status([runId], flags) {
@@ -467,6 +475,7 @@ const HANDLERS = {
       status: run.status,
       mode: run.mode,
       branch: run.branch,
+      pr_base: run.pr_base ?? null,
       lock: lock.state,
       lock_session: lock.owner?.session ?? null,
       gates: Object.fromEntries(GATE_NAMES.filter((name) => run.gates[name]).map((name) => [name, run.gates[name].status])),
@@ -633,7 +642,7 @@ function emit(flags, payload) {
 function usage() {
   process.stdout.write(`factory — durable control plane for /feature runs
 
-  factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--jira KEY] [--mode interactive|headless|autonomous]
+  factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--jira KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID

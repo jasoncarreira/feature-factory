@@ -34,7 +34,7 @@ const RUN = "app-1";
 const NOW = (minute) => `2026-07-30T12:${String(minute).padStart(2, "0")}:00Z`;
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true, testPlan = ["t"] } = {}) {
+function project(name, { seed = true, testPlan = ["t"], legacy = false } = {}) {
   const repo = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(repo, "init", "-q", "-b", "feature");
   git(repo, "config", "user.email", "t@example.com");
@@ -52,6 +52,11 @@ function project(name, { seed = true, testPlan = ["t"] } = {}) {
   const runDir = join(repo, ".factory", RUN);
   const init = factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW(0)]);
   assert.equal(init.ok, true, init.stderr);
+  if (legacy) {
+    const run = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+    delete run.pr_base;
+    writeFileSync(join(runDir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
+  }
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({
     slices: [{ id: "be-thing", stack: "backend", paths: ["src/app/"], depends_on: [], acceptance: ["AC1"], test_plan: testPlan }],
   }, null, 2));
@@ -532,8 +537,8 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
   // observed, reviewed, merged, and the integration branch validated. The test-verifier
   // observation is deliberately NOT done here, so each test decides whether that stage
   // ran and the requirement can be tested in isolation.
-  function readyForPr(name) {
-    const p = project(name);
+  function readyForPr(name, options) {
+    const p = project(name, options);
     const { head: sliceHead, basePoint } = buildSlice(p.repo);
     factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
     factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
@@ -557,8 +562,16 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
   }
 
   it("records a PR against the validated head, and is idempotent on replay", () => {
-    const p = readyForPr("pr-ok");
+    const p = readyForPr("pr-ok", { legacy: true });
     try {
+      const status = factory(p.repo, ["status", RUN]);
+      assert.equal(status.ok, true, status.stderr);
+      assert.equal(status.out.pr_base, null);
+      assert.equal(factory(p.repo, ["lock", RUN, "claim", "--session", "legacy", "--branch", "feature", "--now", NOW(5)]).ok, true);
+      assert.equal(factory(p.repo, ["heartbeat", RUN, "--session", "legacy", "--now", NOW(5)]).ok, true);
+      assert.equal(factory(p.repo, ["lock", RUN, "release", "--session", "legacy", "--now", NOW(5)]).ok, true);
+      assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--now", NOW(5)]).ok, true);
+      assert.equal(Object.hasOwn(runJson(p.runDir), "pr_base"), false);
       // Gate 3 is the last transition before the skill pushes and opens the PR, so the
       // readiness refusal has to be able to land here. Isolated: the slice is merged, the
       // verdict is a GO against the current head, and the only thing missing is an
@@ -586,6 +599,14 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       assert.equal(replay.ok, true, replay.stderr);
       assert.equal(replay.out.idempotent, true);
       assert.equal(runJson(p.runDir).pr_url, "https://example.test/pr/1");
+      assert.equal(Object.hasOwn(runJson(p.runDir), "pr_base"), false);
+
+      const terminal = project("legacy-terminal", { seed: false, legacy: true });
+      try {
+        const stopped = factory(terminal.repo, ["terminal", RUN, "blocked", "--reason", "legacy stop", "--now", NOW(8)]);
+        assert.equal(stopped.ok, true, stopped.stderr);
+        assert.equal(Object.hasOwn(runJson(terminal.runDir), "pr_base"), false);
+      } finally { rmSync(terminal.repo, { recursive: true, force: true }); }
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
