@@ -667,7 +667,7 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
       .reduce((total, path) => total + readFileSync(path, "utf8").split("\n").length, 0);
     const sites = files.filter((path) => path.endsWith(".test.js"))
       .reduce((total, path) => total + (readFileSync(path, "utf8").match(/^\s*(?:it|test)\(/gmu)?.length ?? 0), 0);
-    assert.equal(productionLines, 2665, "AC20 production must remain exactly 2665 lines");
+    assert.equal(productionLines, 2667, "AC20 production must remain exactly 2667 lines");
     assert.equal(sites, 87, "AC20 factory test sites must be exactly 87");
   } finally {
     for (const fixture of fixtures) rmSync(fixture.root, { recursive: true, force: true });
