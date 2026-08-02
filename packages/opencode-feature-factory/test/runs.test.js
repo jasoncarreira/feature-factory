@@ -195,6 +195,24 @@ describe("control-plane discovery", () => {
         ["same-id", "local", true],
         ["wrong-dir", "sandbox", false],
       ], "[AC5, AC6] same-ID manifests remain distinct while deep and symlink children are rejected");
+
+        // The container itself, not a child. `readdirSync` resolves a symlinked container, so
+        // traversal crosses it before any Dirent is examined — which is exactly why the linked
+        // *child* above was already rejected while a linked container was followed. A pre-existing
+        // `.<repo>.factory-sandboxes -> elsewhere` made the sidebar enumerate another directory and
+        // report its manifests as this repository's runs, recreating the unrelated-control-plane
+        // failure the derived location exists to prevent.
+        const foreign = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-foreign-")));
+        const swapped = repo("swapped-container");
+        try {
+          seedRun(join(foreign, "foreign-run"), "foreign-run", RUN({ run_id: "foreign-run" }));
+          symlinkSync(foreign, sandboxContainer(swapped), "dir");
+          assert.deepEqual(pollRuns(swapped).runs.map((run) => run.run_id), [],
+            "[AC7] a symlinked sandbox container is refused rather than followed");
+        } finally {
+          rmSync(swapped, { recursive: true, force: true });
+          rmSync(foreign, { recursive: true, force: true });
+        }
       assert.equal(snapshot.runs[0].sandbox_path, sandbox.sandbox,
         "[AC5] a sandbox record carries its absolute sandbox path");
       assert.equal(snapshot.runs[0].manifest_path, realpathSync(join(sandbox.dir, "run.json")),

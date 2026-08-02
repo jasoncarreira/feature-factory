@@ -10,7 +10,7 @@
 // `gitdir: /main/repo/.git/worktrees/<name>`, so the main repository is derivable from that text
 // alone. Without this, opening the sidebar while a slice worktree is the cwd shows no run at all,
 // which is precisely when an operator most wants to see one.
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { CONTROL_PLANE, nextAction, readRunUnchecked, validateRun } from "feature-factory";
 
@@ -105,6 +105,16 @@ function localRuns(repo) {
 
 function sandboxRuns(repo) {
   const container = sandboxContainer(repo);
+  // The container itself must be a real directory, checked without following. `readdirSync` resolves
+  // a symlink, so a pre-existing `.<repo>.factory-sandboxes -> elsewhere` would enumerate another
+  // directory and report its manifests as this repository's runs — the unrelated-control-plane
+  // failure the derived location exists to prevent, and inconsistent with the orchestration contract,
+  // which refuses a symlinked container when it creates one.
+  //
+  // The per-entry `isDirectory()` below cannot cover this: traversal has already crossed the
+  // container before any Dirent is examined, which is why the direct-child symlink test passes while
+  // this case does not.
+  if (!isRealDirectory(container)) return [];
   let entries;
   try { entries = readdirSync(container, { withFileTypes: true }); } catch { return []; }
   return entries
@@ -218,6 +228,13 @@ function invalidRun(runId, error, source, manifestPath, sandboxPath) {
     run_id: runId, valid: false, error, source, manifest_path: manifestPath,
     sandbox_path: sandboxPath, terminal: false, deadLock: false, updated_at: null,
   };
+}
+
+function isRealDirectory(path) {
+  try {
+    const value = lstatSync(path);
+    return value.isDirectory() && !value.isSymbolicLink();
+  } catch { return false; }
 }
 
 function sandboxContainer(repo) {

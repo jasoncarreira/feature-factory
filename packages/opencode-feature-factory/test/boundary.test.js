@@ -44,7 +44,10 @@ const WRITE_PRIMITIVES = [
   "truncateSync(", "truncate(",
 ];
 
-const READ_ONLY_FS_IMPORTS = new Set(["existsSync", "readdirSync", "readFileSync", "realpathSync", "statSync"]);
+// Read-only by capability, not by convention: each name here can observe the filesystem and cannot
+// change it. `lstatSync` was added for the sandbox container check — `statSync` follows a symlink and
+// therefore cannot tell a real directory from a link to one, which is the whole question there.
+const READ_ONLY_FS_IMPORTS = new Set(["existsSync", "lstatSync", "readdirSync", "readFileSync", "realpathSync", "statSync"]);
 const FS_MUTATION_APIS = [
   "writeFile", "appendFile", "rm", "unlink", "mkdir", "rename", "copyFile", "cp", "truncate", "rmdir", "chmod", "chown", "utimes",
 ];
