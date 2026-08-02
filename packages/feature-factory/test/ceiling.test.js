@@ -418,6 +418,24 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //
     // Neither part is a feature, and the lines are the two checks plus the notes recording that the
     // original falsification of this pre-check's removal ran only where inodes are not reused.
+    //
+    // Equality was tried here and reverted, so that the argument survives instead of being re-run.
+    // `assert.strictEqual(total, 2665)` records reductions as well as growth, which is a real gain:
+    // under `<`, trimming five lines leaves five lines of headroom nobody voted for, and the next
+    // addition spends it silently. It is not worth what it costs. A run that deletes a line
+    // incidentally then fails a lock its plan never predicted, whose file it does not own, and the
+    // cheapest way back to green is to ADD a meaningless line. Manufacturing scope to satisfy an
+    // assertion is worse than the offset equality was meant to catch, and it is the move an agent
+    // optimizing for a green suite will find first. Deletions are also far more often incidental than
+    // additions, so that friction lands squarely on the behaviour this repo wants to encourage.
+    //
+    // Neither comparison catches an offset. A diff that adds one line and deletes an unrelated one
+    // nets zero either way; no assertion on a single total can see it. Run 175 did exactly that - it
+    // needed one line to split a diagnostic conflating two causes, could not raise the number because
+    // this file was outside its slice's approved paths, and paid with a comment line in the same
+    // handler. Catching that is work-reviewer's job and its prose now names it; making it unnecessary
+    // is work-decomposer's, which now bounds the expected change before paths are seeded. What is left
+    // for the assertion is unauthorized growth, and `<` does that.
     assert.ok(total < 2666, `production source is ${total} lines; the tripwire is 2666`);
   });
 

@@ -57,9 +57,14 @@ where it costs a re-read rather than a run.
 2. **Same-wave slices are file-disjoint.** If two slices would edit the same file, they cannot be in the same wave — give one a `depends_on` the other, or merge them.
 3. **Serialize integration hotspots.** These files are edited by many features and are natural collision points — any slices touching the same one go in **different waves** (serialized):
    Take the concrete list from the **research map** — the codebase-researcher names this repo's
-   registries and generated trees. The recurring shapes are: schema/migration manifests, shared
-   route or module registries, root schema files, dependency manifests, and generated output
-   (regenerated rather than hand-owned, so the slice that changes the source owns the regen).
+   registries and generated trees under `### Landmines`, and the files enforcing a repo-wide rule
+   under `### Repo-wide rules`. The recurring shapes are: schema/migration manifests, shared
+   route or module registries, root schema files, dependency manifests, generated output
+   (regenerated rather than hand-owned, so the slice that changes the source owns the regen), and
+   any file that enforces a repo-wide rule the work will move — an allowlist, a surface list, a
+   budget or limit. Give that file to exactly one slice: `paths` freeze at seeding, and a slice
+   that needs such a file without owning it is left choosing between an out-of-lane edit and
+   quietly working around the rule.
    Flag each hotspot you serialized so the orchestrator and human see why parallelism was limited.
 4. **Every AC maps to a slice.** No orphan criteria; no slice without at least one AC.
 4b. **No slice carries them all.** Where the plan has more than one slice, none may claim the entire acceptance set. Coverage and concentration are different properties, and only coverage was ever checked: a plan whose first slice claims every criterion satisfies rule 4 perfectly and is not a decomposition. A slice must be reviewable on its own — if rejecting it would read as "N categories of behaviour are still missing" rather than naming specific defects, it is too large and must be split before seeding. A genuinely small feature may still be one slice; this is about a slice that hoards while siblings exist.
