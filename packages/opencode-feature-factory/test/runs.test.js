@@ -31,8 +31,24 @@ function repo(name) {
   return root;
 }
 
+// The container convention necessarily exists twice: the skill's shell *creates* it, and
+// `observe/runs.js` *reads* it, and the packages cannot share the value — this one may not import the
+// factory package for a path and may not spawn git. This helper used to be a third copy, which meant
+// the tests could agree with the reader while both drifted from the skill. It is now derived from the
+// skill's own formula, so every test that seeds a sandbox couples all three: if the skill and the
+// reader disagree, seeding lands somewhere discovery does not look and those tests fail.
+//
+// Drift here is silent and asymmetric — the run works, the sidebar reports "no runs" — which cost two
+// separate debugging rounds before the container even existed.
+const CONTAINER_FORMULA = (() => {
+  const skill = readFileSync(new URL("../../feature-factory/skills/feature/SKILL.md", import.meta.url), "utf8");
+  const formula = /^C\s*=\s*(\S+)\s*$/mu.exec(skill)?.[1];
+  if (!formula) throw new Error("SKILL.md must state the sandbox container path as `C = <formula>`");
+  return formula;
+})();
+
 function sandboxContainer(root) {
-  return join(dirname(root), `.${basename(root)}.factory-sandboxes`);
+  return CONTAINER_FORMULA.replace("dirname(O)", dirname(root)).replace("<basename(O)>", basename(root));
 }
 
 function searchedLocations(...roots) {
@@ -173,6 +189,24 @@ describe("control-plane discovery", () => {
       seedRun(root, "app-1", RUN());
       assert.deepEqual(listRuns(root).map((run) => run.run_id), ["app-1"],
         "and a real run alongside them is still found");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("reads the container the skill creates, stated once and derived here", () => {
+    // Names the coupling the other tests rely on implicitly. The skill is the authority — it is what
+    // the orchestrator runs — so discovery is required to agree with it, not the reverse. If the
+    // formula changes in SKILL.md and `sandboxContainer()` in observe/runs.js does not follow, a run
+    // creates its sandbox where nothing looks and the sidebar reports "no runs" while it works.
+    const root = repo("convention");
+    try {
+      const container = sandboxContainer(root);
+      assert.equal(container, join(dirname(root), `.${basename(root)}.factory-sandboxes`),
+        "the skill's formula must still resolve to the documented shape");
+
+      const seeded = seedSandbox(root, "conv-1", RUN({ run_id: "conv-1" }));
+      assert.equal(dirname(seeded.sandbox), container, "seeding uses the skill-derived container");
+      assert.deepEqual(pollRuns(root).runs.map((run) => run.run_id), ["conv-1"],
+        "discovery must read the container the skill creates");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

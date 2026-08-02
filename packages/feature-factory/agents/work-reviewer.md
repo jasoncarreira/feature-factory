@@ -52,7 +52,7 @@ When the subject is a **class-wide** requirement (`all`/`every`/`centralize`/`ac
 
 ## What to check, by subject
 
-- **Doc steps (`spec-writer`, `work-decomposer`):** every required field of the output contract is filled; the artifact is consistent with its inputs (does the brief cover every AC and match the research map's real paths? does the slice DAG obey file-disjoint + hotspot-serialization rules, and does every AC map to a slice?). For class-wide subjects, the brief must include the finite implementation matrix (per §"Class-wide completeness") — a class-wide spec that lacks it is a BLOCKER.
+- **Doc steps (`spec-writer`, `work-decomposer`):** every required field of the output contract is filled; the artifact is consistent with its inputs (does the brief cover every AC and match the research map's real paths? does the slice DAG obey file-disjoint + hotspot-serialization rules, and does every AC map to a slice?). Coverage is not enough: where more than one slice exists, a slice claiming the entire acceptance set, or claiming paths spanning every module in its lane, is a BLOCKER — that plan reviews clean and fails later as "N categories missing", which is a scope report rather than a defect report. For class-wide subjects, the brief must include the finite implementation matrix (per §"Class-wide completeness") — a class-wide spec that lacks it is a BLOCKER.
 - **Build slices (`backend-builder` / `frontend-builder`):** apply the repo's own rubric — its agent instructions (`AGENTS.md` or `CLAUDE.md` and any review or rules files it points at — against the **observed diff**:
   - Backend: the repo's layering, its projection/read path, its API boundary.
   - Frontend: the repo's component conventions, binding forms, state approach and design tokens.
@@ -60,7 +60,7 @@ When the subject is a **class-wide** requirement (`all`/`every`/`centralize`/`ac
   - No edits to vendored or generated trees. No stray code comments.
   - **Slice discipline:** the diff stays within the slice's `paths` (out-of-lane edits are a finding).
   - The slice's `acceptance` is actually implemented, and the observed tests cover it.
-- **Test step (`test-verifier`):** each AC maps to a real assertion that would fail if the behavior broke; no test weakened to pass; observed test run is green (or honestly WRITTEN-NOT-RUN with a reason).
+- **Test step (`test-verifier`):** each AC maps to a real assertion that would fail if the behavior broke; no test weakened to pass; the observed command is the suite the plan named and was not narrowed to exclude failures, which is a separate finding from weakening a test; observed test run is green (or honestly WRITTEN-NOT-RUN with a reason).
 
 ## Security proportionality
 

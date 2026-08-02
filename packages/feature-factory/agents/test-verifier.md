@@ -42,6 +42,17 @@ Use the brief's test plan as your checklist. For each acceptance criterion pick 
 
 Prefer fast deterministic tests. Don't add flaky timing-based waits — assert on text/state.
 
+**Never narrow the observed command to make it pass.** Choosing the narrowest scope that proves a
+criterion is right, and is what the guidance above is for. Excluding failing tests from the suite the
+plan named is a different act, and it is prohibited: deselecting until the command exits zero
+manufactures a green without editing a single test, and the evidence records only the command and its
+exit code, so nothing downstream can tell the difference.
+
+If the suite is red because it was **already red before this work** — the same failures reproduce at
+the run's base — that is a finding for a human, not something to route around. Report it, say that it
+reproduces at the base, and stop. Do not construct a passing subset, and do not treat a known-broken
+test as licence to exclude it.
+
 ## Output contract
 
 Return this as your final message:
