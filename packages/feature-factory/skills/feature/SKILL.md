@@ -516,32 +516,33 @@ factory gate <run-id> pre_pr approved          # present the new diff and re-app
 
 ## Step 6 — Draft PR
 
-Immediately before any publication effect, read the delivery intent from the sandbox status, then
-recapture both effective push targets:
+Immediately before any publication effect, read the delivery intent from the selected run repository,
+then recapture the operator and selected-run effective push targets:
 
 ```sh
-factory status "$R" --json --repo "$S"
+factory status "$R" --json --repo "$RUN_REPO"
 CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-CURRENT_SANDBOX_PUSH="$(LC_ALL=C git -C "$S" remote get-url --push origin)"
+CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"
 ```
 
 Both lookups must succeed and return nonempty output, and their shell strings must be exactly equal.
-Never persist or log either target, normalize them, or automatically reconfigure the sandbox. A lookup
-failure or mismatch retains `S`, exposes neither value, permits status only, and blocks every
-publication effect.
+Never persist or log either target, normalize them, or automatically reconfigure a remote. A lookup
+failure or mismatch leaves `RUN_REPO` intact, exposes neither value, permits status only, and blocks
+every publication effect.
 
 Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as
 `PR_BASE`; never infer, shorten, normalize, or substitute either value. Publish the fully qualified
-recorded feature ref from `S`, run `gh` from `O` with that exact head and base, require a draft, and
-record the returned URL under `S`:
+recorded feature ref from `RUN_REPO`, run `gh` from `O` with that exact head and base, require a draft,
+and record the returned URL under `RUN_REPO`. Thus sandbox runs use `S` and legacy local runs use `O`
+through the selection already made in Step 0:
 
 ```sh
-git -C "$S" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"
+git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"
 (
   cd "$O"
-  gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"
+  gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"
 )
-factory pr "$R" --url "$PR_URL" --repo "$S"
+factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"
 ```
 
 The `gh` call is the orchestrator's external effect; the package makes no forge call and `factory pr`

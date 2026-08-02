@@ -69,26 +69,29 @@ test("AC9/AC16-AC19 effective push targets are proven at bootstrap, resume, and 
   assert.equal(occurrences(resume, "config --replace-all remote.origin.pushurl"), 0);
 
   ordered(publication, [
-    'factory status "$R" --json --repo "$S"',
+    'factory status "$R" --json --repo "$RUN_REPO"',
     'CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"',
-    'CURRENT_SANDBOX_PUSH="$(LC_ALL=C git -C "$S" remote get-url --push origin)"',
+    'CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"',
     "their shell strings must be exactly equal",
-    'git -C "$S" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"',
+    'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"',
     'cd "$O"',
-    'gh pr create --draft --base "<pr_base>" --head "<branch>"',
-    'factory pr "$R" --url "$PR_URL" --repo "$S"',
+    'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"',
+    'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
   ], "AC9/AC17 publication effective-push");
   for (const fragment of [
-    "Never persist or log either target, normalize them, or automatically reconfigure the sandbox.",
-    "A lookup\nfailure or mismatch retains `S`, exposes neither value, permits status only, and blocks every\npublication effect.",
+    "Never persist or log either target, normalize them, or automatically reconfigure a remote.",
+    "A lookup\nfailure or mismatch leaves `RUN_REPO` intact, exposes neither value, permits status only, and blocks\nevery publication effect.",
     "Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as\n`PR_BASE`; never infer, shorten, normalize, or substitute either value.",
-    "Publish the fully qualified\nrecorded feature ref from `S`, run `gh` from `O` with that exact head and base, require a draft",
+    "Publish the fully qualified\nrecorded feature ref from `RUN_REPO`, run `gh` from `O` with that exact head and base, require a draft",
+    "sandbox runs use `S` and legacy local runs use `O`\nthrough the selection already made in Step 0",
     "`pr_url` is immutable once recorded",
     "If PR creation returns an unknown outcome, re-observe whether the PR exists before retrying",
     "For a legacy manifest where `pr_base` is absent or null, stop and\nrequire a human/operator to choose or confirm the exact target",
     "Never infer it from HEAD, the feature branch, repository or forge defaults, and\nnever backfill the legacy manifest.",
   ]) required(publication, fragment, "AC9/AC17 publication effective-push");
   assert.equal(occurrences(publication, "config --replace-all remote.origin.pushurl"), 0);
+  assert.doesNotMatch(publication, /(?:--repo|git -C) "\$S"/u);
+  assert.doesNotMatch(publication, /"<(?:pr_base|branch)>"/u);
   assert.equal(occurrences(skill, "config --replace-all remote.origin.pushurl"), 1);
 
   const root = mkdtempSync(join(tmpdir(), "factory-effective-push-"));
@@ -132,6 +135,21 @@ test("AC9/AC16-AC19 effective push targets are proven at bootstrap, resume, and 
     const featureRef = "refs/heads/feature/173-3";
     git(sandbox, "push", "--quiet", "origin", `${featureRef}:${featureRef}`);
     assert.equal(git(pushRepository, "rev-parse", featureRef), git(sandbox, "rev-parse", featureRef), "AC9 fully qualified feature ref must reach the effective push target");
+
+    writeFileSync(join(operator, "legacy.txt"), "legacy publication\n");
+    git(operator, "add", "legacy.txt");
+    git(operator, "commit", "-m", "legacy publication fixture");
+    const legacyStatus = { branch: "feature/173-3", pr_base: "main" };
+    const legacyRunRepo = operator;
+    const legacyFeatureBranch = legacyStatus.branch;
+    const legacyPrBase = legacyStatus.pr_base;
+    assert.equal(legacyFeatureBranch, "feature/173-3", "AC9 legacy publication must use the exact recorded branch");
+    assert.equal(legacyPrBase, "main", "AC9 legacy publication must use the exact recorded intended base");
+    assert.equal(git(operator, "remote", "get-url", "--push", "origin"), git(legacyRunRepo, "remote", "get-url", "--push", "origin"), "AC17 legacy O/O effective targets must compare exactly");
+    const legacyFeatureRef = `refs/heads/${legacyFeatureBranch}`;
+    git(legacyRunRepo, "push", "--quiet", "origin", `${legacyFeatureRef}:${legacyFeatureRef}`);
+    assert.equal(git(pushRepository, "rev-parse", legacyFeatureRef), git(legacyRunRepo, "rev-parse", legacyFeatureRef), "AC9 legacy publication must push the fully qualified recorded ref from RUN_REPO=O");
+    assert.notEqual(git(pushRepository, "rev-parse", legacyFeatureRef), git(sandbox, "rev-parse", legacyFeatureRef), "AC9 legacy publication must not push from stale S");
 
     runGit("clone", "--quiet", "--local", operator, failedSandbox);
     git(failedSandbox, "config", "--replace-all", "remote.origin.pushurl", capturedPushTarget);
