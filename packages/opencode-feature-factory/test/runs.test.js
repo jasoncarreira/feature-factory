@@ -6,9 +6,11 @@
 // path handling that a mock would replace.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { CONTROL_PLANE } from "feature-factory";
 import { findControlPlane, listRuns, pollRuns, repositoryRoots, selectActiveRun } from "../observe/runs.js";
 import { renderLines } from "../tui/lines.js";
@@ -24,9 +26,18 @@ const RUN = (overrides = {}) => ({
 });
 
 function repo(name) {
-  const root = mkdtempSync(join(tmpdir(), `ff-tui-${name}-`));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `ff-tui-${name}-`)));
   mkdirSync(join(root, ".git"), { recursive: true });
   return root;
+}
+
+function sandboxContainer(root) {
+  return join(dirname(root), `.${basename(root)}.factory-sandboxes`);
+}
+
+function searchedLocations(...roots) {
+  return roots.flatMap((root) => [join(root, CONTROL_PLANE), sandboxContainer(root)])
+    .sort((left, right) => left.localeCompare(right));
 }
 
 function seedRun(root, runId, run) {
@@ -34,6 +45,11 @@ function seedRun(root, runId, run) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
   return dir;
+}
+
+function seedSandbox(root, runId, run) {
+  const sandbox = join(sandboxContainer(root), runId);
+  return { sandbox, dir: seedRun(sandbox, runId, run) };
 }
 
 describe("control-plane discovery", () => {
@@ -52,7 +68,7 @@ describe("control-plane discovery", () => {
     // the sidebar while a slice worktree is the cwd shows no run, which is exactly when an operator
     // wants one. Nothing here may shell out to `git`, so the pointer is read as text.
     const root = repo("worktree-main");
-    const linked = mkdtempSync(join(tmpdir(), "ff-tui-linked-"));
+    const linked = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-linked-")));
     try {
       seedRun(root, "app-1", RUN());
       writeFileSync(join(linked, ".git"), `gitdir: ${join(root, ".git", "worktrees", "slice-1")}\n`);
@@ -71,7 +87,7 @@ describe("control-plane discovery", () => {
     // the first ancestor with a control plane matched the home directory and rendered its `skills/`
     // subfolder as a broken run. The rename from `.claude/factory` to `.factory` made it likely; a
     // two-segment path rarely exists by accident in a home directory, a single dotfile does.
-    const outer = mkdtempSync(join(tmpdir(), "ff-tui-ancestor-"));
+    const outer = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-ancestor-")));
     try {
       // An ancestor that looks like a control plane, and a repository beneath it that has none.
       mkdirSync(join(outer, CONTROL_PLANE, "skills"), { recursive: true });
@@ -83,7 +99,7 @@ describe("control-plane discovery", () => {
       assert.equal(findControlPlane(join(inner, "src")).repo, null,
         "an ancestor's .factory is not this repository's control plane");
       assert.deepEqual(pollRuns(join(inner, "src")),
-        { repo: null, runs: [], active: null, searched: [inner] });
+        { repo: null, runs: [], active: null, searched: searchedLocations(inner) });
     } finally { rmSync(outer, { recursive: true, force: true }); }
   });
 
@@ -101,12 +117,13 @@ describe("control-plane discovery", () => {
       const found = pollRuns([without, withRun]);
       assert.equal(found.repo, withRun, "the second candidate wins when the first has no control plane");
       assert.equal(found.active.run_id, "app-1");
-      assert.deepEqual(found.searched, [without, withRun], "in order, first hit last");
+      assert.deepEqual(found.searched, searchedLocations(without, withRun),
+        "[AC7] every accepted root contributes both bounded checked locations");
 
       const empty = pollRuns([without]);
       assert.equal(empty.repo, null);
-      assert.deepEqual(renderLines(empty), ["no runs", `searched ${without}`],
-        "an empty sidebar names the directory, because that is the whole diagnosis");
+      assert.deepEqual(renderLines(empty), ["no runs", ...searchedLocations(without).map((path) => `searched ${path}`)],
+        "[AC7] an empty sidebar names every bounded checked location");
 
       // A single string still works — every other caller passes one.
       assert.equal(pollRuns(withRun).repo, withRun);
@@ -116,25 +133,27 @@ describe("control-plane discovery", () => {
     }
   });
 
-  it("prefers a linked worktree's own control plane over the main repository's", () => {
+  it("unions a linked worktree's own and main control planes [AC6, AC15]", () => {
     // Found during a real run, and caused by the previous fix. A slice worktree has no control plane
     // of its own, so it must resolve to the main repository — but a linked worktree used as the
     // *project* root does have one, because `factory init` writes to the directory it runs in.
     // Resolving only to the main repository reported "no runs" while a valid run sat in the worktree.
     const main = repo("linked-own");
-    const linked = mkdtempSync(join(tmpdir(), "ff-tui-linked-own-"));
+    const linked = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-linked-own-")));
     try {
       writeFileSync(join(linked, ".git"), `gitdir: ${join(main, ".git", "worktrees", "wt")}\n`);
-      seedRun(main, "in-main", RUN({ run_id: "in-main" }));
-      seedRun(linked, "in-worktree", RUN({ run_id: "in-worktree" }));
+      seedRun(main, "in-main", RUN({ run_id: "in-main", updated_at: "2026-07-30T11:00:00.000Z" }));
+      seedRun(linked, "in-worktree", RUN({ run_id: "in-worktree", updated_at: "2026-07-30T13:00:00.000Z" }));
 
-      assert.equal(findControlPlane(linked).repo, linked, "the worktree's own run is the one being driven");
-      assert.equal(pollRuns(linked).active.run_id, "in-worktree");
+      assert.equal(findControlPlane(linked).repo, linked, "[AC6] legacy lookup still accepts the worktree's own plane");
+      assert.equal(pollRuns(linked).active.run_id, "in-worktree", "[AC15] the newest valid live run headlines");
+      assert.deepEqual(pollRuns(linked).runs.map((run) => run.run_id), ["in-worktree", "in-main"],
+        "[AC6] own and linked-main manifests remain in the canonical union");
 
       // And with nothing of its own, it still falls back — the slice-worktree case.
       rmSync(join(linked, CONTROL_PLANE), { recursive: true, force: true });
-      assert.equal(findControlPlane(linked).repo, main, "a slice worktree resolves to the main repository");
-      assert.equal(pollRuns(linked).active.run_id, "in-main");
+      assert.equal(findControlPlane(linked).repo, main, "[AC6] a slice worktree resolves to the main repository");
+      assert.equal(pollRuns(linked).active.run_id, "in-main", "[AC6] linked-main fallback remains discoverable");
     } finally {
       rmSync(main, { recursive: true, force: true });
       rmSync(linked, { recursive: true, force: true });
@@ -157,8 +176,61 @@ describe("control-plane discovery", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  it("discovers only literal direct sibling sandbox manifests [AC5, AC6, AC7]", () => {
+    const root = repo("sibling");
+    const container = sandboxContainer(root);
+    const linkedTarget = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-linked-sandbox-")));
+    try {
+      seedRun(root, "same-id", RUN({ run_id: "same-id", updated_at: "2026-07-30T10:00:00.000Z" }));
+      const sandbox = seedSandbox(root, "same-id",
+        RUN({ run_id: "same-id", updated_at: "2026-07-30T11:00:00.000Z" }));
+      seedSandbox(root, "wrong-dir", RUN({ run_id: "actual-id" }));
+      seedRun(join(container, "nested", "deeper"), "deep", RUN({ run_id: "deep" }));
+      seedRun(linkedTarget, "linked-run", RUN({ run_id: "linked-run" }));
+      symlinkSync(linkedTarget, join(container, "linked-run"), "dir");
+
+      const snapshot = pollRuns(root);
+      assert.deepEqual(snapshot.runs.map((run) => [run.run_id, run.source, run.valid]), [
+        ["same-id", "sandbox", true],
+        ["same-id", "local", true],
+        ["wrong-dir", "sandbox", false],
+      ], "[AC5, AC6] same-ID manifests remain distinct while deep and symlink children are rejected");
+
+        // The container itself, not a child. `readdirSync` resolves a symlinked container, so
+        // traversal crosses it before any Dirent is examined — which is exactly why the linked
+        // *child* above was already rejected while a linked container was followed. A pre-existing
+        // `.<repo>.factory-sandboxes -> elsewhere` made the sidebar enumerate another directory and
+        // report its manifests as this repository's runs, recreating the unrelated-control-plane
+        // failure the derived location exists to prevent.
+        const foreign = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-foreign-")));
+        const swapped = repo("swapped-container");
+        try {
+          seedRun(join(foreign, "foreign-run"), "foreign-run", RUN({ run_id: "foreign-run" }));
+          symlinkSync(foreign, sandboxContainer(swapped), "dir");
+          assert.deepEqual(pollRuns(swapped).runs.map((run) => run.run_id), [],
+            "[AC7] a symlinked sandbox container is refused rather than followed");
+        } finally {
+          rmSync(swapped, { recursive: true, force: true });
+          rmSync(foreign, { recursive: true, force: true });
+        }
+      assert.equal(snapshot.runs[0].sandbox_path, sandbox.sandbox,
+        "[AC5] a sandbox record carries its absolute sandbox path");
+      assert.equal(snapshot.runs[0].manifest_path, realpathSync(join(sandbox.dir, "run.json")),
+        "[AC6] a record carries its canonical manifest path");
+      assert.equal(snapshot.runs[1].sandbox_path, null, "[AC6] a legacy local record remains local");
+      assert.match(snapshot.runs[2].error, /does not match sandbox directory/u,
+        "[AC5] a run_id mismatch is invalid rather than accepted");
+      assert.deepEqual(snapshot.searched, searchedLocations(root),
+        "[AC7] the local plane and one literal sibling container are the complete search set");
+    } finally {
+      rmSync(container, { recursive: true, force: true });
+      rmSync(linkedTarget, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("ignores a malformed or ordinary .git rather than guessing a root", () => {
-    const stray = mkdtempSync(join(tmpdir(), "ff-tui-stray-"));
+    const stray = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-stray-")));
     try {
       writeFileSync(join(stray, ".git"), "not a gitdir pointer\n");
       assert.equal(findControlPlane(stray).repo, null, "a malformed pointer is not a repository root");
@@ -182,10 +254,10 @@ describe("run projection", () => {
       const snapshot = pollRuns(root);
       const { runs, active } = snapshot;
       assert.equal(runs.length, 2);
-      assert.deepEqual(runs.map((run) => [run.run_id, run.valid]), [["old-1", true], ["app-2", true]],
-        "pre-change and pr_base-bearing manifests are both listed as valid");
+      assert.deepEqual(runs.map((run) => [run.run_id, run.valid]), [["app-2", true], ["old-1", true]],
+        "[AC6, AC15] valid live records precede valid terminal records");
       // Newer by timestamp, but terminal: it must not become the headline.
-      assert.equal(runs[0].run_id, "old-1", "listing is newest first");
+      assert.equal(runs[0].run_id, "app-2", "[AC15] valid live ordering precedes terminal recency");
       assert.equal(active.run_id, "app-2", "the still-running run is the active one");
       assert.equal(runs.find((run) => run.run_id === "old-1").terminal, true);
       assert.deepEqual(renderLines(snapshot), [
@@ -223,6 +295,123 @@ describe("run projection", () => {
       assert.equal(runs[0].valid, false);
       assert.match(renderLines({ repo: root, runs, active: selectActiveRun(runs) }).join("\n"), /INVALID/u);
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("renders global precedence, dead sandboxes, and every invalid manifest [AC6, AC7, AC13, AC15]", () => {
+    const root = repo("global-render");
+    const container = sandboxContainer(root);
+    const originalNow = Date.now;
+    const now = Date.parse("2026-07-30T13:00:00.000Z");
+    const staleOwner = (runId) => ({
+      session: `SESSION-${runId}`, pid: 7, run_id: runId, branch: null,
+      claimed_at: "2026-07-30T10:00:00.000Z", heartbeat_at: "2026-07-30T11:00:00.000Z",
+    });
+    try {
+      Date.now = () => now;
+      const primary = seedSandbox(root, "live-primary",
+        RUN({ run_id: "live-primary", updated_at: "2026-07-30T12:00:00.000Z" }));
+      writeFileSync(join(primary.dir, "factory.lock"), JSON.stringify(staleOwner("live-primary")));
+      const dead = seedSandbox(root, "live-dead",
+        RUN({ run_id: "live-dead", updated_at: "2026-07-30T11:00:00.000Z" }));
+      writeFileSync(join(dead.dir, "factory.lock"), JSON.stringify(staleOwner("live-dead")));
+      seedRun(root, "other-live", RUN({ run_id: "other-live", updated_at: "2026-07-30T10:00:00.000Z" }));
+      const terminal = seedSandbox(root, "terminal-new",
+        RUN({ run_id: "terminal-new", status: "completed", updated_at: "2026-07-30T13:00:00.000Z" }));
+      const invalidLocalDup = seedRun(root, "dup", RUN({ run_id: "dup", unexpected: true,
+        updated_at: "2030-07-30T12:00:00.000Z" }));
+      const invalidSandboxDup = seedSandbox(root, "dup", RUN({ run_id: "dup", unexpected: true,
+        updated_at: "2031-07-30T12:00:00.000Z" }));
+      const invalidNewer = seedRun(root, "newer-invalid", RUN({ run_id: "newer-invalid", unexpected: true,
+        updated_at: "2032-07-30T12:00:00.000Z" }));
+
+      // Polling is read-only even when it reads both a live sandbox and a stale/dead one.  Snapshot
+      // manifests and unrelated sentinels before polling twice so a future cleanup/write hidden in a
+      // projection path cannot pass merely because the rendered values look right.
+      const primarySentinel = join(primary.sandbox, "read-only-primary.sentinel");
+      const deadSentinel = join(dead.sandbox, "read-only-dead.sentinel");
+      writeFileSync(primarySentinel, "live sandbox survives polling\n");
+      writeFileSync(deadSentinel, "dead sandbox survives polling\n");
+      const readOnlyBefore = new Map([
+        [join(primary.dir, "run.json"), readFileSync(join(primary.dir, "run.json"), "utf8")],
+        [join(dead.dir, "run.json"), readFileSync(join(dead.dir, "run.json"), "utf8")],
+        [primarySentinel, readFileSync(primarySentinel, "utf8")],
+        [deadSentinel, readFileSync(deadSentinel, "utf8")],
+      ]);
+
+      const snapshot = pollRuns(root);
+      const repeatedSnapshot = pollRuns(root);
+      assert.equal(repeatedSnapshot.active.run_id, "live-primary", "[AC5, AC13] repeat polling retains the live sandbox");
+      assert.equal(repeatedSnapshot.runs.find((run) => run.run_id === "live-dead")?.deadLock, true,
+        "[AC13] repeat polling retains the stale/dead sandbox");
+      for (const [path, contents] of readOnlyBefore) {
+        assert.equal(readFileSync(path, "utf8"), contents, `[AC5, AC13] polling must not mutate ${path}`);
+      }
+      assert.equal(snapshot.active.run_id, "live-primary",
+        "[AC15] a valid live run headlines ahead of newer terminal and invalid records");
+      assert.deepEqual(snapshot.runs.map((run) => [run.run_id, run.valid, run.terminal]), [
+        ["live-primary", true, false],
+        ["live-dead", true, false],
+        ["other-live", true, false],
+        ["terminal-new", true, true],
+        ["dup", false, false],
+        ["dup", false, false],
+        ["newer-invalid", false, false],
+      ], "[AC6, AC15] records use live, terminal, then deterministic invalid precedence");
+
+      const lines = renderLines(snapshot);
+      assert.deepEqual(lines.slice(0, 5), [
+        "live-primary", "running  interactive  feature/app-1", "next: gate:story",
+        `sandbox: ${primary.sandbox}`, "lock: stale (dead; sandbox retained)",
+      ], "[AC13] the primary sandbox path and dead lock follow the full live block");
+      assert.deepEqual(lines.slice(5, 7), [
+        "live-dead  lock: stale (dead; sandbox retained)", `sandbox: ${dead.sandbox}`,
+      ], "[AC13] a non-primary dead sandbox remains explicit in valid-live order");
+      const invalids = snapshot.runs.filter((run) => !run.valid);
+      assert.deepEqual(lines.filter((line) => line.startsWith("at ")), invalids.map((run) => `at ${run.manifest_path}`),
+        "[AC6, AC7] every invalid canonical path is rendered in deterministic order");
+      for (const invalid of invalids) {
+        assert.ok(lines.includes(invalid.error), "[AC6] every invalid record retains its existing error text");
+      }
+      const expectedInvalidPaths = [
+        { run_id: "dup", manifest_path: realpathSync(join(invalidLocalDup, "run.json")) },
+        { run_id: "dup", manifest_path: realpathSync(join(invalidSandboxDup.dir, "run.json")) },
+        { run_id: "newer-invalid", manifest_path: realpathSync(join(invalidNewer, "run.json")) },
+      ].sort((left, right) => left.run_id.localeCompare(right.run_id) || left.manifest_path.localeCompare(right.manifest_path));
+      const expectedInvalidBlocks = expectedInvalidPaths.flatMap(({ run_id, manifest_path }) => {
+        const invalid = invalids.find((run) => run.run_id === run_id && run.manifest_path === manifest_path);
+        assert.ok(invalid?.error, `[AC6, AC7] ${manifest_path} must remain an explicit invalid record`);
+        return [`${run_id}  INVALID`, `at ${manifest_path}`, invalid.error];
+      });
+      const firstInvalid = lines.indexOf(`${expectedInvalidPaths[0].run_id}  INVALID`);
+      assert.deepEqual(lines.slice(firstInvalid, firstInvalid + expectedInvalidBlocks.length), expectedInvalidBlocks,
+        "[AC6, AC7] every local/sandbox invalid renders as one adjacent ID/path/error block in deterministic ID/path order");
+      assert.equal(lines.at(-1), "(2 other runs)",
+        "[AC13, AC15] the count includes only valid records not already rendered explicitly");
+
+      rmSync(primary.sandbox, { recursive: true, force: true });
+      rmSync(dead.sandbox, { recursive: true, force: true });
+      rmSync(join(root, CONTROL_PLANE, "other-live"), { recursive: true, force: true });
+      const terminalSnapshot = pollRuns(root);
+      assert.equal(terminalSnapshot.active.run_id, "terminal-new",
+        "[AC15] a valid terminal record headlines when no valid live record exists");
+      assert.deepEqual(renderLines(terminalSnapshot).slice(0, 2), [
+        "terminal-new  completed", `sandbox: ${terminal.sandbox}`,
+      ], "[AC6, AC15] compact terminal fallback retains its sandbox path");
+
+      rmSync(terminal.sandbox, { recursive: true, force: true });
+      const invalidSnapshot = pollRuns(root);
+      const invalidLines = renderLines(invalidSnapshot);
+      assert.equal(invalidSnapshot.active.valid, false, "[AC6] an invalid record is selected only without valid records");
+      assert.deepEqual(invalidLines.filter((line) => line.startsWith("at ")),
+        invalidSnapshot.runs.map((run) => `at ${run.manifest_path}`),
+        "[AC6, AC7] invalid-only duplicate IDs render each canonical manifest path exactly once");
+      assert.equal(invalidLines.some((line) => /other run/u.test(line)), false,
+        "[AC6, AC15] invalid records are never collapsed into the other-run count");
+    } finally {
+      Date.now = originalNow;
+      rmSync(container, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("surfaces the waiting gate, the slice tally, and the next action", () => {
@@ -271,7 +460,7 @@ describe("run projection", () => {
   });
 
   it("says so when there is no control plane at all", () => {
-    const empty = mkdtempSync(join(tmpdir(), "ff-tui-empty-"));
+    const empty = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-empty-")));
     try {
       // This once asserted a bare "no runs", on the reasoning that outside a repository there is no
       // root to name. That was exactly backwards, and it cost a debugging round: a session left
@@ -330,9 +519,8 @@ describe("the poll loop", () => {
       assert.equal(ticks, 1, "the first publish is attempted");
       assert.doesNotThrow(() => brittle.refresh(), "a failed publish must not reach the host's interval");
       assert.equal(ticks, 2, "and the loop keeps publishing after one throws");
-      // A control plane that exists and holds nothing: one line, no `searched` — that is reported
-      // only when no control plane was found at all.
-      assert.deepEqual(brittle.lines(), ["no runs"], "the scan result is still current");
+      assert.deepEqual(brittle.lines(), ["no runs", "searched /repo"],
+        "[AC7] the scan result retains its checked location");
     } finally { brittle.stop(); }
   });
 });
@@ -421,16 +609,41 @@ describe("the host registration contract", () => {
       "selecting it navigates to that session, by id");
   });
 
-  it("reads the owning session from the run's lock", () => {
+  it("reads the fixed process-free lock contract [AC13]", () => {
     const root = repo("session");
+    const originalNow = Date.now;
+    const now = Date.parse("2026-07-30T12:30:00.000Z");
     try {
+      Date.now = () => now;
       const dir = seedRun(root, "app-1", RUN());
-      assert.equal(pollRuns(root).active.session, null, "no lock means no session to open");
-      writeFileSync(join(dir, "factory.lock"), JSON.stringify({ session: "SESSION-Z", pid: 1 }));
-      assert.equal(pollRuns(root).active.session, "SESSION-Z");
+      const owner = (heartbeat_at) => ({
+        session: "SESSION-Z", pid: 1, run_id: "app-1", branch: null,
+        claimed_at: "2026-07-30T12:00:00.000Z", heartbeat_at,
+      });
+      assert.equal(pollRuns(root).active.session, null, "[AC13] a missing factory.lock is absent");
+      writeFileSync(join(dir, "not-factory.lock"), JSON.stringify(owner("2026-07-30T11:59:59.999Z")));
+      assert.equal(pollRuns(root).active.deadLock, false, "[AC13] only the literal factory.lock filename is read");
+
+      writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T12:00:00.000Z")));
+      assert.equal(pollRuns(root).active.session, "SESSION-Z", "[AC13] the six-key owner is projected");
+      assert.equal(pollRuns(root).active.deadLock, false, "[AC13] age equal to 30 minutes remains fresh");
+      writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T11:59:59.999Z")));
+      assert.equal(pollRuns(root).active.deadLock, true, "[AC13] age greater than 30 minutes is stale");
+      writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T12:30:00.001Z")));
+      assert.equal(pollRuns(root).active.deadLock, false, "[AC13] a future heartbeat remains fresh");
+
+      writeFileSync(join(dir, "factory.lock"), JSON.stringify({ ...owner("2026-07-30T12:00:00.000Z"), extra: true }));
+      assert.equal(pollRuns(root).active.session, null, "[AC13] keys outside the fixed six-key contract are absent");
       writeFileSync(join(dir, "factory.lock"), "{ not json");
-      assert.equal(pollRuns(root).active.session, null, "an unreadable lock is unknown, not fatal");
-    } finally { rmSync(root, { recursive: true, force: true }); }
+      assert.equal(pollRuns(root).active.session, null, "[AC13] a malformed lock is absent, not fatal");
+
+      writeFileSync(join(dir, "run.json"), `${JSON.stringify(RUN({ status: "completed" }), null, 2)}\n`);
+      writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T11:59:59.999Z")));
+      assert.equal(pollRuns(root).active.deadLock, false, "[AC13] terminal runs are never dead locks");
+    } finally {
+      Date.now = originalNow;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("holds its state in the hook and recreates the subtree, so a change reaches the screen", async () => {

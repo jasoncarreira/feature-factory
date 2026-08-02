@@ -196,7 +196,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.match(initHandler, /await writeProtectedJsonAtomic\(runDir, "run\.json", run, \{ createOnly: true \}\)/u,
       "init must publish run.json through the create-only writer; ordinary rename would let a racer replace it");
     assert.ok(cliSource.includes("[--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET]"));
-    assert.ok(markdown.includes("factory init <run-id> [--jira <KEY>] [--mode <mode>] [--pr-base <target-branch>]"));
+    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"'));
     assert.ok(readme.includes("factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET]"));
     assert.ok(markdown.includes('gh pr create --draft --base "<pr_base>" --head "<branch>"'));
 
@@ -451,6 +451,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // single-slice validator rule needed both sides proven — every publication fixture here is
     // single-slice, so the moment one slice stopped requiring a verdict the requirement would
     // have had no test left at all.
-    assert.ok(count <= 83, `${count} tests; the budget is 83`);
+    // 83 -> 87 funds the four AC-mapped lifecycle sites approved for issue 173: sandbox,
+    // effective push, state relocation, and terminal handoff.
+    assert.ok(count <= 87, `${count} tests; the budget is 87`);
   });
 });
