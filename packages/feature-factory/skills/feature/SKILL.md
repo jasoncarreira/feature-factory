@@ -117,7 +117,11 @@ These rules apply when mode admission selected the exact leading `--autonomous` 
   every acceptance criterion maps to a slice, and same-wave slices are file-disjoint.
 - **Gate 3 (pre-PR)**: approve only on a GO or GO-WITH-NITS validator verdict with `review_ready`
   observed evidence for the integrated branch. A NO-GO is a NO-GO.
-- **Never auto-merge.** Creating the draft PR is the last side effect an autonomous run may perform.
+- **Never auto-merge.** The draft PR is the last externally publishing side effect an autonomous run
+  may perform. After it is recorded, the mandatory local completed handoff in Step 7 still follows and
+  is required in every mode: terminalize, fetch the permitted local refs, archive and verify the control
+  plane, and remove only the guarded sandbox. Autonomous mode never merges an external PR or performs
+  unrelated work after PR recording.
 - Write the gate question to `gates/<gate>.md` even when no human reads it, so the decision is
   auditable after the fact.
 
@@ -148,9 +152,14 @@ W = S/.factory/worktrees/R
 A = O/.factory/R
 ```
 
-`O` is the operator checkout and must remain unchanged. Never switch, reset, clean, stash, create a
-branch or worktree, write Git configuration, or initialize factory state in `O` for a fresh run. The
-only pre-clone Git operations there are reads. All fresh-run writes happen in `S` or `C`.
+During bootstrap and active sandbox execution, `O` is the operator checkout and must remain unchanged.
+Never switch, reset, clean, stash, create a
+branch or worktree, write Git configuration, or initialize factory state in `O` for a fresh run.
+The only pre-clone Git operations there are reads, and all
+fresh-run and active-execution writes happen in `S` or `C`. The sole completed-handoff exception comes
+after the draft PR is recorded: Step 7 may fetch and verify only the recorded feature and unmerged-slice
+refs in `O`, create and verify only the `O/.factory/R` archive, and then remove only the guarded sandbox
+`S`. No other operator-checkout write or action after PR recording is permitted by this exception.
 
 ### Resume or collision
 
@@ -707,6 +716,11 @@ Labels, reviewers, and tracker fields are repository policy: derive them from th
 whatever mapping the repository documents, and update the tracker only through *your* own calls.
 
 ## Step 7 — Summary and completed sandbox handoff
+
+After draft PR recording, `interactive`, `headless`, and `autonomous` modes all enter this same mandatory
+local completed handoff. In autonomous mode this is the sole narrow exception to the external-side-effect
+stop: perform only the terminalize, local-ref fetch, archive, verification, and guarded sandbox-removal
+sequence below, with no external PR merge or unrelated work after PR recording.
 
 After `factory pr` records the draft PR, stop the heartbeat loop and wait for any heartbeat call already
 in flight to return. Before terminalization or any filesystem or Git side effect, require that the loop
