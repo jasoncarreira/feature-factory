@@ -45,6 +45,7 @@ export function nextAction(run) {
     if (gate.status === "pending") return `gate:${name}`;
     if (gate.status === "stop") return `stopped-at-gate:${name}`;
     if (gate.status === "changes") return `changes-at-gate:${name}`;
+    if (name === "brief" && gate.status === "approved" && run.slices.length === 0) return "seed-slices";
   }
   const blockedSlice = run.slices.find((slice) => slice.status === "blocked");
   if (blockedSlice) return `blocked-slice:${blockedSlice.id}`;

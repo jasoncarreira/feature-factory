@@ -60,7 +60,10 @@ function project(name, { seed = true, testPlan = ["t"], legacy = false } = {}) {
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({
     slices: [{ id: "be-thing", stack: "backend", paths: ["src/app/"], depends_on: [], acceptance: ["AC1"], test_plan: testPlan }],
   }, null, 2));
-  if (seed) assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
+  if (seed) {
+    approveEarlyGates(repo, NOW(1));
+    assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
+  }
   return { repo, runDir };
 }
 
@@ -467,11 +470,28 @@ describe("end to end — a merge is refused through the real CLI", () => {
         { id: "be-two", stack: "backend", paths: ["src/app/two/"], depends_on: [] },
       ];
       writeFileSync(planFile, JSON.stringify({ slices }, null, 2));
+      const unapproved = factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]);
+      assert.equal(unapproved.ok, false, "a plan must not seed before Brief approval");
+      assert.match(unapproved.stderr, /slices-seed requires the Brief gate to be approved/u);
+      assert.deepEqual(runJson(p.runDir).slices, []);
+
+      approveEarlyGates(p.repo, NOW(1));
       const omitted = factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]);
       assert.equal(omitted.ok, false, "a plan that never mentions tests must not seed");
       assert.match(omitted.stderr, /test_plan: must be an array of strings/u);
 
       writeFileSync(planFile, JSON.stringify({ slices: slices.map((s) => ({ ...s, test_plan: ["t"] })) }, null, 2));
+      const presentedPlan = readFileSync(planFile, "utf8");
+      rmSync(planFile);
+      const missing = factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]);
+      assert.equal(missing.ok, false, "a failed first seed must leave the run recoverable");
+      assert.match(missing.stderr, /could not read plan\/slices\.json/u);
+      const recoverable = factory(p.repo, ["status", RUN]);
+      assert.equal(recoverable.ok, true, recoverable.stderr);
+      assert.equal(recoverable.out.gates.brief, "approved");
+      assert.deepEqual(recoverable.out.slices, []);
+      assert.equal(recoverable.out.next, "seed-slices");
+      writeFileSync(planFile, presentedPlan);
       assert.equal(factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
       const waveBase = git(p.repo, "rev-parse", "HEAD");
 
@@ -549,7 +569,6 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     const mergeCommit = mergeIntoFeature(p.repo);
     assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
     const head = git(p.repo, "rev-parse", "HEAD");
-    approveEarlyGates(p.repo, NOW(5));
     assert.equal(recordValidator(p.repo, p.runDir, head, "GO", NOW(5)).ok, true);
     return { ...p, head, basePoint };
   }
@@ -733,7 +752,6 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       buildSlice(p.repo);
       factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
       const head = git(p.repo, "rev-parse", "slice");
-      approveEarlyGates(p.repo, NOW(5));
       recordValidator(p.repo, p.runDir, head, "GO", NOW(5));
       const running = approveGate(p.repo, "pre_pr", NOW(5));
       assert.equal(running.ok, false);
@@ -770,22 +788,50 @@ describe("what happens next", () => {
     status: "running", gates: {}, steps: [], slices: [], pr_url: null, max_retries: 3, ...overrides,
   });
   const approved = { status: "approved", at: "2026-07-30T12:00:00.000Z", artifact: null };
-  const running = [{ agent: "spec-writer", status: "running", attempts: 1 }];
+  const gate = (status) => ({ status, at: status === "pending" ? null : approved.at, artifact: null });
+  const openSteps = [{ agent: "spec-writer", status: "running", attempts: 1 }];
+  const slice = (status) => ({ id: "backend", status });
 
-  it("names the open step while a gate is merely absent, and the gate once it is pending", () => {
-    assert.equal(nextAction(state({ gates: { story: approved }, steps: running })), "step:spec-writer",
-      "an absent gate with work in flight is not waiting on a human");
-    assert.equal(nextAction(state({ gates: { story: approved } })), "gate:brief",
-      "with nothing recorded, the gate is still the next thing — absent is not done");
-    assert.equal(
-      nextAction(state({
-        gates: { story: approved, brief: { status: "pending", at: null, artifact: null } },
-        steps: running,
-      })),
-      "gate:brief",
-      "a pending gate outranks an open step: pending means a human really is waiting",
-    );
-    assert.equal(nextAction(state({})), "gate:story", "an empty run starts at the first gate");
+  it("preserves lifecycle precedence from terminal state through publication", () => {
+    assert.equal(nextAction(state({
+      status: "needs-human", gates: { story: gate("pending") }, steps: openSteps, slices: [slice("blocked")],
+    })), "terminal:needs-human");
+
+    assert.equal(nextAction(state({})), "gate:story");
+    assert.equal(nextAction(state({ steps: openSteps })), "step:spec-writer");
+    for (const [status, expected] of [
+      ["pending", "gate:story"],
+      ["stop", "stopped-at-gate:story"],
+      ["changes", "changes-at-gate:story"],
+    ]) assert.equal(nextAction(state({ gates: { story: gate(status) }, steps: openSteps })), expected);
+
+    assert.equal(nextAction(state({ gates: { story: approved } })), "gate:brief");
+    assert.equal(nextAction(state({ gates: { story: approved }, steps: openSteps })), "step:spec-writer");
+    for (const [status, expected] of [
+      ["pending", "gate:brief"],
+      ["stop", "stopped-at-gate:brief"],
+      ["changes", "changes-at-gate:brief"],
+    ]) assert.equal(nextAction(state({ gates: { story: approved, brief: gate(status) }, steps: openSteps })), expected);
+
+    const briefApproved = { story: approved, brief: approved };
+    assert.equal(nextAction(state({ gates: briefApproved })), "seed-slices");
+    assert.equal(nextAction(state({ gates: briefApproved, steps: openSteps })), "seed-slices");
+    assert.equal(nextAction(state({ gates: { ...briefApproved, pre_pr: gate("pending") } })), "seed-slices");
+    assert.equal(nextAction(state({ gates: { ...briefApproved, pre_pr: gate("pending") }, steps: openSteps })), "seed-slices");
+
+    assert.equal(nextAction(state({ gates: briefApproved, slices: [slice("pending")] })), "gate:pre_pr");
+    assert.equal(nextAction(state({ gates: briefApproved, steps: openSteps, slices: [slice("pending")] })), "step:spec-writer");
+    assert.equal(nextAction(state({ gates: { ...briefApproved, pre_pr: gate("pending") }, slices: [slice("pending")] })), "gate:pre_pr");
+    assert.equal(nextAction(state({ gates: { ...briefApproved, pre_pr: gate("pending") }, steps: openSteps, slices: [slice("pending")] })), "gate:pre_pr");
+
+    const allApproved = { ...briefApproved, pre_pr: approved };
+    assert.equal(nextAction(state({ gates: allApproved, slices: [slice("blocked")] })), "blocked-slice:backend");
+    assert.equal(nextAction(state({ gates: allApproved, slices: [slice("running")] })), "observe-slice:backend");
+    assert.equal(nextAction(state({ gates: allApproved, slices: [slice("review")] })), "observe-slice:backend");
+    assert.equal(nextAction(state({ gates: allApproved, slices: [slice("pending")] })), "dispatch-slice:backend");
+    assert.equal(nextAction(state({ gates: allApproved, steps: openSteps, slices: [slice("merged")] })), "step:spec-writer");
+    assert.equal(nextAction(state({ gates: allApproved, slices: [slice("merged")] })), "pr");
+    assert.equal(nextAction(state({ gates: allApproved, slices: [slice("merged")], pr_url: "https://example.test/pr/1" })), "complete");
   });
 });
 
