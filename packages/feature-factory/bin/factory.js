@@ -178,6 +178,7 @@ const HANDLERS = {
       participants: [{ familyId: "slices", mode: "seed" }],
       apply: (state) => {
         if (state.slices.length > 0) throw new Error("slices are already seeded");
+        if (state.gates.brief?.status !== "approved") throw new Error("slices-seed requires the Brief gate to be approved");
         return {
           ...state,
           updated_at: at,
