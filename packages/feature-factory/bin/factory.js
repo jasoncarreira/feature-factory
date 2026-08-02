@@ -453,30 +453,30 @@ const HANDLERS = {
       }
       throw error;
     }
-    return emit(flags, { run_id: runId, run_dir: runDir, branch, worktree, pr_base: prBase, status: "running", mode });
+    return emit(flags, { run_id: runId, run_dir: runDir, sandbox_path: repo, branch, worktree, pr_base: prBase, status: "running", mode });
   },
 
   status([runId], flags) {
     const runDir = runDirFor(flags, runId);
     const observed = readRunUnchecked(runDir);
-    if (!observed.ok) return emit(flags, { run_id: runId, valid: false, error: observed.error });
+    if (!observed.ok) return emit(flags, { run_id: runId, valid: false, sandbox_path: resolve(flags.repo ?? process.cwd()), error: observed.error });
     let run;
     try {
       run = readRun(runDir);
     } catch (error) {
       // A record that exists but does not validate is reported, not hidden: the
       // operator needs to see the invalid state, not an absence.
-      return emit(flags, { run_id: runId, valid: false, error: error.message });
+      return emit(flags, { run_id: runId, valid: false, sandbox_path: resolve(flags.repo ?? process.cwd()), error: error.message });
     }
     const lock = inspectSessionLock(runDir);
     return emit(flags, {
       run_id: run.run_id,
-      valid: true,
+      valid: true, sandbox_path: resolve(flags.repo ?? process.cwd()),
       status: run.status,
       mode: run.mode,
       branch: run.branch,
       pr_base: run.pr_base ?? null,
-      lock: lock.state,
+      lock: lock.state, dead_lock: !run.terminal_result && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,
       gates: Object.fromEntries(GATE_NAMES.filter((name) => run.gates[name]).map((name) => [name, run.gates[name].status])),
       steps: run.steps.map((step) => `${step.agent}:${step.status}(${step.attempts})`),

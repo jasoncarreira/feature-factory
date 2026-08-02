@@ -25,10 +25,12 @@ Two principles make this a factory rather than a session workflow:
   you run `factory observe`, which re-derives the diff and re-runs the named tests itself and records
   what it saw. `work-reviewer` judges that record, never the prose.
 
-**Who may run which commands.** Every state-changing command is yours. A subagent may read —
-`factory status <run-id> --json` to orient itself — and may never write. `factory observe` in
-particular stays with you: its entire purpose is that the party being judged is not the party
-reporting, so an agent running it would return the mechanism to prose.
+**Who may run which commands.** Every state-changing command is yours. The preserved compatibility
+claim reads: A subagent may read —
+`factory status <run-id> --json` to orient itself — and may never write. That quoted phrase names a
+command stem, not a runnable invocation: issue it only as `factory status "$R" --json --repo "$RUN_REPO"`.
+`factory observe` in particular stays with you: its entire purpose is that the party
+being judged is not the party reporting, so an agent running it would return the mechanism to prose.
 
 ## Threat boundary
 
@@ -81,6 +83,9 @@ as follows:
    - With no recognized leading mode token, omit `--mode`; existing `factory init` records
      `interactive`.
 
+Those three compatibility phrases name init command stems, not runnable invocations. The selected
+fresh-run invocation is fully qualified in Step 0 and ends with `--repo "$RUN_REPO"`.
+
 Repeated copies of one recognized flag are idempotent: remove them all and select that mode once. An
 exact mode token after the first other token is request content and neither selects nor conflicts.
 Natural-language intent, `--interactive`, capitalization variants, abbreviations, assignment or
@@ -104,7 +109,8 @@ mode. Invocation flags never reinitialize, compare, or mutate an existing run's 
 These rules apply when mode admission selected the exact leading `--autonomous` token.
 
 - Each gate has a stated precondition. If it does not hold, record `needs-human` with
-  `factory terminal <run-id> needs-human --reason TEXT` and **stop** — do not approve to keep moving.
+  `factory terminal "$R" needs-human --reason "$REASON" --repo "$RUN_REPO"` and **stop** — do not
+  approve to keep moving.
 - **Gate 1 (story)**: approve only if the story has clear acceptance criteria and scope, with no
   unresolved product, UX, security, or external-policy decision.
 - **Gate 2 (brief + plan)**: approve only after `work-reviewer` approves both spec and decomposition,
@@ -153,6 +159,33 @@ Classify existing paths before creating anything. A valid legacy manifest at `A/
 candidate with `factory status "$R" --json --repo "$RUN_REPO"`. If both manifests exist, print both
 absolute paths and refuse as ambiguous. An invalid manifest is surfaced and never replaced.
 
+After selecting the repository, bind the only state file and worktree root that later steps may read:
+
+```sh
+RUN_MANIFEST="$RUN_REPO/.factory/$R/run.json"
+SLICE_ROOT="$RUN_REPO/.factory/worktrees/$R"
+```
+
+Thus a sandbox selects `S/.factory/worktrees/R`; a legacy run selects its existing
+`O/.factory/worktrees/R` layout. Require `RUN_MANIFEST` and `SLICE_ROOT` to remain physically contained
+by `RUN_REPO`. Read exactly `RUN_MANIFEST` through the host's direct file-read capability: do not spawn
+a process, scan another directory, or write the file. Parse it as JSON, require CLI validation to have
+succeeded, bind the parsed object as `parsedRun`, require `parsedRun.run_id` to equal `R`, and reject a
+missing or second candidate.
+
+On resume, bind the recorded feature branch before any orchestration continues:
+
+```text
+FEATURE_BRANCH = parsedRun.branch
+```
+
+Require a nonempty branch accepted by manifest validation. Discard any feature-branch value left from
+intake or the invocation checkout; recorded state always wins on resume.
+
+For either manifest shape, use the qualified status command above and resume; never treat it as a fresh
+run. Once a manifest exists, do not call `factory init` again. An existing manifest is never replaced,
+including a legacy manifest with no `pr_base`; it is resumed without backfill.
+
 Never follow a symlink at `C` or `S`. With no legacy run to resume, a symlinked `C`, any existing `S`
 without the sole valid sandbox manifest, a non-directory path, or any other deterministic-path
 collision is fatal. Do not reuse, repair, or delete it. A resumed sandbox must pass the same physical
@@ -182,6 +215,12 @@ factory lock "$R" steal --session "$SESSION_ID" --repo "$RUN_REPO"
 ```
 
 ### Fresh sandbox bootstrap
+
+**Do not ask the engineer for a branch or a worktree.** The CLI retains its configured-worktree
+semantics: By default, `pr_base` is the symbolic branch checked out in that configured worktree;
+`--pr-base <target-branch>` takes precedence and bypasses worktree observation. Without an override, a detached, missing, or outside-repository configured worktree is
+refused. The sandbox flow supplies the captured base explicitly and uses the sandbox root as its
+default `.` integration worktree.
 
 For a fresh run, `FEATURE_BRANCH` is explicit intake intent or `feature/$R`. The engineer supplies an
 override only when they say so or repository instructions in `AGENTS.md` or `CLAUDE.md` require it.
@@ -259,27 +298,31 @@ SWITCHED_BRANCH="$(git -C "$S" symbolic-ref --quiet --short HEAD)"
 ```
 
 Both verification commands must succeed. Require `SWITCHED_HEAD` to equal `SEED_HEAD` and
-`SWITCHED_BRANCH` to equal `FEATURE_BRANCH`. Only after those checks initialize the control plane.
-Keep the command first and the repository flag last; include Jira and admitted mode flags only when
-present:
-
-```sh
-factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"
-```
+`SWITCHED_BRANCH` to equal `FEATURE_BRANCH`. Only after those checks initialize the control plane. The
+older bootstrap assertion retains the non-runnable command shape `factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"`; its runnable
+selected-repository form is below.
 
 `init` creates `P`, including `plan/`, `artifacts/`, `evidence/`, and `reviews/`. Initialization is
-create-only. If its outcome is unknown, resolve it with `factory status "$R" --json --repo "$S"`:
-valid state means resume and never retry; no manifest with only init scaffolding may retry init; an
-invalid manifest is surfaced without overwrite. The branch already exists and exactly matches the
-intent recorded by init, so the first slice can observe it.
-
-Only after containment, branch verification, and valid initialized state are all proven, select the
-fresh run repository before any later status, dispatch, or publication path uses it:
+create-only. To resolve the unknown create outcome with status, valid state means resume and never retry.
+A scaffold-only run directory without
+`run.json` is retryable. With any record present,
+an invalid manifest means stop and surface it without overwriting it. Bind the fresh selected paths,
+then initialize with the command first and repository flag last; include Jira and admitted mode flags
+only when present:
 
 ```sh
 RUN_REPO="$S"
-factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"
+RUN_MANIFEST="$RUN_REPO/.factory/$R/run.json"
+SLICE_ROOT="$RUN_REPO/.factory/worktrees/$R"
+$ factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$RUN_REPO"
+$ factory status "$R" --json --repo "$RUN_REPO"
+$ factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"
 ```
+
+Run status only to resolve an unknown init result; on an ordinary successful init proceed directly to
+the lock. The branch already exists and exactly matches the intent recorded by init. The retained
+non-runnable bootstrap claim shapes are `factory lock "$R" claim --session "$SESSION_ID" --repo "$S"`
+and `factory status "$R" --json --repo "$S"`; all execution uses the selected forms above.
 
 If the lock is held by another session, resume with that session, use the fully qualified steal command
 above only when the holder is gone, or abort. Refresh it around long waits with
@@ -287,19 +330,22 @@ above only when the holder is gone, or abort. Refresh it around long waits with
 reclaimable rather than wedged. Only after bootstrap and lock handling dispatch the planned ticket,
 story, or design agent.
 
+The init result and every valid status result report `sandbox_path` as the resolved selected repository.
+Status also reports `dead_lock: true` only when the run is nonterminal and its lock is stale. This is
+reporting, not cleanup: stale nonterminal sandboxes remain in place.
+
 ### Gate 1 — Story
 
-Present the story. Record with `factory gate <run-id> story pending --artifact artifacts/story.md`
-before presenting, then the decision: `factory gate <run-id> story approved|changes|stop`. A gate must
-be opened as `pending` before it can be decided — a gate that appears already approved is a decision
-nobody made, and the CLI refuses it.
+Present the story. Open and decide it with the fully qualified commands below. A gate must be opened as
+`pending` before it can be decided — a gate that appears already approved is a decision nobody made,
+and the CLI refuses it.
 
-**`changes` is a request for another round, not the end of the run.** `factory status` reports
+**`changes` is a request for another round, not the end of the run.** The qualified status read reports
 `changes-at-gate:<name>`, and the loop is: revise the artifact, re-open the gate, re-present.
 
 ```sh
-factory gate <run-id> story pending --artifact artifacts/story.md   # re-open after a `changes`
-factory gate <run-id> story approved                                # the revised story's decision
+factory gate "$R" story pending --artifact artifacts/story.md --repo "$RUN_REPO"
+factory gate "$R" story approved --repo "$RUN_REPO"
 ```
 
 This holds at **every** gate. Do not start a replacement run and do not block the run because a gate
@@ -325,8 +371,8 @@ Run `spec-writer` with the approved story, research map, and design brief → th
 re-run with the required fixes and re-review. Record each attempt:
 
 ```sh
-factory step <run-id> spec-writer running|accepted|rejected|blocked \
-  --attempts N --review-ref reviews/spec-writer.json
+factory step "$R" spec-writer running|accepted|rejected|blocked \
+  --attempts N --review-ref reviews/spec-writer.json --repo "$RUN_REPO"
 ```
 
 For class-wide work the brief must convert the inventory into a closed implementation matrix — one row
@@ -355,7 +401,7 @@ same-wave slices are file-disjoint, and integration hotspots are serialized into
 seed the manifest:
 
 ```sh
-factory slices-seed <run-id> --from plan/slices.json
+factory slices-seed "$R" --from plan/slices.json --repo "$RUN_REPO"
 ```
 
 Seeding is the **ratification point** for two decisions, and neither can be changed afterwards:
@@ -374,21 +420,81 @@ serialized hotspots. The engineer approves the parallelization plan, not just th
 
 ## Step 4 — Build slices (you own the worktrees)
 
-One feature branch and worktree for the run; slice worktrees branch from the current feature-branch
-HEAD so dependents contain their dependencies' code. Compute waves by topological sort of
-`depends_on`: a wave is every `pending` slice whose dependencies are all `merged`. Cap concurrency at
-`max_parallel_slices`.
+The selected `RUN_REPO` owns the feature branch, live control plane, and slice worktree root. For a new
+sandbox, `SLICE_ROOT` is the approved `S/.factory/worktrees/R`; for a legacy run it is the existing
+`O/.factory/worktrees/R`. Every slice branch is `factory/R/<slice-id>`. Slice branches start at the
+current feature-branch HEAD so dependents contain their dependencies' code. Compute waves by
+topological sort of `depends_on`: a wave is every `pending` slice whose dependencies are all `merged`.
+Cap concurrency at `max_parallel_slices`.
+
+Directly reload `RUN_MANIFEST`, validate its identity again, and bind the integration worktree before
+creating or merging any slice:
+
+```text
+FEATURE_BRANCH = parsedRun.branch
+RECORDED_RUN_WORKTREE = parsedRun.worktree
+INTEGRATION_WORKTREE = physical normalized resolution of RECORDED_RUN_WORKTREE under RUN_REPO
+```
+
+For a relative recorded value, resolve it from `RUN_REPO`; for an absolute value, use it unchanged.
+Require the result to exist and remain physically contained by `RUN_REPO`, exactly as `resolveWorktree`
+does. Refuse a missing, escaping, or symlink-redirected path.
+
+Immediately before every pending-slice activation, observation, or merge, verify the selected
+integration worktree is still checked out on the recorded feature branch with the probe shown at each
+operation. Every probe must succeed and its output must equal `FEATURE_BRANCH` exactly. A failed probe
+means detached HEAD and is refused; a different branch is refused as a mismatch. Never switch branches
+to repair either condition, and never substitute stale intake branch intent.
+
+In the first wave, activate the first seeded slice whose `depends_on` is empty before any other slice
+can merge. This deterministic root slice records the original feature head in its immutable `base_ref`;
+do not reorder that root behind a merge.
+
+For a fresh pending slice, set the exact names, require both `refs/heads/$SLICE_BRANCH` and the
+`SLICE_WORKTREE` path to be absent, and create the worktree from the current feature branch before
+activation:
+
+```sh
+SLICE_BRANCH="factory/$R/$SLICE_ID"
+SLICE_WORKTREE="$SLICE_ROOT/$SLICE_ID"
+CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
+git -C "$RUN_REPO" worktree add -b "$SLICE_BRANCH" "$SLICE_WORKTREE" "$FEATURE_BRANCH"
+$ factory slice "$R" "$SLICE_ID" running --worktree "$SLICE_WORKTREE" --branch "$SLICE_BRANCH" --repo "$RUN_REPO"
+```
+
+Bind `SLICE_BASE_REF` to the activation result's `base_ref` and require a 40-character commit SHA. That
+value is immutable. `factory status` exposes compact slice labels only; it does not expose recorded
+worktree, branch, or `base_ref` values.
+
+On resume, never infer those values or recreate a recorded worktree. Immediately before every
+re-observation, directly reload and parse exactly `RUN_MANIFEST` under the process-free read rules from
+Step 0. Require `run_id === R`, select exactly one `slices` row with `id === SLICE_ID`, and bind:
+
+```text
+RECORDED_SLICE = parsedRun.slices row whose id equals SLICE_ID
+SLICE_WORKTREE = RECORDED_SLICE.worktree
+SLICE_BRANCH = RECORDED_SLICE.branch
+SLICE_BASE_REF = RECORDED_SLICE.base_ref
+```
+
+Require the row status to be `running` or `review`, all three values to be non-null, `SLICE_BASE_REF` to
+be a 40-character commit SHA, `SLICE_BRANCH` to equal `factory/R/<slice-id>`, and the physical
+`SLICE_WORKTREE` to equal `SLICE_ROOT/<slice-id>`. Require `git -C "$RUN_REPO" worktree list
+--porcelain` to associate that physical path with that exact branch. A pending slice requires both path
+and ref to remain absent; an unrecorded existing path or ref is a collision. Refuse every mismatch
+instead of repairing, deleting, or reassociating it. A merged slice is never dispatched again.
 
 Per slice:
 
-1. **Isolate** — create the slice worktree and branch, then
-   `factory slice <run-id> <slice-id> running --worktree <path> --branch <branch>`.
+1. **Isolate** — perform the fresh or resume association checks above, then activate only a fresh
+   pending slice with the fully qualified command above.
 2. **Dispatch** — one agent call per slice in the wave, in a single message. Give each builder its one
-   slice spec, its worktree, the brief, and the research map.
+   slice spec, the recorded `SLICE_WORKTREE`, the brief, and the research map.
 3. **Observe** — when the builder returns, do not read its prose for facts:
    ```sh
-   factory observe <run-id> <slice-id> --worktree <path> --base <slice-base-sha> \
-     --test-cmd "<the slice's test command>" [--claim <builder-report.json>]
+   CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
+   $ factory observe "$R" "$SLICE_ID" --worktree "$SLICE_WORKTREE" --base "$SLICE_BASE_REF" \
+     --test-cmd "$SLICE_TEST_COMMAND" [--claim "$BUILDER_REPORT"] --repo "$RUN_REPO"
    ```
    `base_ref` is fixed when the slice is activated and cannot be changed afterwards — it is the branch
    point, a fact about the past. A slice that needs a different base is a new slice.
@@ -405,8 +511,8 @@ Per slice:
 4. **Review** — `work-reviewer` with subject `<slice-id>`, the observed evidence, the slice spec, and
    the brief. Record both refs — the merge requires each:
      ```sh
-     factory slice <run-id> <slice-id> review \
-       --evidence-ref evidence/<slice-id>.json --review-ref reviews/<slice-id>.json
+     $ factory slice "$R" "$SLICE_ID" review --evidence-ref "evidence/$SLICE_ID.json" \
+       --review-ref "reviews/$SLICE_ID.json" --repo "$RUN_REPO"
      ```
    - On REJECT, before spending an attempt, identify the design-level root cause. If the fix would
      violate an approved story or brief constraint, or repeated findings trace to the same unresolved
@@ -416,8 +522,10 @@ Per slice:
 5. **Merge (you, serially)** — on APPROVE, merge the slice branch into the feature branch one at a
    time. Builds are concurrent; merges are single-writer, which is what makes the parallelism safe.
    ```sh
-   git -C $FEAT_WT merge --no-ff <slice-branch> -m "<slice-id>"
-   factory slice <run-id> <slice-id> merged --merge-commit <sha>
+   CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
+   git -C "$INTEGRATION_WORKTREE" merge --no-ff "$SLICE_BRANCH" -m "$SLICE_ID"
+   MERGE_COMMIT="$(git -C "$INTEGRATION_WORKTREE" rev-parse --verify 'HEAD^{commit}')"
+   $ factory slice "$R" "$SLICE_ID" merged --merge-commit "$MERGE_COMMIT" --repo "$RUN_REPO"
    ```
    **`--no-ff` is required, not stylistic.** The merge proof measures what the merge contributed as
    the diff from its *first parent*, which only means "the integration branch before this merge" when
@@ -425,8 +533,10 @@ Per slice:
    previous commit and the proof would silently measure the wrong thing. `factory slice … merged`
    refuses a merge commit that does not have exactly two parents, and refuses one that is not the
    current head of the feature branch — record the merge before doing anything else to that branch.
-   Recording a merge re-observes the slice's changed paths and **refuses** any path the slice does not
-   own or any privileged control-plane path. Then remove the slice worktree and branch.
+   Recording a merge uses the existing `resolveWorktree` containment check, re-observes the slice's
+   changed paths, and **refuses** any path outside the seeded ownership paths or any privileged
+   control-plane path. It also requires the seeded test plan's evidence and the bound review. Then
+   remove the slice worktree and branch.
 
 **Ownership disclosure.** A builder that must touch a path outside its declared set finishes the
 required work and discloses every concrete out-of-lane path with a rationale, so the reviewer decides
@@ -441,16 +551,35 @@ while movement around it is not. What guards the branch as a whole is the integr
 validator judges the whole diff and Gate 3 will not approve unless the head it judged is still the head.
 
 Advance waves until all slices are `merged`, or a slice is `blocked`. If some merged and others
-blocked, the run is `partial` — surface it at the next gate rather than pushing on.
+blocked, the run is `partial` — surface it at the next gate rather than pushing on. Record a terminal
+decision, when needed, only as `factory terminal "$R" blocked|partial|needs-human --reason "$REASON" --repo "$RUN_REPO"`.
+A `blocked`, `partial`, or `needs-human` sandbox run retains `RUN_REPO`; stale nonterminal locks retain it
+too. Nothing removes any of those sandboxes automatically. Legacy runs
+likewise retain their selected O-local state.
 
 ## Step 5 — Integrate: test, then validate
 
 Against the integrated feature worktree, not a slice:
 
+Directly reload and validate `RUN_MANIFEST` once more. Rebind `INTEGRATION_WORKTREE` from
+`parsedRun.worktree` using the selected resolution above. In seeded slice order, select the first row
+whose `depends_on` is empty; this is the root slice activated from the original feature head. Require
+its immutable `base_ref` to be a 40-character commit SHA, then bind the integration baseline:
+
+```text
+ROOT_SLICE = first parsedRun.slices row whose depends_on is empty
+BRANCH_POINT = ROOT_SLICE.base_ref
+```
+
+Refuse integration if no such recorded root or base exists. Neither value comes from status, current
+HEAD, a branch name, or an unpersisted variable.
+
 1. `test-verifier` writes and runs acceptance tests for the story's criteria. Observe its result on the
    **integrated** worktree, with the run's original branch point as `--base`:
    ```sh
-   factory observe <run-id> test-verifier --worktree $FEAT_WT --base <branch-point> --test-cmd "<suite>"
+   CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
+   factory observe "$R" test-verifier --worktree "$INTEGRATION_WORKTREE" --base "$BRANCH_POINT" \
+     --test-cmd "$INTEGRATION_SUITE" --repo "$RUN_REPO"
    ```
    This writes `evidence/test-verifier.json`, which Gate 3 requires by that exact name. There is no
    waiver: the stage exists to run the tests, so the evidence must record an observed run that exited
@@ -465,7 +594,7 @@ Against the integrated feature worktree, not a slice:
    When you do run it, it returns GO / GO-WITH-NITS / NO-GO **and writes `reviews/implementation-validator.json`
    naming the commit it judged**, exactly like any other reviewer. Then:
    ```sh
-   factory validator <run-id> --report artifacts/validation-report.md
+   factory validator "$R" --report artifacts/validation-report.md --repo "$RUN_REPO"
    ```
    The verdict and the judged head are read from that record, not passed as arguments, and the record's
    commit must still be the integration head — so a report about one commit cannot be recorded as a
@@ -481,8 +610,8 @@ integration branch if it is test-only. Respect `max_retries`.
 Present the validator verdict, the acceptance-test table, the full diff against the base branch, and
 migration, flag, and risk callouts.
 
-**Approving this gate is the transition that authorizes publication**, so `factory gate <run-id>
-pre_pr approved` re-checks the whole publication story and *refuses the approval* if any of it is
+**Approving this gate is the transition that authorizes publication**, so the fully qualified Gate 3
+approval shown below re-checks the whole publication story and *refuses the approval* if any of it is
 missing. This is deliberate: everything after this point — the push, the PR — has already happened by
 the time `factory pr` runs, so this is the last refusal that can still prevent something. It requires:
 
@@ -499,11 +628,11 @@ the time `factory pr` runs, so this is the last refusal that can still prevent s
 
 If the gate refuses, its message names the missing piece. Fix that and re-present — do not push.
 
-**Once the plan is seeded, only Gate 3 may re-open.** `factory gate <run-id> story pending` on an
-approved Story gate is refused after `slices-seed`, as is Brief, and a decided gate's `--artifact`
-cannot be changed in place. Gate 3 is the exception because only its subject — the integrated diff —
-can legitimately change after approval. If an approved story turns out to be wrong *after work
-began*, that is a new run, not an edit to this one.
+**Once the plan is seeded, only Gate 3 may re-open.** The Story `pending` transition is refused on an
+approved Story gate after `slices-seed`, as is Brief, and a decided gate's `--artifact` cannot be
+changed in place. Invoke any allowed re-open with a trailing `--repo "$RUN_REPO"`. Gate 3 is the
+exception because only its subject — the integrated diff — can legitimately change after approval. If
+an approved story turns out to be wrong *after work began*, that is a new run, not an edit to this one.
 
 **Before the plan is seeded, an approved gate still re-opens** — nothing has been built, so there is
 nothing judged against the old artifact to strand. This is the path for a story that turns out to
@@ -515,11 +644,18 @@ validator verdict is frozen while the gate stands and `factory pr` refuses. Reco
 approval, not a lost run:
 
 ```sh
-factory gate <run-id> pre_pr pending          # re-open; a decided gate may only re-open as pending
-factory observe <run-id> test-verifier ...     # re-observe the tests at the new head
-factory validator <run-id> --report artifacts/validation-report.md   # verdict and head come from its record
-factory gate <run-id> pre_pr approved          # present the new diff and re-approve
+factory gate "$R" pre_pr pending --repo "$RUN_REPO"
+CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
+factory observe "$R" test-verifier --worktree "$INTEGRATION_WORKTREE" --base "$BRANCH_POINT" \
+  --test-cmd "$INTEGRATION_SUITE" --repo "$RUN_REPO"
+factory validator "$R" --report artifacts/validation-report.md --repo "$RUN_REPO"
+factory gate "$R" pre_pr approved --repo "$RUN_REPO"
 ```
+
+The compatibility transition name is `factory gate <run-id> pre_pr pending`; the runnable form is the
+repository-qualified command above.
+
+The publication command's recorded-value signature remains `gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`; Step 6 binds those placeholders to status output before executing it.
 
 ## Step 6 — Draft PR
 
@@ -574,12 +710,14 @@ whatever mapping the repository documents, and update the tracker only through *
 
 Report the ticket, the story and brief in a line each, the slice plan and per-slice merge status,
 migration and flag callouts, the acceptance-criteria/test table and validator verdict, the PR URL, the
-run directory, and any TODOs — blocked slices, accepted NO-GO findings, recorded overrides.
+run directory and reported `sandbox_path`, and any TODOs — blocked slices, accepted NO-GO findings,
+recorded overrides, retained sandboxes, or a nonterminal `dead_lock`.
 
 ## Resuming
 
-On invocation, if the run directory exists and you hold or steal the lock, run
-`factory status <run-id> --json` and continue from `next` rather than restarting:
+On invocation, if the run directory exists and you hold or steal the lock, the preserved compatibility
+claim reads “run `factory status <run-id> --json` and resume; never restart.” It names a non-runnable
+command stem. Execute only `factory status "$R" --json --repo "$RUN_REPO"`, then continue from `next`:
 
 - a gate absent or `pending` → present it
 - a slice `running`/`review` → re-observe and re-review; do not rebuild if the diff is already good
