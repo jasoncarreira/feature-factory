@@ -34,9 +34,11 @@ const RUN_JSON_KEYS = [
   // viso's fifteen
   "version", "run_id", "jira_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
   "status", "max_parallel_slices", "max_retries", "gates", "steps", "slices", "validator", "pr_url",
-  // the three justified additions. base_commit was dropped: it was written and never
-  // read, which is the standard a durable field has to meet.
-  "mode", "terminal_result",
+  // the four justified additions. base_commit was dropped: it was written and never
+  // read, which is the standard a durable field has to meet. plan_digest meets it: the seed
+  // reads it and refuses on mismatch, which is the only thing binding an approved plan to the
+  // one that gets ratified.
+  "mode", "terminal_result", "plan_digest",
 ];
 
 const FAMILIES = ["envelope", "gates", "steps", "slices", "verdict"];
@@ -293,7 +295,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 18, "eighteen: viso's fifteen plus mode, terminal_result, and pr_base");
+    assert.equal(RUN_KEYS.length, 19, "nineteen: viso's fifteen plus mode, terminal_result, pr_base, and plan_digest");
   });
 
   it("registers exactly the declared families", () => {
@@ -419,7 +421,15 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Neither part is a feature, and the lines are the two checks plus the notes recording that the
     // original falsification of this pre-check's removal ran only where inodes are not reused.
     // 2665 -> 2667 (#178): nextAction seed-slices branch and checked Brief-approval seed guard.
-    assert.ok(total < 2668, `production source is ${total} lines; the tripwire is 2668`);
+    //
+    // 2667 -> 2703, review of #186, and over that issue's authorized 2675 - Jason approved the
+    // field directly rather than the run absorbing the overshoot. Gate ordering alone left the
+    // approval bound to a filename: approve plan A, edit plan/slices.json, seed plan B, and the
+    // ratified `paths` and `test_plan` are ones nobody reviewed - an empty test_plan among them,
+    // which waives the observed test run. The lines are the digest recorded at brief approval,
+    // the comparison at the seed, and the refusal when no digest exists, plus the notes saying
+    // why a filename was never the thing being approved.
+    assert.ok(total < 2704, `production source is ${total} lines; the tripwire is 2704`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

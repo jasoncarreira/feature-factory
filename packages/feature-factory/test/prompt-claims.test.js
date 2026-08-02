@@ -202,6 +202,31 @@ const CLAIMS = [
     },
   },
   {
+    id: "slices-seed-binds-the-approved-plan-bytes",
+    file: "skills/feature/SKILL.md",
+    fragment: "Only after that approval succeeds, invoke the separate first seed using the exact plan bytes that were\npresented.",
+    expect: "refused",
+    matches: /^plan\/slices\.json is not the plan the brief gate approved\n$/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      const plan = join(repo, ".factory", RUN, "plan", "slices.json");
+      const path = join(repo, ".factory", RUN, "run.json");
+      // Approve plan A, then swap the file for a plan B nobody reviewed.
+      writeFileSync(plan, JSON.stringify(PLAN));
+      assert.equal(decide(repo, "brief", "approved").ok, true);
+      const swapped = { slices: [{ ...PLAN.slices[0], id: "s2", paths: ["other/"], test_plan: [] }] };
+      writeFileSync(plan, JSON.stringify(swapped));
+      const before = readFileSync(path);
+      const result = factory(repo, ["slices-seed", RUN, "--now", NOW]);
+      assert.deepEqual(result, { ok: false, out: "plan/slices.json is not the plan the brief gate approved\n" });
+      assert.deepEqual(readFileSync(path), before);
+      // The approved plan still seeds, so the guard binds bytes rather than blocking the flow.
+      writeFileSync(plan, JSON.stringify(PLAN));
+      assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW]).ok, true);
+      return result;
+    },
+  },
+  {
     id: "slices-seed-requires-brief-approval",
     file: "skills/feature/SKILL.md",
     fragment: "Never invoke `slices-seed` before Brief approval.",

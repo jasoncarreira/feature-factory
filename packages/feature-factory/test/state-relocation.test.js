@@ -203,8 +203,8 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const sourceFiles = filesUnder(pkg);
   const productionLines = sourceFiles.filter((path) => !path.includes(`${pkg}/test/`))
     .reduce((total, path) => total + readFileSync(path, "utf8").split("\n").length, 0);
-  assert.equal(productionLines, 2667, "AC8 production must remain exactly 2667 lines under the approved ceiling");
-  assert.equal(readFileSync(cli, "utf8").split("\n").length - 1, 703, "AC14 factory.js must be exactly 703 physical lines");
+  assert.equal(productionLines, 2703, "AC8 production must remain exactly 2703 lines under the approved ceiling");
+  assert.equal(readFileSync(cli, "utf8").split("\n").length - 1, 736, "AC14 factory.js must be exactly 736 physical lines");
 
   const repository = mkdtempSync(join(tmpdir(), "factory-state-relocation-"));
   try {

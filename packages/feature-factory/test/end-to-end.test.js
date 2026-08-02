@@ -481,6 +481,9 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.match(omitted.stderr, /test_plan: must be an array of strings/u);
 
       writeFileSync(planFile, JSON.stringify({ slices: slices.map((s) => ({ ...s, test_plan: ["t"] })) }, null, 2));
+      // Revising the plan after approval unbinds it: the gate approved the earlier bytes. Re-approve
+      // so the seed below ratifies what was presented, which is the contract, not a fixture detail.
+      assert.equal(approveGate(p.repo, "brief", NOW(1)).ok, true);
       const presentedPlan = readFileSync(planFile, "utf8");
       rmSync(planFile);
       const missing = factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]);

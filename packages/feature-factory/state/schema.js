@@ -15,6 +15,9 @@ export const RUN_KEYS = Object.freeze([
   "version", "run_id", "jira_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
   "status", "mode", "max_parallel_slices", "max_retries",
   "gates", "steps", "slices", "validator", "terminal_result", "pr_url",
+  // Digest of the plan bytes the brief gate approved, so the seed ratifies that plan and not a
+  // later edit of the same filename. See the check in `slices-seed`.
+  "plan_digest",
 ]);
 
 export const RUN_STATUSES = Object.freeze(["running", "completed", "blocked", "partial", "needs-human"]);
@@ -104,7 +107,7 @@ export function validateRun(run) {
   for (const key of ["branch", "worktree"]) required(errors, run, key, "run");
   for (const key of ["created_at", "updated_at"]) pattern(errors, run, key, ISO, "run");
   for (const key of ["max_parallel_slices", "max_retries"]) positiveInt(errors, run, key, "run");
-  for (const key of ["jira_key", "pr_base", "pr_url"]) optionalString(errors, run, key, "run");
+  for (const key of ["jira_key", "pr_base", "pr_url", "plan_digest"]) optionalString(errors, run, key, "run");
 
   gates(errors, run.gates);
   steps(errors, run.steps);
