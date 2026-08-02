@@ -418,7 +418,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //
     // Neither part is a feature, and the lines are the two checks plus the notes recording that the
     // original falsification of this pre-check's removal ran only where inodes are not reused.
-    assert.ok(total < 2666, `production source is ${total} lines; the tripwire is 2666`);
+    // 2665 -> 2667 (#178): nextAction seed-slices branch and checked Brief-approval seed guard.
+    assert.ok(total < 2668, `production source is ${total} lines; the tripwire is 2668`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
