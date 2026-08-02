@@ -159,6 +159,20 @@ collision is fatal. Do not reuse, repair, or delete it. A resumed sandbox must p
 containment gate as a fresh sandbox before an agent receives its path; a failed resume check retains
 the sandbox and refuses dispatch. A legacy run continues at `--repo "$O"` without migration.
 
+Every sandbox resume recaptures both effective push targets before claiming the lock or dispatching an
+agent:
+
+```sh
+CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
+CURRENT_SANDBOX_PUSH="$(LC_ALL=C git -C "$S" remote get-url --push origin)"
+```
+
+Both lookups must succeed and return nonempty output, and their shell strings must be exactly equal.
+Never persist or log either target, normalize them, or automatically reconfigure the sandbox. A lookup
+failure or mismatch retains `S`, exposes neither value, and permits only status reads against `S`; do
+not claim or steal the lock or publish, and refuse dispatch.
+The legacy `RUN_REPO="$O"` resume has no sandbox target and keeps its existing local flow.
+
 On resume, claim or resume the lock at the selected repository and continue from status `next`; never
 restart or initialize:
 
@@ -184,8 +198,9 @@ PUSH_TARGET="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
 
 Each command must succeed and produce nonempty output. Omit the symbolic-ref command only when an
 explicit `PR_BASE` was supplied. The push lookup must be exactly the effective push lookup above;
-never read raw `remote.origin.url`, normalize the result, or expose it. Keep `PUSH_TARGET` out of the
-control plane and logs. A push lookup failure refuses before `S` exists.
+its result includes Git's configured `pushurl` and `pushInsteadOf` semantics and may differ from the
+fetch URL. Never read raw `remote.origin.url`, normalize the result, or expose it. Keep `PUSH_TARGET`
+out of the control plane and logs. A push lookup failure refuses before `S` exists.
 
 Require `C` to be absent or a real directory, create it when absent, and recheck that `S` is absent
 immediately before cloning. Run the C-locale clone once:
@@ -214,7 +229,8 @@ RESOLVED_PUSH="$(LC_ALL=C git -C "$S" remote get-url --push origin)"
 
 Both commands must succeed, the resolved value must be nonempty, and shell-string equality with
 `PUSH_TARGET` must be exact. On configuration, lookup, or equality failure, expose neither value,
-remove only this invocation's new `S`, and refuse dispatch.
+remove only this invocation's new `S`, and refuse dispatch. Do not initialize state, claim a lock, or
+perform any external effect from the failed bootstrap.
 
 ### Physical containment gate
 
@@ -249,7 +265,6 @@ present:
 
 ```sh
 factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"
-factory lock "$R" claim --session "$SESSION_ID" --repo "$S"
 ```
 
 `init` creates `P`, including `plan/`, `artifacts/`, `evidence/`, and `reviews/`. Initialization is
@@ -257,6 +272,14 @@ create-only. If its outcome is unknown, resolve it with `factory status "$R" --j
 valid state means resume and never retry; no manifest with only init scaffolding may retry init; an
 invalid manifest is surfaced without overwrite. The branch already exists and exactly matches the
 intent recorded by init, so the first slice can observe it.
+
+Only after containment, branch verification, and valid initialized state are all proven, select the
+fresh run repository before any later status, dispatch, or publication path uses it:
+
+```sh
+RUN_REPO="$S"
+factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"
+```
 
 If the lock is held by another session, resume with that session, use the fully qualified steal command
 above only when the holder is gone, or abort. Refresh it around long waits with
@@ -500,13 +523,33 @@ factory gate <run-id> pre_pr approved          # present the new diff and re-app
 
 ## Step 6 — Draft PR
 
-Read the delivery intent from status immediately before the external effects. Push the recorded feature
-branch, create the PR as a **draft** against the exact recorded target, and then record its URL:
+Immediately before any publication effect, read the delivery intent from the selected run repository,
+then recapture the operator and selected-run effective push targets:
 
 ```sh
-factory status <run-id> --json
-gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"
-factory pr <run-id> --url <pr-url>
+factory status "$R" --json --repo "$RUN_REPO"
+CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
+CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"
+```
+
+Both lookups must succeed and return nonempty output, and their shell strings must be exactly equal.
+Never persist or log either target, normalize them, or automatically reconfigure a remote. A lookup
+failure or mismatch leaves `RUN_REPO` intact, exposes neither value, permits status only, and blocks
+every publication effect.
+
+Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as
+`PR_BASE`; never infer, shorten, normalize, or substitute either value. Publish the fully qualified
+recorded feature ref from `RUN_REPO`, run `gh` from `O` with that exact head and base, require a draft,
+and record the returned URL under `RUN_REPO`. Thus sandbox runs use `S` and legacy local runs use `O`
+through the selection already made in Step 0:
+
+```sh
+git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"
+(
+  cd "$O"
+  gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"
+)
+factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"
 ```
 
 The `gh` call is the orchestrator's external effect; the package makes no forge call and `factory pr`
