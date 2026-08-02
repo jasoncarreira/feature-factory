@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
+  readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -521,10 +521,75 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
 
     const guarded = createFixture("guarded");
     fixtures.push(guarded);
+    writeFileSync(join(guarded.operator, "operator-sentinel.txt"), "operator must survive\n");
     const escaped = completedHandoff(guarded, { removePath: guarded.operator });
     assert.match(escaped.reason, /^cleanup remove failed: /u);
     assert.equal(existsSync(guarded.sandbox), true, "AC10 destructive guard must retain a mismatched target");
     assert.equal(existsSync(guarded.operator), true, "AC10 destructive guard must never remove O");
+    assert.equal(readFileSync(join(guarded.operator, "operator-sentinel.txt"), "utf8"), "operator must survive\n",
+      "AC10 the protected O sentinel survives a rejected removal target");
+
+    // Exercise every canonical removal guard against a fresh temp fixture.  These use the actual
+    // handoff up to removal where possible, then verify a protected file remains; they are not path
+    // arithmetic assertions that could pass while `rm -rf` is pointed at the wrong directory.
+    const symlinkedContainer = createFixture("remove-symlink-container");
+    fixtures.push(symlinkedContainer);
+    const containerTarget = join(symlinkedContainer.root, "container-target");
+    renameSync(symlinkedContainer.container, containerTarget);
+    symlinkSync(containerTarget, symlinkedContainer.container, "dir");
+    const containerSentinel = join(containerTarget, symlinkedContainer.runId, "container-sentinel.txt");
+    writeFileSync(containerSentinel, "container survives\n");
+    const rejectedContainer = completedHandoff(symlinkedContainer);
+    assert.deepEqual(rejectedContainer.phases, ["terminal", "fetch", "archive", "verify"],
+      "AC10 a symlinked C reaches no removal phase");
+    assert.match(rejectedContainer.reason, /^cleanup remove failed: not a real directory: /u);
+    assert.equal(readFileSync(containerSentinel, "utf8"), "container survives\n",
+      "AC10 symlinked C sentinel survives the rejected removal");
+
+    const symlinkedSandbox = createFixture("remove-symlink-sandbox");
+    fixtures.push(symlinkedSandbox);
+    const sandboxTarget = join(symlinkedSandbox.container, "sandbox-target");
+    renameSync(symlinkedSandbox.sandbox, sandboxTarget);
+    symlinkSync(sandboxTarget, symlinkedSandbox.sandbox, "dir");
+    const sandboxSentinel = join(sandboxTarget, "sandbox-sentinel.txt");
+    writeFileSync(sandboxSentinel, "sandbox survives\n");
+    const rejectedSandbox = completedHandoff(symlinkedSandbox);
+    assert.deepEqual(rejectedSandbox.phases, ["terminal", "fetch", "archive", "verify"],
+      "AC10 a symlinked S reaches no removal phase");
+    assert.match(rejectedSandbox.reason, /^cleanup remove failed: not a real directory: /u);
+    assert.equal(readFileSync(sandboxSentinel, "utf8"), "sandbox survives\n",
+      "AC10 symlinked S sentinel survives the rejected removal");
+
+    const canonicalMismatch = createFixture("remove-canonical-mismatch");
+    fixtures.push(canonicalMismatch);
+    const canonicalSentinel = join(canonicalMismatch.sandbox, "canonical-sentinel.txt");
+    writeFileSync(canonicalSentinel, "canonical survives\n");
+    const alias = `${canonicalMismatch.sandbox}/../${canonicalMismatch.runId}`;
+    const rejectedCanonical = completedHandoff(canonicalMismatch, { removePath: alias });
+    assert.deepEqual(rejectedCanonical.phases, ["terminal", "fetch", "archive", "verify"]);
+    assert.match(rejectedCanonical.reason, /^cleanup remove failed: canonical path mismatch/u,
+      "AC10 lexical S aliases must fail the exact canonical S guard");
+    assert.equal(readFileSync(canonicalSentinel, "utf8"), "canonical survives\n");
+
+    const wrongParent = createFixture("remove-wrong-parent");
+    fixtures.push(wrongParent);
+    const wrongContainer = join(wrongParent.root, "wrong-container");
+    mkdirSync(wrongContainer);
+    const wrongParentSentinel = join(wrongParent.sandbox, "wrong-parent-sentinel.txt");
+    writeFileSync(wrongParentSentinel, "wrong parent survives\n");
+    assert.throws(() => removalGuard(wrongParent.operator, wrongContainer, wrongParent.sandbox), /canonical parent mismatch/u,
+      "AC10 S whose physical parent is not C must be refused");
+    assert.equal(readFileSync(wrongParentSentinel, "utf8"), "wrong parent survives\n");
+
+    const rootRefusal = createFixture("remove-root-refusal");
+    fixtures.push(rootRefusal);
+    const rootSentinel = join(rootRefusal.sandbox, "root-guard-sentinel.txt");
+    writeFileSync(rootSentinel, "root guard survives\n");
+    assert.throws(() => removalGuard(rootRefusal.operator, rootRefusal.container, rootRefusal.operator),
+      "AC10 the operator checkout is never a removable sandbox target");
+    assert.throws(() => removalGuard(rootRefusal.operator, rootRefusal.container, "/"),
+      "AC10 filesystem root is never a removable sandbox target");
+    assert.equal(readFileSync(rootSentinel, "utf8"), "root guard survives\n");
 
     const retained = createFixture("retained");
     fixtures.push(retained);

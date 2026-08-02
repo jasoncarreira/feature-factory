@@ -299,14 +299,35 @@ describe("run projection", () => {
       seedRun(root, "other-live", RUN({ run_id: "other-live", updated_at: "2026-07-30T10:00:00.000Z" }));
       const terminal = seedSandbox(root, "terminal-new",
         RUN({ run_id: "terminal-new", status: "completed", updated_at: "2026-07-30T13:00:00.000Z" }));
-      seedRun(root, "dup", RUN({ run_id: "dup", unexpected: true,
+      const invalidLocalDup = seedRun(root, "dup", RUN({ run_id: "dup", unexpected: true,
         updated_at: "2030-07-30T12:00:00.000Z" }));
-      seedSandbox(root, "dup", RUN({ run_id: "dup", unexpected: true,
+      const invalidSandboxDup = seedSandbox(root, "dup", RUN({ run_id: "dup", unexpected: true,
         updated_at: "2031-07-30T12:00:00.000Z" }));
-      seedRun(root, "newer-invalid", RUN({ run_id: "newer-invalid", unexpected: true,
+      const invalidNewer = seedRun(root, "newer-invalid", RUN({ run_id: "newer-invalid", unexpected: true,
         updated_at: "2032-07-30T12:00:00.000Z" }));
 
+      // Polling is read-only even when it reads both a live sandbox and a stale/dead one.  Snapshot
+      // manifests and unrelated sentinels before polling twice so a future cleanup/write hidden in a
+      // projection path cannot pass merely because the rendered values look right.
+      const primarySentinel = join(primary.sandbox, "read-only-primary.sentinel");
+      const deadSentinel = join(dead.sandbox, "read-only-dead.sentinel");
+      writeFileSync(primarySentinel, "live sandbox survives polling\n");
+      writeFileSync(deadSentinel, "dead sandbox survives polling\n");
+      const readOnlyBefore = new Map([
+        [join(primary.dir, "run.json"), readFileSync(join(primary.dir, "run.json"), "utf8")],
+        [join(dead.dir, "run.json"), readFileSync(join(dead.dir, "run.json"), "utf8")],
+        [primarySentinel, readFileSync(primarySentinel, "utf8")],
+        [deadSentinel, readFileSync(deadSentinel, "utf8")],
+      ]);
+
       const snapshot = pollRuns(root);
+      const repeatedSnapshot = pollRuns(root);
+      assert.equal(repeatedSnapshot.active.run_id, "live-primary", "[AC5, AC13] repeat polling retains the live sandbox");
+      assert.equal(repeatedSnapshot.runs.find((run) => run.run_id === "live-dead")?.deadLock, true,
+        "[AC13] repeat polling retains the stale/dead sandbox");
+      for (const [path, contents] of readOnlyBefore) {
+        assert.equal(readFileSync(path, "utf8"), contents, `[AC5, AC13] polling must not mutate ${path}`);
+      }
       assert.equal(snapshot.active.run_id, "live-primary",
         "[AC15] a valid live run headlines ahead of newer terminal and invalid records");
       assert.deepEqual(snapshot.runs.map((run) => [run.run_id, run.valid, run.terminal]), [
@@ -333,6 +354,19 @@ describe("run projection", () => {
       for (const invalid of invalids) {
         assert.ok(lines.includes(invalid.error), "[AC6] every invalid record retains its existing error text");
       }
+      const expectedInvalidPaths = [
+        { run_id: "dup", manifest_path: realpathSync(join(invalidLocalDup, "run.json")) },
+        { run_id: "dup", manifest_path: realpathSync(join(invalidSandboxDup.dir, "run.json")) },
+        { run_id: "newer-invalid", manifest_path: realpathSync(join(invalidNewer, "run.json")) },
+      ].sort((left, right) => left.run_id.localeCompare(right.run_id) || left.manifest_path.localeCompare(right.manifest_path));
+      const expectedInvalidBlocks = expectedInvalidPaths.flatMap(({ run_id, manifest_path }) => {
+        const invalid = invalids.find((run) => run.run_id === run_id && run.manifest_path === manifest_path);
+        assert.ok(invalid?.error, `[AC6, AC7] ${manifest_path} must remain an explicit invalid record`);
+        return [`${run_id}  INVALID`, `at ${manifest_path}`, invalid.error];
+      });
+      const firstInvalid = lines.indexOf(`${expectedInvalidPaths[0].run_id}  INVALID`);
+      assert.deepEqual(lines.slice(firstInvalid, firstInvalid + expectedInvalidBlocks.length), expectedInvalidBlocks,
+        "[AC6, AC7] every local/sandbox invalid renders as one adjacent ID/path/error block in deterministic ID/path order");
       assert.equal(lines.at(-1), "(2 other runs)",
         "[AC13, AC15] the count includes only valid records not already rendered explicitly");
 

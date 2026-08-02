@@ -38,7 +38,12 @@ const WRITE_PRIMITIVES = [
   "withRunJsonLock", "writeProtectedJsonAtomic", "writeProtectedFileAtomic",
   "writeFileSync", "writeFile", "renameSync", "coordinateRunJsonTransition", "transition(",
   "node:child_process", "child_process", "execFile", "spawnSync", "spawn(", "exec(",
+  "rmSync(", "rm(", "unlinkSync(", "unlink(", "mkdirSync(", "mkdir(", "rename(",
+  "copyFileSync(", "copyFile(", "cpSync(", "cp(", "appendFileSync(", "appendFile(",
+  "truncateSync(", "truncate(",
 ];
+
+const READ_ONLY_FS_IMPORTS = new Set(["existsSync", "readdirSync", "readFileSync", "realpathSync", "statSync"]);
 
 describe("package boundary", () => {
   it("gives the opencode package no way to write run state", () => {
@@ -49,6 +54,14 @@ describe("package boundary", () => {
       // whatever a bundler emits. Scanning it reports the bundler's internals, not our choices.
       if (path.includes(`${opencodePkg}/tui/dist/`)) continue;
       const text = readFileSync(path, "utf8");
+      const fsImports = [...text.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']node:fs["']/gu)];
+      const fsMentions = text.match(/from\s*["']node:fs["']/gu)?.length ?? 0;
+      if (fsImports.length !== fsMentions) offenders.push(`${path.slice(opencodePkg.length + 1)} :: non-allowlisted node:fs import form`);
+      for (const [, names] of fsImports) {
+        for (const name of names.split(",").map((entry) => entry.trim().split(/\s+as\s+/u)[0])) {
+          if (name && !READ_ONLY_FS_IMPORTS.has(name)) offenders.push(`${path.slice(opencodePkg.length + 1)} :: node:fs ${name}`);
+        }
+      }
       for (const primitive of WRITE_PRIMITIVES) {
         if (text.includes(primitive)) offenders.push(`${path.slice(opencodePkg.length + 1)} :: ${primitive}`);
       }

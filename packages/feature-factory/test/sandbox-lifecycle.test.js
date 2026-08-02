@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -20,6 +22,80 @@ function position(fragment) {
 function factoryInvocations(markdown) {
   return [...markdown.matchAll(/(?:^|`)(factory\s+[a-z-]+\s+[^`\n]+)(?=`|$)/gmu)]
     .map(([, invocation]) => invocation.trim());
+}
+
+function git(repository, ...args) {
+  return execFileSync("git", ["-C", repository, ...args], {
+    encoding: "utf8", env: { ...process.env, LC_ALL: "C" },
+  }).trim();
+}
+
+function inside(child, parent) {
+  const path = relative(parent, child);
+  return path.length > 0 && path !== ".." && !path.startsWith(`..${sep}`);
+}
+
+// This is deliberately a small executable model of the shell sequence the skill directs.  The
+// factory is an agent skill rather than a bootstrap binary, so real Git operations plus the skill's
+// exact command/order assertions below are the boundary that can prove the destructive sequence.
+function bootstrapWithInjectedHardlinkFailure({ operator, sandbox, runId, dispatch }) {
+  const container = dirname(sandbox);
+  const plane = join(sandbox, ".factory", runId);
+  const worktrees = join(sandbox, ".factory", "worktrees", runId);
+  const events = [];
+  const seed = git(operator, "rev-parse", "--verify", "HEAD^{commit}");
+  const pushTarget = git(operator, "remote", "get-url", "--push", "origin");
+  let attempts = 0;
+  let containmentProven = false;
+  mkdirSync(container);
+
+  const clone = (noHardlinks) => {
+    attempts += 1;
+    events.push(noHardlinks ? "clone:no-hardlinks" : "clone:hardlinks");
+    if (!noHardlinks) {
+      mkdirSync(sandbox);
+      writeFileSync(join(sandbox, "partial"), "only this attempt may remove me\n");
+      const error = new Error("fatal: failed to create link");
+      error.stderr = "fatal: failed to create link";
+      throw error;
+    }
+    assert.equal(existsSync(sandbox), false, "AC4 partial sandbox must be removed before the sole fallback clone");
+    execFileSync("git", ["clone", "--local", "--no-hardlinks", operator, sandbox], {
+      encoding: "utf8", env: { ...process.env, LC_ALL: "C" },
+    });
+  };
+
+  try {
+    clone(false);
+  } catch (error) {
+    assert.match(error.stderr, /failed to create link/u, "AC4 only the hardlink failure admits fallback");
+    assert.equal(existsSync(join(sandbox, "partial")), true, "AC4 fixture must create the invocation partial sandbox");
+    rmSync(sandbox, { recursive: true });
+    events.push("remove:partial");
+    clone(true);
+  }
+  assert.equal(attempts, 2, "AC4 allows one initial hardlink attempt and exactly one fallback");
+
+  git(sandbox, "config", "--replace-all", "remote.origin.pushurl", pushTarget);
+  assert.equal(git(sandbox, "remote", "get-url", "--push", "origin"), pushTarget,
+    "AC3 effective push proof completes before containment and dispatch");
+  const canonicalSandbox = realpathSync(sandbox);
+  assert.equal(realpathSync(git(sandbox, "rev-parse", "--show-toplevel")), canonicalSandbox,
+    "AC3 clone top level must be exactly S");
+  assert.equal(realpathSync(git(sandbox, "rev-parse", "--absolute-git-dir")), join(canonicalSandbox, ".git"),
+    "AC3 clone Git dir must be S/.git");
+  mkdirSync(plane, { recursive: true });
+  mkdirSync(worktrees, { recursive: true });
+  assert.equal(inside(realpathSync(plane), canonicalSandbox), true, "AC2 P must physically be inside S");
+  assert.equal(inside(realpathSync(worktrees), canonicalSandbox), true, "AC2 W must physically be inside S");
+  git(sandbox, "switch", "--quiet", "--no-track", "-c", `feature/${runId}`, seed);
+  assert.equal(git(sandbox, "rev-parse", "HEAD"), seed);
+  containmentProven = true;
+  events.push("containment:proved");
+  dispatch();
+  assert.equal(containmentProven, true, "AC3 dispatch callback cannot run before containment succeeds");
+  events.push("dispatch");
+  return { events, plane, worktrees };
 }
 
 test("AC1/AC3/AC4 fresh and resumed runs use a contained sandbox with guarded hardlink fallback", () => {
@@ -138,5 +214,46 @@ test("AC1/AC3/AC4 fresh and resumed runs use a contained sandbox with guarded ha
   for (const command of factoryCommands) {
     assert.match(command, /^factory [a-z-]+ /u, `factory syntax must be command-first: ${command}`);
     assert.match(command, /--repo "\$(?:RUN_REPO|S)"$/u, `factory repository must be trailing: ${command}`);
+  }
+
+  const root = mkdtempSync(join(tmpdir(), "factory-sandbox-lifecycle-"));
+  try {
+    const operator = join(root, "operator");
+    const pushTarget = join(root, "push-target.git");
+    const sandbox = join(root, ".operator.factory-sandboxes", "sandbox-lifecycle");
+    mkdirSync(operator);
+    execFileSync("git", ["init", "--quiet", "--initial-branch=main", operator]);
+    git(operator, "config", "user.name", "Factory Test");
+    git(operator, "config", "user.email", "factory@example.test");
+    writeFileSync(join(operator, "tracked.txt"), "operator stays untouched\n");
+    git(operator, "add", "tracked.txt");
+    git(operator, "commit", "--quiet", "-m", "seed");
+    git(operator, "switch", "--quiet", "-c", "operator-work");
+    execFileSync("git", ["init", "--bare", "--quiet", pushTarget]);
+    git(operator, "remote", "add", "origin", pushTarget);
+    const operatorBefore = {
+      branch: git(operator, "symbolic-ref", "--quiet", "--short", "HEAD"),
+      head: git(operator, "rev-parse", "HEAD"),
+      status: git(operator, "status", "--porcelain"),
+    };
+    let dispatches = 0;
+    const bootstrapped = bootstrapWithInjectedHardlinkFailure({
+      operator, sandbox, runId: "sandbox-lifecycle",
+      dispatch: () => { dispatches += 1; },
+    });
+    assert.deepEqual(bootstrapped.events, [
+      "clone:hardlinks", "remove:partial", "clone:no-hardlinks", "containment:proved", "dispatch",
+    ], "AC3/AC4 partial cleanup and containment must precede the one dispatch");
+    assert.equal(dispatches, 1, "AC3 dispatch occurs once after containment proof");
+    assert.deepEqual({
+      branch: git(operator, "symbolic-ref", "--quiet", "--short", "HEAD"),
+      head: git(operator, "rev-parse", "HEAD"),
+      status: git(operator, "status", "--porcelain"),
+    }, operatorBefore, "AC1 bootstrap must not switch, commit, or dirty the operator checkout");
+    assert.equal(existsSync(join(sandbox, "partial")), false, "AC4 fallback never retains the partial clone");
+    assert.equal(realpathSync(bootstrapped.plane).startsWith(`${realpathSync(sandbox)}/`), true);
+    assert.equal(realpathSync(bootstrapped.worktrees).startsWith(`${realpathSync(sandbox)}/`), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

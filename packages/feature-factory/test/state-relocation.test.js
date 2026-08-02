@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -241,5 +241,60 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     assert.equal(terminal.sandbox_path, resolve(repository));
   } finally {
     rmSync(repository, { recursive: true, force: true });
+  }
+
+  // Execute the path convention with real linked-worktree metadata, rather than only deriving
+  // strings from it.  `repository` above is the selected repo unit fixture; this one distinguishes
+  // the untouched operator O from the sandbox S that owns both P and W.
+  const root = mkdtempSync(join(tmpdir(), "factory-state-sandbox-"));
+  try {
+    const operator = join(root, "operator");
+    const container = join(root, ".operator.factory-sandboxes");
+    const sandbox = join(container, "state-relocation");
+    const runId = "state-relocation";
+    mkdirSync(operator);
+    git(operator, "init", "--quiet", "--initial-branch=main");
+    git(operator, "config", "user.name", "Factory Test");
+    git(operator, "config", "user.email", "factory@example.test");
+    writeFileSync(join(operator, "operator.txt"), "operator\n");
+    git(operator, "add", "operator.txt");
+    git(operator, "commit", "--quiet", "-m", "operator seed");
+    git(operator, "switch", "--quiet", "-c", "operator-work");
+    const operatorBefore = {
+      branch: git(operator, "symbolic-ref", "--quiet", "--short", "HEAD"),
+      head: git(operator, "rev-parse", "HEAD"),
+      status: git(operator, "status", "--porcelain"),
+    };
+    mkdirSync(container);
+    execFileSync("git", ["clone", "--quiet", "--local", operator, sandbox]);
+    git(sandbox, "config", "user.name", "Factory Test");
+    git(sandbox, "config", "user.email", "factory@example.test");
+    git(sandbox, "switch", "--quiet", "-c", `feature/${runId}`);
+    factory(sandbox, "init", runId, "--branch", `feature/${runId}`, "--pr-base", "main");
+    const plane = join(sandbox, ".factory", runId);
+    const worktreeRoot = join(sandbox, ".factory", "worktrees", runId);
+    const sliceWorktree = join(worktreeRoot, "slice-a");
+    mkdirSync(worktreeRoot, { recursive: true });
+    git(sandbox, "worktree", "add", "--quiet", "-b", `factory/${runId}/slice-a`, sliceWorktree, `feature/${runId}`);
+    const canonicalSandbox = realpathSync(sandbox);
+    for (const path of [plane, worktreeRoot, sliceWorktree]) {
+      const physical = realpathSync(path);
+      const pathInsideSandbox = relative(canonicalSandbox, physical);
+      assert.ok(pathInsideSandbox && pathInsideSandbox !== ".." && !pathInsideSandbox.startsWith(`..${sep}`),
+        `AC2 ${path} must physically remain under S`);
+    }
+    assert.equal(realpathSync(git(sandbox, "rev-parse", "--show-toplevel")), canonicalSandbox,
+      "AC2 feature repository is the sandbox, not O");
+    assert.equal(realpathSync(git(sliceWorktree, "rev-parse", "--show-toplevel")), realpathSync(sliceWorktree),
+      "AC2 slice worktree is a real linked worktree inside W");
+    assert.equal(existsSync(join(operator, ".factory", runId, "run.json")), false,
+      "AC2 sandbox initialization must not create a control plane in O");
+    assert.deepEqual({
+      branch: git(operator, "symbolic-ref", "--quiet", "--short", "HEAD"),
+      head: git(operator, "rev-parse", "HEAD"),
+      status: git(operator, "status", "--porcelain"),
+    }, operatorBefore, "AC1/AC2 real slice creation must leave O unchanged");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
