@@ -17,6 +17,11 @@ function position(fragment) {
   return index;
 }
 
+function factoryInvocations(markdown) {
+  return [...markdown.matchAll(/(?:^|`)(factory\s+[a-z-]+\s+[^`\n]+)(?=`|$)/gmu)]
+    .map(([, invocation]) => invocation.trim());
+}
+
 test("AC1/AC3/AC4 fresh and resumed runs use a contained sandbox with guarded hardlink fallback", () => {
   const required = [
     "C = dirname(O)/.<basename(O)>.factory-sandboxes",
@@ -30,20 +35,31 @@ test("AC1/AC3/AC4 fresh and resumed runs use a contained sandbox with guarded ha
     "If both manifests exist, print both\nabsolute paths and refuse as ambiguous.",
     "Never follow a symlink at `C` or `S`.",
     "Do not reuse, repair, or delete it.",
+    "a failed resume check retains\nthe sandbox and refuses dispatch",
+    "Refuse if `refs/heads/$FEATURE_BRANCH` already exists in `O`.",
     "SEED_HEAD=\"$(git -C \"$O\" rev-parse --verify 'HEAD^{commit}')\"",
     "PR_BASE=\"$(git -C \"$O\" symbolic-ref --quiet --short HEAD)\"",
     "PUSH_TARGET=\"$(LC_ALL=C git -C \"$O\" remote get-url --push origin)\"",
     "LC_ALL=C git clone --local \"$O\" \"$S\"",
+    "Remove only the partial `S` created by this invocation",
     "factory sandbox: hardlink clone failed; retrying with --no-hardlinks",
     "LC_ALL=C git clone --local --no-hardlinks \"$O\" \"$S\"",
     "git -C \"$S\" config --replace-all remote.origin.pushurl \"$PUSH_TARGET\"",
     "RESOLVED_PUSH=\"$(LC_ALL=C git -C \"$S\" remote get-url --push origin)\"",
     "shell-string equality with\n`PUSH_TARGET` must be exact",
+    "On configuration, lookup, or equality failure, expose neither value",
+    "remove only this invocation's new `S`, and refuse dispatch",
+    "CANONICAL_S=\"$(cd \"$S\" && pwd -P)\"",
     "TOP_LEVEL=\"$(cd \"$(git -C \"$S\" rev-parse --show-toplevel)\" && pwd -P)\"",
     "GIT_DIR=\"$(cd \"$(git -C \"$S\" rev-parse --absolute-git-dir)\" && pwd -P)\"",
     "Require `CANONICAL_S` and `TOP_LEVEL` to equal `S`, and `GIT_DIR` to\nequal `S/.git`.",
     "require their\nphysical canonical locations to be strict\ndescendants of `S`",
+    "Any fresh failure removes only the new `S`;\nany resume failure retains it.",
+    "Refuse an existing sandbox `refs/heads/$FEATURE_BRANCH`",
     "git -C \"$S\" switch --no-track -c \"$FEATURE_BRANCH\" \"$SEED_HEAD\"",
+    "SWITCHED_HEAD=\"$(git -C \"$S\" rev-parse --verify 'HEAD^{commit}')\"",
+    "SWITCHED_BRANCH=\"$(git -C \"$S\" symbolic-ref --quiet --short HEAD)\"",
+    "Require `SWITCHED_HEAD` to equal `SEED_HEAD` and\n`SWITCHED_BRANCH` to equal `FEATURE_BRANCH`.",
     "factory init \"$R\" --branch \"$FEATURE_BRANCH\" --pr-base \"$PR_BASE\" [--jira \"$KEY\"] [--mode \"$MODE\"] --repo \"$S\"",
   ];
   required.forEach(position);
@@ -56,7 +72,13 @@ test("AC1/AC3/AC4 fresh and resumed runs use a contained sandbox with guarded ha
     "git clone --local \"$O\" \"$S\"",
     "config --replace-all remote.origin.pushurl",
     "### Physical containment gate",
+    "CANONICAL_S=",
+    "Any fresh failure removes only the new `S`",
+    "Refuse an existing sandbox `refs/heads/$FEATURE_BRANCH`",
     "switch --no-track -c",
+    "SWITCHED_HEAD=",
+    "SWITCHED_BRANCH=",
+    "Require `SWITCHED_HEAD`",
     "factory init \"$R\"",
     "dispatch the planned ticket",
   ].map(position);
@@ -67,8 +89,52 @@ test("AC1/AC3/AC4 fresh and resumed runs use a contained sandbox with guarded ha
   assert.match(step0, /Do not retry any other clone failure\.[^]*make no\nthird attempt\./u);
   assert.doesNotMatch(step0, /git -C "\$O" (?:switch|reset|clean|stash|worktree|config)\b/u);
 
-  const factoryCommands = [...step0.matchAll(/^factory .+$/gmu)].map(([command]) => command);
-  assert.ok(factoryCommands.length >= 4);
+  const fallbackOrder = [
+    "Only a nonzero result",
+    "Remove only the partial `S` created by this invocation",
+    "factory sandbox: hardlink clone failed; retrying with --no-hardlinks",
+    "LC_ALL=C git clone --local --no-hardlinks",
+  ].map(position);
+  assert.deepEqual(fallbackOrder, [...fallbackOrder].sort((a, b) => a - b), "AC4 partial cleanup must precede the sole fallback retry");
+
+  const pushFailureOrder = [
+    "RESOLVED_PUSH=",
+    "On configuration, lookup, or equality failure",
+    "remove only this invocation's new `S`",
+    "### Physical containment gate",
+  ].map(position);
+  assert.deepEqual(pushFailureOrder, [...pushFailureOrder].sort((a, b) => a - b), "AC3 failed fresh push proof must clean only its new sandbox before dispatch");
+
+  const containmentOrder = [
+    "### Physical containment gate",
+    "CANONICAL_S=",
+    "TOP_LEVEL=",
+    "GIT_DIR=",
+    "Require `CANONICAL_S` and `TOP_LEVEL`",
+    "physical canonical locations to be strict",
+    "Any fresh failure removes only the new `S`",
+    "any resume failure retains it",
+    "Either failure stops before dispatch.",
+  ].map(position);
+  assert.deepEqual(containmentOrder, [...containmentOrder].sort((a, b) => a - b), "AC3 containment proof must finish with fresh cleanup and resumed retention before dispatch");
+
+  const containmentComplete = position("Either failure stops before dispatch.");
+  for (const match of step0.matchAll(/\bdispatch\b/gu)) {
+    const prefix = step0.slice(Math.max(0, match.index - 24), match.index + match[0].length);
+    if (/(?:refuses?|before) dispatch$/u.test(prefix)) continue;
+    assert.ok(match.index > containmentComplete, `AC3 agent dispatch precedes completed containment checks: ${prefix}`);
+  }
+
+  const factoryCommands = factoryInvocations(step0);
+  assert.deepEqual(factoryCommands, [
+    'factory status "$R" --json --repo "$RUN_REPO"',
+    'factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"',
+    'factory lock "$R" steal --session "$SESSION_ID" --repo "$RUN_REPO"',
+    'factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"',
+    'factory lock "$R" claim --session "$SESSION_ID" --repo "$S"',
+    'factory status "$R" --json --repo "$S"',
+    'factory heartbeat "$R" --session "$SESSION_ID" --repo "$RUN_REPO"',
+  ], "AC1 parser must cover every fenced and inline Step-0 factory invocation");
   for (const command of factoryCommands) {
     assert.match(command, /^factory [a-z-]+ /u, `factory syntax must be command-first: ${command}`);
     assert.match(command, /--repo "\$(?:RUN_REPO|S)"$/u, `factory repository must be trailing: ${command}`);

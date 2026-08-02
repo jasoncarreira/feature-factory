@@ -233,15 +233,19 @@ physical canonical locations to be strict
 descendants of `S`; a lexical prefix check is not proof. Any fresh failure removes only the new `S`;
 any resume failure retains it. Either failure stops before dispatch.
 
-Refuse an existing sandbox `refs/heads/$FEATURE_BRANCH`, create the feature branch at the captured
-seed, and verify both its commit and symbolic name before initialization:
+Refuse an existing sandbox `refs/heads/$FEATURE_BRANCH`, then create the feature branch at the
+captured seed:
 
 ```sh
 git -C "$S" switch --no-track -c "$FEATURE_BRANCH" "$SEED_HEAD"
+SWITCHED_HEAD="$(git -C "$S" rev-parse --verify 'HEAD^{commit}')"
+SWITCHED_BRANCH="$(git -C "$S" symbolic-ref --quiet --short HEAD)"
 ```
 
-Only after those checks initialize the control plane. Keep the command first and the repository flag
-last; include Jira and admitted mode flags only when present:
+Both verification commands must succeed. Require `SWITCHED_HEAD` to equal `SEED_HEAD` and
+`SWITCHED_BRANCH` to equal `FEATURE_BRANCH`. Only after those checks initialize the control plane.
+Keep the command first and the repository flag last; include Jira and admitted mode flags only when
+present:
 
 ```sh
 factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"
