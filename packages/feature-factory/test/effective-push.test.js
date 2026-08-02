@@ -32,6 +32,18 @@ test("AC9/AC16-AC19 effective push targets are proven at bootstrap, resume, and 
     env: { ...process.env, LC_ALL: "C" },
   }).trim();
   const git = (repository, ...args) => runGit("-C", repository, ...args);
+  const publishSelectedRun = (operatorRepository, runRepository, targetRepository, status, trace) => {
+    const operatorTarget = git(operatorRepository, "remote", "get-url", "--push", "origin");
+    const runTarget = git(runRepository, "remote", "get-url", "--push", "origin");
+    assert.equal(runTarget, operatorTarget, `${trace} effective targets must compare exactly`);
+    const featureBranch = status.branch;
+    const prBase = status.pr_base;
+    const featureRef = `refs/heads/${featureBranch}`;
+    git(runRepository, "push", "--quiet", "origin", `${featureRef}:${featureRef}`);
+    const publishedHead = git(runRepository, "rev-parse", featureRef);
+    assert.equal(git(targetRepository, "rev-parse", featureRef), publishedHead, `${trace} must publish the selected RUN_REPO head`);
+    return { featureBranch, prBase, featureRef, publishedHead };
+  };
 
   assert.ok(resumeStart >= 0 && freshStart > resumeStart && stepOneStart > freshStart);
   assert.ok(publicationStart >= 0 && summaryStart > publicationStart);
@@ -51,6 +63,20 @@ test("AC9/AC16-AC19 effective push targets are proven at bootstrap, resume, and 
     "Keep `PUSH_TARGET`\nout of the control plane and logs.",
     "Do not initialize state, claim a lock, or\nperform any external effect from the failed bootstrap.",
   ]) required(fresh, fragment, "AC16-AC18 fresh effective-push");
+  ordered(fresh, [
+    "### Physical containment gate",
+    "Require `SWITCHED_HEAD` to equal `SEED_HEAD`",
+    'factory init "$R" --branch "$FEATURE_BRANCH"',
+    "valid state means resume and never retry",
+    'RUN_REPO="$S"',
+    'factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"',
+    "dispatch the planned ticket",
+  ], "AC9 fresh RUN_REPO selection");
+  assert.equal(occurrences(fresh, 'RUN_REPO="$S"'), 1);
+  const freshRunRepoVariable = /RUN_REPO="(\$S)"/u.exec(fresh)?.[1];
+  const legacyRunRepoVariable = /RUN_REPO="(\$O)"/u.exec(resume)?.[1];
+  assert.equal(freshRunRepoVariable, "$S");
+  assert.equal(legacyRunRepoVariable, "$O");
   assert.doesNotMatch(fresh, /git -C "\$O" config .*remote\.origin\.url/u);
 
   ordered(resume, [
@@ -132,24 +158,24 @@ test("AC9/AC16-AC19 effective push targets are proven at bootstrap, resume, and 
     const sandboxPushTarget = git(sandbox, "remote", "get-url", "--push", "origin");
     assert.equal(sandboxPushTarget, capturedPushTarget, "AC17 sandbox target must re-resolve exactly");
 
-    const featureRef = "refs/heads/feature/173-3";
-    git(sandbox, "push", "--quiet", "origin", `${featureRef}:${featureRef}`);
-    assert.equal(git(pushRepository, "rev-parse", featureRef), git(sandbox, "rev-parse", featureRef), "AC9 fully qualified feature ref must reach the effective push target");
+    const repositoriesByVariable = new Map([["$O", operator], ["$S", sandbox]]);
+    let selectedRunRepo = repositoriesByVariable.get(freshRunRepoVariable);
+    assert.equal(selectedRunRepo, sandbox, "AC9 fresh assignment must select RUN_REPO=S");
+    const freshStatus = { branch: "feature/173-3", pr_base: "main" };
+    const freshPublication = publishSelectedRun(operator, selectedRunRepo, pushRepository, freshStatus, "AC9 fresh RUN_REPO=S publication");
+    assert.equal(freshPublication.featureBranch, freshStatus.branch, "AC9 fresh publication must use the exact recorded branch");
+    assert.equal(freshPublication.prBase, freshStatus.pr_base, "AC9 fresh publication must use the exact recorded intended base");
 
     writeFileSync(join(operator, "legacy.txt"), "legacy publication\n");
     git(operator, "add", "legacy.txt");
     git(operator, "commit", "-m", "legacy publication fixture");
     const legacyStatus = { branch: "feature/173-3", pr_base: "main" };
-    const legacyRunRepo = operator;
-    const legacyFeatureBranch = legacyStatus.branch;
-    const legacyPrBase = legacyStatus.pr_base;
-    assert.equal(legacyFeatureBranch, "feature/173-3", "AC9 legacy publication must use the exact recorded branch");
-    assert.equal(legacyPrBase, "main", "AC9 legacy publication must use the exact recorded intended base");
-    assert.equal(git(operator, "remote", "get-url", "--push", "origin"), git(legacyRunRepo, "remote", "get-url", "--push", "origin"), "AC17 legacy O/O effective targets must compare exactly");
-    const legacyFeatureRef = `refs/heads/${legacyFeatureBranch}`;
-    git(legacyRunRepo, "push", "--quiet", "origin", `${legacyFeatureRef}:${legacyFeatureRef}`);
-    assert.equal(git(pushRepository, "rev-parse", legacyFeatureRef), git(legacyRunRepo, "rev-parse", legacyFeatureRef), "AC9 legacy publication must push the fully qualified recorded ref from RUN_REPO=O");
-    assert.notEqual(git(pushRepository, "rev-parse", legacyFeatureRef), git(sandbox, "rev-parse", legacyFeatureRef), "AC9 legacy publication must not push from stale S");
+    selectedRunRepo = repositoriesByVariable.get(legacyRunRepoVariable);
+    assert.equal(selectedRunRepo, operator, "AC9 legacy assignment must preserve RUN_REPO=O");
+    const legacyPublication = publishSelectedRun(operator, selectedRunRepo, pushRepository, legacyStatus, "AC9 legacy RUN_REPO=O publication");
+    assert.equal(legacyPublication.featureBranch, legacyStatus.branch, "AC9 legacy publication must use the exact recorded branch");
+    assert.equal(legacyPublication.prBase, legacyStatus.pr_base, "AC9 legacy publication must use the exact recorded intended base");
+    assert.notEqual(legacyPublication.publishedHead, git(sandbox, "rev-parse", legacyPublication.featureRef), "AC9 legacy publication must not push from stale S");
 
     runGit("clone", "--quiet", "--local", operator, failedSandbox);
     git(failedSandbox, "config", "--replace-all", "remote.origin.pushurl", capturedPushTarget);

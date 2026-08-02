@@ -265,7 +265,6 @@ present:
 
 ```sh
 factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"
-factory lock "$R" claim --session "$SESSION_ID" --repo "$S"
 ```
 
 `init` creates `P`, including `plan/`, `artifacts/`, `evidence/`, and `reviews/`. Initialization is
@@ -273,6 +272,14 @@ create-only. If its outcome is unknown, resolve it with `factory status "$R" --j
 valid state means resume and never retry; no manifest with only init scaffolding may retry init; an
 invalid manifest is surfaced without overwrite. The branch already exists and exactly matches the
 intent recorded by init, so the first slice can observe it.
+
+Only after containment, branch verification, and valid initialized state are all proven, select the
+fresh run repository before any later status, dispatch, or publication path uses it:
+
+```sh
+RUN_REPO="$S"
+factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"
+```
 
 If the lock is held by another session, resume with that session, use the fully qualified steal command
 above only when the holder is gone, or abort. Refresh it around long waits with
