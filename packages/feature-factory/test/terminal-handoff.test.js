@@ -6,7 +6,7 @@ import {
   readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -24,14 +24,31 @@ function factory(repository, ...args) {
   return JSON.parse(execFileSync("node", [cli, ...args, "--repo", repository, "--json"], { encoding: "utf8" }));
 }
 
-function refSha(repository, ref) {
-  const result = spawnSync("git", ["-C", repository, "rev-parse", "--verify", `${ref}^{commit}`], {
+function inspectRef(repository, ref) {
+  const existence = spawnSync("git", ["-C", repository, "show-ref", "--verify", "--quiet", ref], {
     encoding: "utf8",
     env: { ...process.env, LC_ALL: "C" },
   });
-  if (result.status === 0) return result.stdout.trim();
-  if (result.status === 128) return null;
-  throw new Error(result.stderr.trim() || `could not inspect ${ref}`);
+  if (existence.status === 1) return { exists: false, sha: null };
+  if (existence.status !== 0) throw new Error(existence.stderr.trim() || `could not inspect ${ref}`);
+  const peeled = spawnSync("git", ["-C", repository, "rev-parse", "--verify", `${ref}^{commit}`], {
+    encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C" },
+  });
+  return { exists: true, sha: peeled.status === 0 ? peeled.stdout.trim() : null };
+}
+
+function refSha(repository, ref) {
+  return inspectRef(repository, ref).sha;
+}
+
+function pathEntry(path) {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 function treeInventory(root) {
@@ -62,10 +79,11 @@ function branchInventory(run, sandbox) {
   const refs = new Map();
   for (const branch of branches) {
     const ref = `refs/heads/${branch}`;
-    const sha = refSha(sandbox, ref);
-    if (!sha) throw new Error(`missing source ${ref}`);
-    if (refs.has(ref) && refs.get(ref) !== sha) throw new Error(`duplicate source ${ref}`);
-    refs.set(ref, sha);
+    const source = inspectRef(sandbox, ref);
+    if (!source.exists) throw new Error(`missing source ${ref}`);
+    if (!source.sha) throw new Error(`source is not a commit ${ref}`);
+    if (refs.has(ref) && refs.get(ref) !== source.sha) throw new Error(`duplicate source ${ref}`);
+    refs.set(ref, source.sha);
   }
   return [...refs].map(([ref, sha]) => ({ ref, sha })).sort((left, right) => left.ref.localeCompare(right.ref));
 }
@@ -91,59 +109,87 @@ function removalGuard(operator, container, sandbox) {
 
 function completedHandoff(fixture, options = {}) {
   const { operator, container, sandbox, archive, runId } = fixture;
-  if (fixture.legacy) {
-    factory(operator, "terminal", runId, "completed", "--reason", "draft-pr-recorded");
-    return { status: factory(operator, "status", runId), phases: ["terminal"] };
+  const events = [];
+  const invoke = (repository, command, ...args) => {
+    events.push({ command, repository });
+    return factory(repository, command, ...args);
+  };
+  if (options.status && options.status !== "completed" || options.deadLock) return { phases: [], events };
+  const selectedRepository = fixture.legacy ? operator : sandbox;
+  const preflightRun = JSON.parse(readFileSync(join(selectedRepository, ".factory", runId, "run.json"), "utf8"));
+  const activeStep = preflightRun.steps.some((step) => step.status === "running");
+  const activeSlice = preflightRun.slices.some((slice) => ["running", "review"].includes(slice.status));
+  if (options.heartbeatActive || options.agentActive || activeStep || activeSlice) {
+    return { phases: [], events, refusal: "handoff is not quiescent" };
   }
-  if (options.status && options.status !== "completed" || options.deadLock) return { phases: [] };
-  factory(sandbox, "terminal", runId, "completed", "--reason", "draft-pr-recorded");
+  if (fixture.legacy) {
+    invoke(operator, "terminal", runId, "completed", "--reason", "draft-pr-recorded");
+    return { status: invoke(operator, "status", runId), phases: ["terminal"], events };
+  }
+  invoke(sandbox, "terminal", runId, "completed", "--reason", "draft-pr-recorded");
   const phases = ["terminal"];
   const run = JSON.parse(readFileSync(join(sandbox, ".factory", runId, "run.json"), "utf8"));
   let refs;
+  let fetchInvocations = 0;
+  const sandboxFailure = (phase, error) => {
+    const reason = cleanupReason(phase, error, sandbox);
+    invoke(sandbox, "terminal", runId, "completed", "--reason", reason);
+    const persisted = JSON.parse(readFileSync(join(sandbox, ".factory", runId, "run.json"), "utf8"));
+    assert.equal(persisted.status, "completed");
+    assert.equal(persisted.terminal_result?.status, "completed");
+    assert.equal(persisted.terminal_result?.reason, reason);
+    return { reason, persisted };
+  };
   try {
     refs = branchInventory(run, sandbox);
     const missing = [];
     const collisions = [];
     for (const source of refs) {
-      const destination = refSha(operator, source.ref);
-      if (destination === null) missing.push(source);
-      else if (destination !== source.sha) collisions.push(source.ref);
+      const destination = inspectRef(operator, source.ref);
+      if (!destination.exists) missing.push(source);
+      else if (!destination.sha || destination.sha !== source.sha) collisions.push(source.ref);
     }
     if (collisions.length) throw new Error(`destination ref collision ${collisions.join(", ")}`);
     if (options.fail === "fetch") throw new Error("injected fetch failure");
-    if (missing.length) git(operator, "fetch", "--atomic", "--no-tags", sandbox, ...missing.map(({ ref }) => `${ref}:${ref}`));
+    if (missing.length) {
+      git(operator, "fetch", "--atomic", "--no-tags", sandbox, ...missing.map(({ ref }) => `${ref}:${ref}`));
+      fetchInvocations += 1;
+    }
     phases.push("fetch");
   } catch (error) {
-    const reason = cleanupReason("fetch", error, sandbox);
-    factory(sandbox, "terminal", runId, "completed", "--reason", reason);
-    return { reason, phases, refs: refs ?? [] };
+    const failure = sandboxFailure("fetch", error);
+    return { ...failure, phases, refs: refs ?? [], fetchInvocations, events };
   }
   const plane = join(sandbox, ".factory", runId);
   let sourceInventory;
   try {
-    if (existsSync(archive)) throw new Error(`archive exists at ${archive}`);
+    const archiveParent = dirname(archive);
+    let parent = pathEntry(archiveParent);
+    if (parent === null) {
+      mkdirSync(archiveParent);
+      parent = pathEntry(archiveParent);
+    }
+    if (!parent?.isDirectory() || parent.isSymbolicLink()) throw new Error(`archive parent is not a real directory ${archiveParent}`);
+    if (pathEntry(archive) !== null) throw new Error(`archive exists at ${archive}`);
     if (options.fail === "archive") throw new Error("injected archive failure");
     sourceInventory = treeInventory(plane);
-    mkdirSync(dirname(archive), { recursive: true });
     cpSync(plane, archive, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true, verbatimSymlinks: true });
     phases.push("archive");
   } catch (error) {
-    const reason = cleanupReason("archive", error, sandbox);
-    factory(sandbox, "terminal", runId, "completed", "--reason", reason);
-    return { reason, phases, refs };
+    const failure = sandboxFailure("archive", error);
+    return { ...failure, phases, refs, fetchInvocations, events };
   }
   try {
     if (options.fail === "verify") writeFileSync(join(archive, "artifacts", "payload.txt"), "changed after archive\n");
     for (const source of refs) assert.equal(refSha(operator, source.ref), source.sha);
-    const archivedStatus = factory(operator, "status", runId);
+    const archivedStatus = invoke(operator, "status", runId);
     assert.equal(archivedStatus.status, "completed");
     assert.equal(archivedStatus.terminal_result.reason, "draft-pr-recorded");
     assert.deepEqual(treeInventory(archive), sourceInventory);
     phases.push("verify");
   } catch (error) {
-    const reason = cleanupReason("verify", error, sandbox);
-    factory(sandbox, "terminal", runId, "completed", "--reason", reason);
-    return { reason, phases, refs, sourceInventory };
+    const failure = sandboxFailure("verify", error);
+    return { ...failure, phases, refs, sourceInventory, fetchInvocations, events };
   }
   try {
     removalGuard(operator, container, options.removePath ?? sandbox);
@@ -152,13 +198,13 @@ function completedHandoff(fixture, options = {}) {
     phases.push("remove");
   } catch (error) {
     const reason = cleanupReason("remove", error, sandbox);
-    factory(operator, "terminal", runId, "completed", "--reason", reason);
-    return { reason, phases, refs, sourceInventory, status: factory(operator, "status", runId) };
+    invoke(operator, "terminal", runId, "completed", "--reason", reason);
+    return { reason, phases, refs, sourceInventory, fetchInvocations, events, status: invoke(operator, "status", runId) };
   }
-  return { phases, refs, sourceInventory, status: factory(operator, "status", runId) };
+  return { phases, refs, sourceInventory, fetchInvocations, events, status: invoke(operator, "status", runId) };
 }
 
-function createFixture(label, { legacy = false } = {}) {
+function createFixture(label, { legacy = false, openStatus = "blocked", runningStep = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `factory-terminal-${label}-`)));
   const operator = join(root, "operator");
   const container = join(root, ".operator.factory-sandboxes");
@@ -203,9 +249,10 @@ function createFixture(label, { legacy = false } = {}) {
   });
   run.slices = [
     slice("merged", "merged", `factory/${runId}/merged`, featureSha, featureSha),
-    slice("open", "running", `factory/${runId}/open`, featureSha),
+    slice("open", openStatus, `factory/${runId}/open`, featureSha),
     slice("unstarted", "pending", null, null),
   ];
+  if (runningStep) run.steps = [{ agent: "backend-builder", status: "running", attempts: 1, review_ref: null, evidence_ref: null }];
   writeFileSync(runPath, `${JSON.stringify(run, null, 2)}\n`);
   writeFileSync(join(plane, "artifacts", "payload.txt"), "archive payload\n");
   chmodSync(join(plane, "artifacts", "payload.txt"), 0o640);
@@ -240,51 +287,71 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     return index;
   };
   for (const fragment of [
-    "stop heartbeats and require that no agent remains active",
+    "stop the heartbeat loop and wait for any heartbeat call already\nin flight to return",
+    "no dispatched agent call remains in flight",
+    "require no step with status `running` and no slice with status `running` or `review`",
+    "without terminalizing, fetching, archiving, or removing\nanything",
     'factory terminal "$R" completed --reason "draft-pr-recorded" --repo "$RUN_REPO"',
     "status is not `merged` and whose recorded branch is non-null",
     "Exclude merged slices even if their local\nbranches still exist, and exclude null slice branches.",
-    "Inspect all destinations first, and if any collision exists run\nno fetch at all.",
+    "Test exact ref existence independently from\ncommit peeling: only a ref proven absent is eligible for fetch.",
+    "An existing ref that cannot peel to a commit, or whose commit differs from its source SHA",
+    "Inspect all destinations first, and if any collision exists run no fetch at\nall.",
     'git -C "$O" fetch --atomic --no-tags "$S"',
     "Never add `--force`, a leading `+`, tags, one fetch per branch, or a push.",
-    "require `A` to be absent",
-    "Never overwrite, merge with, or\ndelete an existing `A`.",
-    "`W` is outside `P`; do not copy slice worktrees",
+    "inspect `O/.factory` with a non-following metadata read",
+    "create that one directory non-recursively and inspect it again",
+    "Never use recursive directory creation for this parent.",
+    "Then inspect `A` itself without following links and require no directory entry at all.",
+    "A dangling\nsymbolic link at `A`, a live symbolic link, a file, or a directory is an archive collision.",
+    "Never write through a symlinked parent, overwrite, merge with, or delete an existing `A`.",
+    "do not copy slice worktrees or any other part of `S` into the archive",
     "containing `.` and\nevery descendant",
     "relative path, type, and permission mode",
     "SHA-256 of its bytes",
     "symbolic link records its link target",
     "absence of missing or extra archive entries",
-    "require parsed status `completed` with reason exactly `draft-pr-recorded`",
+    'factory status "$R" --json --repo "$O"',
+    "never with `RUN_REPO` or `S`",
+    "Require parsed status `completed` with reason exactly `draft-pr-recorded`",
     "cleanup <fetch|archive|verify> failed: <single-line error>; sandbox retained at <S>",
+    'factory terminal "$R" completed --reason "$CLEANUP_REASON" --repo "$S"',
+    "require persisted status `completed` and reason\nexactly equal to `CLEANUP_REASON`",
     "stops every later phase, leaves `S` in place",
     "Require `S` and\n`C` to be real directories rather than symbolic links",
     "require the canonical parent of `S` to\nequal canonical `C`",
     "Refuse `/`, `O`, or any path not exactly the deterministic sandbox.",
     "cleanup remove failed: <single-line error>; residual sandbox at <S>",
-    "update the\ncompleted result in the archive",
-    "make the final status read from `O`",
-    "A legacy run selected at `RUN_REPO=\"$O\"` keeps its prior local behavior",
-    "never fetch from, archive, or remove a supposed sandbox",
+    "update the\ncompleted result in the archive with the following command",
+    'factory terminal "$R" completed --reason "$CLEANUP_REASON" --repo "$O"',
+    "make the final read with the following command",
+    "A legacy run selected at `RUN_REPO=\"$O\"` keeps\nits prior local behavior",
+    "never fetch from,\narchive, or remove a supposed sandbox",
     "`blocked`, `partial`,\n`needs-human`, and nonterminal dead-lock runs only report their sandbox paths and remain untouched",
     "no handoff journal, replay protocol, retry loop,\nintermediate archive plane, tombstone, or cleanup state machine",
   ]) required(fragment);
+  const statusAtOperator = [...handoff.matchAll(/factory status "\$R" --json --repo "\$O"/gu)].map((match) => match.index);
+  assert.equal(statusAtOperator.length, 2, "AC10 archive verification and final status must both explicitly target O");
   const ordered = [
-    "stop heartbeats",
+    "stop the heartbeat loop",
+    "no dispatched agent call remains in flight",
     'factory terminal "$R" completed --reason "draft-pr-recorded"',
     "### Completed sandbox branch inventory and fetch",
     "Preflight every destination",
     'fetch --atomic --no-tags "$S"',
     "### Completed sandbox archive",
-    "require `A` to be absent",
-    "copy the complete live plane `P`",
+    "inspect `O/.factory` with a non-following metadata read",
+    "inspect `A` itself without following links",
+    "Copy the complete live plane `P`",
     "### Completed sandbox verification and removal",
     "verify every inventoried operator ref",
+    'factory status "$R" --json --repo "$O"',
     "compare the complete source and archive inventories",
     "Only after all ref and archive verification succeeds",
     "recursively remove `S`",
-    "make the final status read from `O`",
+    "make the final read with the following command",
   ].map(required);
+  ordered.push(statusAtOperator[1]);
   assert.deepEqual(ordered, [...ordered].sort((left, right) => left - right), "AC10 handoff phases must be strictly ordered");
   assert.equal((handoff.match(/fetch --atomic --no-tags/gu) ?? []).length, 1, "AC10 documents one atomic fetch shape");
   assert.doesNotMatch(handoff, /fetch[^\n]*(?:--force|\+refs\/heads)/u);
@@ -292,10 +359,42 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
 
   const fixtures = [];
   try {
+    const active = createFixture("active", { openStatus: "running" });
+    fixtures.push(active);
+    const activeResult = completedHandoff(active);
+    assert.deepEqual(activeResult.phases, [], "AC10 running slice must refuse before terminalization");
+    assert.deepEqual(activeResult.events, [], "AC10 refused quiescence gate must execute no factory command");
+    const activeRun = JSON.parse(readFileSync(join(active.sandbox, ".factory", active.runId, "run.json"), "utf8"));
+    assert.equal(activeRun.status, "running");
+    assert.equal(activeRun.terminal_result, null);
+    assert.equal(refSha(active.operator, `refs/heads/feature/${active.runId}`), null);
+    assert.equal(pathEntry(active.archive), null);
+    assert.equal(existsSync(active.sandbox), true);
+
+    const heartbeat = createFixture("heartbeat");
+    fixtures.push(heartbeat);
+    const heartbeatResult = completedHandoff(heartbeat, { heartbeatActive: true });
+    assert.deepEqual(heartbeatResult.phases, [], "AC10 active heartbeat must refuse before terminalization");
+    assert.deepEqual(heartbeatResult.events, []);
+    assert.equal(JSON.parse(readFileSync(join(heartbeat.sandbox, ".factory", heartbeat.runId, "run.json"), "utf8")).status, "running");
+    assert.equal(refSha(heartbeat.operator, `refs/heads/feature/${heartbeat.runId}`), null);
+    assert.equal(pathEntry(heartbeat.archive), null);
+    assert.equal(existsSync(heartbeat.sandbox), true);
+
+    const activeAgent = createFixture("active-agent", { runningStep: true });
+    fixtures.push(activeAgent);
+    assert.deepEqual(completedHandoff(activeAgent).events, [], "AC10 running agent step must refuse before terminalization");
+
     const success = createFixture("success");
     fixtures.push(success);
-    const completed = completedHandoff(success);
+    const completed = completedHandoff(success, { heartbeatActive: false, agentActive: false });
     assert.deepEqual(completed.phases, ["terminal", "fetch", "archive", "verify", "remove"], "AC10 all gates must complete in order");
+    assert.equal(completed.fetchInvocations, 1);
+    assert.deepEqual(completed.events, [
+      { command: "terminal", repository: success.sandbox },
+      { command: "status", repository: success.operator },
+      { command: "status", repository: success.operator },
+    ], "AC10 verification and final status must execute against O after terminalizing through S");
     assert.equal(existsSync(success.sandbox), false, "AC10 verified sandbox must be removed");
     assert.equal(completed.status.terminal_result.reason, "draft-pr-recorded");
     assert.deepEqual(completed.refs.map(({ ref }) => ref), [
@@ -318,17 +417,85 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     assert.equal(refSha(collision.operator, `refs/heads/factory/${collision.runId}/open`), null, "AC10 collision must prevent an earlier missing ref from being fetched");
     assert.equal(existsSync(collision.archive), false);
     assert.equal(existsSync(collision.sandbox), true, "AC12 fetch failure must retain S");
+    assert.equal(collided.fetchInvocations, 0);
+    assert.deepEqual(collided.events, [
+      { command: "terminal", repository: collision.sandbox },
+      { command: "terminal", repository: collision.sandbox },
+    ]);
+    assert.equal(collided.persisted.status, "completed");
+    assert.equal(collided.persisted.terminal_result.reason, collided.reason);
 
-    for (const phase of ["fetch", "archive", "verify"]) {
+    const nonCommit = createFixture("non-commit");
+    fixtures.push(nonCommit);
+    const blobPath = join(nonCommit.root, "blob.txt");
+    writeFileSync(blobPath, "not a commit\n");
+    const blobSha = git(nonCommit.operator, "hash-object", "-w", blobPath);
+    const nonCommitRef = `refs/heads/feature/${nonCommit.runId}`;
+    const looseRef = join(nonCommit.operator, ".git", ...nonCommitRef.split("/"));
+    mkdirSync(dirname(looseRef), { recursive: true });
+    writeFileSync(looseRef, `${blobSha}\n`);
+    assert.deepEqual(inspectRef(nonCommit.operator, nonCommitRef), { exists: true, sha: null });
+    const nonCommitCollision = completedHandoff(nonCommit);
+    assert.deepEqual(nonCommitCollision.phases, ["terminal"]);
+    assert.equal(nonCommitCollision.fetchInvocations, 0, "AC10 existing non-commit ref must collide before fetch");
+    assert.match(nonCommitCollision.reason, /destination ref collision/u);
+    assert.equal(refSha(nonCommit.operator, `refs/heads/factory/${nonCommit.runId}/open`), null);
+    assert.equal(existsSync(nonCommit.sandbox), true);
+
+    const equal = createFixture("equal");
+    fixtures.push(equal);
+    const equalRefs = [`refs/heads/factory/${equal.runId}/open`, `refs/heads/feature/${equal.runId}`];
+    git(equal.operator, "fetch", "--atomic", "--no-tags", equal.sandbox, ...equalRefs.map((ref) => `${ref}:${ref}`));
+    const alreadyEqual = completedHandoff(equal);
+    assert.deepEqual(alreadyEqual.phases, ["terminal", "fetch", "archive", "verify", "remove"]);
+    assert.equal(alreadyEqual.fetchInvocations, 0, "AC10 equal existing refs must be omitted from fetch");
+    assert.deepEqual(alreadyEqual.refs.map(({ ref }) => ref), equalRefs);
+
+    const failurePhases = new Map([
+      ["fetch", ["terminal"]],
+      ["archive", ["terminal", "fetch"]],
+      ["verify", ["terminal", "fetch", "archive"]],
+    ]);
+    for (const phase of failurePhases.keys()) {
       const failed = createFixture(`failed-${phase}`);
       fixtures.push(failed);
       const result = completedHandoff(failed, { fail: phase });
       assert.match(result.reason, new RegExp(`^cleanup ${phase} failed: [^\\r\\n]+; sandbox retained at ${failed.sandbox.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "u"));
       assert.equal(existsSync(failed.sandbox), true, `AC12 ${phase} failure must retain S`);
       assert.equal(result.phases.includes("remove"), false, `AC12 ${phase} failure must stop removal`);
-      if (phase === "fetch") assert.equal(result.phases.includes("archive"), false);
-      if (phase === "archive") assert.equal(result.phases.includes("verify"), false);
+      assert.deepEqual(result.phases, failurePhases.get(phase), `AC12 ${phase} failure must stop every later phase`);
+      const persisted = JSON.parse(readFileSync(join(failed.sandbox, ".factory", failed.runId, "run.json"), "utf8"));
+      assert.equal(persisted.status, "completed", `AC12 ${phase} failure must persist completed status in S`);
+      assert.equal(persisted.terminal_result.status, "completed");
+      assert.equal(persisted.terminal_result.reason, result.reason, `AC12 ${phase} failure must persist exact reason in S`);
+      assert.deepEqual(result.events.filter(({ command }) => command === "terminal"), [
+        { command: "terminal", repository: failed.sandbox },
+        { command: "terminal", repository: failed.sandbox },
+      ], `AC12 ${phase} initial and failure terminal transitions must both target S`);
     }
+
+    const symlinkedParent = createFixture("symlink-parent");
+    fixtures.push(symlinkedParent);
+    const parentTarget = join(symlinkedParent.root, "archive-parent-target");
+    mkdirSync(parentTarget);
+    writeFileSync(join(parentTarget, "sentinel.txt"), "untouched\n");
+    symlinkSync(parentTarget, dirname(symlinkedParent.archive));
+    const parentRefusal = completedHandoff(symlinkedParent);
+    assert.match(parentRefusal.reason, /^cleanup archive failed: archive parent is not a real directory /u);
+    assert.deepEqual(readdirSync(parentTarget), ["sentinel.txt"], "AC10 symlinked parent must receive no archive write");
+    assert.equal(existsSync(symlinkedParent.sandbox), true);
+
+    const danglingArchive = createFixture("dangling-archive");
+    fixtures.push(danglingArchive);
+    mkdirSync(dirname(danglingArchive.archive));
+    const danglingTarget = join(danglingArchive.root, "missing-archive-target");
+    symlinkSync(danglingTarget, danglingArchive.archive);
+    assert.equal(existsSync(danglingArchive.archive), false);
+    assert.ok(pathEntry(danglingArchive.archive)?.isSymbolicLink());
+    const danglingCollision = completedHandoff(danglingArchive);
+    assert.match(danglingCollision.reason, /^cleanup archive failed: archive exists at /u);
+    assert.ok(pathEntry(danglingArchive.archive)?.isSymbolicLink(), "AC10 dangling archive link must not be overwritten");
+    assert.equal(pathEntry(danglingTarget), null);
 
     const existingArchive = createFixture("archive-collision");
     fixtures.push(existingArchive);
@@ -344,6 +511,12 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     assert.deepEqual(residual.phases, ["terminal", "fetch", "archive", "verify"], "AC12 remove can run only after verified archive");
     assert.equal(residual.reason, `cleanup remove failed: injected remove failure; residual sandbox at ${removeFailure.sandbox}`);
     assert.equal(residual.status.terminal_result.reason, residual.reason, "AC12 remove failure must be recorded via O");
+    assert.deepEqual(residual.events, [
+      { command: "terminal", repository: removeFailure.sandbox },
+      { command: "status", repository: removeFailure.operator },
+      { command: "terminal", repository: removeFailure.operator },
+      { command: "status", repository: removeFailure.operator },
+    ], "AC12 removal failure update and final status must explicitly execute against O");
     assert.equal(existsSync(removeFailure.sandbox), true);
 
     const guarded = createFixture("guarded");
