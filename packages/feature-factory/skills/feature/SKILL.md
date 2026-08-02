@@ -119,56 +119,150 @@ These rules apply when mode admission selected the exact leading `--autonomous` 
 
 Using only the request remainder produced by mode admission:
 
-1. **Ticket?** A key in the input or inferable from the branch → run the reader agent. Otherwise have
-   the story agent draft one locally. Creating a ticket in an external tracker is *your* action, never
-   an agent's, and only after Gate 1.
-2. **Design source?** If a design URL is present, plan to run `design-interpreter`.
+1. **Ticket?** Record a key in the input or one inferable from the branch. Otherwise plan to have the
+   story agent draft one locally after the repository sandbox is proven. Creating a ticket in an
+   external tracker is *your* action, never an agent's, and only after Gate 1.
+2. **Design source?** If a design URL is present, plan to run `design-interpreter` after bootstrap.
 
-Before initialization, check the exact manifest path at `.factory/<run-id>/run.json`. If `run.json`
-exists, do not call `factory init` again. This applies equally to current and legacy manifests: read
-status, claim or resume the lock, and continue from `next`.
-
-For a run with no manifest, establish the control plane:
+`R` is the ticket key lowercased, else a validated slug of the request. Capture the invocation
+checkout, resolve its Git top level, and then resolve that physically; the result is `O`:
 
 ```sh
-factory init <run-id> [--jira <KEY>] [--mode <mode>] [--pr-base <target-branch>]
-factory lock <run-id> claim --session <session-id>
+INVOCATION_CHECKOUT="$PWD"
+O="$(cd "$(git -C "$INVOCATION_CHECKOUT" rev-parse --show-toplevel)" && pwd -P)"
 ```
 
-`run-id` is the ticket key lowercased, else a slug of the request. `init` creates `plan/`,
-`artifacts/`, `evidence/`, `reviews/` and writes the manifest. A scaffold-only run directory without
-`run.json` is retryable. Initialization is create-only: an existing manifest is never replaced,
-validated into a new shape, or backfilled.
+Require an absolute, nonempty `O`. Use this literal convention:
 
-**Do not ask the engineer for a branch or a worktree.** The feature branch defaults to
-`feature/<run-id>`, the worktree defaults to the current checkout, and `init` reports what it
-recorded. By default, `pr_base` is the symbolic branch checked out in that configured worktree, not
-the process working directory. `--pr-base <target-branch>` takes precedence and bypasses worktree
-observation. Without an override, a detached, missing, or outside-repository configured worktree is
-refused rather than replaced with a SHA, feature branch, repository default, or forge default.
+```text
+C = dirname(O)/.<basename(O)>.factory-sandboxes
+S = C/R
+P = S/.factory/R
+W = S/.factory/worktrees/R
+A = O/.factory/R
+```
 
-The engineer supplies a feature branch only if they say so in the invocation, or if this repository
-has a naming convention that says otherwise — check the repository's agent instructions (`AGENTS.md`
-or `CLAUDE.md`, whichever this repo has) before overriding, and pass `--branch` if it does. Supply
-`--pr-base` only for an explicit target override; ordinary PR-base input is derived rather than asked
-of the engineer.
+`O` is the operator checkout and must remain unchanged. Never switch, reset, clean, stash, create a
+branch or worktree, write Git configuration, or initialize factory state in `O` for a fresh run. The
+only pre-clone Git operations there are reads. All fresh-run writes happen in `S` or `C`.
 
-The recorded branch is a statement of intent, not something that exists yet. You create it in Step 4,
-and it must match exactly what `init` reported: the first slice activation observes that branch and
-fails if it is absent.
+### Resume or collision
 
-If init reports that the run already exists, run `factory status <run-id> --json` and resume; never
-retry init. If init says the run may already be initialized, resolve the unknown create outcome with
-status before retrying: valid state means claim or resume and never retry; no manifest with scaffolding
-only means init may be retried; an invalid manifest means stop and surface it without overwriting it.
+Classify existing paths before creating anything. A valid legacy manifest at `A/run.json` resumes with
+`RUN_REPO="$O"`; a valid sandbox manifest at `P/run.json` resumes with `RUN_REPO="$S"`. Validate the sole
+candidate with `factory status "$R" --json --repo "$RUN_REPO"`. If both manifests exist, print both
+absolute paths and refuse as ambiguous. An invalid manifest is surfaced and never replaced.
 
-If `factory lock` reports the run is held by another session, it tells you the owner: **resume** with
-that session id, **steal** it (`factory lock <run-id> steal --session <session-id>`) if the holder is gone, or abort. If
-`run.json` already exists this is a **resume** — continue from the status result's `next` field rather
-than restarting.
+Never follow a symlink at `C` or `S`. With no legacy run to resume, a symlinked `C`, any existing `S`
+without the sole valid sandbox manifest, a non-directory path, or any other deterministic-path
+collision is fatal. Do not reuse, repair, or delete it. A resumed sandbox must pass the same physical
+containment gate as a fresh sandbox before an agent receives its path; a failed resume check retains
+the sandbox and refuses dispatch. A legacy run continues at `--repo "$O"` without migration.
 
-Refresh the lock as the run progresses with `factory heartbeat <run-id> --session <session-id>`,
-especially around long waits, so a crashed run becomes reclaimable rather than wedged.
+On resume, claim or resume the lock at the selected repository and continue from status `next`; never
+restart or initialize:
+
+```sh
+factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"
+factory lock "$R" steal --session "$SESSION_ID" --repo "$RUN_REPO"
+```
+
+### Fresh sandbox bootstrap
+
+For a fresh run, `FEATURE_BRANCH` is explicit intake intent or `feature/$R`. The engineer supplies an
+override only when they say so or repository instructions in `AGENTS.md` or `CLAUDE.md` require it.
+Refuse if `refs/heads/$FEATURE_BRANCH` already exists in `O`.
+
+Before creating `C` or `S`, capture all clone inputs. An explicit `PR_BASE` wins and permits detached
+`O`; otherwise the symbolic branch is mandatory:
+
+```sh
+SEED_HEAD="$(git -C "$O" rev-parse --verify 'HEAD^{commit}')"
+PR_BASE="$(git -C "$O" symbolic-ref --quiet --short HEAD)"
+PUSH_TARGET="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
+```
+
+Each command must succeed and produce nonempty output. Omit the symbolic-ref command only when an
+explicit `PR_BASE` was supplied. The push lookup must be exactly the effective push lookup above;
+never read raw `remote.origin.url`, normalize the result, or expose it. Keep `PUSH_TARGET` out of the
+control plane and logs. A push lookup failure refuses before `S` exists.
+
+Require `C` to be absent or a real directory, create it when absent, and recheck that `S` is absent
+immediately before cloning. Run the C-locale clone once:
+
+```sh
+LC_ALL=C git clone --local "$O" "$S"
+```
+
+Only a nonzero result whose C-locale stderr contains Git's literal `failed to create link` admits one
+fallback. Remove only the partial `S` created by this invocation, print exactly
+"factory sandbox: hardlink clone failed; retrying with --no-hardlinks", and retry once:
+
+```sh
+LC_ALL=C git clone --local --no-hardlinks "$O" "$S"
+```
+
+Do not retry any other clone failure. Never remove a path that predated this invocation, and make no
+third attempt.
+
+Configure the captured push destination only in the new sandbox, then resolve it through Git again:
+
+```sh
+git -C "$S" config --replace-all remote.origin.pushurl "$PUSH_TARGET"
+RESOLVED_PUSH="$(LC_ALL=C git -C "$S" remote get-url --push origin)"
+```
+
+Both commands must succeed, the resolved value must be nonempty, and shell-string equality with
+`PUSH_TARGET` must be exact. On configuration, lookup, or equality failure, expose neither value,
+remove only this invocation's new `S`, and refuse dispatch.
+
+### Physical containment gate
+
+Before branch creation, initialization, or disclosing `S` to any agent, physically canonicalize the
+clone itself and Git's answers:
+
+```sh
+CANONICAL_S="$(cd "$S" && pwd -P)"
+TOP_LEVEL="$(cd "$(git -C "$S" rev-parse --show-toplevel)" && pwd -P)"
+GIT_DIR="$(cd "$(git -C "$S" rev-parse --absolute-git-dir)" && pwd -P)"
+```
+
+All three commands must succeed. Require `CANONICAL_S` and `TOP_LEVEL` to equal `S`, and `GIT_DIR` to
+equal `S/.git`. For `P` and `W`, reject symlinks in every existing path component and require their
+physical canonical locations to be strict
+descendants of `S`; a lexical prefix check is not proof. Any fresh failure removes only the new `S`;
+any resume failure retains it. Either failure stops before dispatch.
+
+Refuse an existing sandbox `refs/heads/$FEATURE_BRANCH`, then create the feature branch at the
+captured seed:
+
+```sh
+git -C "$S" switch --no-track -c "$FEATURE_BRANCH" "$SEED_HEAD"
+SWITCHED_HEAD="$(git -C "$S" rev-parse --verify 'HEAD^{commit}')"
+SWITCHED_BRANCH="$(git -C "$S" symbolic-ref --quiet --short HEAD)"
+```
+
+Both verification commands must succeed. Require `SWITCHED_HEAD` to equal `SEED_HEAD` and
+`SWITCHED_BRANCH` to equal `FEATURE_BRANCH`. Only after those checks initialize the control plane.
+Keep the command first and the repository flag last; include Jira and admitted mode flags only when
+present:
+
+```sh
+factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"
+factory lock "$R" claim --session "$SESSION_ID" --repo "$S"
+```
+
+`init` creates `P`, including `plan/`, `artifacts/`, `evidence/`, and `reviews/`. Initialization is
+create-only. If its outcome is unknown, resolve it with `factory status "$R" --json --repo "$S"`:
+valid state means resume and never retry; no manifest with only init scaffolding may retry init; an
+invalid manifest is surfaced without overwrite. The branch already exists and exactly matches the
+intent recorded by init, so the first slice can observe it.
+
+If the lock is held by another session, resume with that session, use the fully qualified steal command
+above only when the holder is gone, or abort. Refresh it around long waits with
+`factory heartbeat "$R" --session "$SESSION_ID" --repo "$RUN_REPO"`, so a crashed run becomes
+reclaimable rather than wedged. Only after bootstrap and lock handling dispatch the planned ticket,
+story, or design agent.
 
 ### Gate 1 — Story
 
