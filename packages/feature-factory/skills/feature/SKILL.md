@@ -406,17 +406,15 @@ Run `work-decomposer` → `plan/slices.json` (required top-level shape: `{ "slic
 human-readable `plan/plan.md`. Each slice declares `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`.
 
 Review it with `work-reviewer` subject `work-decomposer`: every acceptance criterion maps to a slice,
-same-wave slices are file-disjoint, and integration hotspots are serialized into different waves. Then
-seed the manifest:
+same-wave slices are file-disjoint, and integration hotspots are serialized into different waves. Keep
+the reviewed plan unseeded until Gate 2 has presented and approved its exact contents.
 
-```sh
-factory slices-seed "$R" --from plan/slices.json --repo "$RUN_REPO"
-```
-
-Seeding is the **ratification point** for two decisions, and neither can be changed afterwards:
+The first successful seed is the **ratification point** for two decisions, and neither can be changed
+afterwards:
 
 - `paths` — the set every later merge is judged against, so a slice that needs more scope amends the
-  plan rather than quietly widening.
+  unseeded plan at Gate 2 rather than quietly widening. After seeding, changed scope requires a terminal
+  decision or a new run; the plan cannot be amended or reseeded.
 - `test_plan` — whether the slice may ship without an observed test run. A slice with a non-empty
   `test_plan` is not `review_ready` until you have run tests and seen them exit zero. A slice with an
   **empty** `test_plan` is exempt. That exemption is a decision for the engineer at Gate 2, so decide
@@ -426,6 +424,52 @@ Seeding is the **ratification point** for two decisions, and neither can be chan
 
 Present the brief **and** the plan — the waves, each slice's paths and acceptance criteria, and any
 serialized hotspots. The engineer approves the parallelization plan, not just the brief.
+
+Open the Brief gate while slices are still empty and present the reviewed artifacts. The human loop is
+`pending` → `changes` → revise → `pending` → re-present → decision. A `changes` decision keeps slices
+empty; revise the brief and plan, repeat their required reviews, re-open the gate, and re-present before
+asking for another decision:
+
+```sh
+factory gate "$R" brief pending --artifact artifacts/technical-brief.md --repo "$RUN_REPO"
+factory gate "$R" brief changes --repo "$RUN_REPO"
+factory gate "$R" brief pending --artifact artifacts/technical-brief.md --repo "$RUN_REPO"
+```
+
+On approval, record only the Brief decision. This produces a durable Brief-approved, zero-slices state
+whose status reports `next: seed-slices`; it does not seed as part of the gate transition:
+
+```sh
+factory gate "$R" brief approved --repo "$RUN_REPO"
+factory status "$R" --json --repo "$RUN_REPO"
+```
+
+Only after that approval succeeds, invoke the separate first seed using the exact plan bytes that were
+presented. Continue to Step 4 only after this command succeeds:
+
+```sh
+factory slices-seed "$R" --from plan/slices.json --repo "$RUN_REPO"
+```
+
+Never invoke `slices-seed` before Brief approval. A successful first seed is one-time: every second seed
+is refused, and the seeded `paths` and `test_plan` remain immutable.
+
+### Failed first-seed recovery
+
+A failed first seed leaves the Brief approved, slices empty, and `next: seed-slices`. If the presented
+plan was temporarily missing or unreadable, restore the exact unchanged presented bytes and retry that
+first seed. Do not advance, re-present the unchanged approved plan, or substitute revised bytes.
+
+If any presented plan byte must change while the approved run is still unseeded, reopen the approved
+Brief directly to `pending` **before mutating the plan**:
+
+```sh
+factory gate "$R" brief pending --repo "$RUN_REPO"
+```
+
+Then revise, independently review, re-present, and reapprove the Brief and plan before attempting the
+first seed. Never route an approved Brief to `changes`; `changes` is only a human decision on an already
+pending presentation.
 
 ## Step 4 — Build slices (you own the worktrees)
 
@@ -860,6 +904,8 @@ claim reads “run `factory status <run-id> --json` and resume; never restart.�
 command stem. Execute only `factory status "$R" --json --repo "$RUN_REPO"`, then continue from `next`:
 
 - a gate absent or `pending` → present it
+- `changes-at-gate:brief` → revise and review while unseeded, then transition Brief to `pending` and re-present
+- `seed-slices` → retry the separate first seed from the exact unchanged approved plan bytes; do not advance or re-present the unchanged plan
 - a slice `running`/`review` → re-observe and re-review; do not rebuild if the diff is already good
 - a slice `pending` → wait on its dependencies, then dispatch
 - a slice `blocked` → surface for a decision
