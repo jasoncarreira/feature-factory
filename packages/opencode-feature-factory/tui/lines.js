@@ -15,15 +15,34 @@ export function renderLines(snapshot) {
   // both times a live run was sitting one directory away while this said nothing was happening. The
   // path is the whole diagnosis, so it is on screen. It still does not tell anyone to run
   // `factory init` — the orchestrator's command, not theirs.
-  if (!snapshot.repo) {
+  if (!snapshot.active) {
     const searched = snapshot.searched ?? [];
     return searched.length > 0 ? ["no runs", ...searched.map((dir) => `searched ${dir}`)] : ["no runs"];
   }
-  if (!snapshot.active) return ["no runs"];
   const run = snapshot.active;
-  // A record that exists but does not validate is shown as broken rather than omitted. Omitting it
-  // leaves an operator with no way to learn it is there.
-  if (!run.valid) return [`${run.run_id}  INVALID`, run.error ?? "run.json could not be read"];
+  const runs = Array.isArray(snapshot.runs)
+    ? snapshot.runs.filter((entry) => entry && typeof entry === "object")
+    : [];
+  const lines = primaryLines(run);
+  const otherRuns = runs.filter((entry) => entry !== run
+    && (!run.manifest_path || entry.manifest_path !== run.manifest_path));
+  const explicitDeadLocks = otherRuns.filter((entry) => entry.valid
+    && !entry.terminal && entry.deadLock && entry.sandbox_path);
+  for (const entry of explicitDeadLocks) {
+    lines.push(`${entry.run_id}  lock: stale (dead; sandbox retained)`);
+    lines.push(`sandbox: ${entry.sandbox_path}`);
+  }
+  for (const entry of otherRuns.filter((candidate) => !candidate.valid)) {
+    lines.push(...invalidLines(entry));
+  }
+  const otherCount = otherRuns.filter((entry) => entry.valid
+    && !explicitDeadLocks.includes(entry)).length;
+  if (otherCount > 0) lines.push(`(${otherCount} other run${otherCount === 1 ? "" : "s"})`);
+  return lines;
+}
+
+function primaryLines(run) {
+  if (!run.valid) return invalidLines(run);
 
   // A finished run is reported, not featured. `selectActiveRun` prefers a live run and falls back to
   // the newest, so with nothing running the newest dead one became the headline — four lines of
@@ -33,9 +52,7 @@ export function renderLines(snapshot) {
   if (run.terminal) {
     const outcome = run.pr_url ? `${run.status}  ${run.pr_url}` : run.status;
     const lines = [`${run.run_id}  ${outcome}`];
-    if (snapshot.runs.length > 1) {
-      lines.push(`(${snapshot.runs.length - 1} other run${snapshot.runs.length === 2 ? "" : "s"})`);
-    }
+    if (run.sandbox_path) lines.push(`sandbox: ${run.sandbox_path}`);
     return lines;
   }
 
@@ -60,8 +77,17 @@ export function renderLines(snapshot) {
   if (run.pr_url) lines.push(`pr ${run.pr_url}`);
   if (run.terminal_result) lines.push(`${run.terminal_result.status}: ${run.terminal_result.reason}`);
   lines.push(`${run.awaiting_gate ? ">> " : ""}next: ${run.next}`);
-  if (snapshot.runs.length > 1) {
-    lines.push(`(${snapshot.runs.length - 1} other run${snapshot.runs.length === 2 ? "" : "s"})`);
+  if (run.sandbox_path) {
+    lines.push(`sandbox: ${run.sandbox_path}`);
+    if (run.deadLock) lines.push("lock: stale (dead; sandbox retained)");
   }
   return lines;
+}
+
+function invalidLines(run) {
+  return [
+    `${run.run_id}  INVALID`,
+    `at ${run.manifest_path}`,
+    run.error ?? "run.json could not be read",
+  ];
 }
