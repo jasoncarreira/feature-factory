@@ -173,6 +173,15 @@ a process, scan another directory, or write the file. Parse it as JSON, require 
 succeeded, bind the parsed object as `parsedRun`, require `parsedRun.run_id` to equal `R`, and reject a
 missing or second candidate.
 
+On resume, bind the recorded feature branch before any orchestration continues:
+
+```text
+FEATURE_BRANCH = parsedRun.branch
+```
+
+Require a nonempty branch accepted by manifest validation. Discard any feature-branch value left from
+intake or the invocation checkout; recorded state always wins on resume.
+
 For either manifest shape, use the qualified status command above and resume; never treat it as a fresh
 run. Once a manifest exists, do not call `factory init` again. An existing manifest is never replaced,
 including a legacy manifest with no `pr_base`; it is resumed without backfill.
@@ -422,6 +431,7 @@ Directly reload `RUN_MANIFEST`, validate its identity again, and bind the integr
 creating or merging any slice:
 
 ```text
+FEATURE_BRANCH = parsedRun.branch
 RECORDED_RUN_WORKTREE = parsedRun.worktree
 INTEGRATION_WORKTREE = physical normalized resolution of RECORDED_RUN_WORKTREE under RUN_REPO
 ```
@@ -429,6 +439,12 @@ INTEGRATION_WORKTREE = physical normalized resolution of RECORDED_RUN_WORKTREE u
 For a relative recorded value, resolve it from `RUN_REPO`; for an absolute value, use it unchanged.
 Require the result to exist and remain physically contained by `RUN_REPO`, exactly as `resolveWorktree`
 does. Refuse a missing, escaping, or symlink-redirected path.
+
+Immediately before every pending-slice activation, observation, or merge, verify the selected
+integration worktree is still checked out on the recorded feature branch with the probe shown at each
+operation. Every probe must succeed and its output must equal `FEATURE_BRANCH` exactly. A failed probe
+means detached HEAD and is refused; a different branch is refused as a mismatch. Never switch branches
+to repair either condition, and never substitute stale intake branch intent.
 
 In the first wave, activate the first seeded slice whose `depends_on` is empty before any other slice
 can merge. This deterministic root slice records the original feature head in its immutable `base_ref`;
@@ -441,6 +457,7 @@ activation:
 ```sh
 SLICE_BRANCH="factory/$R/$SLICE_ID"
 SLICE_WORKTREE="$SLICE_ROOT/$SLICE_ID"
+CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
 git -C "$RUN_REPO" worktree add -b "$SLICE_BRANCH" "$SLICE_WORKTREE" "$FEATURE_BRANCH"
 $ factory slice "$R" "$SLICE_ID" running --worktree "$SLICE_WORKTREE" --branch "$SLICE_BRANCH" --repo "$RUN_REPO"
 ```
@@ -475,6 +492,7 @@ Per slice:
    slice spec, the recorded `SLICE_WORKTREE`, the brief, and the research map.
 3. **Observe** — when the builder returns, do not read its prose for facts:
    ```sh
+   CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
    $ factory observe "$R" "$SLICE_ID" --worktree "$SLICE_WORKTREE" --base "$SLICE_BASE_REF" \
      --test-cmd "$SLICE_TEST_COMMAND" [--claim "$BUILDER_REPORT"] --repo "$RUN_REPO"
    ```
@@ -504,6 +522,7 @@ Per slice:
 5. **Merge (you, serially)** — on APPROVE, merge the slice branch into the feature branch one at a
    time. Builds are concurrent; merges are single-writer, which is what makes the parallelism safe.
    ```sh
+   CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
    git -C "$INTEGRATION_WORKTREE" merge --no-ff "$SLICE_BRANCH" -m "$SLICE_ID"
    MERGE_COMMIT="$(git -C "$INTEGRATION_WORKTREE" rev-parse --verify 'HEAD^{commit}')"
    $ factory slice "$R" "$SLICE_ID" merged --merge-commit "$MERGE_COMMIT" --repo "$RUN_REPO"
@@ -558,6 +577,7 @@ HEAD, a branch name, or an unpersisted variable.
 1. `test-verifier` writes and runs acceptance tests for the story's criteria. Observe its result on the
    **integrated** worktree, with the run's original branch point as `--base`:
    ```sh
+   CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
    factory observe "$R" test-verifier --worktree "$INTEGRATION_WORKTREE" --base "$BRANCH_POINT" \
      --test-cmd "$INTEGRATION_SUITE" --repo "$RUN_REPO"
    ```
@@ -625,6 +645,7 @@ approval, not a lost run:
 
 ```sh
 factory gate "$R" pre_pr pending --repo "$RUN_REPO"
+CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
 factory observe "$R" test-verifier --worktree "$INTEGRATION_WORKTREE" --base "$BRANCH_POINT" \
   --test-cmd "$INTEGRATION_SUITE" --repo "$RUN_REPO"
 factory validator "$R" --report artifacts/validation-report.md --repo "$RUN_REPO"

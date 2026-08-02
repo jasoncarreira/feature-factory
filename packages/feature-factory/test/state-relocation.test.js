@@ -49,6 +49,8 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "Read exactly `RUN_MANIFEST` through the host's direct file-read capability",
     "do not spawn\na process, scan another directory, or write the file",
     "bind the parsed object as `parsedRun`, require `parsedRun.run_id` to equal `R`",
+    "FEATURE_BRANCH = parsedRun.branch",
+    "Discard any feature-branch value left from\nintake or the invocation checkout; recorded state always wins on resume",
     "Every slice branch is `factory/R/<slice-id>`",
     "SLICE_WORKTREE=\"$SLICE_ROOT/$SLICE_ID\"",
     "git -C \"$RUN_REPO\" worktree add -b \"$SLICE_BRANCH\" \"$SLICE_WORKTREE\" \"$FEATURE_BRANCH\"",
@@ -76,6 +78,10 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "Nothing removes any of those sandboxes automatically.",
     "RECORDED_RUN_WORKTREE = parsedRun.worktree",
     "INTEGRATION_WORKTREE = physical normalized resolution of RECORDED_RUN_WORKTREE under RUN_REPO",
+    "Immediately before every pending-slice activation, observation, or merge",
+    "CHECKED_OUT_FEATURE_BRANCH=\"$(git -C \"$INTEGRATION_WORKTREE\" symbolic-ref --quiet --short HEAD)\"",
+    "A failed probe\nmeans detached HEAD and is refused; a different branch is refused as a mismatch",
+    "never substitute stale intake branch intent",
     "activate the first seeded slice whose `depends_on` is empty before any other slice\ncan merge",
     "ROOT_SLICE = first parsedRun.slices row whose depends_on is empty",
     "BRANCH_POINT = ROOT_SLICE.base_ref",
@@ -140,11 +146,35 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const integrationDefinition = stepFour.indexOf("INTEGRATION_WORKTREE = physical normalized resolution");
   const integrationMerge = stepFour.indexOf('git -C "$INTEGRATION_WORKTREE" merge');
   assert.ok(integrationDefinition >= 0 && integrationDefinition < integrationMerge, "integration worktree must be defined before merge");
+  const recordedFeatureDefinition = stepFour.indexOf("FEATURE_BRANCH = parsedRun.branch");
+  const branchProbes = [...stepFour.matchAll(/CHECKED_OUT_FEATURE_BRANCH="\$\(git -C "\$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD\)"/gu)]
+    .map((match) => match.index);
+  const sliceActivation = stepFour.indexOf('$ factory slice "$R" "$SLICE_ID" running');
+  assert.equal(branchProbes.length, 3, "feature branch must be reverified for activation, observation, and merge");
+  assert.ok(recordedFeatureDefinition >= 0 && recordedFeatureDefinition < integrationDefinition && integrationDefinition < branchProbes[0]);
+  assert.ok(branchProbes[0] < sliceActivation && sliceActivation < branchProbes[1] && branchProbes[1] < sliceObservation);
+  assert.ok(sliceObservation < branchProbes[2] && branchProbes[2] < integrationMerge,
+    "recorded feature branch verification must immediately precede each slice operation");
 
   const stepFive = skill.slice(skill.indexOf("## Step 5 — Integrate"), skill.indexOf("## Step 6 — Draft PR"));
   const rootBaseDefinition = stepFive.indexOf("BRANCH_POINT = ROOT_SLICE.base_ref");
   const integratedObservation = stepFive.indexOf('factory observe "$R" test-verifier');
   assert.ok(rootBaseDefinition >= 0 && rootBaseDefinition < integratedObservation, "root base_ref must define branch point before integration observation");
+  const integrationProbes = [...stepFive.matchAll(/CHECKED_OUT_FEATURE_BRANCH="\$\(git -C "\$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD\)"/gu)]
+    .map((match) => match.index);
+  const integrationObservations = [...stepFive.matchAll(/factory observe "\$R" test-verifier/gu)].map((match) => match.index);
+  assert.equal(integrationProbes.length, integrationObservations.length);
+  integrationObservations.forEach((observation, index) => {
+    assert.ok(integrationProbes[index] < observation, "recorded feature branch verification must precede integration observation");
+  });
+
+  const resumeSection = skill.slice(skill.indexOf("### Resume or collision"), skill.indexOf("### Fresh sandbox bootstrap"));
+  const parsedRunBinding = resumeSection.indexOf("bind the parsed object as `parsedRun`");
+  const featureBranchBinding = resumeSection.indexOf("FEATURE_BRANCH = parsedRun.branch");
+  const resumeLock = resumeSection.indexOf('factory lock "$R" claim');
+  assert.ok(parsedRunBinding >= 0 && parsedRunBinding < featureBranchBinding && featureBranchBinding < resumeLock,
+    "resume must replace intake branch intent with parsedRun.branch before continuing");
+  assert.match(resumeSection, /recorded state always wins on resume/u);
 
   const fresh = skill.slice(skill.indexOf("### Fresh sandbox bootstrap"), skill.indexOf("### Gate 1 — Story"));
   const selectedRepositoryDefinition = fresh.indexOf('RUN_REPO="$S"');
