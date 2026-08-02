@@ -117,6 +117,7 @@ function completedHandoff(fixture, options = {}) {
   if (options.status && options.status !== "completed" || options.deadLock) return { phases: [], events };
   const selectedRepository = fixture.legacy ? operator : sandbox;
   const preflightRun = JSON.parse(readFileSync(join(selectedRepository, ".factory", runId, "run.json"), "utf8"));
+  if (!preflightRun.pr_url) return { phases: [], events, refusal: "draft PR is not recorded" };
   const activeStep = preflightRun.steps.some((step) => step.status === "running");
   const activeSlice = preflightRun.slices.some((slice) => ["running", "review"].includes(slice.status));
   if (options.heartbeatActive || options.agentActive || activeStep || activeSlice) {
@@ -204,7 +205,7 @@ function completedHandoff(fixture, options = {}) {
   return { phases, refs, sourceInventory, fetchInvocations, events, status: invoke(operator, "status", runId) };
 }
 
-function createFixture(label, { legacy = false, openStatus = "blocked", runningStep = false } = {}) {
+function createFixture(label, { legacy = false, mode = "interactive", openStatus = "blocked", runningStep = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `factory-terminal-${label}-`)));
   const operator = join(root, "operator");
   const container = join(root, ".operator.factory-sandboxes");
@@ -219,7 +220,11 @@ function createFixture(label, { legacy = false, openStatus = "blocked", runningS
   git(operator, "add", "base.txt");
   git(operator, "commit", "--quiet", "-m", "base");
   if (legacy) {
-    factory(operator, "init", runId, "--branch", `feature/${runId}`, "--pr-base", "main");
+    factory(operator, "init", runId, "--branch", `feature/${runId}`, "--pr-base", "main", "--mode", mode);
+    const runPath = join(operator, ".factory", runId, "run.json");
+    const run = JSON.parse(readFileSync(runPath, "utf8"));
+    run.pr_url = `https://example.test/${runId}`;
+    writeFileSync(runPath, `${JSON.stringify(run, null, 2)}\n`);
     return { root, operator, container, sandbox, archive, runId, legacy: true };
   }
   mkdirSync(container);
@@ -238,10 +243,11 @@ function createFixture(label, { legacy = false, openStatus = "blocked", runningS
   const openSha = git(sandbox, "rev-parse", "HEAD");
   git(sandbox, "branch", `factory/${runId}/merged`, featureSha);
   git(sandbox, "switch", "--quiet", `feature/${runId}`);
-  factory(sandbox, "init", runId, "--branch", `feature/${runId}`, "--pr-base", "main");
+  factory(sandbox, "init", runId, "--branch", `feature/${runId}`, "--pr-base", "main", "--mode", mode);
   const plane = join(sandbox, ".factory", runId);
   const runPath = join(plane, "run.json");
   const run = JSON.parse(readFileSync(runPath, "utf8"));
+  run.pr_url = `https://example.test/${runId}`;
   const slice = (id, status, branch, baseRef, mergeCommit = null) => ({
     id, stack: "backend", depends_on: [], status, worktree: status === "pending" ? null : sandbox,
     branch, attempts: 1, paths: [`${id}.txt`], test_plan: [], base_ref: baseRef,
@@ -357,6 +363,39 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.doesNotMatch(handoff, /fetch[^\n]*(?:--force|\+refs\/heads)/u);
   assert.doesNotMatch(handoff, /factory\s+(?:cleanup|replay|retry)|cleanup\.(?:json|lock)|archive-(?:stage|tombstone)/u);
 
+  const autonomousStart = skill.indexOf("## Autonomous mode");
+  const autonomousEnd = skill.indexOf("## Step 0", autonomousStart);
+  const autonomous = skill.slice(autonomousStart, autonomousEnd);
+  for (const fragment of [
+    "The draft PR is the last externally publishing side effect an autonomous run",
+    "the mandatory local completed handoff in Step 7 still follows and\n  is required in every mode",
+    "terminalize, fetch the permitted local refs, archive and verify the control\n  plane, and remove only the guarded sandbox",
+    "Autonomous mode never merges an external PR or performs\n  unrelated work after PR recording.",
+  ]) assert.match(autonomous, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"), `AC10 autonomous contract is missing: ${fragment}`);
+  assert.doesNotMatch(autonomous, /Creating the draft PR is the last side effect an autonomous run may perform/u,
+    "AC10 autonomous mode must permit the mandatory local completed handoff after publication");
+
+  const bootstrapStart = skill.indexOf("During bootstrap and active sandbox execution");
+  const bootstrapEnd = skill.indexOf("### Resume or collision", bootstrapStart);
+  const operatorBoundary = skill.slice(bootstrapStart, bootstrapEnd);
+  for (const fragment of [
+    "During bootstrap and active sandbox execution, `O` is the operator checkout and must remain unchanged.",
+    "Never switch, reset, clean, stash, create a\nbranch or worktree, write Git configuration, or initialize factory state in `O` for a fresh run.",
+    "The only pre-clone Git operations there are reads",
+    "The sole completed-handoff exception comes\nafter the draft PR is recorded",
+    "fetch and verify only the recorded feature and unmerged-slice\nrefs in `O`",
+    "create and verify only the `O/.factory/R` archive",
+    "then remove only the guarded sandbox\n`S`",
+    "No other operator-checkout write or action after PR recording is permitted by this exception.",
+  ]) assert.ok(operatorBoundary.includes(fragment), `AC10 operator boundary is missing: ${fragment}`);
+
+  const sharedModeRule = "After draft PR recording, `interactive`, `headless`, and `autonomous` modes all enter this same mandatory\nlocal completed handoff.";
+  assert.ok(handoff.includes(sharedModeRule), "AC10 all modes must enter the same local completed handoff after PR recording");
+  assert.ok(handoff.includes("perform only the terminalize, local-ref fetch, archive, verification, and guarded sandbox-removal\nsequence below"),
+    "AC10 autonomous post-PR exception must be limited to the local completed handoff sequence");
+  assert.ok(handoff.includes("with no external PR merge or unrelated work after PR recording"),
+    "AC10 autonomous post-PR exception must prohibit external PR merge and unrelated work");
+
   const fixtures = [];
   try {
     const active = createFixture("active", { openStatus: "running" });
@@ -385,17 +424,25 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     fixtures.push(activeAgent);
     assert.deepEqual(completedHandoff(activeAgent).events, [], "AC10 running agent step must refuse before terminalization");
 
-    const success = createFixture("success");
-    fixtures.push(success);
-    const completed = completedHandoff(success, { heartbeatActive: false, agentActive: false });
-    assert.deepEqual(completed.phases, ["terminal", "fetch", "archive", "verify", "remove"], "AC10 all gates must complete in order");
+    const modeTable = ["interactive", "headless", "autonomous"].map((mode) => {
+      const fixture = createFixture(`mode-${mode}`, { mode });
+      fixtures.push(fixture);
+      const recorded = JSON.parse(readFileSync(join(fixture.sandbox, ".factory", fixture.runId, "run.json"), "utf8"));
+      assert.equal(recorded.mode, mode, `AC10 ${mode} fixture must preserve its admitted mode`);
+      assert.equal(recorded.pr_url, `https://example.test/${fixture.runId}`, `AC10 ${mode} handoff must follow PR recording`);
+      const result = completedHandoff(fixture, { heartbeatActive: false, agentActive: false });
+      assert.deepEqual(result.phases, ["terminal", "fetch", "archive", "verify", "remove"],
+        `AC10 ${mode} must enter the same mandatory local completed handoff`);
+      assert.deepEqual(result.events, [
+        { command: "terminal", repository: fixture.sandbox },
+        { command: "status", repository: fixture.operator },
+        { command: "status", repository: fixture.operator },
+      ], `AC10 ${mode} must terminalize through S and verify and finish through O`);
+      assert.equal(existsSync(fixture.sandbox), false, `AC10 ${mode} verified sandbox must be removed`);
+      return { mode, fixture, result };
+    });
+    const { fixture: success, result: completed } = modeTable[0];
     assert.equal(completed.fetchInvocations, 1);
-    assert.deepEqual(completed.events, [
-      { command: "terminal", repository: success.sandbox },
-      { command: "status", repository: success.operator },
-      { command: "status", repository: success.operator },
-    ], "AC10 verification and final status must execute against O after terminalizing through S");
-    assert.equal(existsSync(success.sandbox), false, "AC10 verified sandbox must be removed");
     assert.equal(completed.status.terminal_result.reason, "draft-pr-recorded");
     assert.deepEqual(completed.refs.map(({ ref }) => ref), [
       `refs/heads/factory/${success.runId}/open`, `refs/heads/feature/${success.runId}`,
