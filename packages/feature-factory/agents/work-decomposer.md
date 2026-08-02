@@ -62,6 +62,7 @@ where it costs a re-read rather than a run.
    (regenerated rather than hand-owned, so the slice that changes the source owns the regen).
    Flag each hotspot you serialized so the orchestrator and human see why parallelism was limited.
 4. **Every AC maps to a slice.** No orphan criteria; no slice without at least one AC.
+4b. **No slice carries them all.** Where the plan has more than one slice, none may claim the entire acceptance set. Coverage and concentration are different properties, and only coverage was ever checked: a plan whose first slice claims every criterion satisfies rule 4 perfectly and is not a decomposition. A slice must be reviewable on its own — if rejecting it would read as "N categories of behaviour are still missing" rather than naming specific defects, it is too large and must be split before seeding. A genuinely small feature may still be one slice; this is about a slice that hoards while siblings exist.
 5. **Keep slices coherent.** A slice is one layer-consistent chunk (e.g. "entity + repository", "api handler + projection", "list component + its data op"), not an arbitrary file split.
 
 ## Working style
