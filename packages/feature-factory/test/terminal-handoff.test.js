@@ -584,12 +584,20 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     const rootRefusal = createFixture("remove-root-refusal");
     fixtures.push(rootRefusal);
     const rootSentinel = join(rootRefusal.sandbox, "root-guard-sentinel.txt");
+    const operatorRootSentinel = join(rootRefusal.operator, "operator-root-guard-sentinel.txt");
     writeFileSync(rootSentinel, "root guard survives\n");
-    assert.throws(() => removalGuard(rootRefusal.operator, rootRefusal.container, rootRefusal.operator),
-      "AC10 the operator checkout is never a removable sandbox target");
-    assert.throws(() => removalGuard(rootRefusal.operator, rootRefusal.container, "/"),
-      "AC10 filesystem root is never a removable sandbox target");
+    writeFileSync(operatorRootSentinel, "operator root guard survives\n");
+    // Supply the candidate's real parent as C so neither exact-path nor parent validation can
+    // short-circuit the destructive-root guard.  removalGuard has no delete operation; the sentinel
+    // checks prove these direct guard probes leave both safe fixture targets untouched.
+    assert.throws(() => removalGuard(rootRefusal.operator, dirname(rootRefusal.operator), rootRefusal.operator),
+      (error) => error.message === "refusing destructive root",
+      "AC10 O must reach and be refused by the explicit destructive-root guard");
+    assert.throws(() => removalGuard(rootRefusal.operator, "/", "/"),
+      (error) => error.message === "refusing destructive root",
+      "AC10 filesystem root must reach and be refused by the explicit destructive-root guard");
     assert.equal(readFileSync(rootSentinel, "utf8"), "root guard survives\n");
+    assert.equal(readFileSync(operatorRootSentinel, "utf8"), "operator root guard survives\n");
 
     const retained = createFixture("retained");
     fixtures.push(retained);

@@ -6,7 +6,8 @@
 // still reached mutation through imported dispatch-completion helpers.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,7 +23,7 @@ function sources(dir, found = []) {
     if (statSync(path).isDirectory()) sources(path, found);
     // .jsx too: the reactive component lives in one, and a scanner that reads only .js would let a
     // write primitive hide in exactly the file that was added last.
-    else if (entry.endsWith(".js") || entry.endsWith(".jsx")) found.push(path);
+    else if ([".js", ".mjs", ".cjs", ".jsx"].some((extension) => entry.endsWith(extension))) found.push(path);
   }
   return found;
 }
@@ -44,29 +45,79 @@ const WRITE_PRIMITIVES = [
 ];
 
 const READ_ONLY_FS_IMPORTS = new Set(["existsSync", "readdirSync", "readFileSync", "realpathSync", "statSync"]);
+const FS_MUTATION_APIS = [
+  "writeFile", "appendFile", "rm", "unlink", "mkdir", "rename", "copyFile", "cp", "truncate", "rmdir", "chmod", "chown", "utimes",
+];
+
+function filesystemOffenders(directory) {
+  const offenders = [];
+  for (const path of sources(directory)) {
+    if (path.includes(`${directory}/test/`) || path.includes(`${directory}/tui/dist/`)) continue;
+    const relativePath = path.slice(directory.length + 1);
+    const text = readFileSync(path, "utf8");
+    const imports = [...text.matchAll(/import\s+([\s\S]*?)\s+from\s*["'](node:fs(?:\/promises)?|fs(?:\/promises)?)["']/gu)];
+    const mentions = text.match(/from\s*["'](?:node:)?fs(?:\/promises)?["']/gu)?.length ?? 0;
+    if (imports.length !== mentions) offenders.push(`${relativePath} :: unrecognized fs import form`);
+    for (const [, bindings, specifier] of imports) {
+      const trimmed = bindings.trim();
+      if (specifier.endsWith("/promises")) {
+        offenders.push(`${relativePath} :: ${specifier} import`);
+        continue;
+      }
+      const named = /^\{([\s\S]*)\}$/u.exec(trimmed)?.[1];
+      if (named === undefined) {
+        offenders.push(`${relativePath} :: non-allowlisted ${specifier} import form`);
+        continue;
+      }
+      for (const name of named.split(",").map((entry) => entry.trim().split(/\s+as\s+/u)[0])) {
+        if (name && !READ_ONLY_FS_IMPORTS.has(name)) offenders.push(`${relativePath} :: ${specifier} ${name}`);
+      }
+    }
+    if (/\brequire\s*\(\s*["'](?:node:)?fs(?:\/promises)?["']\s*\)/u.test(text)) {
+      offenders.push(`${relativePath} :: require fs module`);
+    }
+    for (const match of text.matchAll(new RegExp(`\\b[A-Za-z_$][\\w$]*\\s*\\.\\s*(?:promises\\s*\\.\\s*)?(${FS_MUTATION_APIS.join("|")})\\s*\\(`, "gu"))) {
+      offenders.push(`${relativePath} :: filesystem mutation API ${match[1]}`);
+    }
+    for (const primitive of WRITE_PRIMITIVES) {
+      if (text.includes(primitive)) offenders.push(`${relativePath} :: ${primitive}`);
+    }
+  }
+  return offenders;
+}
 
 describe("package boundary", () => {
   it("gives the opencode package no way to write run state", () => {
-    const offenders = [];
-    for (const path of sources(opencodePkg)) {
-      if (path.includes(`${opencodePkg}/test/`)) continue;
-      // Generated output: it inlines this package's own modules, which are scanned at source, plus
-      // whatever a bundler emits. Scanning it reports the bundler's internals, not our choices.
-      if (path.includes(`${opencodePkg}/tui/dist/`)) continue;
-      const text = readFileSync(path, "utf8");
-      const fsImports = [...text.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']node:fs["']/gu)];
-      const fsMentions = text.match(/from\s*["']node:fs["']/gu)?.length ?? 0;
-      if (fsImports.length !== fsMentions) offenders.push(`${path.slice(opencodePkg.length + 1)} :: non-allowlisted node:fs import form`);
-      for (const [, names] of fsImports) {
-        for (const name of names.split(",").map((entry) => entry.trim().split(/\s+as\s+/u)[0])) {
-          if (name && !READ_ONLY_FS_IMPORTS.has(name)) offenders.push(`${path.slice(opencodePkg.length + 1)} :: node:fs ${name}`);
-        }
+    assert.deepEqual(filesystemOffenders(opencodePkg), [], "the opencode package observes and renders; only the CLI writes");
+
+    const root = mkdtempSync(join(tmpdir(), "ff-boundary-fs-bypasses-"));
+    try {
+      const fixtures = new Map([
+        ["allowed.mjs", 'import { readFileSync as read } from "node:fs";\nread("run.json");\n'],
+        ["named.js", 'import { writeFile as harmless } from "node:fs";\nharmless("run.json", "bad");\n'],
+        ["default.js", 'import fs from "fs";\nfs.writeFile("run.json", "bad");\n'],
+        ["namespace.mjs", 'import * as fs from "node:fs";\nfs.promises.rm("run.json");\n'],
+        ["promise-default.cjs", 'import fs from "node:fs/promises";\nfs.appendFile("run.json", "bad");\n'],
+        ["promise-named.js", 'import { writeFile as renamed } from "fs/promises";\nrenamed("run.json", "bad");\n'],
+        ["require.cjs", 'const { mkdir: alias } = require("fs");\nalias("state");\n'],
+      ]);
+      for (const [file, contents] of fixtures) writeFileSync(join(root, file), contents);
+      const offenders = filesystemOffenders(root);
+      assert.equal(offenders.some((entry) => entry.startsWith("allowed.mjs ::")), false,
+        "a named/aliased read-only node:fs import remains allowed");
+      for (const file of [...fixtures.keys()].filter((name) => name !== "allowed.mjs")) {
+        assert.ok(offenders.some((entry) => entry.startsWith(`${file} ::`)),
+          `filesystem scanner must catch the ${file} import bypass`);
       }
-      for (const primitive of WRITE_PRIMITIVES) {
-        if (text.includes(primitive)) offenders.push(`${path.slice(opencodePkg.length + 1)} :: ${primitive}`);
-      }
+      assert.ok(offenders.some((entry) => entry === "default.js :: filesystem mutation API writeFile"),
+        "the scanner catches a representative default-import mutation API");
+      assert.ok(offenders.some((entry) => entry === "namespace.mjs :: filesystem mutation API rm"),
+        "the scanner catches a representative namespace promise mutation API");
+      assert.ok(offenders.some((entry) => entry === "promise-default.cjs :: filesystem mutation API appendFile"),
+        "the scanner catches a representative fs/promises mutation API");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
-    assert.deepEqual(offenders, [], "the opencode package observes and renders; only the CLI writes");
   });
 
   it("consumes only the schema and the read-only reader", () => {
