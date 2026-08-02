@@ -103,6 +103,15 @@ function permissionFor(tools) {
     webfetch: has("webfetch") ? "allow" : "deny",
     // One level of orchestration is a property of the chain, not a preference.
     task: "deny",
+    // Since runs became sandboxed, the workspace is a clone beside the repository rather than the
+    // repository, so *every* agent in the chain works outside the directory the session started in:
+    // builders in the slice worktrees, reviewers and the validator on the observed diff, the
+    // verifier on the integration head. Left at the default `ask`, an interactive operator approves
+    // it once and never thinks about it again, while a headless or autonomous run is auto-rejected
+    // and cannot bootstrap at all. That is not a guard doing work; it is a prompt that only fires
+    // where nobody can answer. What actually confines an agent is its `paths` lane, the ownership
+    // refusal on the observed diff, and the boundary test forbidding this package to write.
+    external_directory: "allow",
   };
 }
 
@@ -111,7 +120,7 @@ const ORCHESTRATOR = {
     + "idea to draft PR through the /feature skill, stopping at every human gate.",
   mode: "primary",
   // The orchestrator is the only agent that may delegate, and the only one that writes run state.
-  permission: { edit: "allow", bash: "allow", webfetch: "allow", task: "allow" },
+  permission: { edit: "allow", bash: "allow", webfetch: "allow", task: "allow", external_directory: "allow" },
   prompt: "You are the feature-factory orchestrator. Follow the loaded `feature` skill exactly: it is "
     + "the authority on the chain, the gates, and which commands are yours. Every state change goes "
     + "through a `factory` command — never hand-write run.json. Re-derive evidence yourself rather "

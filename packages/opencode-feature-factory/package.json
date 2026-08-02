@@ -1,6 +1,6 @@
 {
   "name": "opencode-feature-factory",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "OpenCode integration for feature-factory: server plugin and sidebar. Reads run state; never writes it.",
   "type": "module",
   "license": "MIT",

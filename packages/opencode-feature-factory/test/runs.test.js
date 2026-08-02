@@ -798,6 +798,15 @@ describe("registering the workflow with the host", () => {
     }
     assert.equal(cfg.agent["work-reviewer"].permission.bash, "allow",
       "a reviewer may run the tests it judges, but not change them");
+
+    // Every agent works outside the directory the session started in, because the workspace is a
+    // sandbox clone beside the repository. Asserted so the grant stays a decision: left at the
+    // default `ask`, an interactive operator waves it through once and a headless run is
+    // auto-rejected before it can clone anything.
+    for (const [name, agent] of Object.entries(cfg.agent)) {
+      assert.equal(agent.permission.external_directory, "allow",
+        `${name} must reach the sandbox; the lane and the observed diff are what confine it`);
+    }
   });
 
   it("resolves a model through agent, then role, then default, then one-for-all", async () => {
