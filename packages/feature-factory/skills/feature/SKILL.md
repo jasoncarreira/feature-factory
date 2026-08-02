@@ -882,9 +882,11 @@ Never re-do a side effect the manifest shows already done — ticket creation, p
 - **Draft PR only.** Never merge, force-push, or close tickets. Humans merge.
 - **Scope discipline and no fabrication.** Flag out-of-scope work at the next gate. Never invent paths,
   keys, versions, or test passes — if the evidence is thin, say so and ask.
-- **A repository may lock its own scope, and a lock is not a defect.** A test whose assertion *is* a
-  limit — a line count, an exact list of commands or keys, a cap on the number of test cases — records
-  a decision. Treat it as a constraint on the plan: fit inside it, prefer new cases in existing tests
+- **A repository may lock its own scope, and a lock is not a defect.** A check whose assertion *is* a
+  limit records a decision: a coverage floor, a bundle or performance budget, a maximum file length, a
+  dependency or import allowlist, a public-API or snapshot test, an exact list of permitted names, a
+  cap on how much of something may exist. It need not be a test — a lint rule or a CI threshold locks
+  scope the same way. Treat it as a constraint on the plan: fit inside it, prefer new cases in existing tests
   over new test entry points, and if the work genuinely needs more, surface that at the gate with the
   number and the reason. Editing the limit to make the suite green removes the only thing holding the
   scope, and the failure message tells you the number, so you never need to be told it in advance.
