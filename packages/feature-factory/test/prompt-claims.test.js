@@ -155,6 +155,40 @@ const CLAIMS = [
     },
   },
   {
+    id: "slices-seed-requires-plan-envelope",
+    file: "skills/feature/SKILL.md",
+    fragment: "Run `work-decomposer` → `plan/slices.json` (required top-level shape: `{ \"slices\": [...] }`) and the\nhuman-readable `plan/plan.md`.",
+    expect: "refused",
+    matches: /^plan\/slices\.json must have top-level shape \{ "slices": \[\.\.\.\] \}\n$/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      const path = join(repo, ".factory", RUN, "run.json");
+      const before = readFileSync(path);
+      writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify(PLAN.slices));
+      const result = factory(repo, ["slices-seed", RUN, "--now", NOW]);
+      assert.deepEqual(result, { ok: false, out: 'plan/slices.json must have top-level shape { "slices": [...] }\n' });
+      assert.deepEqual(readFileSync(path), before);
+      return result;
+    },
+  },
+  {
+    id: "slices-seed-refuses-empty-content",
+    file: "agents/work-reviewer.md",
+    fragment: "For `work-decomposer`, do not approve unless the supplied `plan/slices.json` is a top-level object with array-valued `slices` (the exact seedable shape `{ \"slices\": [...] }`); inspect only the supplied artifact, not a broader plan schema.",
+    expect: "refused",
+    matches: /^plan\/slices\.json has no slices\n$/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      const path = join(repo, ".factory", RUN, "run.json");
+      const before = readFileSync(path);
+      writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify({ slices: [] }));
+      const result = factory(repo, ["slices-seed", RUN, "--now", NOW]);
+      assert.deepEqual(result, { ok: false, out: "plan/slices.json has no slices\n" });
+      assert.deepEqual(readFileSync(path), before);
+      return result;
+    },
+  },
+  {
     id: "agents-may-read-never-write",
     file: "skills/feature/SKILL.md",
     fragment: "A subagent may read —\n`factory status <run-id> --json` to orient itself — and may never write.",

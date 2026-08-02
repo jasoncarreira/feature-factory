@@ -402,8 +402,8 @@ dependency or design decision needed instead of sending an impossible envelope t
 
 ## Step 3 — Decompose (reviewed)
 
-Run `work-decomposer` → `plan/slices.json` and the human-readable `plan/plan.md`. Each slice declares
-`id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`.
+Run `work-decomposer` → `plan/slices.json` (required top-level shape: `{ "slices": [...] }`) and the
+human-readable `plan/plan.md`. Each slice declares `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`.
 
 Review it with `work-reviewer` subject `work-decomposer`: every acceptance criterion maps to a slice,
 same-wave slices are file-disjoint, and integration hotspots are serialized into different waves. Then
