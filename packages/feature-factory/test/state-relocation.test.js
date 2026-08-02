@@ -27,17 +27,40 @@ function factory(repository, ...args) {
   return JSON.parse(execFileSync("node", [cli, ...args, "--repo", repository, "--json"], { encoding: "utf8" }));
 }
 
+function documentedFactoryCommands(markdown) {
+  const joined = markdown.replace(/\\\n\s*/gu, " ");
+  const snippets = [];
+  for (const [, body] of joined.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)) snippets.push(...body.split("\n"));
+  for (const [, body] of joined.matchAll(/`([^`\n]+)`/gu)) snippets.push(body);
+  return snippets.flatMap((snippet) => {
+    const matches = [...snippet.matchAll(/\bfactory\s+([a-z-]+)/gu)];
+    return matches.map((match, index) => snippet.slice(match.index, matches[index + 1]?.index ?? snippet.length).trim());
+  });
+}
+
 test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proof contracts", () => {
   const skill = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
   for (const fragment of [
     "P = S/.factory/R",
     "W = S/.factory/worktrees/R",
-    "every slice worktree is `W/<slice-id>`",
-    "every slice branch is `factory/R/<slice-id>`",
-    "git -C \"$S\" worktree add -b \"$SLICE_BRANCH\" \"$SLICE_WORKTREE\" \"$FEATURE_BRANCH\"",
+    "RUN_MANIFEST=\"$RUN_REPO/.factory/$R/run.json\"",
+    "SLICE_ROOT=\"$RUN_REPO/.factory/worktrees/$R\"",
+    "a sandbox selects `S/.factory/worktrees/R`; a legacy run selects its existing\n`O/.factory/worktrees/R` layout",
+    "Read exactly `RUN_MANIFEST` through the host's direct file-read capability",
+    "do not spawn\na process, scan another directory, or write the file",
+    "bind the parsed object as `parsedRun`, require `parsedRun.run_id` to equal `R`",
+    "Every slice branch is `factory/R/<slice-id>`",
+    "SLICE_WORKTREE=\"$SLICE_ROOT/$SLICE_ID\"",
+    "git -C \"$RUN_REPO\" worktree add -b \"$SLICE_BRANCH\" \"$SLICE_WORKTREE\" \"$FEATURE_BRANCH\"",
     "require both `refs/heads/$SLICE_BRANCH` and the\n`SLICE_WORKTREE` path to be absent",
-    "must record exactly `W/<slice-id>` and `factory/R/<slice-id>`",
-    "`git -C \"$S\" worktree list --porcelain` to associate that physical path with that exact branch",
+    "`factory status` exposes compact slice labels only; it does not expose recorded\nworktree, branch, or `base_ref` values",
+    "Immediately before every\nre-observation, directly reload and parse exactly `RUN_MANIFEST`",
+    "RECORDED_SLICE = parsedRun.slices row whose id equals SLICE_ID",
+    "SLICE_WORKTREE = RECORDED_SLICE.worktree",
+    "SLICE_BRANCH = RECORDED_SLICE.branch",
+    "SLICE_BASE_REF = RECORDED_SLICE.base_ref",
+    "`SLICE_WORKTREE` to equal `SLICE_ROOT/<slice-id>`",
+    "`git -C \"$RUN_REPO\" worktree list\n--porcelain`",
     "an unrecorded existing path or ref is a collision",
     "--worktree \"$SLICE_WORKTREE\" --base \"$SLICE_BASE_REF\"",
     "`base_ref` is fixed when the slice is activated and cannot be changed afterwards",
@@ -47,20 +70,105 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "merge --no-ff \"$SLICE_BRANCH\"",
     "refuses a merge commit that does not have exactly two parents",
     "**A moved base is fine.**",
-    "A `blocked`, `partial`, or `needs-human` run retains `S`",
+    "--repo \"$RUN_REPO\"",
+    "A `blocked`, `partial`, or `needs-human` sandbox run retains `RUN_REPO`",
     "stale nonterminal locks retain it",
     "Nothing removes any of those sandboxes automatically.",
+    "RECORDED_RUN_WORKTREE = parsedRun.worktree",
+    "INTEGRATION_WORKTREE = physical normalized resolution of RECORDED_RUN_WORKTREE under RUN_REPO",
+    "activate the first seeded slice whose `depends_on` is empty before any other slice\ncan merge",
+    "ROOT_SLICE = first parsedRun.slices row whose depends_on is empty",
+    "BRANCH_POINT = ROOT_SLICE.base_ref",
+    "Neither value comes from status, current\nHEAD, a branch name, or an unpersisted variable",
     "report `sandbox_path` as the resolved selected repository",
     "reports `dead_lock: true` only when the run is nonterminal and its lock is stale",
   ]) assert.ok(skill.includes(fragment), `state-relocation contract is missing: ${fragment}`);
 
-  const shell = [...skill.matchAll(/```sh\n([\s\S]*?)```/gu)].map(([, body]) => body).join("\n").replace(/\\\n\s*/gu, " ");
-  const invocations = shell.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("factory "));
-  assert.ok(invocations.length >= 20, `expected fully qualified factory examples, found ${invocations.length}`);
-  for (const invocation of invocations) {
-    assert.match(invocation, /^factory [a-z-]+\s/u, `factory invocation is not command-first: ${invocation}`);
-    assert.match(invocation, /--repo "\$(?:S|RUN_REPO|O)"$/u, `factory invocation lacks a trailing selected repository: ${invocation}`);
+  const commands = documentedFactoryCommands(skill);
+  assert.ok(commands.length >= 35, `expected every documented factory command shape, found ${commands.length}`);
+  const nonRunnableSandboxShapes = new Set([
+    'factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"',
+    'factory lock "$R" claim --session "$SESSION_ID" --repo "$S"',
+    'factory status "$R" --json --repo "$S"',
+  ]);
+  for (const command of commands.filter((entry) => entry.includes('"$R"'))) {
+    if (nonRunnableSandboxShapes.has(command)) continue;
+    assert.match(command, /^factory [a-z-]+\s/u, `factory invocation is not command-first: ${command}`);
+    assert.match(command, /--repo "\$RUN_REPO"$/u, `factory invocation lacks trailing selected RUN_REPO: ${command}`);
   }
+  assert.deepEqual(commands.filter((entry) => /--repo "\$S"$/u.test(entry)), [...nonRunnableSandboxShapes]);
+  assert.ok(skill.includes("older bootstrap assertion retains the non-runnable command shape"));
+  assert.ok(skill.includes("non-runnable bootstrap claim shapes are"));
+  for (const stem of ["factory status <run-id> --json", "factory gate <run-id> pre_pr pending"]) {
+    assert.ok(commands.includes(stem), `missing compatibility command stem: ${stem}`);
+  }
+  const placeholderCommands = commands.filter((entry) => entry.includes("<run-id>"));
+  assert.ok(placeholderCommands.length >= 3);
+  assert.ok(placeholderCommands.every((entry) => [
+    "factory status <run-id> --json", "factory gate <run-id> pre_pr pending",
+  ].includes(entry)), `unqualified placeholder invocation is not marked compatibility: ${placeholderCommands.join(", ")}`);
+  assert.ok(skill.includes("quoted phrase names a\ncommand stem, not a runnable invocation"));
+  assert.ok(skill.includes("It names a non-runnable\ncommand stem. Execute only `factory status \"$R\" --json --repo \"$RUN_REPO\"`"));
+  assert.ok(skill.includes("compatibility transition name is `factory gate <run-id> pre_pr pending`; the runnable form is the\nrepository-qualified command above"));
+  const introduction = skill.slice(0, skill.indexOf("## Threat boundary"));
+  assert.match(introduction, /preserved compatibility\nclaim reads: A subagent may read —\n`factory status <run-id> --json`[^]*command stem, not a runnable invocation[^]*--repo "\$RUN_REPO"/u);
+  const resuming = skill.slice(skill.indexOf("## Resuming"), skill.indexOf("## Guardrails"));
+  assert.match(resuming, /preserved compatibility\nclaim reads “run `factory status <run-id> --json` and resume; never restart\.” It names a non-runnable\ncommand stem\. Execute only `factory status "\$R" --json --repo "\$RUN_REPO"`/u);
+  const modeAdmission = skill.slice(skill.indexOf("## Mode admission"), skill.indexOf("## Operating modes"));
+  assert.match(modeAdmission, /compatibility phrases name init command stems, not runnable invocations[^]*--repo "\$RUN_REPO"/u);
+  for (const command of commands.filter((entry) => !entry.includes('"$R"') && !entry.includes("<run-id>"))) {
+    assert.ok(
+      /^factory (?:observe|init|status|slice|pr)$/u.test(command)
+        || /^factory slice … (?:running|merged)$/u.test(command)
+        || ["factory init --mode autonomous", "factory init --mode headless"].includes(command),
+      `factory command shape is neither qualified nor a declared compatibility stem: ${command}`,
+    );
+  }
+
+  const stepFour = skill.slice(skill.indexOf("## Step 4 — Build slices"), skill.indexOf("## Step 5 — Integrate"));
+  assert.doesNotMatch(stepFour, /(?:--repo|git -C) "\$(?:S|O)"/u);
+  assert.doesNotMatch(stepFour, /\$W\//u);
+  const sliceObservation = stepFour.indexOf('$ factory observe "$R" "$SLICE_ID"');
+  for (const binding of [
+    "SLICE_WORKTREE = RECORDED_SLICE.worktree",
+    "SLICE_BRANCH = RECORDED_SLICE.branch",
+    "SLICE_BASE_REF = RECORDED_SLICE.base_ref",
+  ]) {
+    const resumeBinding = stepFour.indexOf(binding);
+    assert.ok(resumeBinding >= 0 && resumeBinding < sliceObservation, `recorded resume row must bind before observation: ${binding}`);
+  }
+  const integrationDefinition = stepFour.indexOf("INTEGRATION_WORKTREE = physical normalized resolution");
+  const integrationMerge = stepFour.indexOf('git -C "$INTEGRATION_WORKTREE" merge');
+  assert.ok(integrationDefinition >= 0 && integrationDefinition < integrationMerge, "integration worktree must be defined before merge");
+
+  const stepFive = skill.slice(skill.indexOf("## Step 5 — Integrate"), skill.indexOf("## Step 6 — Draft PR"));
+  const rootBaseDefinition = stepFive.indexOf("BRANCH_POINT = ROOT_SLICE.base_ref");
+  const integratedObservation = stepFive.indexOf('factory observe "$R" test-verifier');
+  assert.ok(rootBaseDefinition >= 0 && rootBaseDefinition < integratedObservation, "root base_ref must define branch point before integration observation");
+
+  const fresh = skill.slice(skill.indexOf("### Fresh sandbox bootstrap"), skill.indexOf("### Gate 1 — Story"));
+  const selectedRepositoryDefinition = fresh.indexOf('RUN_REPO="$S"');
+  const selectedManifestDefinition = fresh.indexOf('RUN_MANIFEST="$RUN_REPO/.factory/$R/run.json"');
+  const selectedRootDefinition = fresh.indexOf('SLICE_ROOT="$RUN_REPO/.factory/worktrees/$R"');
+  const selectedInit = fresh.indexOf('$ factory init "$R"');
+  assert.ok(selectedRepositoryDefinition >= 0 && selectedRepositoryDefinition < selectedManifestDefinition);
+  assert.ok(selectedManifestDefinition < selectedRootDefinition && selectedRootDefinition < selectedInit,
+    "fresh selected repository paths must be defined before init");
+
+  const selectedPaths = (operator, sandbox, sandboxed, recordedWorktree) => {
+    const runRepository = sandboxed ? sandbox : operator;
+    return {
+      runRepository,
+      sliceRoot: join(runRepository, ".factory", "worktrees", "state-relocation"),
+      integrationWorktree: resolve(runRepository, recordedWorktree),
+    };
+  };
+  assert.deepEqual(selectedPaths("/operator", "/sandbox", true, "."), {
+    runRepository: "/sandbox", sliceRoot: "/sandbox/.factory/worktrees/state-relocation", integrationWorktree: "/sandbox",
+  });
+  assert.deepEqual(selectedPaths("/operator", "/sandbox", false, "configured"), {
+    runRepository: "/operator", sliceRoot: "/operator/.factory/worktrees/state-relocation", integrationWorktree: "/operator/configured",
+  });
 
   const sourceFiles = filesUnder(pkg);
   const productionLines = sourceFiles.filter((path) => !path.includes(`${pkg}/test/`))
