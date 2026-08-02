@@ -171,7 +171,8 @@ const HANDLERS = {
     } catch (error) {
       throw new CliError(`could not read ${from}: ${error.message}`);
     }
-    if (!Array.isArray(plan?.slices) || plan.slices.length === 0) throw new CliError(`${from} has no slices`);
+    if (!Array.isArray(plan?.slices)) throw new CliError(`${from} must have top-level shape { "slices": [...] }`);
+    if (plan.slices.length === 0) throw new CliError(`${from} has no slices`);
     const at = stamp(flags);
     const next = await transition(runDir, {
       participants: [{ familyId: "slices", mode: "seed" }],
@@ -195,8 +196,7 @@ const HANDLERS = {
             // Stored with NO default. `test_plan ?? []` turned an omitted field into the
             // approved-empty exemption, so a plan that never mentioned tests silently
             // waived them - the CLI defeating the schema rule that was supposed to make
-            // that impossible. The schema rejects a missing or non-array value; that is
-            // the whole point of it being required.
+            // that impossible. The schema rejects a missing or non-array value.
             paths: slice.paths,
             test_plan: slice.test_plan,
             evidence_ref: null,
