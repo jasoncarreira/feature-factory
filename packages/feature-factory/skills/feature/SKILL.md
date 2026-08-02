@@ -706,12 +706,138 @@ what was approved — say so at the gate rather than recording it anyway.
 Labels, reviewers, and tracker fields are repository policy: derive them from the changed paths using
 whatever mapping the repository documents, and update the tracker only through *your* own calls.
 
-## Step 7 — Summary
+## Step 7 — Summary and completed sandbox handoff
 
-Report the ticket, the story and brief in a line each, the slice plan and per-slice merge status,
-migration and flag callouts, the acceptance-criteria/test table and validator verdict, the PR URL, the
-run directory and reported `sandbox_path`, and any TODOs — blocked slices, accepted NO-GO findings,
-recorded overrides, retained sandboxes, or a nonterminal `dead_lock`.
+After `factory pr` records the draft PR, stop the heartbeat loop and wait for any heartbeat call already
+in flight to return. Before terminalization or any filesystem or Git side effect, require that the loop
+is no longer active and no dispatched agent call remains in flight, directly read and validate exactly
+`RUN_MANIFEST`, and require no step with status `running` and no slice with status `running` or `review`.
+These are checks of existing orchestration and run-status vocabulary, not new persisted state. If any
+check fails, report and retain the sandbox without terminalizing, fetching, archiving, or removing
+anything.
+
+The completed handoff applies only when the selected `RUN_REPO` is the sandbox `S`; do not enter it for
+any other terminal status or for a nonterminal stale lock. A legacy run selected at `RUN_REPO="$O"` keeps
+its prior local behavior: terminalize it in place, read its final status there, and never fetch from,
+archive, or remove a supposed sandbox.
+
+Terminalize before any housekeeping, through the repository selected in Step 0:
+
+```sh
+factory terminal "$R" completed --reason "draft-pr-recorded" --repo "$RUN_REPO"
+```
+
+Do not replay or retry any handoff phase. A later invocation that finds a completed sandbox reports its
+path for manual recovery and leaves it intact. For the same reason, do not invent durable phase state or
+infer that an interrupted effect is safe to repeat.
+
+### Completed sandbox branch inventory and fetch
+
+From the just-terminalized manifest, inventory the recorded feature branch and every slice row whose
+status is not `merged` and whose recorded branch is non-null. Exclude merged slices even if their local
+branches still exist, and exclude null slice branches. For each selected branch, require its exact
+`refs/heads/<recorded-branch>` in `S`, resolve that source ref to a commit SHA, reject duplicate ref names
+with unequal SHAs, and retain the unique fully qualified ref/SHA pairs in lexical ref order.
+
+Preflight every destination in `O` before running fetch. Test exact ref existence independently from
+commit peeling: only a ref proven absent is eligible for fetch. An existing destination is accepted only
+when it peels to a commit whose SHA exactly equals the captured source SHA and is then omitted from the
+refspecs. An existing ref that cannot peel to a commit, or whose commit differs from its source SHA, is
+a fetch-phase collision. Inspect all destinations first, and if any collision exists run no fetch at
+all.
+
+When at least one destination is missing, perform exactly one local fetch, with every missing pair in
+the same invocation and with source and destination both fully qualified:
+
+```sh
+git -C "$O" fetch --atomic --no-tags "$S" \
+  "refs/heads/<recorded-branch>:refs/heads/<recorded-branch>" [...]
+```
+
+Never add `--force`, a leading `+`, tags, one fetch per branch, or a push. If every destination already
+equals its source, run no fetch. Capture the complete inventory before preflight so a collision cannot
+leave only an earlier branch fetched.
+
+### Completed sandbox archive
+
+Only after fetch succeeds or is unnecessary, inspect `O/.factory` with a non-following metadata read. If
+it is absent, create that one directory non-recursively and inspect it again; if present, require it to
+be a real directory and not a symbolic link. Never use recursive directory creation for this parent.
+Then inspect `A` itself without following links and require no directory entry at all. A dangling
+symbolic link at `A`, a live symbolic link, a file, or a directory is an archive collision.
+
+Copy the complete live plane `P` to the new `A`. Preserve every entry and its mode and copy symlinks as
+symlinks. Never write through a symlinked parent, overwrite, merge with, or delete an existing `A`. `W`
+is outside `P`; do not copy slice worktrees or any other part of `S` into the archive.
+
+Before copying, walk `P` without following symlinks and build a source inventory containing `.` and
+every descendant. Each entry records its relative path, type, and permission mode; a regular file also
+records the SHA-256 of its bytes, and a symbolic link records its link target. Reject unsupported entry
+types. Sort entries lexically by relative path. After copying, independently walk `A` with the same
+rules. Exact equality of the two sorted inventories proves directories, regular files, links, modes,
+contents, and the absence of missing or extra archive entries.
+
+### Completed sandbox verification and removal
+
+After the archive copy, verify every inventoried operator ref equals its captured source SHA. Read the
+archive with the following command, never with `RUN_REPO` or `S`:
+
+    factory status "$R" --json --repo "$O"
+
+Require parsed status `completed` with reason exactly `draft-pr-recorded`.
+
+Then compare the complete source and archive inventories. Any ref, status, reason, or inventory
+mismatch is a verify-phase failure. Fetch, archive, and verification are strict gates: a phase failure
+stops every later phase, leaves `S` in place, and updates the existing `completed` result through the
+selected sandbox repository. Convert the underlying failure to one nonempty line without changing its
+meaning, bind the exact reason below, and run the existing transition rather than editing `run.json`:
+
+```text
+CLEANUP_REASON = cleanup <fetch|archive|verify> failed: <single-line error>; sandbox retained at <S>
+```
+
+    factory terminal "$R" completed --reason "$CLEANUP_REASON" --repo "$S"
+
+Immediately read `S/.factory/R/run.json` directly and require persisted status `completed` and reason
+exactly equal to `CLEANUP_REASON`; failure to observe that update is reported with `S` retained and no
+later phase runs.
+
+The phase word is the phase that failed, and the final path is the absolute `S`; this stable
+phase/error/path shape is also used for a preflight collision or an existing `A`. Report the retained
+sandbox and stop. Never continue from fetch failure to archive, or from archive or verification failure
+to removal.
+
+Only after all ref and archive verification succeeds, guard the destructive removal. Require `S` and
+`C` to be real directories rather than symbolic links, physically canonicalize each, require those
+canonical paths to equal the literal absolute `S` and `C`, and require the canonical parent of `S` to
+equal canonical `C`. Refuse `/`, `O`, or any path not exactly the deterministic sandbox. Only then
+recursively remove `S`; never remove `C` or `A`.
+
+If removal fails, the archive has already been verified. Bind this exact one-line reason and update the
+completed result in the archive with the following command, never through `RUN_REPO` or `S`, then
+report the absolute residual path:
+
+```text
+CLEANUP_REASON = cleanup remove failed: <single-line error>; residual sandbox at <S>
+```
+
+    factory terminal "$R" completed --reason "$CLEANUP_REASON" --repo "$O"
+
+Whether removal succeeds or records a residual, make the final read with the following command, never
+with `RUN_REPO` or `S`:
+
+    factory status "$R" --json --repo "$O"
+
+A successful archive retains the initial `draft-pr-recorded` reason. `blocked`, `partial`,
+`needs-human`, and nonterminal dead-lock runs only report their sandbox paths and remain untouched.
+There is no automatic cleanup of those runs and no handoff journal, replay protocol, retry loop,
+intermediate archive plane, tombstone, or cleanup state machine.
+
+Finally report the ticket, the story and brief in a line each, the slice plan and per-slice merge
+status, migration and flag callouts, the acceptance-criteria/test table and validator verdict, the PR
+URL, the archive run directory and final reported `sandbox_path`, and any TODOs — blocked slices,
+accepted NO-GO findings, recorded overrides, retained or residual sandboxes, or a nonterminal
+`dead_lock`.
 
 ## Resuming
 
