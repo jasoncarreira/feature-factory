@@ -57,7 +57,8 @@ where it costs a re-read rather than a run.
 2. **Same-wave slices are file-disjoint.** If two slices would edit the same file, they cannot be in the same wave — give one a `depends_on` the other, or merge them.
 3. **Serialize integration hotspots.** These files are edited by many features and are natural collision points — any slices touching the same one go in **different waves** (serialized):
    Take the concrete list from the **research map** — the codebase-researcher names this repo's
-   registries and generated trees. The recurring shapes are: schema/migration manifests, shared
+   registries and generated trees under `### Landmines`, and the files enforcing a repo-wide rule
+   under `### Repo-wide rules`. The recurring shapes are: schema/migration manifests, shared
    route or module registries, root schema files, dependency manifests, generated output
    (regenerated rather than hand-owned, so the slice that changes the source owns the regen), and
    any file that enforces a repo-wide rule the work will move — an allowlist, a surface list, a
