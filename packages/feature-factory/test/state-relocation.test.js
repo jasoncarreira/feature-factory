@@ -233,7 +233,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const root = mkdtempSync(join(tmpdir(), "factory-state-sandbox-"));
   try {
     const operator = join(root, "operator");
-    const container = join(root, ".operator.factory-sandboxes");
+    const container = join(operator, ".factory-sandboxes");
     const sandbox = join(container, "state-relocation");
     const runId = "state-relocation";
     mkdirSync(operator);
@@ -241,7 +241,12 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     git(operator, "config", "user.name", "Factory Test");
     git(operator, "config", "user.email", "factory@example.test");
     writeFileSync(join(operator, "operator.txt"), "operator\n");
-    git(operator, "add", "operator.txt");
+    // The ignore rule is load-bearing, not hygiene: the container now lives *inside* `O`, so without
+    // it every run leaves the operator checkout dirty and the ownership refusal fires against the
+    // run's own workspace. Committed here so the `operatorBefore`/`operatorAfter` comparison below
+    // proves it — that assertion fails with `?? .factory-sandboxes/` if the rule is ever dropped.
+    writeFileSync(join(operator, ".gitignore"), "/.factory-sandboxes/\n");
+    git(operator, "add", "operator.txt", ".gitignore");
     git(operator, "commit", "--quiet", "-m", "operator seed");
     git(operator, "switch", "--quiet", "-c", "operator-work");
     const operatorBefore = {

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +7,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = resolve(pkg, "..", "..");
 const skill = readFileSync(resolve(pkg, "skills", "feature", "SKILL.md"), "utf8");
+const repositoryGitignore = readFileSync(resolve(repositoryRoot, ".gitignore"), "utf8");
+const readme = readFileSync(resolve(repositoryRoot, "README.md"), "utf8");
 const step0 = skill.slice(
   skill.indexOf("## Step 0 — Intake, run id, lock, manifest"),
   skill.indexOf("### Gate 1 — Story"),
@@ -47,7 +50,7 @@ function bootstrapWithInjectedHardlinkFailure({ operator, sandbox, runId, dispat
   const pushTarget = git(operator, "remote", "get-url", "--push", "origin");
   let attempts = 0;
   let containmentProven = false;
-  mkdirSync(container);
+  mkdirSync(container, { recursive: true });
 
   const clone = (noHardlinks) => {
     attempts += 1;
@@ -98,15 +101,17 @@ function bootstrapWithInjectedHardlinkFailure({ operator, sandbox, runId, dispat
   return { events, plane, worktrees };
 }
 
-test("AC1/AC3/AC4 fresh and resumed runs use a contained sandbox with guarded hardlink fallback", () => {
+test("AC1/AC3/AC4/AC6/AC8 fresh and resumed runs use a contained sandbox with guarded hardlink fallback", () => {
   const required = [
-    "C = dirname(O)/.<basename(O)>.factory-sandboxes",
+    "C = O/.factory-sandboxes",
     "S = C/R",
     "P = S/.factory/R",
     "W = S/.factory/worktrees/R",
     "A = O/.factory/R",
     "O=\"$(cd \"$(git -C \"$INVOCATION_CHECKOUT\" rev-parse --show-toplevel)\" && pwd -P)\"",
-    "Never switch, reset, clean, stash, create a\nbranch or worktree, write Git configuration, or initialize factory state in `O` for a fresh run.",
+    "`O` is the operator checkout; ignored `C` and `S` are\nthe sole active-write exception inside it.",
+    "Never switch, reset, clean, stash, create a branch or\nworktree, write Git configuration, or initialize factory state directly in `O` for a fresh run.",
+    "all fresh-run and active-execution writes are\nconfined to `C` or `S`.",
     "A valid legacy manifest at `A/run.json` resumes with\n`RUN_REPO=\"$O\"`; a valid sandbox manifest at `P/run.json` resumes with `RUN_REPO=\"$S\"`.",
     "If both manifests exist, print both\nabsolute paths and refuse as ambiguous.",
     "Never follow a symlink at `C` or `S`.",
@@ -216,17 +221,24 @@ test("AC1/AC3/AC4 fresh and resumed runs use a contained sandbox with guarded ha
     assert.match(command, /--repo "\$(?:RUN_REPO|S)"$/u, `factory repository must be trailing: ${command}`);
   }
 
+  const readmeSentence = "Run sandboxes are gitignored and therefore deleted by `git clean -xdf`.";
+  assert.equal(readme.split(readmeSentence).length - 1, 1, "AC8 README must contain the decided sentence exactly once");
+  assert.equal((repositoryGitignore.match(/^\/\.factory-sandboxes\/$/gmu) ?? []).length, 1,
+    "AC3 the anchored sandbox ignore rule must exist exactly once");
+
   const root = mkdtempSync(join(tmpdir(), "factory-sandbox-lifecycle-"));
   try {
     const operator = join(root, "operator");
     const pushTarget = join(root, "push-target.git");
-    const sandbox = join(root, ".operator.factory-sandboxes", "sandbox-lifecycle");
+    const sandbox = join(operator, ".factory-sandboxes", "sandbox-lifecycle");
+    const fallbackSandbox = join(operator, ".factory-sandboxes", "sandbox-fallback");
     mkdirSync(operator);
     execFileSync("git", ["init", "--quiet", "--initial-branch=main", operator]);
     git(operator, "config", "user.name", "Factory Test");
     git(operator, "config", "user.email", "factory@example.test");
+    writeFileSync(join(operator, ".gitignore"), repositoryGitignore);
     writeFileSync(join(operator, "tracked.txt"), "operator stays untouched\n");
-    git(operator, "add", "tracked.txt");
+    git(operator, "add", ".gitignore", "tracked.txt");
     git(operator, "commit", "--quiet", "-m", "seed");
     git(operator, "switch", "--quiet", "-c", "operator-work");
     execFileSync("git", ["init", "--bare", "--quiet", pushTarget]);
@@ -236,9 +248,28 @@ test("AC1/AC3/AC4 fresh and resumed runs use a contained sandbox with guarded ha
       head: git(operator, "rev-parse", "HEAD"),
       status: git(operator, "status", "--porcelain"),
     };
+    const objectId = git(operator, "rev-parse", "HEAD:tracked.txt");
+    const sourceObject = join(operator, ".git", "objects", objectId.slice(0, 2), objectId.slice(2));
+    mkdirSync(dirname(sandbox), { recursive: true });
+    execFileSync("git", ["clone", "--local", operator, sandbox], {
+      encoding: "utf8", env: { ...process.env, LC_ALL: "C" },
+    });
+    const sandboxObject = join(sandbox, ".git", "objects", objectId.slice(0, 2), objectId.slice(2));
+    assert.deepEqual(
+      { dev: statSync(sandboxObject).dev, ino: statSync(sandboxObject).ino },
+      { dev: statSync(sourceObject).dev, ino: statSync(sourceObject).ino },
+      "AC6 local cloning must hardlink a reachable loose object",
+    );
+    assert.equal(existsSync(join(sandbox, ".factory-sandboxes")), false,
+      "AC4 a sandbox clone must not contain a nested sandbox container");
+    assert.match(git(operator, "check-ignore", "--verbose", ".factory-sandboxes/sandbox-lifecycle"),
+      /:\/\.factory-sandboxes\/\t\.factory-sandboxes\/sandbox-lifecycle$/u,
+      "AC3 the repository ignore rule must cover the in-repository sandbox");
+    assert.equal(git(operator, "status", "--porcelain"), "",
+      "AC3 the operator checkout must stay clean while its sandbox exists");
     let dispatches = 0;
     const bootstrapped = bootstrapWithInjectedHardlinkFailure({
-      operator, sandbox, runId: "sandbox-lifecycle",
+      operator, sandbox: fallbackSandbox, runId: "sandbox-fallback",
       dispatch: () => { dispatches += 1; },
     });
     assert.deepEqual(bootstrapped.events, [
@@ -250,9 +281,9 @@ test("AC1/AC3/AC4 fresh and resumed runs use a contained sandbox with guarded ha
       head: git(operator, "rev-parse", "HEAD"),
       status: git(operator, "status", "--porcelain"),
     }, operatorBefore, "AC1 bootstrap must not switch, commit, or dirty the operator checkout");
-    assert.equal(existsSync(join(sandbox, "partial")), false, "AC4 fallback never retains the partial clone");
-    assert.equal(realpathSync(bootstrapped.plane).startsWith(`${realpathSync(sandbox)}/`), true);
-    assert.equal(realpathSync(bootstrapped.worktrees).startsWith(`${realpathSync(sandbox)}/`), true);
+    assert.equal(existsSync(join(fallbackSandbox, "partial")), false, "AC4 fallback never retains the partial clone");
+    assert.equal(realpathSync(bootstrapped.plane).startsWith(`${realpathSync(fallbackSandbox)}/`), true);
+    assert.equal(realpathSync(bootstrapped.worktrees).startsWith(`${realpathSync(fallbackSandbox)}/`), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

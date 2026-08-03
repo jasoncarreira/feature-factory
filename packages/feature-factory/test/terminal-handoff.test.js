@@ -208,7 +208,7 @@ function completedHandoff(fixture, options = {}) {
 function createFixture(label, { legacy = false, mode = "interactive", openStatus = "blocked", runningStep = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `factory-terminal-${label}-`)));
   const operator = join(root, "operator");
-  const container = join(root, ".operator.factory-sandboxes");
+  const container = join(operator, ".factory-sandboxes");
   const runId = `handoff-${label}`;
   const sandbox = join(container, runId);
   const archive = join(operator, ".factory", runId);
@@ -369,9 +369,12 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   const bootstrapEnd = skill.indexOf("### Resume or collision", bootstrapStart);
   const operatorBoundary = skill.slice(bootstrapStart, bootstrapEnd);
   for (const fragment of [
-    "During bootstrap and active sandbox execution, `O` is the operator checkout and must remain unchanged.",
-    "Never switch, reset, clean, stash, create a\nbranch or worktree, write Git configuration, or initialize factory state in `O` for a fresh run.",
-    "The only pre-clone Git operations there are reads",
+    // Reworded when the container moved inside `O` (#189): the boundary is no longer "nothing is
+    // written in O" but "nothing is written in O outside the ignored container". The fragments still
+    // pin the same guarantees; only the sentence carrying the first one changed.
+    "`O` is the operator checkout; ignored `C` and `S` are\nthe sole active-write exception inside it.",
+    "Never switch, reset, clean, stash, create a branch or\nworktree, write Git configuration, or initialize factory state directly in `O` for a fresh run.",
+    "The only pre-clone Git operations in `O` are reads",
     "The sole completed-handoff exception comes\nafter the draft PR is recorded",
     "fetch and verify only the recorded feature and unmerged-slice\nrefs in `O`",
     "create and verify only the `O/.factory/R` archive",

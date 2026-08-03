@@ -8,9 +8,9 @@ node_modules/
 # refusal, because a slice that edits the control plane is not doing the work it was dispatched for.
 # This repository runs the factory on itself, so the rule applies here too.
 .factory/
-# Run sandboxes, once #189 moves the container inside the repository. Landed ahead of that change
-# because `.gitignore` is itself a privileged path: a slice that edits it trips the same refusal
-# described above, so the run that relocates the container cannot also add the rule that hides it.
+# Run sandboxes. `C = O/.factory-sandboxes` per the feature skill: generated local state, one
+# clone per run, removed on completed handoff and retained when a run stops for a human. Root-anchored
+# so it hides the container without hiding a same-named directory nested elsewhere.
 /.factory-sandboxes/
 # Host config and per-repo seeded skills/agents, which are machine-local.
 .claude/
