@@ -173,7 +173,15 @@ After selecting the repository, bind the only state file and worktree root that 
 ```sh
 RUN_MANIFEST="$RUN_REPO/.factory/$R/run.json"
 SLICE_ROOT="$RUN_REPO/.factory/worktrees/$R"
+SESSION_ID="${FACTORY_SESSION_ID:-session-unknown-$R}"
 ```
+
+**`SESSION_ID` is the session you are running in, not a name you compose.** The integration exports it
+into every shell call; read it there and never build one from the run id and the date. The lock
+requires a session, so the fallback keeps a run working where the integration is not installed — and
+it is deliberately not session-shaped, because the sidebar offers a jump only to a real session id. An
+unidentified run then offers no jump instead of one that lands nowhere, which is what an invented
+label did: it satisfied the lock and silently broke the jump.
 
 Thus a sandbox selects `S/.factory/worktrees/R`; a legacy run selects its existing
 `O/.factory/worktrees/R` layout. Require `RUN_MANIFEST` and `SLICE_ROOT` to remain physically contained

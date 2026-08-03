@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CONTROL_PLANE } from "feature-factory";
 import { findControlPlane, listRuns, pollRuns, repositoryRoots, selectActiveRun } from "../observe/runs.js";
+import plugin from "../plugin/index.js";
 import { renderLines } from "../tui/lines.js";
 import { runCommands } from "../tui/commands.js";
 import { ORDER, SLOT } from "../tui/sidebar-config.js";
@@ -339,7 +340,7 @@ describe("run projection", () => {
     const originalNow = Date.now;
     const now = Date.parse("2026-07-30T13:00:00.000Z");
     const staleOwner = (runId) => ({
-      session: `SESSION-${runId}`, pid: 7, run_id: runId, branch: null,
+      session: `ses_0365a2c98ffe9AGxEQrTVs4yE${runId.length}`, pid: 7, run_id: runId, branch: null,
       claimed_at: "2026-07-30T10:00:00.000Z", heartbeat_at: "2026-07-30T11:00:00.000Z",
     });
     try {
@@ -629,20 +630,65 @@ describe("the host registration contract", () => {
     // a projection plus a route call — no process, no write.
     const navigations = [];
     const commands = runCommands([
-      { run_id: "app-1", valid: true, session: "SESSION-A", next: "gate:story" },
+      { run_id: "app-1", valid: true, session: "ses_0365a2c98ffe9AGxEQrTVs4yEy", next: "gate:story" },
       // No session: the lock was released, so there is nothing to open and offering it would
-      // navigate nowhere.
+      // navigate nowhere. A run whose lock holds an unnavigable label projects `null` and lands here
+      // too, which is why this consumer needs no shape check of its own.
       { run_id: "app-2", valid: true, session: null, next: "gate:brief" },
       // Unreadable manifests are shown in the sidebar but cannot be jumped to.
-      { run_id: "app-3", valid: false, session: "SESSION-C", next: null },
+      { run_id: "app-3", valid: false, session: "ses_03661f9adffeU2xTChAwIH9rWR", next: null },
     ], { navigate: (name, params) => navigations.push([name, params]) });
 
     assert.deepEqual(commands.map((command) => command.value), ["feature-factory.open.app-1"],
       "only a valid run with a recorded session can be opened");
     assert.match(commands[0].description, /gate:story/u, "the palette says which run needs attention");
     commands[0].onSelect();
-    assert.deepEqual(navigations, [["session", { sessionID: "SESSION-A" }]],
+    assert.deepEqual(navigations, [["session", { sessionID: "ses_0365a2c98ffe9AGxEQrTVs4yEy" }]],
       "selecting it navigates to that session, by id");
+  });
+
+  it("projects only a session the host can navigate to, not an invented label", () => {
+    // The defect this closes: `$SESSION_ID` was referenced five times in the skill and defined
+    // nowhere, so runs composed labels like `opencode-163-20260803`, the lock recorded them, and the
+    // sidebar offered a jump to a string naming no session. Narrowing the projection makes an
+    // unidentified run offer no jump rather than a broken one — including every run recorded before
+    // the integration exported the real id.
+    const root = repo("session-shape");
+    const lock = (session) => JSON.stringify({
+      session, pid: 1, run_id: "app-1", branch: null,
+      claimed_at: "2026-07-30T12:00:00.000Z", heartbeat_at: new Date().toISOString(),
+    });
+    const dir = seedRun(root, "app-1", RUN());
+
+    writeFileSync(join(dir, "factory.lock"), lock("ses_0365a2c98ffe9AGxEQrTVs4yEy"));
+    assert.equal(pollRuns(root).active.session, "ses_0365a2c98ffe9AGxEQrTVs4yEy",
+      "a host-issued id is projected");
+
+    for (const label of ["opencode-163-20260803", "SESSION-A", "session-unknown-163", "ses_", ""]) {
+      writeFileSync(join(dir, "factory.lock"), lock(label));
+      assert.equal(pollRuns(root).active.session, null,
+        `an unnavigable session (${JSON.stringify(label)}) offers no jump`);
+    }
+  });
+
+  it("exports the real session id into shell calls, and nothing when there is none", async () => {
+    // Verified against opencode 1.18.11 before this was written: the `shell.env` hook is honoured and
+    // carries a `ses_`-prefixed id. Absent must export nothing rather than a placeholder — writing a
+    // placeholder is how the lock came to hold labels in the first place.
+    const hooks = await plugin({}, {});
+    const shellEnv = hooks["shell.env"];
+    assert.equal(typeof shellEnv, "function", "the integration exports the session id to shell calls");
+
+    const withSession = { env: {} };
+    await shellEnv({ sessionID: "ses_0365a2c98ffe9AGxEQrTVs4yEy", cwd: "/repo" }, withSession);
+    assert.deepEqual(withSession.env, { FACTORY_SESSION_ID: "ses_0365a2c98ffe9AGxEQrTVs4yEy" });
+
+    // `sessionID` is optional in the hook's own signature, so every absent shape must stay silent.
+    for (const input of [{ cwd: "/repo" }, { sessionID: undefined }, { sessionID: "" }]) {
+      const output = { env: {} };
+      await shellEnv(input, output);
+      assert.deepEqual(output.env, {}, `no placeholder for ${JSON.stringify(input)}`);
+    }
   });
 
   it("reads the fixed process-free lock contract [AC13]", () => {
@@ -652,8 +698,11 @@ describe("the host registration contract", () => {
     try {
       Date.now = () => now;
       const dir = seedRun(root, "app-1", RUN());
+      // A host-issued id, because that is what a lock now holds and the only thing the sidebar will
+      // offer to open. The fixture used to carry `SESSION-Z`, which modelled the invented labels the
+      // skill produced while `$SESSION_ID` was undefined — and asserted that a label was projected.
       const owner = (heartbeat_at) => ({
-        session: "SESSION-Z", pid: 1, run_id: "app-1", branch: null,
+        session: "ses_03661f9e0ffeiAbZLdMQSm8xvd", pid: 1, run_id: "app-1", branch: null,
         claimed_at: "2026-07-30T12:00:00.000Z", heartbeat_at,
       });
       assert.equal(pollRuns(root).active.session, null, "[AC13] a missing factory.lock is absent");
@@ -661,7 +710,8 @@ describe("the host registration contract", () => {
       assert.equal(pollRuns(root).active.deadLock, false, "[AC13] only the literal factory.lock filename is read");
 
       writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T12:00:00.000Z")));
-      assert.equal(pollRuns(root).active.session, "SESSION-Z", "[AC13] the six-key owner is projected");
+      assert.equal(pollRuns(root).active.session, "ses_03661f9e0ffeiAbZLdMQSm8xvd",
+        "[AC13] the six-key owner is projected");
       assert.equal(pollRuns(root).active.deadLock, false, "[AC13] age equal to 30 minutes remains fresh");
       writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T11:59:59.999Z")));
       assert.equal(pollRuns(root).active.deadLock, true, "[AC13] age greater than 30 minutes is stale");

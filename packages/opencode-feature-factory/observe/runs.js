@@ -156,6 +156,19 @@ function inspectSessionLock(runDir) {
   return { state: ageMs <= SESSION_LOCK_TTL_MS ? "fresh" : "stale", owner };
 }
 
+// A session the host can navigate to is one the host issued, and the host issues `ses_`-prefixed ids.
+// The lock's `session` is whatever the claimer passed, and for every run recorded before the plugin
+// exported the real id that is an invented label — `opencode-163-20260803` and the like. Projecting
+// those made the sidebar offer a jump that lands nowhere, which is worse than offering none: the
+// consumer already filters on this field, so narrowing it here turns a broken jump into no jump.
+//
+// Deliberately a shape check rather than a lookup. Asking the host to resolve every id would make a
+// pure projection do I/O, and if the id format ever changes this degrades to "no jump offered" —
+// the safe direction — instead of resurrecting the broken one.
+function navigableSession(session) {
+  return typeof session === "string" && session.startsWith("ses_") && session.length > 4 ? session : null;
+}
+
 function validSessionLock(value) {
   return Boolean(value)
     && typeof value === "object"
@@ -197,7 +210,7 @@ function project(runDir, runId, { source, sandboxPath, expectedRunId }) {
     branch: run.branch,
     jira_key: run.jira_key ?? null,
     updated_at: run.updated_at ?? null,
-    session: lock.owner?.session ?? null,
+    session: navigableSession(lock.owner?.session),
     terminal,
     deadLock: !terminal && lock.state === "stale",
     // Which gate is waiting is the one thing an operator acts on, so it is not buried in a map.

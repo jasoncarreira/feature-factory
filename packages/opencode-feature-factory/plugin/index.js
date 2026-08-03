@@ -26,6 +26,20 @@ import { registerWorkflow } from "./config.js";
 // step and nothing stale left in a config directory.
 export default async function plugin(_input, options = {}) {
   return {
+    // The session id, exported so a run can record the session that owns it.
+    //
+    // `factory lock` has always had a `session` field and the sidebar has always offered to jump to
+    // it, but the skill's `$SESSION_ID` was referenced five times and defined nowhere — and nothing
+    // in a shell call's environment could have defined it. So every run invented a label like
+    // `opencode-163-20260803`, the lock recorded it, and `navigate("session", { sessionID })` was
+    // handed a string naming no session. Built end to end against a value that was never wired up.
+    //
+    // This is the hook that supplies it, and it writes nothing: the host hands over the env for one
+    // shell call and takes it back. Absent `sessionID` exports nothing rather than a placeholder,
+    // because a placeholder is precisely how the defect started.
+    async "shell.env"({ sessionID }, output) {
+      if (typeof sessionID === "string" && sessionID.length > 0) output.env.FACTORY_SESSION_ID = sessionID;
+    },
     async config(cfg) {
       // Everything the operator can configure, forwarded whole: `models` maps the agents' declared
       // tiers to concrete ids, `profiles` overrides per agent, and a project's own opencode.json
