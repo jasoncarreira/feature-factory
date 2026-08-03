@@ -121,6 +121,29 @@ function sourceTokens(source) {
     return tokens.at(-1);
   }
 
+  function escapedValue(start) {
+    const escaped = source[start + 1];
+    if (escaped === undefined) return { value: "", end: start + 1 };
+    if (escaped === "\n" || escaped === "\r") {
+      return { value: "", end: start + (escaped === "\r" && source[start + 2] === "\n" ? 3 : 2) };
+    }
+    const simple = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", 0: "\0" };
+    if (simple[escaped] !== undefined) return { value: simple[escaped], end: start + 2 };
+    if (escaped === "u" && source[start + 2] === "{") {
+      const closing = source.indexOf("}", start + 3);
+      const digits = closing === -1 ? "" : source.slice(start + 3, closing);
+      if (/^[0-9A-Fa-f]{1,6}$/u.test(digits)) {
+        return { value: String.fromCodePoint(Number.parseInt(digits, 16)), end: closing + 1 };
+      }
+    }
+    const width = escaped === "x" ? 2 : escaped === "u" ? 4 : 0;
+    const digits = width > 0 ? source.slice(start + 2, start + 2 + width) : "";
+    if (width > 0 && new RegExp(`^[0-9A-Fa-f]{${width}}$`, "u").test(digits)) {
+      return { value: String.fromCodePoint(Number.parseInt(digits, 16)), end: start + width + 2 };
+    }
+    return { value: escaped, end: start + 2 };
+  }
+
   function quotedValue(start, quote) {
     let index = start + 1;
     let value = "";
@@ -132,27 +155,9 @@ function sourceTokens(source) {
         index += 1;
         continue;
       }
-      const escaped = source[index + 1];
-      if (escaped === undefined) return { value, end: index + 1 };
-      if (escaped === "\n" || escaped === "\r") {
-        index += escaped === "\r" && source[index + 2] === "\n" ? 3 : 2;
-        continue;
-      }
-      const simple = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", 0: "\0" };
-      if (simple[escaped] !== undefined) {
-        value += simple[escaped];
-        index += 2;
-        continue;
-      }
-      const width = escaped === "x" ? 2 : escaped === "u" ? 4 : 0;
-      const digits = width > 0 ? source.slice(index + 2, index + 2 + width) : "";
-      if (width > 0 && new RegExp(`^[0-9A-Fa-f]{${width}}$`, "u").test(digits)) {
-        value += String.fromCodePoint(Number.parseInt(digits, 16));
-        index += width + 2;
-        continue;
-      }
-      value += escaped;
-      index += 2;
+      const escaped = escapedValue(index);
+      value += escaped.value;
+      index = escaped.end;
     }
     return { value, end: index };
   }
@@ -160,7 +165,7 @@ function sourceTokens(source) {
   function regexAllowed(previous) {
     if (!previous) return true;
     if (previous.regexPrefix) return true;
-    if (previous.type === "identifier") return REGEX_PREFIX_KEYWORDS.has(previous.value);
+    if (previous.type === "identifier") return false;
     if (["number", "string", "regex", "template"].includes(previous.type)) return false;
     return ![")", "]", "}", "++", "--"].includes(previous.value);
   }
@@ -188,21 +193,29 @@ function sourceTokens(source) {
   }
 
   function templateEnd(start) {
-    emit("template", "", start, start + 1);
     let index = start + 1;
+    let value = "";
+    let substituted = false;
     while (index < source.length) {
       if (source[index] === "\\") {
-        index += 2;
+        const escaped = escapedValue(index);
+        value += escaped.value;
+        index = escaped.end;
         continue;
       }
-      if (source[index] === "`") return index + 1;
+      if (source[index] === "`") {
+        const end = index + 1;
+        return { end, token: substituted ? null : emit("template", value, start, end) };
+      }
       if (source[index] === "$" && source[index + 1] === "{") {
+        substituted = true;
         index = scan(index + 2, true);
         continue;
       }
+      value += source[index];
       index += 1;
     }
-    return index;
+    return { end: index, token: null };
   }
 
   function scan(start, stopAtClosingBrace) {
@@ -210,6 +223,7 @@ function sourceTokens(source) {
     let braceDepth = 0;
     let previous = null;
     const parenthesisContexts = [];
+    const braceContexts = [];
     while (index < source.length) {
       const character = source[index];
       if (/\s/u.test(character)) {
@@ -233,8 +247,9 @@ function sourceTokens(source) {
         continue;
       }
       if (character === "`") {
-        index = templateEnd(index);
-        previous = { type: "template", value: "`" };
+        const template = templateEnd(index);
+        index = template.end;
+        previous = template.token ?? { type: "template", value: "" };
         continue;
       }
       if (character === "/" && regexAllowed(previous)
@@ -249,7 +264,11 @@ function sourceTokens(source) {
       if (IDENTIFIER_START.test(character)) {
         let end = index + 1;
         while (IDENTIFIER_PART.test(source[end] ?? "")) end += 1;
+        const prior = previous;
         previous = emit("identifier", source.slice(index, end), index, end);
+        const isMember = prior?.value === "." || prior?.value === "?.";
+        previous.regexPrefix = REGEX_PREFIX_KEYWORDS.has(previous.value) && !isMember;
+        previous.controlParen = CONTROL_PAREN_KEYWORDS.has(previous.value) && !isMember;
         index = end;
         continue;
       }
@@ -262,6 +281,8 @@ function sourceTokens(source) {
       }
       if (character === "{") {
         braceDepth += 1;
+        braceContexts.push(!previous || previous.regexPrefix || previous.value === "=>" || previous.value === ";"
+          || previous.value === "{" || (previous.type === "identifier" && ["do", "else", "finally", "try"].includes(previous.value)));
         previous = emit("punctuator", character, index, index + 1);
         index += 1;
         continue;
@@ -270,12 +291,13 @@ function sourceTokens(source) {
         if (stopAtClosingBrace && braceDepth === 0) return index + 1;
         braceDepth = Math.max(0, braceDepth - 1);
         previous = emit("punctuator", character, index, index + 1);
+        previous.regexPrefix = braceContexts.pop() ?? false;
         index += 1;
         continue;
       }
       const token = MULTI_CHARACTER_TOKENS.find((candidate) => source.startsWith(candidate, index)) ?? character;
       let regexPrefix = false;
-      if (token === "(") parenthesisContexts.push(previous?.type === "identifier" && CONTROL_PAREN_KEYWORDS.has(previous.value));
+      if (token === "(") parenthesisContexts.push(previous?.controlParen === true);
       if (token === ")") regexPrefix = parenthesisContexts.pop() ?? false;
       previous = emit("punctuator", token, index, index + token.length);
       previous.regexPrefix = regexPrefix;
@@ -308,6 +330,129 @@ function matchingPairs(tokens, opening, closing) {
     }
   }
   return pairs;
+}
+
+function parenthesizedBounds(tokens, start, end, parentheses) {
+  let first = start;
+  let last = end;
+  while (tokens[first - 1]?.value === "(" && parentheses.get(first - 1) === last + 1) {
+    first -= 1;
+    last += 1;
+  }
+  return { first, last };
+}
+
+function staticString(token) {
+  return token?.type === "string" || token?.type === "template" ? token.value : null;
+}
+
+function firstStaticArgument(tokens, opening, parentheses) {
+  const closing = parentheses.get(opening);
+  if (closing === undefined) return null;
+  for (let index = opening + 1; index < closing; index += 1) {
+    const value = staticString(tokens[index]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function commonJsLoads(tokens) {
+  const parentheses = matchingPairs(tokens, "(", ")");
+  const loaders = new Set(["require"]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let index = 0; index < tokens.length; index += 1) {
+      if (tokens[index].value !== "=" || tokens[index - 1]?.type !== "identifier") continue;
+      let expression = index + 1;
+      while (tokens[expression]?.value === "(") expression += 1;
+      const loaderAlias = tokens[expression]?.type === "identifier" && loaders.has(tokens[expression].value);
+      const memberAlias = tokens[expression]?.type === "identifier"
+        && ((tokens[expression + 1]?.value === "." && tokens[expression + 2]?.value === "require")
+          || (tokens[expression + 1]?.value === "[" && staticString(tokens[expression + 2]) === "require"
+            && tokens[expression + 3]?.value === "]"));
+      if ((loaderAlias || memberAlias) && !loaders.has(tokens[index - 1].value)) {
+        loaders.add(tokens[index - 1].value);
+        changed = true;
+      }
+    }
+  }
+
+  const loads = [];
+  const seen = new Set();
+  function add(token, opening) {
+    const module = firstStaticArgument(tokens, opening, parentheses);
+    if (module === null) return;
+    const key = `${token.start}:${module}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    loads.push({ token, module });
+  }
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type === "identifier" && loaders.has(token.value)) {
+      const bounds = parenthesizedBounds(tokens, index, index, parentheses);
+      if (tokens[bounds.last + 1]?.value === "(") add(token, bounds.last + 1);
+      if (tokens[bounds.last + 1]?.value === "." && ["call", "apply"].includes(tokens[bounds.last + 2]?.value)
+        && tokens[bounds.last + 3]?.value === "(") add(token, bounds.last + 3);
+    }
+    if (token.type === "identifier" && token.value === "require" && tokens[index - 1]?.value === "."
+      && tokens[index + 1]?.value === "(") add(token, index + 1);
+    if (staticString(token) === "require" && tokens[index - 1]?.value === "[" && tokens[index + 1]?.value === "]"
+      && tokens[index + 2]?.value === "(") add(token, index + 2);
+  }
+  return loads;
+}
+
+function builtinModuleLoads(tokens) {
+  const parentheses = matchingPairs(tokens, "(", ")");
+  const loaders = new Set();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let index = 0; index < tokens.length; index += 1) {
+      if (tokens[index].value !== "=" || tokens[index - 1]?.type !== "identifier") continue;
+      let expression = index + 1;
+      while (tokens[expression]?.value === "(") expression += 1;
+      const loaderAlias = tokens[expression]?.type === "identifier" && loaders.has(tokens[expression].value);
+      const memberAlias = tokens[expression]?.type === "identifier"
+        && ((tokens[expression + 1]?.value === "." && tokens[expression + 2]?.value === "getBuiltinModule")
+          || (tokens[expression + 1]?.value === "[" && staticString(tokens[expression + 2]) === "getBuiltinModule"
+            && tokens[expression + 3]?.value === "]"));
+      if ((loaderAlias || memberAlias) && !loaders.has(tokens[index - 1].value)) {
+        loaders.add(tokens[index - 1].value);
+        changed = true;
+      }
+    }
+  }
+
+  const loads = [];
+  const seen = new Set();
+  function add(token, opening) {
+    const module = firstStaticArgument(tokens, opening, parentheses);
+    if (module === null) return;
+    const key = `${token.start}:${module}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    loads.push({ token, module });
+  }
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type === "identifier" && loaders.has(token.value)) {
+      const bounds = parenthesizedBounds(tokens, index, index, parentheses);
+      if (tokens[bounds.last + 1]?.value === "(") add(token, bounds.last + 1);
+      if (tokens[bounds.last + 1]?.value === "." && ["call", "apply"].includes(tokens[bounds.last + 2]?.value)
+        && tokens[bounds.last + 3]?.value === "(") add(token, bounds.last + 3);
+    }
+    if (token.type === "identifier" && token.value === "getBuiltinModule" && tokens[index - 1]?.value === "."
+      && tokens[index + 1]?.value === "(") add(token, index + 1);
+    if (token.type === "identifier" && token.value === "getBuiltinModule" && tokens[index - 1]?.value === "."
+      && tokens[index + 1]?.value === "." && ["call", "apply"].includes(tokens[index + 2]?.value)
+      && tokens[index + 3]?.value === "(") add(token, index + 3);
+    if (staticString(token) === "getBuiltinModule" && tokens[index - 1]?.value === "[" && tokens[index + 1]?.value === "]"
+      && tokens[index + 2]?.value === "(") add(token, index + 2);
+  }
+  return loads;
 }
 
 function moduleReferences(tokens) {
@@ -398,7 +543,8 @@ function createRequireLoaderOffenders(path, tokens) {
     let expression = index + 1;
     while (tokens[expression]?.value === "(") expression += 1;
     const call = factoryCalls.get(expression);
-    if (call && !(tokens[call.closing + 1]?.value === "." && tokens[call.closing + 2]?.value === "resolve")) {
+    const bounds = call ? parenthesizedBounds(tokens, expression, call.closing, parentheses) : null;
+    if (call && !(tokens[bounds.last + 1]?.value === "." && tokens[bounds.last + 2]?.value === "resolve")) {
       loaders.add(tokens[index - 1].value);
     }
   }
@@ -424,23 +570,24 @@ function createRequireLoaderOffenders(path, tokens) {
     offenders.push(tokenOffender(path, token, "createRequire result invoked as loader"));
   }
   for (const [start, call] of factoryCalls) {
-    const next = tokens[call.closing + 1];
+    const bounds = parenthesizedBounds(tokens, start, call.closing, parentheses);
+    const next = tokens[bounds.last + 1];
     if (next?.value === "(") add(tokens[start]);
-    if (next?.value === "." && ["call", "apply"].includes(tokens[call.closing + 2]?.value)
-      && tokens[call.closing + 3]?.value === "(") add(tokens[start]);
+    if (next?.value === "." && ["call", "apply"].includes(tokens[bounds.last + 2]?.value)
+      && tokens[bounds.last + 3]?.value === "(") add(tokens[start]);
   }
   for (let index = 0; index < tokens.length; index += 1) {
     if (tokens[index].type !== "identifier" || !loaders.has(tokens[index].value)) continue;
-    if (tokens[index + 1]?.value === "(") add(tokens[index]);
-    if (tokens[index + 1]?.value === "." && ["call", "apply"].includes(tokens[index + 2]?.value)
-      && tokens[index + 3]?.value === "(") add(tokens[index]);
-    if (tokens[index - 1]?.value === "(" && tokens[index + 1]?.value === ")" && tokens[index + 2]?.value === "(") add(tokens[index]);
+    const bounds = parenthesizedBounds(tokens, index, index, parentheses);
+    if (tokens[bounds.last + 1]?.value === "(") add(tokens[index]);
+    if (tokens[bounds.last + 1]?.value === "." && ["call", "apply"].includes(tokens[bounds.last + 2]?.value)
+      && tokens[bounds.last + 3]?.value === "(") add(tokens[index]);
   }
   return offenders;
 }
 
 const FILESYSTEM_READ_APIS = new Set([
-  "access", "accessSync", "createReadStream", "existsSync", "fstat", "fstatSync", "lstat", "lstatSync", "open", "openSync", "opendir", "opendirSync", "read", "readSync", "readdir", "readdirSync", "readFile", "readFileSync", "readlink", "readlinkSync", "realpath", "realpathSync", "stat", "statSync",
+  "access", "accessSync", "createReadStream", "exists", "existsSync", "fstat", "fstatSync", "glob", "globSync", "lstat", "lstatSync", "open", "openAsBlob", "openSync", "opendir", "opendirSync", "read", "readLines", "readSync", "readableWebStream", "readdir", "readdirSync", "readFile", "readFileSync", "readlink", "readlinkSync", "readv", "readvSync", "realpath", "realpathSync", "stat", "statSync", "statfs", "statfsSync", "watch", "watchFile",
 ]);
 
 function isAllowedReaddirCall(tokens, index, closing) {
@@ -529,7 +676,6 @@ function registrationReadOffenders(input) {
       const token = tokens[index];
       if (token.type !== "identifier" || tokens[index + 1]?.value !== "(") continue;
       const closing = parentheses.get(index + 1);
-      if (token.value === "require") offenders.push(tokenOffender(path, token, "CommonJS require"));
       if (token.value === "createRequire") {
         const exactArgument = closing === index + 7
           && tokens[index + 2]?.value === "import"
@@ -574,19 +720,40 @@ function registrationReadOffenders(input) {
     }
     for (let index = 0; index < tokens.length; index += 1) {
       const token = tokens[index];
-      if (!["readdirSync", "readFileSync"].includes(token.value) || filesystemImportTokens.has(token.start)
-        || allowedReadCallTokens.has(token.start)) continue;
+      if (token.type !== "identifier" || !FILESYSTEM_READ_APIS.has(token.value) || filesystemImportTokens.has(token.start)
+        || allowedReadCallTokens.has(token.start) || tokens[index - 1]?.value === ".") continue;
       if (tokens[index + 1]?.value === "(") continue;
-      offenders.push(tokenOffender(path, token, `extra direct ${token.value}`));
+      const reason = ["readdirSync", "readFileSync"].includes(token.value)
+        ? `extra direct ${token.value}` : `additional filesystem read API ${token.value}`;
+      offenders.push(tokenOffender(path, token, reason));
     }
     for (const token of tokens) {
-      if (token.value !== "createRequire" || createRequireImportTokens.has(token.start)
+      if (token.type !== "identifier" || token.value !== "createRequire" || createRequireImportTokens.has(token.start)
         || allowedCreateRequireCallTokens.has(token.start)) continue;
       offenders.push(tokenOffender(path, token, "unsupported createRequire usage"));
     }
     for (let index = 1; index < tokens.length - 2; index += 1) {
-      if (tokens[index].value !== "." || !FILESYSTEM_READ_APIS.has(tokens[index + 1]?.value) || tokens[index + 2]?.value !== "(") continue;
+      if (tokens[index].value !== "." || tokens[index + 1]?.type !== "identifier"
+        || !FILESYSTEM_READ_APIS.has(tokens[index + 1].value) || tokens[index + 2]?.value !== "(") continue;
       offenders.push(tokenOffender(path, tokens[index + 1], `filesystem member read ${tokens[index + 1].value}`));
+    }
+    for (let index = 1; index < tokens.length - 3; index += 1) {
+      const member = staticString(tokens[index + 1]);
+      if (tokens[index].value !== "[" || !FILESYSTEM_READ_APIS.has(member) || tokens[index + 2]?.value !== "]"
+        || tokens[index + 3]?.value !== "(") continue;
+      offenders.push(tokenOffender(path, tokens[index + 1], `filesystem member read ${member}`));
+    }
+    for (const load of commonJsLoads(tokens)) {
+      offenders.push(tokenOffender(path, load.token, "CommonJS require"));
+      if (forbiddenConfigurationModule(load.module)) {
+        offenders.push(tokenOffender(path, load.token, "CommonJS configuration load"));
+      }
+      if (["fs", "node:fs", "fs/promises", "node:fs/promises"].includes(load.module)) {
+        offenders.push(tokenOffender(path, load.token, `CommonJS filesystem load ${load.module}`));
+      }
+    }
+    for (const load of builtinModuleLoads(tokens)) {
+      offenders.push(tokenOffender(path, load.token, `alternate built-in module acquisition ${load.module}`));
     }
     offenders.push(...createRequireLoaderOffenders(path, tokens));
     if (path === "plugin/config.js") {
@@ -609,9 +776,16 @@ function executionOffenders(input) {
       if (token.type === "identifier" && token.value === "Function") offenders.push(tokenOffender(path, token, "executable Function identifier"));
     }
     for (let index = 0; index < tokens.length - 2; index += 1) {
-      if (tokens[index].value !== "[" || tokens[index + 1]?.type !== "string" || tokens[index + 2]?.value !== "]") continue;
-      if (tokens[index + 1].value === "eval") offenders.push(tokenOffender(path, tokens[index + 1], "static eval member"));
-      if (tokens[index + 1].value === "Function") offenders.push(tokenOffender(path, tokens[index + 1], "static Function member"));
+      if (tokens[index].value !== "[" || !["string", "template"].includes(tokens[index + 1]?.type)
+        || tokens[index + 2]?.value !== "]") continue;
+      if (tokens[index + 1].value === "eval") {
+        const reason = tokens[index + 1].type === "template" ? "static template eval member" : "static eval member";
+        offenders.push(tokenOffender(path, tokens[index + 1], reason));
+      }
+      if (tokens[index + 1].value === "Function") {
+        const reason = tokens[index + 1].type === "template" ? "static template Function member" : "static Function member";
+        offenders.push(tokenOffender(path, tokens[index + 1], reason));
+      }
     }
     for (const reference of moduleReferences(tokens)) {
       if (reference.kind === "dynamic") offenders.push(tokenOffender(path, tokens[reference.start], "dynamic import"));
@@ -619,9 +793,11 @@ function executionOffenders(input) {
         offenders.push(tokenOffender(path, tokens[reference.start], "static vm import"));
       }
     }
-    for (let index = 0; index < tokens.length - 2; index += 1) {
-      if (tokens[index].value !== "require" || tokens[index + 1]?.value !== "(" || tokens[index + 2]?.type !== "string") continue;
-      if (["node:vm", "vm"].includes(tokens[index + 2].value)) offenders.push(tokenOffender(path, tokens[index], "CommonJS vm load"));
+    for (const load of commonJsLoads(tokens)) {
+      if (["node:vm", "vm"].includes(load.module)) offenders.push(tokenOffender(path, load.token, "CommonJS vm load"));
+    }
+    for (const load of builtinModuleLoads(tokens)) {
+      if (["node:vm", "vm"].includes(load.module)) offenders.push(tokenOffender(path, load.token, "built-in vm load"));
     }
     offenders.push(...createRequireLoaderOffenders(path, tokens));
   }
@@ -787,6 +963,7 @@ describe("package boundary", () => {
     ]);
     assert.deepEqual(registrationReadOffenders(registration), []);
     assert.deepEqual(registrationReadOffenders(registrationBaseline()), []);
+    assert.deepEqual(registrationReadOffenders(registrationBaseline('const quoted = "readFileSync createRequire";\nconst prompt = `readFileSync createRequire`;')), []);
 
     const controls = [
       ["discarded-direct.js", 'readFileSync("opencode.json", "utf8");', "extra direct readFileSync"],
@@ -802,6 +979,17 @@ describe("package boundary", () => {
       ["dynamic-foreign.js", 'await import(".claude/config.mjs");', "dynamic import"],
       ["static-config.js", 'import config from "../.opencode/opencode.json";', "forbidden static configuration import"],
       ["extra-api.js", 'existsSync("opencode.json");', "additional filesystem read API existsSync"],
+      ["read-vector.js", 'readvSync(handle, buffers);', "additional filesystem read API readvSync"],
+      ["aliased-read-vector.js", 'const inspect = readvSync;\ninspect(handle, buffers);', "additional filesystem read API readvSync"],
+      ["filesystem-glob.js", 'globSync("**/opencode.json");', "additional filesystem read API globSync"],
+      ["filesystem-statfs.js", 'statfsSync(".");', "additional filesystem read API statfsSync"],
+      ["bracket-read.js", 'fs["readFileSync"]("opencode.json", "utf8");', "filesystem member read readFileSync"],
+      ["aliased-commonjs-config.js", 'const load = require;\nload("../.claude/config.mjs");', "CommonJS configuration load"],
+      ["member-commonjs-config.js", 'module.require("../.opencode/profiles.json");', "CommonJS configuration load"],
+      ["member-alias-commonjs-config.js", 'const load = module["require"];\nload("../.claude/settings.json");', "CommonJS configuration load"],
+      ["builtin-filesystem.js", 'process.getBuiltinModule("node:fs");', "alternate built-in module acquisition node:fs"],
+      ["aliased-builtin-filesystem.js", 'const builtin = process.getBuiltinModule;\nbuiltin("node:fs/promises");', "alternate built-in module acquisition node:fs/promises"],
+      ["called-builtin-filesystem.js", 'process.getBuiltinModule.call(process, "node:fs");', "alternate built-in module acquisition node:fs"],
       ["duplicate-directory.js", "readdirSync(dir);", "duplicate allowed readdirSync"],
       ["duplicate-file.js", 'readFileSync(join(dir, file), "utf8");', "duplicate allowed readFileSync"],
       ["require-loader.js", 'createRequire(import.meta.url)("../.claude/config.mjs");', "createRequire result invoked as loader"],
@@ -820,7 +1008,8 @@ describe("package boundary", () => {
       ["resolver.js", 'import { createRequire } from "node:module";\nconst loader = createRequire(import.meta.url);\nloader.resolve("feature-factory");'],
       ["aliased-resolver.js", 'import { createRequire as makeRequire } from "node:module";\nconst loader = makeRequire(import.meta.url);\nloader.resolve("feature-factory");'],
       ["literal-text.js", '// eval(source); new Function(source);\nconst words = "eval Function";\nconst pattern = /eval\\s+Function[)]/giu;\nconst prompt = `eval and Function stay literal`;'],
-      ["safe-template.js", 'const ratio = total / divisor / 2;\nconst text = `safe ${JSON.parse(value).name} ${"eval"} ${/Function/u} ${`nested ${"Function"}`}`;\nvalue.match(/Function|eval/gu);\nif (ready) /eval|Function/u.test(value);'],
+      ["safe-template.js", 'const ratio = total / divisor / 2;\nconst text = `safe ${JSON.parse(value).name} ${"eval"} ${/Function/u} ${`nested ${"Function"}`}`;\nglobalThis[`safe`](value);\nvalue.match(/Function|eval/gu);\nif (ready) /eval|Function/u.test(value);'],
+      ["post-block-regex.js", "if (ready) {} /eval|Function/u.test(value);"],
     ]);
     assert.deepEqual(executionOffenders(allowed), []);
 
@@ -828,18 +1017,27 @@ describe("package boundary", () => {
       ["direct-eval.js", "eval(source);", "executable eval identifier"],
       ["eval-alias.js", "const execute = eval; execute(source);", "executable eval identifier"],
       ["indirect-eval.js", "(0, eval)(source);", "executable eval identifier"],
+      ["division-eval.js", "const ratio = options.return / eval(source) / divisor;", "executable eval identifier"],
       ["bracket-eval.js", 'globalThis["eval"](source);', "static eval member"],
+      ["template-bracket-eval.js", "globalThis[`eval`](source);", "static template eval member"],
+      ["escaped-template-bracket-eval.js", "globalThis[`ev\\x61l`](source);", "static template eval member"],
       ["direct-function.js", "Function(source);", "executable Function identifier"],
       ["new-function.js", "new Function(source);", "executable Function identifier"],
       ["function-alias.js", "const Build = Function; Build(source);", "executable Function identifier"],
       ["dot-function.js", "globalThis.Function(source);", "executable Function identifier"],
       ["bracket-function.js", 'globalThis["Function"](source);', "static Function member"],
+      ["template-bracket-function.js", "globalThis[`Function`](source);", "static template Function member"],
+      ["escaped-template-bracket-function.js", "globalThis[`Fun\\u0063tion`](source);", "static template Function member"],
       ["template-eval.js", "const result = `${eval(source)}`;", "executable eval identifier"],
       ["nested-template-eval.js", "const result = `${`nested ${eval(source)}`}`;", "executable eval identifier"],
       ["template-function.js", "const result = `${(() => { const Build = Function; return Build(source); })()}`;", "executable Function identifier"],
       ["node-vm.js", 'import vm from "node:vm";', "static vm import"],
       ["bare-vm.js", 'import * as vm from "vm";', "static vm import"],
       ["require-vm.js", 'const vm = require("node:vm");', "CommonJS vm load"],
+      ["aliased-require-vm.js", 'const load = require;\nconst vm = load("node:vm");', "CommonJS vm load"],
+      ["member-require-vm.js", 'const vm = module.require("vm");', "CommonJS vm load"],
+      ["member-alias-require-vm.js", 'const load = module["require"];\nconst vm = load("node:vm");', "CommonJS vm load"],
+      ["builtin-vm.js", 'const vm = process.getBuiltinModule("node:vm");', "built-in vm load"],
       ["dynamic-import.js", 'const parser = await import("safe-parser");', "dynamic import"],
       ["named-loader.js", 'import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\nload("config.js");', "createRequire result invoked as loader"],
       ["aliased-loader.js", 'import { createRequire as makeRequire } from "node:module";\nconst load = makeRequire(import.meta.url);\nload("config.js");', "createRequire result invoked as loader"],
@@ -848,6 +1046,8 @@ describe("package boundary", () => {
       ["call-loader.js", 'import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\nload.call(null, "config.js");', "createRequire result invoked as loader"],
       ["apply-loader.js", 'import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\nload.apply(null, ["config.js"]);', "createRequire result invoked as loader"],
       ["parenthesized-loader.js", 'import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\n(load)("config.js");', "createRequire result invoked as loader"],
+      ["nested-parenthesized-loader.js", 'import { createRequire } from "node:module";\n((createRequire(import.meta.url)))("config.js");', "createRequire result invoked as loader"],
+      ["nested-parenthesized-alias.js", 'import { createRequire } from "node:module";\nconst load = ((createRequire(import.meta.url)));\n(((load)))("config.js");', "createRequire result invoked as loader"],
       ["direct-loader.js", 'import { createRequire } from "node:module";\ncreateRequire(import.meta.url)("config.js");', "createRequire result invoked as loader"],
     ];
     for (const [file, source, reason] of controls) {
