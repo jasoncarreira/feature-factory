@@ -694,6 +694,30 @@ const CLAIMS = [
     },
   },
   {
+    id: "unknown-init-outcome-stops-on-missing-steps-manifest",
+    file: "skills/feature/SKILL.md",
+    fragment: "an invalid manifest means stop and surface it without overwriting it.",
+    expect: "allowed",
+    matches: /"valid": false[\s\S]*steps/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
+      const path = join(repo, ".factory", RUN, "run.json");
+      const run = JSON.parse(readFileSync(path, "utf8"));
+      delete run.steps;
+      writeFileSync(path, `${JSON.stringify(run, null, 2)}\n`);
+      const before = readFileSync(path);
+      let result;
+      assert.doesNotThrow(() => { result = factory(repo, ["status", RUN, "--json"]); });
+      assert.equal(result.ok, true);
+      const parsed = JSON.parse(result.out);
+      assert.equal(parsed.valid, false);
+      assert.match(parsed.error, /steps/u);
+      assert.equal(Object.hasOwn(parsed, "next"), false);
+      assert.deepEqual(readFileSync(path), before);
+      return result;
+    },
+  },
+  {
     id: "legacy-step-six-requires-human-base-without-inference-or-backfill",
     file: "skills/feature/SKILL.md",
     fragment: "For a legacy manifest where `pr_base` is absent or null, stop and\nrequire a human/operator to choose or confirm the exact target, then pass that value through\n`gh pr create --base`. Never infer it from HEAD, the feature branch, repository or forge defaults, and\nnever backfill the legacy manifest.",
