@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -160,9 +160,18 @@ describe("attack 5 — a slice changes paths it does not own", () => {
 
   it("reports privileged control-plane paths regardless of declaration", () => {
     const privileged = [".gitignore", ".factory", ".factory/app-1/run.json", ".git", ".git/config"];
-    assert.deepEqual(privilegedPaths([...privileged, "package.json", "package-lock.json", "src/app/ok.ts"]).sort(),
+    assert.deepEqual(privilegedPaths([...privileged, "package.json", "package-lock.json", "pyproject.toml", "Cargo.toml", "src/app/ok.ts"]).sort(),
       privileged.sort());
     assert.deepEqual(privilegedPaths(["package.json", "package-lock.json"]), []);
+    const policy = readFileSync(new URL("../observe/index.js", import.meta.url), "utf8");
+    assert.match(policy, /const PRIVILEGED_PREFIXES = Object\.freeze\(\[CONTROL_PLANE, "\.git"\]\);/u,
+      "the universal policy may have only the .factory and .git prefixes");
+    assert.match(policy, /const PRIVILEGED_EXACT = Object\.freeze\(\["\.gitignore"\]\);/u,
+      "the universal policy may have only the exact .gitignore entry");
+    assert.match(policy, /\.gitignore can conceal files from cleanliness and observed-diff checks/u,
+      "the adjacent policy comment must explain .gitignore's concealment risk");
+    assert.match(policy, /Ecosystem manifests\n\/\/ are authorized through ratified seeded ownership instead\./u,
+      "the adjacent policy comment must explain manifest authorization through seeded ownership");
     // Declaring them does not grant them.
     assert.deepEqual(unownedPaths([".factory/app-1/run.json"], [".factory/"]), []);
     assert.equal(privilegedPaths([".factory/app-1/run.json"]).length, 1,
