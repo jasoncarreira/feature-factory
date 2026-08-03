@@ -89,6 +89,571 @@ function filesystemOffenders(directory) {
   return offenders;
 }
 
+const IDENTIFIER_START = /[A-Za-z_$]/u;
+const IDENTIFIER_PART = /[A-Za-z0-9_$]/u;
+const REGEX_PREFIX_KEYWORDS = new Set([
+  "await", "case", "delete", "do", "else", "in", "instanceof", "new", "of", "return", "throw", "typeof", "void", "yield",
+]);
+const CONTROL_PAREN_KEYWORDS = new Set(["catch", "for", "if", "switch", "while", "with"]);
+const MULTI_CHARACTER_TOKENS = ["===", "!==", ">>>", "**=", "&&=", "||=", "??=", "=>", "==", "!=", "<=", ">=", "++", "--", "&&", "||", "??", "?.", "**", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "...", ">>=", ">>>="]
+  .sort((left, right) => right.length - left.length);
+
+function sourceTokens(source) {
+  const tokens = [];
+  const lineStarts = [0];
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] === "\n") lineStarts.push(index + 1);
+  }
+
+  function location(index) {
+    let low = 0;
+    let high = lineStarts.length;
+    while (low + 1 < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (lineStarts[middle] <= index) low = middle;
+      else high = middle;
+    }
+    return { line: low + 1, column: index - lineStarts[low] + 1 };
+  }
+
+  function emit(type, value, start, end) {
+    tokens.push({ type, value, start, end, ...location(start) });
+    return tokens.at(-1);
+  }
+
+  function quotedValue(start, quote) {
+    let index = start + 1;
+    let value = "";
+    while (index < source.length) {
+      const character = source[index];
+      if (character === quote) return { value, end: index + 1 };
+      if (character !== "\\") {
+        value += character;
+        index += 1;
+        continue;
+      }
+      const escaped = source[index + 1];
+      if (escaped === undefined) return { value, end: index + 1 };
+      if (escaped === "\n" || escaped === "\r") {
+        index += escaped === "\r" && source[index + 2] === "\n" ? 3 : 2;
+        continue;
+      }
+      const simple = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", 0: "\0" };
+      if (simple[escaped] !== undefined) {
+        value += simple[escaped];
+        index += 2;
+        continue;
+      }
+      const width = escaped === "x" ? 2 : escaped === "u" ? 4 : 0;
+      const digits = width > 0 ? source.slice(index + 2, index + 2 + width) : "";
+      if (width > 0 && new RegExp(`^[0-9A-Fa-f]{${width}}$`, "u").test(digits)) {
+        value += String.fromCodePoint(Number.parseInt(digits, 16));
+        index += width + 2;
+        continue;
+      }
+      value += escaped;
+      index += 2;
+    }
+    return { value, end: index };
+  }
+
+  function regexAllowed(previous) {
+    if (!previous) return true;
+    if (previous.regexPrefix) return true;
+    if (previous.type === "identifier") return REGEX_PREFIX_KEYWORDS.has(previous.value);
+    if (["number", "string", "regex", "template"].includes(previous.type)) return false;
+    return ![")", "]", "}", "++", "--"].includes(previous.value);
+  }
+
+  function regexEnd(start) {
+    let index = start + 1;
+    let inClass = false;
+    while (index < source.length) {
+      const character = source[index];
+      if (character === "\\") {
+        index += 2;
+        continue;
+      }
+      if (character === "[" && !inClass) inClass = true;
+      else if (character === "]" && inClass) inClass = false;
+      else if (character === "/" && !inClass) {
+        index += 1;
+        while (/[A-Za-z]/u.test(source[index] ?? "")) index += 1;
+        return index;
+      }
+      if ((character === "\n" || character === "\r") && !inClass) return start + 1;
+      index += 1;
+    }
+    return start + 1;
+  }
+
+  function templateEnd(start) {
+    emit("template", "", start, start + 1);
+    let index = start + 1;
+    while (index < source.length) {
+      if (source[index] === "\\") {
+        index += 2;
+        continue;
+      }
+      if (source[index] === "`") return index + 1;
+      if (source[index] === "$" && source[index + 1] === "{") {
+        index = scan(index + 2, true);
+        continue;
+      }
+      index += 1;
+    }
+    return index;
+  }
+
+  function scan(start, stopAtClosingBrace) {
+    let index = start;
+    let braceDepth = 0;
+    let previous = null;
+    const parenthesisContexts = [];
+    while (index < source.length) {
+      const character = source[index];
+      if (/\s/u.test(character)) {
+        index += 1;
+        continue;
+      }
+      if (character === "/" && source[index + 1] === "/") {
+        index += 2;
+        while (index < source.length && source[index] !== "\n") index += 1;
+        continue;
+      }
+      if (character === "/" && source[index + 1] === "*") {
+        const end = source.indexOf("*/", index + 2);
+        index = end === -1 ? source.length : end + 2;
+        continue;
+      }
+      if (character === "'" || character === "\"") {
+        const quoted = quotedValue(index, character);
+        previous = emit("string", quoted.value, index, quoted.end);
+        index = quoted.end;
+        continue;
+      }
+      if (character === "`") {
+        index = templateEnd(index);
+        previous = { type: "template", value: "`" };
+        continue;
+      }
+      if (character === "/" && regexAllowed(previous)
+        && !(previous?.value === "<" && /[A-Za-z>]/u.test(source[index + 1] ?? ""))) {
+        const end = regexEnd(index);
+        if (end > index + 1) {
+          previous = emit("regex", "", index, end);
+          index = end;
+          continue;
+        }
+      }
+      if (IDENTIFIER_START.test(character)) {
+        let end = index + 1;
+        while (IDENTIFIER_PART.test(source[end] ?? "")) end += 1;
+        previous = emit("identifier", source.slice(index, end), index, end);
+        index = end;
+        continue;
+      }
+      if (/[0-9]/u.test(character)) {
+        let end = index + 1;
+        while (/[A-Za-z0-9_.]/u.test(source[end] ?? "")) end += 1;
+        previous = emit("number", source.slice(index, end), index, end);
+        index = end;
+        continue;
+      }
+      if (character === "{") {
+        braceDepth += 1;
+        previous = emit("punctuator", character, index, index + 1);
+        index += 1;
+        continue;
+      }
+      if (character === "}") {
+        if (stopAtClosingBrace && braceDepth === 0) return index + 1;
+        braceDepth = Math.max(0, braceDepth - 1);
+        previous = emit("punctuator", character, index, index + 1);
+        index += 1;
+        continue;
+      }
+      const token = MULTI_CHARACTER_TOKENS.find((candidate) => source.startsWith(candidate, index)) ?? character;
+      let regexPrefix = false;
+      if (token === "(") parenthesisContexts.push(previous?.type === "identifier" && CONTROL_PAREN_KEYWORDS.has(previous.value));
+      if (token === ")") regexPrefix = parenthesisContexts.pop() ?? false;
+      previous = emit("punctuator", token, index, index + token.length);
+      previous.regexPrefix = regexPrefix;
+      index += token.length;
+    }
+    return index;
+  }
+
+  scan(0, false);
+  return tokens;
+}
+
+function sourceEntries(input) {
+  return input instanceof Map ? [...input.entries()] : Object.entries(input);
+}
+
+function tokenOffender(path, token, reason) {
+  return `${path}:${token.line}:${token.column} :: ${reason}`;
+}
+
+function matchingPairs(tokens, opening, closing) {
+  const pairs = new Map();
+  const stack = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index].value === opening) stack.push(index);
+    else if (tokens[index].value === closing && stack.length > 0) {
+      const start = stack.pop();
+      pairs.set(start, index);
+      pairs.set(index, start);
+    }
+  }
+  return pairs;
+}
+
+function moduleReferences(tokens) {
+  const references = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index].value !== "import" && tokens[index].value !== "export") continue;
+    const kind = tokens[index].value;
+    if (kind === "import" && tokens[index + 1]?.value === "(") {
+      references.push({ kind: "dynamic", start: index, module: tokens[index + 2]?.type === "string" ? tokens[index + 2].value : null });
+      continue;
+    }
+    let end = index + 1;
+    while (end < tokens.length && tokens[end].value !== ";") end += 1;
+    let moduleIndex = -1;
+    if (kind === "import" && tokens[index + 1]?.type === "string") moduleIndex = index + 1;
+    else {
+      const from = tokens.findIndex((token, candidate) => candidate > index && candidate < end && token.value === "from");
+      if (from !== -1 && tokens[from + 1]?.type === "string") moduleIndex = from + 1;
+    }
+    if (moduleIndex !== -1) references.push({ kind: "static", start: index, end, moduleIndex, module: tokens[moduleIndex].value });
+  }
+  return references;
+}
+
+function importShape(tokens, reference) {
+  if (reference.kind !== "static" || tokens[reference.start].value !== "import") return { named: [], namespaces: [], defaults: [] };
+  const from = tokens.findIndex((token, index) => index > reference.start && index < reference.moduleIndex && token.value === "from");
+  if (from === -1) return { named: [], namespaces: [], defaults: [] };
+  const named = [];
+  const namespaces = [];
+  const defaults = [];
+  let index = reference.start + 1;
+  while (index < from) {
+    if (tokens[index].value === "{") {
+      index += 1;
+      while (index < from && tokens[index].value !== "}") {
+        if (tokens[index].type !== "identifier") {
+          index += 1;
+          continue;
+        }
+        const imported = tokens[index].value;
+        const local = tokens[index + 1]?.value === "as" && tokens[index + 2]?.type === "identifier"
+          ? tokens[index + 2].value : imported;
+        named.push({ imported, local, token: tokens[index] });
+        index += local === imported ? 1 : 3;
+      }
+      index += 1;
+      continue;
+    }
+    if (tokens[index].value === "*" && tokens[index + 1]?.value === "as" && tokens[index + 2]?.type === "identifier") {
+      namespaces.push({ local: tokens[index + 2].value, token: tokens[index] });
+      index += 3;
+      continue;
+    }
+    if (tokens[index].type === "identifier") defaults.push({ local: tokens[index].value, token: tokens[index] });
+    index += 1;
+  }
+  return { named, namespaces, defaults };
+}
+
+function createRequireLoaderOffenders(path, tokens) {
+  const offenders = [];
+  const factories = new Set();
+  const namespaces = new Set();
+  for (const reference of moduleReferences(tokens)) {
+    if (reference.kind !== "static" || reference.module !== "node:module") continue;
+    const shape = importShape(tokens, reference);
+    for (const binding of shape.named) {
+      if (binding.imported === "createRequire") factories.add(binding.local);
+    }
+    for (const binding of shape.namespaces) namespaces.add(binding.local);
+  }
+  if (factories.size === 0 && namespaces.size === 0) return offenders;
+
+  const parentheses = matchingPairs(tokens, "(", ")");
+  const factoryCalls = new Map();
+  for (let index = 0; index < tokens.length; index += 1) {
+    let opening = -1;
+    if (tokens[index].type === "identifier" && factories.has(tokens[index].value) && tokens[index + 1]?.value === "(") opening = index + 1;
+    if (tokens[index].type === "identifier" && namespaces.has(tokens[index].value)
+      && tokens[index + 1]?.value === "." && tokens[index + 2]?.value === "createRequire" && tokens[index + 3]?.value === "(") opening = index + 3;
+    if (opening !== -1 && parentheses.has(opening)) factoryCalls.set(index, { opening, closing: parentheses.get(opening) });
+  }
+
+  const loaders = new Set();
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index].value !== "=" || tokens[index - 1]?.type !== "identifier") continue;
+    let expression = index + 1;
+    while (tokens[expression]?.value === "(") expression += 1;
+    const call = factoryCalls.get(expression);
+    if (call && !(tokens[call.closing + 1]?.value === "." && tokens[call.closing + 2]?.value === "resolve")) {
+      loaders.add(tokens[index - 1].value);
+    }
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let index = 0; index < tokens.length; index += 1) {
+      if (tokens[index].value !== "=" || tokens[index - 1]?.type !== "identifier") continue;
+      let expression = index + 1;
+      while (tokens[expression]?.value === "(") expression += 1;
+      if (tokens[expression]?.type === "identifier" && loaders.has(tokens[expression].value) && !loaders.has(tokens[index - 1].value)) {
+        loaders.add(tokens[index - 1].value);
+        changed = true;
+      }
+    }
+  }
+
+  const seen = new Set();
+  function add(token) {
+    const key = `${token.start}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    offenders.push(tokenOffender(path, token, "createRequire result invoked as loader"));
+  }
+  for (const [start, call] of factoryCalls) {
+    const next = tokens[call.closing + 1];
+    if (next?.value === "(") add(tokens[start]);
+    if (next?.value === "." && ["call", "apply"].includes(tokens[call.closing + 2]?.value)
+      && tokens[call.closing + 3]?.value === "(") add(tokens[start]);
+  }
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index].type !== "identifier" || !loaders.has(tokens[index].value)) continue;
+    if (tokens[index + 1]?.value === "(") add(tokens[index]);
+    if (tokens[index + 1]?.value === "." && ["call", "apply"].includes(tokens[index + 2]?.value)
+      && tokens[index + 3]?.value === "(") add(tokens[index]);
+    if (tokens[index - 1]?.value === "(" && tokens[index + 1]?.value === ")" && tokens[index + 2]?.value === "(") add(tokens[index]);
+  }
+  return offenders;
+}
+
+const FILESYSTEM_READ_APIS = new Set([
+  "access", "accessSync", "createReadStream", "existsSync", "fstat", "fstatSync", "lstat", "lstatSync", "open", "openSync", "opendir", "opendirSync", "read", "readSync", "readdir", "readdirSync", "readFile", "readFileSync", "readlink", "readlinkSync", "realpath", "realpathSync", "stat", "statSync",
+]);
+
+function isAllowedReaddirCall(tokens, index, closing) {
+  return closing === index + 3 && tokens[index + 1]?.value === "(" && tokens[index + 2]?.value === "dir";
+}
+
+function isAllowedReadFileCall(tokens, index, closing) {
+  return closing === index + 10
+    && tokens[index + 1]?.value === "("
+    && tokens[index + 2]?.value === "join"
+    && tokens[index + 3]?.value === "("
+    && tokens[index + 4]?.value === "dir"
+    && tokens[index + 5]?.value === ","
+    && tokens[index + 6]?.value === "file"
+    && tokens[index + 7]?.value === ")"
+    && tokens[index + 8]?.value === ","
+    && tokens[index + 9]?.type === "string"
+    && tokens[index + 9]?.value === "utf8";
+}
+
+function forbiddenConfigurationModule(specifier) {
+  return specifier.endsWith(".json") || /(?:^|\/)\.(?:claude|opencode)(?:\/|$)/u.test(specifier)
+    || /(?:^|\/)(?:profiles?|agents?)(?:\/|\.(?:json|mjs|cjs|js|md)|$)/u.test(specifier);
+}
+
+function registrationReadOffenders(input) {
+  const offenders = [];
+  for (const [path, source] of sourceEntries(input)) {
+    const tokens = sourceTokens(source);
+    const references = moduleReferences(tokens);
+    let allowedFsImports = 0;
+    let allowedCreateRequireImports = 0;
+    const filesystemImportTokens = new Set();
+    const createRequireImportTokens = new Set();
+    for (const reference of references) {
+      const token = tokens[reference.start];
+      if (reference.kind === "dynamic") {
+        offenders.push(tokenOffender(path, token, "dynamic import"));
+        continue;
+      }
+      if (forbiddenConfigurationModule(reference.module)) {
+        offenders.push(tokenOffender(path, token, "forbidden static configuration import"));
+      }
+      if (["fs", "node:fs/promises", "fs/promises"].includes(reference.module)) {
+        offenders.push(tokenOffender(path, token, `forbidden filesystem module ${reference.module}`));
+        continue;
+      }
+      if (reference.module === "node:fs") {
+        for (let index = reference.start; index <= reference.end; index += 1) filesystemImportTokens.add(tokens[index]?.start);
+        if (path !== "plugin/config.js") {
+          offenders.push(tokenOffender(path, token, "node:fs import outside plugin/config.js"));
+          continue;
+        }
+        const shape = importShape(tokens, reference);
+        if (shape.namespaces.length > 0) offenders.push(tokenOffender(path, token, "namespace node:fs import"));
+        else if (shape.defaults.length > 0) offenders.push(tokenOffender(path, token, "default node:fs import"));
+        else if (shape.named.some((binding) => binding.imported !== binding.local)) offenders.push(tokenOffender(path, token, "aliased node:fs import"));
+        else if (shape.named.length !== 2 || !shape.named.some((binding) => binding.imported === "readdirSync")
+          || !shape.named.some((binding) => binding.imported === "readFileSync")) {
+          offenders.push(tokenOffender(path, token, "unsupported node:fs import"));
+        } else {
+          allowedFsImports += 1;
+          if (allowedFsImports > 1) offenders.push(tokenOffender(path, token, "duplicate allowed node:fs import"));
+        }
+      }
+      if (reference.module === "node:module") {
+        for (let index = reference.start; index <= reference.end; index += 1) createRequireImportTokens.add(tokens[index]?.start);
+        const shape = importShape(tokens, reference);
+        if (path === "plugin/config.js" && shape.named.length === 1 && shape.named[0].imported === "createRequire"
+          && shape.named[0].local === "createRequire" && shape.namespaces.length === 0 && shape.defaults.length === 0) {
+          allowedCreateRequireImports += 1;
+          if (allowedCreateRequireImports > 1) offenders.push(tokenOffender(path, token, "duplicate allowed createRequire import"));
+        } else {
+          offenders.push(tokenOffender(path, token, "unsupported createRequire import"));
+        }
+      }
+    }
+
+    const parentheses = matchingPairs(tokens, "(", ")");
+    let allowedReaddirCalls = 0;
+    let allowedReadFileCalls = 0;
+    let allowedCreateRequireCalls = 0;
+    const allowedReadCallTokens = new Set();
+    const allowedCreateRequireCallTokens = new Set();
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (token.type !== "identifier" || tokens[index + 1]?.value !== "(") continue;
+      const closing = parentheses.get(index + 1);
+      if (token.value === "require") offenders.push(tokenOffender(path, token, "CommonJS require"));
+      if (token.value === "createRequire") {
+        const exactArgument = closing === index + 7
+          && tokens[index + 2]?.value === "import"
+          && tokens[index + 3]?.value === "."
+          && tokens[index + 4]?.value === "meta"
+          && tokens[index + 5]?.value === "."
+          && tokens[index + 6]?.value === "url";
+        const resolveOpening = closing === undefined ? -1 : closing + 3;
+        const resolveClosing = parentheses.get(resolveOpening);
+        const exactResolve = tokens[closing + 1]?.value === "."
+          && tokens[closing + 2]?.value === "resolve"
+          && tokens[resolveOpening]?.value === "("
+          && resolveClosing === resolveOpening + 2
+          && tokens[resolveOpening + 1]?.type === "string"
+          && tokens[resolveOpening + 1]?.value === "feature-factory";
+        if (path === "plugin/config.js" && exactArgument && exactResolve) {
+          allowedCreateRequireCallTokens.add(token.start);
+          allowedCreateRequireCalls += 1;
+          if (allowedCreateRequireCalls > 1) offenders.push(tokenOffender(path, token, "duplicate allowed createRequire resolve"));
+        } else {
+          offenders.push(tokenOffender(path, token, "unsupported createRequire usage"));
+        }
+      }
+      if (!FILESYSTEM_READ_APIS.has(token.value) || tokens[index - 1]?.value === ".") continue;
+      if (path !== "plugin/config.js") {
+        offenders.push(tokenOffender(path, token, `filesystem read outside plugin/config.js: ${token.value}`));
+        continue;
+      }
+      if (token.value === "readdirSync" && isAllowedReaddirCall(tokens, index, closing)) {
+        allowedReadCallTokens.add(token.start);
+        allowedReaddirCalls += 1;
+        if (allowedReaddirCalls > 1) offenders.push(tokenOffender(path, token, "duplicate allowed readdirSync"));
+      } else if (token.value === "readFileSync" && isAllowedReadFileCall(tokens, index, closing)) {
+        allowedReadCallTokens.add(token.start);
+        allowedReadFileCalls += 1;
+        if (allowedReadFileCalls > 1) offenders.push(tokenOffender(path, token, "duplicate allowed readFileSync"));
+      } else if (token.value === "readdirSync" || token.value === "readFileSync") {
+        offenders.push(tokenOffender(path, token, `extra direct ${token.value}`));
+      } else {
+        offenders.push(tokenOffender(path, token, `additional filesystem read API ${token.value}`));
+      }
+    }
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (!["readdirSync", "readFileSync"].includes(token.value) || filesystemImportTokens.has(token.start)
+        || allowedReadCallTokens.has(token.start)) continue;
+      if (tokens[index + 1]?.value === "(") continue;
+      offenders.push(tokenOffender(path, token, `extra direct ${token.value}`));
+    }
+    for (const token of tokens) {
+      if (token.value !== "createRequire" || createRequireImportTokens.has(token.start)
+        || allowedCreateRequireCallTokens.has(token.start)) continue;
+      offenders.push(tokenOffender(path, token, "unsupported createRequire usage"));
+    }
+    for (let index = 1; index < tokens.length - 2; index += 1) {
+      if (tokens[index].value !== "." || !FILESYSTEM_READ_APIS.has(tokens[index + 1]?.value) || tokens[index + 2]?.value !== "(") continue;
+      offenders.push(tokenOffender(path, tokens[index + 1], `filesystem member read ${tokens[index + 1].value}`));
+    }
+    offenders.push(...createRequireLoaderOffenders(path, tokens));
+    if (path === "plugin/config.js") {
+      if (allowedFsImports === 0) offenders.push(tokenOffender(path, tokens[0] ?? { line: 1, column: 1 }, "missing allowed node:fs import"));
+      if (allowedCreateRequireImports === 0) offenders.push(tokenOffender(path, tokens[0] ?? { line: 1, column: 1 }, "missing allowed createRequire import"));
+      if (allowedCreateRequireCalls === 0) offenders.push(tokenOffender(path, tokens[0] ?? { line: 1, column: 1 }, "missing allowed createRequire resolve"));
+      if (allowedReaddirCalls === 0) offenders.push(tokenOffender(path, tokens[0] ?? { line: 1, column: 1 }, "missing allowed readdirSync call"));
+      if (allowedReadFileCalls === 0) offenders.push(tokenOffender(path, tokens[0] ?? { line: 1, column: 1 }, "missing allowed readFileSync call"));
+    }
+  }
+  return offenders;
+}
+
+function executionOffenders(input) {
+  const offenders = [];
+  for (const [path, source] of sourceEntries(input)) {
+    const tokens = sourceTokens(source);
+    for (const token of tokens) {
+      if (token.type === "identifier" && token.value === "eval") offenders.push(tokenOffender(path, token, "executable eval identifier"));
+      if (token.type === "identifier" && token.value === "Function") offenders.push(tokenOffender(path, token, "executable Function identifier"));
+    }
+    for (let index = 0; index < tokens.length - 2; index += 1) {
+      if (tokens[index].value !== "[" || tokens[index + 1]?.type !== "string" || tokens[index + 2]?.value !== "]") continue;
+      if (tokens[index + 1].value === "eval") offenders.push(tokenOffender(path, tokens[index + 1], "static eval member"));
+      if (tokens[index + 1].value === "Function") offenders.push(tokenOffender(path, tokens[index + 1], "static Function member"));
+    }
+    for (const reference of moduleReferences(tokens)) {
+      if (reference.kind === "dynamic") offenders.push(tokenOffender(path, tokens[reference.start], "dynamic import"));
+      if (reference.kind === "static" && ["node:vm", "vm"].includes(reference.module)) {
+        offenders.push(tokenOffender(path, tokens[reference.start], "static vm import"));
+      }
+    }
+    for (let index = 0; index < tokens.length - 2; index += 1) {
+      if (tokens[index].value !== "require" || tokens[index + 1]?.value !== "(" || tokens[index + 2]?.type !== "string") continue;
+      if (["node:vm", "vm"].includes(tokens[index + 2].value)) offenders.push(tokenOffender(path, tokens[index], "CommonJS vm load"));
+    }
+    offenders.push(...createRequireLoaderOffenders(path, tokens));
+  }
+  return offenders;
+}
+
+function productionSources(directory) {
+  return new Map(sources(directory)
+    .filter((path) => !path.includes(`${directory}/test/`) && !path.includes(`${directory}/tui/dist/`))
+    .map((path) => [path.slice(directory.length + 1), readFileSync(path, "utf8")]));
+}
+
+function registrationBaseline(addition = "") {
+  return new Map([
+    ["plugin/index.js", 'import { registerWorkflow } from "./config.js";\nexport { readRun } from "feature-factory";\n'],
+    ["plugin/config.js", `import { readdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { readRun } from "feature-factory";
+const resolved = createRequire(import.meta.url).resolve("feature-factory");
+function definitions(dir) {
+  for (const file of readdirSync(dir)) readFileSync(join(dir, file), "utf8");
+}
+${addition}`],
+  ]);
+}
+
+function assertReason(offenders, path, reason, context = path) {
+  assert.ok(offenders.some((entry) => entry.startsWith(`${path}:`) && entry.endsWith(` :: ${reason}`)),
+    `expected ${context} to report ${reason}; received ${offenders.join(" | ")}`);
+}
+
 describe("package boundary", () => {
   it("gives the opencode package no way to write run state", () => {
     assert.deepEqual(filesystemOffenders(opencodePkg), [], "the opencode package observes and renders; only the CLI writes");
@@ -213,5 +778,81 @@ describe("package boundary", () => {
     const factory = JSON.parse(readFileSync(join(factoryPkg, "package.json"), "utf8"));
     assert.equal(/opencode/u.test(factory.name), false,
       "a host-agnostic package must not be named after one host");
+  });
+
+  it("reads only the installed factory agent definitions during registration", () => {
+    const registration = new Map([
+      ["plugin/index.js", readFileSync(join(opencodePkg, "plugin/index.js"), "utf8")],
+      ["plugin/config.js", readFileSync(join(opencodePkg, "plugin/config.js"), "utf8")],
+    ]);
+    assert.deepEqual(registrationReadOffenders(registration), []);
+    assert.deepEqual(registrationReadOffenders(registrationBaseline()), []);
+
+    const controls = [
+      ["discarded-direct.js", 'readFileSync("opencode.json", "utf8");', "extra direct readFileSync"],
+      ["swallowed-foreign.js", 'try { readFileSync(".claude/settings.json", "utf8"); } catch {}', "extra direct readFileSync"],
+      ["aliased-project.js", 'import { readFileSync as readProject } from "node:fs";\nreadProject(".opencode/opencode.json", "utf8");', "aliased node:fs import"],
+      ["namespace.js", 'import * as fs from "node:fs";\nfs.readFileSync("opencode.json", "utf8");', "namespace node:fs import"],
+      ["default.js", 'import fs from "node:fs";\nfs.readFileSync("opencode.json", "utf8");', "default node:fs import"],
+      ["bare-fs.js", 'import { readFileSync as readProject } from "fs";\nreadProject("opencode.json", "utf8");', "forbidden filesystem module fs"],
+      ["node-promises.js", 'import { readFile } from "node:fs/promises";\nawait readFile("opencode.json");', "forbidden filesystem module node:fs/promises"],
+      ["bare-promises.js", 'import { readFile } from "fs/promises";\nawait readFile("opencode.json");', "forbidden filesystem module fs/promises"],
+      ["commonjs.js", 'const fs = require("node:fs");\nfs.readFileSync("opencode.json", "utf8");', "CommonJS require"],
+      ["dynamic-fs.js", 'await import("node:fs");', "dynamic import"],
+      ["dynamic-foreign.js", 'await import(".claude/config.mjs");', "dynamic import"],
+      ["static-config.js", 'import config from "../.opencode/opencode.json";', "forbidden static configuration import"],
+      ["extra-api.js", 'existsSync("opencode.json");', "additional filesystem read API existsSync"],
+      ["duplicate-directory.js", "readdirSync(dir);", "duplicate allowed readdirSync"],
+      ["duplicate-file.js", 'readFileSync(join(dir, file), "utf8");', "duplicate allowed readFileSync"],
+      ["require-loader.js", 'createRequire(import.meta.url)("../.claude/config.mjs");', "createRequire result invoked as loader"],
+    ];
+    for (const [file, addition, reason] of controls) {
+      const fixture = registrationBaseline(addition);
+      const offenders = registrationReadOffenders(fixture);
+      assertReason(offenders, "plugin/config.js", reason, file);
+    }
+  });
+
+  it("cannot execute configuration content", () => {
+    assert.deepEqual(executionOffenders(productionSources(opencodePkg)), []);
+    const allowed = new Map([
+      ["static-import.js", 'import { parse } from "safe-parser";\nparse("eval Function");'],
+      ["resolver.js", 'import { createRequire } from "node:module";\nconst loader = createRequire(import.meta.url);\nloader.resolve("feature-factory");'],
+      ["aliased-resolver.js", 'import { createRequire as makeRequire } from "node:module";\nconst loader = makeRequire(import.meta.url);\nloader.resolve("feature-factory");'],
+      ["literal-text.js", '// eval(source); new Function(source);\nconst words = "eval Function";\nconst pattern = /eval\\s+Function[)]/giu;\nconst prompt = `eval and Function stay literal`;'],
+      ["safe-template.js", 'const ratio = total / divisor / 2;\nconst text = `safe ${JSON.parse(value).name} ${"eval"} ${/Function/u} ${`nested ${"Function"}`}`;\nvalue.match(/Function|eval/gu);\nif (ready) /eval|Function/u.test(value);'],
+    ]);
+    assert.deepEqual(executionOffenders(allowed), []);
+
+    const controls = [
+      ["direct-eval.js", "eval(source);", "executable eval identifier"],
+      ["eval-alias.js", "const execute = eval; execute(source);", "executable eval identifier"],
+      ["indirect-eval.js", "(0, eval)(source);", "executable eval identifier"],
+      ["bracket-eval.js", 'globalThis["eval"](source);', "static eval member"],
+      ["direct-function.js", "Function(source);", "executable Function identifier"],
+      ["new-function.js", "new Function(source);", "executable Function identifier"],
+      ["function-alias.js", "const Build = Function; Build(source);", "executable Function identifier"],
+      ["dot-function.js", "globalThis.Function(source);", "executable Function identifier"],
+      ["bracket-function.js", 'globalThis["Function"](source);', "static Function member"],
+      ["template-eval.js", "const result = `${eval(source)}`;", "executable eval identifier"],
+      ["nested-template-eval.js", "const result = `${`nested ${eval(source)}`}`;", "executable eval identifier"],
+      ["template-function.js", "const result = `${(() => { const Build = Function; return Build(source); })()}`;", "executable Function identifier"],
+      ["node-vm.js", 'import vm from "node:vm";', "static vm import"],
+      ["bare-vm.js", 'import * as vm from "vm";', "static vm import"],
+      ["require-vm.js", 'const vm = require("node:vm");', "CommonJS vm load"],
+      ["dynamic-import.js", 'const parser = await import("safe-parser");', "dynamic import"],
+      ["named-loader.js", 'import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\nload("config.js");', "createRequire result invoked as loader"],
+      ["aliased-loader.js", 'import { createRequire as makeRequire } from "node:module";\nconst load = makeRequire(import.meta.url);\nload("config.js");', "createRequire result invoked as loader"],
+      ["namespace-loader.js", 'import * as moduleApi from "node:module";\nconst load = moduleApi.createRequire(import.meta.url);\nload("config.js");', "createRequire result invoked as loader"],
+      ["result-alias.js", 'import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\nconst alias = load;\nalias("config.js");', "createRequire result invoked as loader"],
+      ["call-loader.js", 'import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\nload.call(null, "config.js");', "createRequire result invoked as loader"],
+      ["apply-loader.js", 'import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\nload.apply(null, ["config.js"]);', "createRequire result invoked as loader"],
+      ["parenthesized-loader.js", 'import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\n(load)("config.js");', "createRequire result invoked as loader"],
+      ["direct-loader.js", 'import { createRequire } from "node:module";\ncreateRequire(import.meta.url)("config.js");', "createRequire result invoked as loader"],
+    ];
+    for (const [file, source, reason] of controls) {
+      const offenders = executionOffenders(new Map([[file, source]]));
+      assertReason(offenders, file, reason);
+    }
   });
 });
