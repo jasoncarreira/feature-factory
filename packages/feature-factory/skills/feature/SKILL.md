@@ -103,12 +103,15 @@ mode. Invocation flags never reinitialize, compare, or mutate an existing run's 
 
 ## Operating modes
 
-`run.json.mode` is set at `factory init` and decides gate handling:
+Exact leading invocation flags choose a mode only for fresh initialization. Once a manifest exists,
+its immutable persisted `run.json.mode` controls gate handling on that invocation and every later
+resume; invocation flags do not select resumed behavior:
 
-- **interactive** — you stop at every gate and wait for `approve` / `changes: <...>` / `stop`.
-- **headless** — same gates, but the engineer is not present; a gate that would block writes
-  `needs-human` and stops.
-- **autonomous** — gates may be decided without a human, under the rules below.
+- **interactive** — the primary `/feature` driver persists and presents each gate, then waits for
+  `approve` / `changes: <...>` / `stop`; a fan-out child instead performs the verified pending-gate
+  handoff below, releases its lock, and returns to the parent.
+- **headless** — a gate that requires a human records `needs-human` and stops.
+- **autonomous** — gates may be decided without a human only under the preconditions below.
 
 ## Fan-out parent and run-orchestrator child
 
@@ -255,7 +258,10 @@ terminal result, and PR URL; add no durable fields.
 
 ## Autonomous mode
 
-These rules apply when mode admission selected the exact leading `--autonomous` token.
+These rules apply whenever the selected or resumed manifest's immutable `run.json.mode` is
+`autonomous`. Exact-leading-token admission can choose that persisted mode only while initializing a
+fresh run; an existing run follows these rules solely because its manifest already records
+`autonomous`, regardless of the current invocation's flags.
 
 - Each gate has a stated precondition. If it does not hold, record `needs-human` with
   `factory terminal "$R" needs-human --reason "$REASON" --repo "$RUN_REPO"` and **stop** — do not
@@ -862,14 +868,32 @@ not block the run for it. A gate that asked for `changes` re-opens at any point,
 validator verdict is frozen while the gate stands and `factory pr` refuses. Recovery is one more
 approval, not a lost run:
 
+First re-observe the integration tests against the current head. When the run requires an
+`implementation-validator`, rerun it against that same head and wait for its current review record; a
+single-slice run with no prior verdict still skips it as specified in Step 5. Do not present Gate 3 or
+reuse the old `gates/pre_pr.md`.
+
+The recorded validator verdict cannot change while the old approval stands. After the fresh test
+evidence and current validator review exist, use the first bare `pending` transition below only to
+re-open the state and unfreeze validator recording; it is not the recovered Gate 3 presentation. Record
+the current validator when applicable, then refresh `gates/pre_pr.md` with the newly observed tests,
+current verdict and reviewed head when applicable, current feature-branch diff and PR-base summary,
+migration and flag callouts, and remaining risks. Only after that refresh does the second `pending`
+transition, with `--artifact gates/pre_pr.md`, present the recovered gate for approval:
+
 ```sh
-factory gate "$R" pre_pr pending --artifact gates/pre_pr.md --repo "$RUN_REPO"
 CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
 factory observe "$R" test-verifier --worktree "$INTEGRATION_WORKTREE" --base "$BRANCH_POINT" \
   --test-cmd "$INTEGRATION_SUITE" --repo "$RUN_REPO"
+factory gate "$R" pre_pr pending --repo "$RUN_REPO"
 factory validator "$R" --report artifacts/validation-report.md --repo "$RUN_REPO"
+factory gate "$R" pre_pr pending --artifact gates/pre_pr.md --repo "$RUN_REPO"
 factory gate "$R" pre_pr approved --repo "$RUN_REPO"
 ```
+
+Omit the validator command only when Step 5 says no validator applies and no prior verdict must be
+replaced. The artifact refresh occurs between validator recording and the artifact-bearing `pending`
+command; never move it earlier or present stale evidence.
 
 The compatibility transition name is `factory gate <run-id> pre_pr pending`; the runnable form is the
 repository-qualified command above.
