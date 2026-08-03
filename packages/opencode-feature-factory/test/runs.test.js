@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CONTROL_PLANE } from "feature-factory";
 import { findControlPlane, listRuns, pollRuns, repositoryRoots, selectActiveRun } from "../observe/runs.js";
+import { registerAgents } from "../plugin/config.js";
 import plugin from "../plugin/index.js";
 import { renderLines } from "../tui/lines.js";
 import { runCommands } from "../tui/commands.js";
@@ -822,6 +823,7 @@ describe("registering the workflow with the host", () => {
 
         const cfg = await configured();
         assert.equal(cfg.command.feature.agent, "feature-factory");
+        assert.deepEqual(Object.keys(cfg.command).sort(), ["feature", "feature-fanout"]);
         assert.equal(cfg.skills.paths.length, 1);
         assert.match(cfg.skills.paths[0], /feature-factory\/skills$/u);
         const expectedAgents = [
@@ -829,9 +831,11 @@ describe("registering the workflow with the host", () => {
           "implementation-validator", "spec-writer", "story-reader", "story-writer",
           "test-verifier", "work-decomposer", "work-reviewer",
         ].sort();
-        assert.deepEqual(Object.keys(cfg.agent).filter((name) => name !== "feature-factory").sort(), expectedAgents);
+        assert.deepEqual(Object.keys(cfg.agent)
+          .filter((name) => !["feature-factory", "run-orchestrator"].includes(name)).sort(), expectedAgents);
         assert.equal(Object.hasOwn(cfg.agent, "feature-factory"), true);
-        assert.equal(Object.keys(cfg.agent).length, 12);
+        assert.equal(Object.hasOwn(cfg.agent, "run-orchestrator"), true);
+        assert.equal(Object.keys(cfg.agent).length, 13);
 
         const api = {
           state: { path: { directory: root, worktree: root } },
@@ -866,6 +870,7 @@ describe("registering the workflow with the host", () => {
     "work-decomposer": ["deny", "allow", "deny", "deny"],
     "work-reviewer": ["deny", "allow", "deny", "deny"],
     "feature-factory": ["allow", "allow", "allow", "allow"],
+    "run-orchestrator": ["allow", "allow", "allow", "allow"],
   };
 
   function controlledPermissions(permission) {
@@ -912,6 +917,7 @@ describe("registering the workflow with the host", () => {
 
   it("registers the command, the skill path, and every agent the skill dispatches", async () => {
     const cfg = await configured();
+    assert.deepEqual(Object.keys(cfg.command).sort(), ["feature", "feature-fanout"]);
     assert.equal(cfg.command.feature.agent, "feature-factory", "the command runs as the orchestrator");
     assert.equal(cfg.command.feature.description,
       "Take a feature, ticket or idea end to end: story, spec, decomposition, parallel build, "
@@ -930,6 +936,116 @@ describe("registering the workflow with the host", () => {
     assert.doesNotMatch(cfg.agent["feature-factory"].prompt,
       /unless the invocation explicitly asked for autonomous mode/u,
       "the old prose selector must not remain");
+    assert.match(cfg.agent["feature-factory"].description, /Persisted run mode is the sole gate authority/u);
+    for (const passage of [
+      "Persisted `run.json.mode` is immutable and is the sole gate authority on resume",
+      "In `interactive`, persist and present the pending gate and wait for a real human",
+      "In `headless`, preserve terminal `needs-human`",
+      "In `autonomous`, decide only when the existing preconditions authorize the decision",
+    ]) assert.ok(cfg.agent["feature-factory"].prompt.includes(passage), passage);
+    for (const passage of [
+      "Persisted `run.json.mode` is the sole gate authority",
+      "`interactive` persists and presents a pending gate and waits for a real human",
+      "`headless` preserves terminal `needs-human`",
+      "`autonomous` decides only when existing preconditions authorize",
+      "Inability to ask never changes the persisted mode",
+    ]) assert.ok(cfg.command.feature.template.includes(passage), passage);
+
+    const fanout = cfg.command["feature-fanout"];
+    assert.equal(fanout.agent, "feature-factory");
+    assert.equal(fanout.description, "Fan out independent feature runs through native task children. "
+      + "Syntax: /feature-fanout [\"<complete /feature arguments>\", ...]");
+    for (const passage of [
+      "Interpret `$ARGUMENTS` as a human-facing JSON array of strings",
+      "bounded model prompt convention, not an executable parser or grammar-complete validator",
+      "Arguments: $ARGUMENTS",
+      "Invalid /feature-fanout request: expected a non-empty JSON array of strings; no runs dispatched.",
+      "reject the whole invocation before dispatch",
+      "An empty array is invalid",
+      "An empty string element is valid and is dispatched unchanged",
+      "preserve the decoded string byte-for-byte and unchanged",
+      "Do not trim, normalize, split, concatenate, deduplicate, pre-parse mode flags, or rewrite it",
+      "The decoded string, not its JSON token spelling, is the contract",
+      "exactly N native task calls to `run-orchestrator` in one assistant message",
+      "one child per element",
+      "Drive exactly one factory run. Load and follow the `feature` skill as the run-orchestrator.\nRequest: <decoded request string, unchanged>",
+      "Native task calls may block until all children return",
+      "Use no other agent, JavaScript coordinator, `prompt_async`, raw HTTP or session calls, process spawning, report tool, or alternate dispatch mechanism",
+      "does not initialize child runs, claim child locks, or provision isolation",
+      "Each child uses only existing Step 0 and its deterministic sandbox path",
+      "Persisted `run.json.mode`, never conversation placement or human availability, governs each child independently",
+      "dispatch a fresh `run-orchestrator` child with the same unchanged original decoded request",
+      "Refuse decision injection for headless or autonomous runs",
+    ]) assert.ok(fanout.template.includes(passage), passage);
+
+    const child = cfg.agent["run-orchestrator"];
+    assert.equal(child.mode, "subagent");
+    assert.deepEqual(controlledPermissions(child.permission),
+      expectedPermissions(FACTORY_PERMISSION_POLICY["run-orchestrator"]));
+    for (const name of [
+      "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer",
+      "work-decomposer", "work-reviewer", "test-verifier", "implementation-validator", "backend-builder",
+      "frontend-builder",
+    ]) assert.ok(child.prompt.includes(`\`${name}\``), `${name} must be a named child target`);
+    for (const passage of [
+      "Accept exactly one `Request:` payload and drive exactly one factory run",
+      "For fresh initialization only, apply the skill's exact-leading-token mode admission",
+      "persisted `run.json.mode` is immutable and authoritative",
+      "Enter the existing Step 0 unchanged",
+      "only the deterministic existing sandbox path `O/.factory-sandboxes/<R>`",
+      "Use this child's real `FACTORY_SESSION_ID` as `SESSION_ID`",
+      "never reuse the parent's session",
+      "factory status \"$R\" --json --repo \"$RUN_REPO\"",
+      "continue only from `status.next`/`nextAction`",
+      "never initialize another path, invent isolation, create another orchestration layer, or hand-write `run.json`",
+      "generic task permission is not target-scoped",
+      "Refuse task calls to itself, `feature-factory`, any other `run-orchestrator`, and every arbitrary project-owned agent",
+      "It may observe builders it dispatched; builders never observe themselves",
+      "In `interactive`, perform the orderly pending-gate handoff",
+      "In `headless`, preserve terminal `needs-human`",
+      "In `autonomous`, decide only under the existing autonomous preconditions and continue through existing Step 7",
+      "Story gate `story` -> `artifacts/story.md`",
+      "Brief gate `brief` -> `artifacts/technical-brief.md`",
+      "Pre-PR gate `pre_pr` -> `gates/pre_pr.md`",
+      "current validator verdict when applicable, the acceptance-criterion/test table, the feature-branch diff and PR-base summary, migration and flag callouts, and remaining risks",
+      "factory gate \"$R\" pre_pr pending --artifact gates/pre_pr.md --repo \"$RUN_REPO\"",
+      "await every in-flight specialized task call and stop heartbeat calls",
+      "factory gate \"$R\" \"$GATE\" pending --artifact \"$ARTIFACT\" --repo \"$RUN_REPO\"",
+      "manifest records the named gate pending with `ARTIFACT`",
+      "factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"",
+      "verify that session no longer holds the lock",
+      "Run: <R>\nRun repository: <RUN_REPO>\nOutcome: pending-gate\nGate: <GATE>\nArtifact: <run-relative ARTIFACT>\nStatus: pending",
+      "Run: <R>\nRun repository: <RUN_REPO>\nOutcome: retained-lock-error\nGate: <GATE>\nArtifact: <run-relative ARTIFACT>\nStatus: pending\nLock: retained\nError: <actual error>",
+      "accepts exactly one explicit human response: `approve`, `changes: <verbatim feedback>`, or `stop`",
+      "fresh child with the unchanged original decoded request plus the parent-observed run, repository, gate, and decision",
+      "verifies a nonterminal state, persisted mode `interactive`, and the named pending gate",
+      "factory lock \"$R\" claim --session \"$SESSION_ID\" --repo \"$RUN_REPO\"",
+      "If refusal follows claim, release that fresh session first",
+      "factory gate \"$R\" \"$GATE\" approved --repo \"$RUN_REPO\"",
+      "factory gate \"$R\" \"$GATE\" changes --repo \"$RUN_REPO\"",
+      "keep feedback verbatim in task context, add no run key",
+      "factory gate \"$R\" \"$GATE\" stop --repo \"$RUN_REPO\"",
+      "`next: stopped-at-gate:<GATE>`",
+      "`Outcome: stopped-at-gate`",
+      "do not terminalize it or invite another resume",
+      "resume solely from `status.next`",
+      "Never initialize a replacement or repeat completed stages except the intentional changes loop",
+      "`needs-human` with reason `headless run reached a human gate`",
+      "After Step 7 archives or removes a completed sandbox, query and report the canonical post-completion repository selected by Step 7",
+      "Report only existing status, terminal result, and PR URL; add no durable fields",
+    ]) assert.ok(child.prompt.includes(passage), passage);
+    assert.deepEqual(Object.keys(child).sort(), ["description", "mode", "permission", "prompt", "variant"]);
+    assert.deepEqual(Object.keys(fanout).sort(), ["agent", "description", "template"]);
+    const registrationSource = readFileSync(new URL("../plugin/config.js", import.meta.url), "utf8");
+    for (const mechanism of [
+      /\bprompt_async\s*\(/u,
+      /\bfetch\s*\(/u,
+      /\bJSON\.parse\s*\(/u,
+      /\b(?:spawn|execFile|fork)\s*\(/u,
+      /\bnew\s+(?:Worker|WebSocket)\b/u,
+      /node:child_process|child_process/u,
+      /\b(?:coordinator|report)\s*:/u,
+    ]) assert.doesNotMatch(registrationSource, mechanism);
 
     // The host discovers a skill from a directory, so the path must be the one the package ships.
     assert.equal(cfg.skills.paths.length, 1);
@@ -939,7 +1055,11 @@ describe("registering the workflow with the host", () => {
     for (const name of shipped) {
       assert.ok(cfg.agent[name], `${name} must be registered, or a task call for it fails`);
     }
-    assert.equal(Object.keys(cfg.agent).length, shipped.length + 1, "the agents plus one orchestrator");
+    const registered = registerAgents({ agent: {} });
+    assert.deepEqual(registered.sort(), shipped.sort(), "only the eleven packaged specialists are returned");
+    assert.equal(registered.length, 11);
+    assert.equal(Object.keys(cfg.agent).length, shipped.length + 2, "eleven specialists plus both run drivers");
+    assert.deepEqual(Object.keys(cfg.agent).sort(), ["feature-factory", "run-orchestrator", ...shipped].sort());
   });
 
   it("translates Claude Code frontmatter into an opencode agent", async () => {
@@ -981,6 +1101,10 @@ describe("registering the workflow with the host", () => {
       { model: cfg.agent["implementation-validator"].model,
         variant: cfg.agent["implementation-validator"].variant },
       { model: "reviewer/model", variant: "reviewer-variant" },
+    );
+    assert.deepEqual(
+      { model: cfg.agent["run-orchestrator"].model, variant: cfg.agent["run-orchestrator"].variant },
+      { model: "default/model", variant: "default-variant" },
     );
     assert.deepEqual(
       { model: cfg.agent["spec-writer"].model, variant: cfg.agent["spec-writer"].variant },
@@ -1036,8 +1160,13 @@ describe("registering the workflow with the host", () => {
     const bare = await configured();
     assert.equal(bare.agent["feature-factory"].model, undefined);
     assert.equal(bare.agent["feature-factory"].variant, "xhigh");
+    assert.equal(bare.agent["run-orchestrator"].model, undefined);
+    assert.equal(bare.agent["run-orchestrator"].variant, "xhigh");
+    assert.equal(bare.agent["run-orchestrator"].mode, "subagent");
     assert.deepEqual(controlledPermissions(bare.agent["feature-factory"].permission),
       expectedPermissions(FACTORY_PERMISSION_POLICY["feature-factory"]));
+    assert.deepEqual(controlledPermissions(bare.agent["run-orchestrator"].permission),
+      expectedPermissions(FACTORY_PERMISSION_POLICY["run-orchestrator"]));
 
     const tiers = {
       profile: { model: "orchestrator/global", variant: "orchestrator-global-variant" },
@@ -1060,7 +1189,21 @@ describe("registering the workflow with the host", () => {
         expected,
         name,
       );
+      const childExpected = name === "named" ? tiers.planning : expected;
+      assert.deepEqual(
+        { model: cfg.agent["run-orchestrator"].model, variant: cfg.agent["run-orchestrator"].variant },
+        childExpected,
+        `run-orchestrator ${name}`,
+      );
     }
+
+    const namedChild = await configured({ profiles: {
+      planning: tiers.planning, "run-orchestrator": tiers.named,
+    } });
+    assert.deepEqual(
+      { model: namedChild.agent["run-orchestrator"].model, variant: namedChild.agent["run-orchestrator"].variant },
+      tiers.named,
+    );
   });
 
   it("gives host-merged orchestrator preferences precedence without weakening its permissions", async () => {
@@ -1076,12 +1219,27 @@ describe("registering the workflow with the host", () => {
       model: "project/model",
       variant: "project-variant",
       permission: { edit: "deny", bash: "deny", webfetch: "deny", task: "deny", "host-only": "ask" },
+    }, "run-orchestrator": {
+      model: "project/child",
+      variant: "project-child-variant",
+      description: "Project child description",
+      prompt: "Project child prompt",
+      mode: "primary",
+      permission: { edit: "deny", bash: "deny", webfetch: "deny", task: "deny", "host-only": "opaque" },
     } } });
     assert.equal(cfg.agent["feature-factory"].model, "project/model");
     assert.equal(cfg.agent["feature-factory"].variant, "project-variant");
     assert.deepEqual(controlledPermissions(cfg.agent["feature-factory"].permission),
       expectedPermissions(FACTORY_PERMISSION_POLICY["feature-factory"]));
     assert.equal(cfg.agent["feature-factory"].permission["host-only"], "ask");
+    assert.equal(cfg.agent["run-orchestrator"].model, "project/child");
+    assert.equal(cfg.agent["run-orchestrator"].variant, "project-child-variant");
+    assert.equal(cfg.agent["run-orchestrator"].description, "Project child description");
+    assert.equal(cfg.agent["run-orchestrator"].prompt, "Project child prompt");
+    assert.equal(cfg.agent["run-orchestrator"].mode, "subagent");
+    assert.deepEqual(controlledPermissions(cfg.agent["run-orchestrator"].permission),
+      expectedPermissions(FACTORY_PERMISSION_POLICY["run-orchestrator"]));
+    assert.equal(cfg.agent["run-orchestrator"].permission["host-only"], "opaque");
   });
 
   it("holds controlled permissions against hostile project configuration", async () => {
@@ -1095,6 +1253,7 @@ describe("registering the workflow with the host", () => {
       name,
       { permission: { ...oppositePermissions(values), "host-only": "ask" } },
     ]));
+    projectAgents["run-orchestrator"].mode = "primary";
     projectAgents["project-agent"] = structuredClone(projectAgent);
 
     const cfg = await configured({}, { agent: projectAgents });
@@ -1102,6 +1261,13 @@ describe("registering the workflow with the host", () => {
       assert.deepEqual(controlledPermissions(cfg.agent[name].permission), expectedPermissions(values), name);
       assert.equal(cfg.agent[name].permission["host-only"], "ask", name);
     }
+    assert.equal(cfg.agent["run-orchestrator"].mode, "subagent");
+    assert.equal(cfg.agent["feature-factory"].permission.task, "allow");
+    for (const name of [
+      "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer",
+      "work-decomposer", "work-reviewer", "test-verifier", "implementation-validator", "backend-builder",
+      "frontend-builder",
+    ]) assert.equal(cfg.agent[name].permission.task, "deny", name);
     assert.deepEqual(cfg.agent["project-agent"], projectAgent);
   });
 
@@ -1155,7 +1321,7 @@ describe("registering the workflow with the host", () => {
       }
 
       const cfg = await configured({ root });
-      assert.deepEqual(Object.keys(cfg.agent).sort(), ["feature-factory", "safe-agent"]);
+      assert.deepEqual(Object.keys(cfg.agent).sort(), ["feature-factory", "run-orchestrator", "safe-agent"]);
       assert.equal(cfg.skills.paths[0], join(root, "skills"));
       assert.equal(globalThis[marker], undefined);
       assert.doesNotMatch(JSON.stringify(cfg), /FOREIGN_CONFIG_POISON|__ffForeignConfigPoison/u);
