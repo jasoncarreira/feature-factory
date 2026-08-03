@@ -10,7 +10,7 @@ import {
   mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { CONTROL_PLANE } from "feature-factory";
 import { findControlPlane, listRuns, pollRuns, repositoryRoots, selectActiveRun } from "../observe/runs.js";
 import { renderLines } from "../tui/lines.js";
@@ -48,7 +48,9 @@ const CONTAINER_FORMULA = (() => {
 })();
 
 function sandboxContainer(root) {
-  return CONTAINER_FORMULA.replace("dirname(O)", dirname(root)).replace("<basename(O)>", basename(root));
+  const match = /^O\/(.+)$/u.exec(CONTAINER_FORMULA);
+  if (!match) throw new Error("SKILL.md sandbox container formula must have the form `O/<relative-path>`");
+  return join(root, match[1]);
 }
 
 function searchedLocations(...roots) {
@@ -200,7 +202,7 @@ describe("control-plane discovery", () => {
     const root = repo("convention");
     try {
       const container = sandboxContainer(root);
-      assert.equal(container, join(dirname(root), `.${basename(root)}.factory-sandboxes`),
+      assert.equal(container, join(root, ".factory-sandboxes"),
         "the skill's formula must still resolve to the documented shape");
 
       const seeded = seedSandbox(root, "conv-1", RUN({ run_id: "conv-1" }));
@@ -210,8 +212,8 @@ describe("control-plane discovery", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("discovers only literal direct sibling sandbox manifests [AC5, AC6, AC7]", () => {
-    const root = repo("sibling");
+  it("discovers only literal direct in-repository sandbox manifests [AC5, AC6, AC7]", () => {
+    const root = repo("in-repository");
     const container = sandboxContainer(root);
     const linkedTarget = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-linked-sandbox-")));
     try {
@@ -233,7 +235,7 @@ describe("control-plane discovery", () => {
         // The container itself, not a child. `readdirSync` resolves a symlinked container, so
         // traversal crosses it before any Dirent is examined — which is exactly why the linked
         // *child* above was already rejected while a linked container was followed. A pre-existing
-        // `.<repo>.factory-sandboxes -> elsewhere` made the sidebar enumerate another directory and
+        // `<repo>/.factory-sandboxes -> elsewhere` made the sidebar enumerate another directory and
         // report its manifests as this repository's runs, recreating the unrelated-control-plane
         // failure the derived location exists to prevent.
         const foreign = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-foreign-")));
@@ -255,7 +257,7 @@ describe("control-plane discovery", () => {
       assert.match(snapshot.runs[2].error, /does not match sandbox directory/u,
         "[AC5] a run_id mismatch is invalid rather than accepted");
       assert.deepEqual(snapshot.searched, searchedLocations(root),
-        "[AC7] the local plane and one literal sibling container are the complete search set");
+        "[AC7] the local plane and one literal in-repository container are the complete search set");
     } finally {
       rmSync(container, { recursive: true, force: true });
       rmSync(linkedTarget, { recursive: true, force: true });

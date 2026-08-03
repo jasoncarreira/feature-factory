@@ -145,6 +145,8 @@ npm run test:factory
 npm run test:opencode
 ```
 
+Run sandboxes are gitignored and therefore deleted by `git clean -xdf`.
+
 `test/ceiling.test.js` is the scope lock. It asserts the exact command set, the exact `run.json` key
 set, the family list, the absence of every dropped subsystem, that the skill invokes only commands
 and flags the CLI accepts, that every agent the skill dispatches ships, and a hard line budget on

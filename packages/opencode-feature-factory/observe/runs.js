@@ -11,7 +11,7 @@
 // alone. Without this, opening the sidebar while a slice worktree is the cwd shows no run at all,
 // which is precisely when an operator most wants to see one.
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { CONTROL_PLANE, nextAction, readRunUnchecked, validateRun } from "feature-factory";
 
 // `gitdir: <path>/.git/worktrees/<name>` → `<path>`. Returns null for an ordinary checkout, where
@@ -106,7 +106,7 @@ function localRuns(repo) {
 function sandboxRuns(repo) {
   const container = sandboxContainer(repo);
   // The container itself must be a real directory, checked without following. `readdirSync` resolves
-  // a symlink, so a pre-existing `.<repo>.factory-sandboxes -> elsewhere` would enumerate another
+  // a symlink, so a pre-existing `<repo>/.factory-sandboxes -> elsewhere` would enumerate another
   // directory and report its manifests as this repository's runs — the unrelated-control-plane
   // failure the derived location exists to prevent, and inconsistent with the orchestration contract,
   // which refuses a symlinked container when it creates one.
@@ -238,7 +238,7 @@ function isRealDirectory(path) {
 }
 
 function sandboxContainer(repo) {
-  return join(dirname(repo), `.${basename(repo)}.factory-sandboxes`);
+  return join(repo, ".factory-sandboxes");
 }
 
 function canonicalPath(path) {

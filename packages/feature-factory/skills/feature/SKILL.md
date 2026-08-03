@@ -145,18 +145,18 @@ O="$(cd "$(git -C "$INVOCATION_CHECKOUT" rev-parse --show-toplevel)" && pwd -P)"
 Require an absolute, nonempty `O`. Use this literal convention:
 
 ```text
-C = dirname(O)/.<basename(O)>.factory-sandboxes
+C = O/.factory-sandboxes
 S = C/R
 P = S/.factory/R
 W = S/.factory/worktrees/R
 A = O/.factory/R
 ```
 
-During bootstrap and active sandbox execution, `O` is the operator checkout and must remain unchanged.
-Never switch, reset, clean, stash, create a
-branch or worktree, write Git configuration, or initialize factory state in `O` for a fresh run.
-The only pre-clone Git operations there are reads, and all
-fresh-run and active-execution writes happen in `S` or `C`. The sole completed-handoff exception comes
+During bootstrap and active sandbox execution, `O` is the operator checkout; ignored `C` and `S` are
+the sole active-write exception inside it. Never switch, reset, clean, stash, create a branch or
+worktree, write Git configuration, or initialize factory state directly in `O` for a fresh run.
+The only pre-clone Git operations in `O` are reads, and all fresh-run and active-execution writes are
+confined to `C` or `S`. The sole completed-handoff exception comes
 after the draft PR is recorded: Step 7 may fetch and verify only the recorded feature and unmerged-slice
 refs in `O`, create and verify only the `O/.factory/R` archive, and then remove only the guarded sandbox
 `S`. No other operator-checkout write or action after PR recording is permitted by this exception.
