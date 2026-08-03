@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as cli } from "../bin/factory.js";
-import { nextAction } from "../state/index.js";
+import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
 import { assertPublicationReady } from "../observe/review.js";
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "factory.js");
@@ -766,26 +766,104 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
 // Found by watching a live run report `gate:brief` for the whole of research and spec: naming a
 // gate that has not been opened reads as "waiting on you" while an agent is mid-round.
 describe("what happens next", () => {
-  const state = (overrides) => ({
-    status: "running", gates: {}, steps: [], slices: [], pr_url: null, max_retries: 3, ...overrides,
+  const at = "2026-07-30T12:00:00.000Z";
+  const gate = (status) => ({ status, at: status === "pending" ? null : at, artifact: null });
+  const step = (agent, status) => ({ agent, status, attempts: 1, review_ref: null, evidence_ref: null });
+  const slice = (id, status) => ({
+    id, stack: "backend", depends_on: [], status,
+    worktree: status === "pending" ? null : ".", branch: status === "pending" ? null : id, attempts: 1,
+    paths: ["src/"], test_plan: ["npm test"], base_ref: status === "pending" ? null : "a".repeat(40),
+    evidence_ref: null, review_ref: null, merge_commit: status === "merged" ? "b".repeat(40) : null,
   });
-  const approved = { status: "approved", at: "2026-07-30T12:00:00.000Z", artifact: null };
-  const running = [{ agent: "spec-writer", status: "running", attempts: 1 }];
+  const state = (overrides = {}) => validateRun({
+    version: 1, run_id: "next-action", jira_key: null, branch: "feature/next-action", worktree: ".", pr_base: "main",
+    created_at: at, updated_at: at, status: "running", mode: "interactive", max_parallel_slices: 2, max_retries: 3,
+    gates: {}, steps: [], slices: [], validator: null, terminal_result: null, pr_url: null, ...overrides,
+  });
+  const action = (overrides) => nextAction(state(overrides));
+  const approved = gate("approved");
+  const acceptedSteps = [step("first-step", "accepted"), step("second-step", "accepted")];
+  const openSteps = [step("first-step", "running"), step("second-step", "blocked")];
+  const priorGates = (target) => Object.fromEntries(GATE_NAMES.slice(0, GATE_NAMES.indexOf(target)).map((name) => [name, approved]));
+  const allApproved = Object.fromEntries(GATE_NAMES.map((name) => [name, approved]));
+  const competingSlices = [
+    slice("pending-first", "pending"), slice("active-first", "running"), slice("merged-first", "merged"),
+    slice("blocked-first", "blocked"),
+  ];
 
-  it("names the open step while a gate is merely absent, and the gate once it is pending", () => {
-    assert.equal(nextAction(state({ gates: { story: approved }, steps: running })), "step:spec-writer",
-      "an absent gate with work in flight is not waiting on a human");
-    assert.equal(nextAction(state({ gates: { story: approved } })), "gate:brief",
-      "with nothing recorded, the gate is still the next thing — absent is not done");
-    assert.equal(
-      nextAction(state({
-        gates: { story: approved, brief: { status: "pending", at: null, artifact: null } },
-        steps: running,
-      })),
-      "gate:brief",
-      "a pending gate outranks an open step: pending means a human really is waiting",
-    );
-    assert.equal(nextAction(state({})), "gate:story", "an empty run starts at the first gate");
+  it("preserves the mandatory next-action precedence table", () => {
+    const failures = [];
+    const check = (overrides, expected, label) => {
+      const actual = action(overrides);
+      if (actual !== expected) failures.push(`${label}: expected ${expected}, got ${actual}`);
+    };
+    const absentCases = [
+      ["blocked category and array order", [
+        slice("pending-first", "pending"), slice("active-first", "running"), slice("blocked-first", "blocked"),
+        slice("active-second", "review"), slice("blocked-second", "blocked"), slice("pending-second", "pending"),
+        slice("merged-first", "merged"),
+      ], openSteps, "blocked-slice:blocked-first"],
+      ["review before running", [
+        slice("pending-first", "pending"), slice("review-first", "review"), slice("running-second", "running"),
+        slice("pending-second", "pending"), slice("merged-first", "merged"),
+      ], acceptedSteps, "observe-slice:review-first"],
+      ["running before review", [
+        slice("pending-first", "pending"), slice("running-first", "running"), slice("review-second", "review"),
+        slice("pending-second", "pending"), slice("merged-first", "merged"),
+      ], acceptedSteps, "observe-slice:running-first"],
+      ["merged before pending", [
+        slice("merged-first", "merged"), slice("pending-first", "pending"), slice("pending-second", "pending"),
+      ], acceptedSteps, "dispatch-slice:pending-first"],
+      ["pending before open steps", [slice("pending-first", "pending"), slice("pending-second", "pending")], openSteps,
+        "dispatch-slice:pending-first"],
+      ["merged before open steps", [slice("merged-first", "merged")], openSteps, "step:first-step"],
+      ["open steps", [], openSteps, "step:first-step"],
+      ["merged only", [slice("merged-first", "merged")], acceptedSteps, null],
+      ["nothing in flight", [], acceptedSteps, null],
+    ];
+    for (const target of GATE_NAMES) {
+      for (const [label, slices, steps, expected] of absentCases) {
+        check({ gates: priorGates(target), slices, steps }, expected ?? `gate:${target}`, `${target} absent: ${label}`);
+      }
+    }
+
+    const decidedLabels = {
+      pending: (name) => `gate:${name}`,
+      stop: (name) => `stopped-at-gate:${name}`,
+      changes: (name) => `changes-at-gate:${name}`,
+    };
+    for (const target of GATE_NAMES) {
+      for (const status of ["pending", "stop", "changes"]) {
+        check({
+          gates: { ...priorGates(target), [target]: gate(status) }, slices: competingSlices, steps: openSteps,
+        }, decidedLabels[status](target), `${target} ${status} must outrank all slice and step work`);
+      }
+    }
+
+    const approvedCases = [
+      ["blocked category and array order", [
+        slice("pending-first", "pending"), slice("active-first", "review"), slice("blocked-first", "blocked"),
+        slice("blocked-second", "blocked"),
+      ], acceptedSteps, null, "blocked-slice:blocked-first"],
+      ["review before running", [slice("review-first", "review"), slice("running-second", "running")], acceptedSteps, null,
+        "observe-slice:review-first"],
+      ["running before review", [slice("running-first", "running"), slice("review-second", "review")], acceptedSteps, null,
+        "observe-slice:running-first"],
+      ["pending array order", [slice("merged-first", "merged"), slice("pending-first", "pending"),
+        slice("pending-second", "pending")], acceptedSteps, null, "dispatch-slice:pending-first"],
+      ["merged before open steps", [slice("merged-first", "merged")], openSteps, null, "step:first-step"],
+      ["merged before pr", [slice("merged-first", "merged")], acceptedSteps, null, "pr"],
+      ["merged before complete", [slice("merged-first", "merged")], acceptedSteps, "https://example.test/pr/1", "complete"],
+    ];
+    for (const [label, slices, steps, pr_url, expected] of approvedCases) {
+      check({ gates: allApproved, slices, steps, pr_url }, expected, `all gates approved: ${label}`);
+    }
+
+    check({
+      status: "completed", gates: { story: gate("pending"), brief: gate("stop"), pre_pr: gate("changes") },
+      slices: competingSlices, steps: openSteps,
+    }, "terminal:completed", "terminal status must outrank all gate, slice, and step work");
+    assert.deepEqual(failures, []);
   });
 });
 

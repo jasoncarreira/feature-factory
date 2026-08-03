@@ -26,6 +26,15 @@ export function readRunUnchecked(runDir) {
   }
 }
 
+function nextSliceAction(slices) {
+  const blockedSlice = slices.find((slice) => slice.status === "blocked");
+  if (blockedSlice) return `blocked-slice:${blockedSlice.id}`;
+  const activeSlice = slices.find((slice) => ["running", "review"].includes(slice.status));
+  if (activeSlice) return `observe-slice:${activeSlice.id}`;
+  const pendingSlice = slices.find((slice) => slice.status === "pending");
+  return pendingSlice ? `dispatch-slice:${pendingSlice.id}` : undefined;
+}
+
 // The single answer to "what happens next". Both `factory status` and the opencode
 // sidebar need it, and two implementations of resume order would drift — which is the
 // defect class this codebase keeps finding. Read-only, so it belongs here.
@@ -36,22 +45,18 @@ export function readRunUnchecked(runDir) {
 export function nextAction(run) {
   if (TERMINAL_STATUSES.includes(run.status)) return `terminal:${run.status}`;
   const openStep = run.steps.find((step) => step.status !== "accepted");
+  const sliceAction = nextSliceAction(run.slices);
   for (const name of GATE_NAMES) {
     const gate = run.gates[name];
     // `pending` waits on a human; absent means the phase has not been reached, which is
     // still not "done". But naming an absent gate while an agent is mid-round reads as
-    // "waiting on you" — so the open step, the work actually happening, is named instead.
-    if (gate === undefined) return openStep ? `step:${openStep.agent}` : `gate:${name}`;
+    // "waiting on you" — so existing slice or step work is named instead.
+    if (gate === undefined) return sliceAction ?? (openStep ? `step:${openStep.agent}` : `gate:${name}`);
     if (gate.status === "pending") return `gate:${name}`;
     if (gate.status === "stop") return `stopped-at-gate:${name}`;
     if (gate.status === "changes") return `changes-at-gate:${name}`;
   }
-  const blockedSlice = run.slices.find((slice) => slice.status === "blocked");
-  if (blockedSlice) return `blocked-slice:${blockedSlice.id}`;
-  const activeSlice = run.slices.find((slice) => ["running", "review"].includes(slice.status));
-  if (activeSlice) return `observe-slice:${activeSlice.id}`;
-  const pendingSlice = run.slices.find((slice) => slice.status === "pending");
-  if (pendingSlice) return `dispatch-slice:${pendingSlice.id}`;
+  if (sliceAction) return sliceAction;
   if (openStep) return `step:${openStep.agent}`;
   if (!run.pr_url) return "pr";
   return "complete";
