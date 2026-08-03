@@ -60,7 +60,10 @@ function project(name, { seed = true, testPlan = ["t"], legacy = false } = {}) {
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({
     slices: [{ id: "be-thing", stack: "backend", paths: ["src/app/"], depends_on: [], acceptance: ["AC1"], test_plan: testPlan }],
   }, null, 2));
-  if (seed) assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
+  if (seed) {
+    approveEarlyGates(repo, NOW(1));
+    assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
+  }
   return { repo, runDir };
 }
 
@@ -467,11 +470,31 @@ describe("end to end — a merge is refused through the real CLI", () => {
         { id: "be-two", stack: "backend", paths: ["src/app/two/"], depends_on: [] },
       ];
       writeFileSync(planFile, JSON.stringify({ slices }, null, 2));
+      const unapproved = factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]);
+      assert.equal(unapproved.ok, false, "a plan must not seed before Brief approval");
+      assert.match(unapproved.stderr, /slices-seed requires the Brief gate to be approved/u);
+      assert.deepEqual(runJson(p.runDir).slices, []);
+
+      approveEarlyGates(p.repo, NOW(1));
       const omitted = factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]);
       assert.equal(omitted.ok, false, "a plan that never mentions tests must not seed");
       assert.match(omitted.stderr, /test_plan: must be an array of strings/u);
 
       writeFileSync(planFile, JSON.stringify({ slices: slices.map((s) => ({ ...s, test_plan: ["t"] })) }, null, 2));
+      // Revising the plan after approval unbinds it: the gate approved the earlier bytes. Re-approve
+      // so the seed below ratifies what was presented, which is the contract, not a fixture detail.
+      assert.equal(approveGate(p.repo, "brief", NOW(1)).ok, true);
+      const presentedPlan = readFileSync(planFile, "utf8");
+      rmSync(planFile);
+      const missing = factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]);
+      assert.equal(missing.ok, false, "a failed first seed must leave the run recoverable");
+      assert.match(missing.stderr, /could not read plan\/slices\.json/u);
+      const recoverable = factory(p.repo, ["status", RUN]);
+      assert.equal(recoverable.ok, true, recoverable.stderr);
+      assert.equal(recoverable.out.gates.brief, "approved");
+      assert.deepEqual(recoverable.out.slices, []);
+      assert.equal(recoverable.out.next, "seed-slices");
+      writeFileSync(planFile, presentedPlan);
       assert.equal(factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
       const waveBase = git(p.repo, "rev-parse", "HEAD");
 
@@ -549,7 +572,6 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     const mergeCommit = mergeIntoFeature(p.repo);
     assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
     const head = git(p.repo, "rev-parse", "HEAD");
-    approveEarlyGates(p.repo, NOW(5));
     assert.equal(recordValidator(p.repo, p.runDir, head, "GO", NOW(5)).ok, true);
     return { ...p, head, basePoint };
   }
@@ -733,7 +755,6 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       buildSlice(p.repo);
       factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
       const head = git(p.repo, "rev-parse", "slice");
-      approveEarlyGates(p.repo, NOW(5));
       recordValidator(p.repo, p.runDir, head, "GO", NOW(5));
       const running = approveGate(p.repo, "pre_pr", NOW(5));
       assert.equal(running.ok, false);
@@ -821,10 +842,25 @@ describe("what happens next", () => {
       ["merged only", [slice("merged-first", "merged")], acceptedSteps, null],
       ["nothing in flight", [], acceptedSteps, null],
     ];
+    // An approved Brief with nothing seeded is a checkpoint of its own (#178): it outranks both an
+    // absent later gate and any open step, because the only correct next act is the first seed. It
+    // cannot collide with the slice rows above, since slice work implies slices exist.
+    const unseeded = (target, slices) => target === "pre_pr" && slices.length === 0;
     for (const target of GATE_NAMES) {
       for (const [label, slices, steps, expected] of absentCases) {
-        check({ gates: priorGates(target), slices, steps }, expected ?? `gate:${target}`, `${target} absent: ${label}`);
+        check({ gates: priorGates(target), slices, steps },
+          unseeded(target, slices) ? "seed-slices" : expected ?? `gate:${target}`,
+          `${target} absent: ${label}`);
       }
+    }
+
+    // And a later gate opened by accident must not outrank it either: the seed is still the only
+    // thing that can legitimately happen next.
+    for (const status of ["pending", "stop", "changes"]) {
+      check({ gates: { story: approved, brief: approved, pre_pr: gate(status) }, steps: acceptedSteps },
+        "seed-slices", `unseeded Brief outranks pre_pr ${status}`);
+      check({ gates: { story: approved, brief: approved, pre_pr: gate(status) }, steps: openSteps },
+        "seed-slices", `unseeded Brief outranks pre_pr ${status} and an open step`);
     }
 
     const decidedLabels = {

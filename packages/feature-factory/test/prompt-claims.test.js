@@ -89,6 +89,7 @@ function factory(repo, args) {
 function seeded(repo) {
   assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
   writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify(PLAN));
+  assert.equal(decide(repo, "brief", "approved").ok, true);
   assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW]).ok, true);
 }
 
@@ -103,9 +104,17 @@ const CLAIMS = [
     matches: /slices are already seeded/u,
     act(repo) {
       seeded(repo);
+      const path = join(repo, ".factory", RUN, "run.json");
+      const before = JSON.parse(readFileSync(path, "utf8")).slices
+        .map(({ paths, test_plan: testPlan }) => ({ paths, test_plan: testPlan }));
       writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"),
-        JSON.stringify({ slices: [{ ...PLAN.slices[0], paths: ["src/", "lib/"] }] }));
-      return factory(repo, ["slices-seed", RUN, "--now", NOW]);
+        JSON.stringify({ slices: [{ ...PLAN.slices[0], paths: ["src/", "lib/"], test_plan: ["changed"] }] }));
+      const result = factory(repo, ["slices-seed", RUN, "--now", NOW]);
+      assert.deepEqual(result, { ok: false, out: "slices are already seeded\n" });
+      const after = JSON.parse(readFileSync(path, "utf8")).slices
+        .map(({ paths, test_plan: testPlan }) => ({ paths, test_plan: testPlan }));
+      assert.deepEqual(after, before);
+      return result;
     },
   },
   {
@@ -129,6 +138,7 @@ const CLAIMS = [
       assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
       writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"),
         JSON.stringify({ slices: [{ ...PLAN.slices[0], test_plan: [] }] }));
+      assert.equal(decide(repo, "brief", "approved").ok, true);
       assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW]).ok, true);
       execFileSync("git", ["checkout", "-q", "-b", "slice"], { cwd: repo });
       writeFileSync(join(repo, "src", "work.ts"), "work\n");
@@ -151,6 +161,7 @@ const CLAIMS = [
       const { test_plan: _omitted, ...withoutTestPlan } = PLAN.slices[0];
       writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"),
         JSON.stringify({ slices: [withoutTestPlan] }));
+      assert.equal(decide(repo, "brief", "approved").ok, true);
       return factory(repo, ["slices-seed", RUN, "--now", NOW]);
     },
   },
@@ -163,8 +174,9 @@ const CLAIMS = [
     act(repo) {
       assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
       const path = join(repo, ".factory", RUN, "run.json");
-      const before = readFileSync(path);
       writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify(PLAN.slices));
+      assert.equal(decide(repo, "brief", "approved").ok, true);
+      const before = readFileSync(path);
       const result = factory(repo, ["slices-seed", RUN, "--now", NOW]);
       assert.deepEqual(result, { ok: false, out: 'plan/slices.json must have top-level shape { "slices": [...] }\n' });
       assert.deepEqual(readFileSync(path), before);
@@ -180,12 +192,210 @@ const CLAIMS = [
     act(repo) {
       assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
       const path = join(repo, ".factory", RUN, "run.json");
-      const before = readFileSync(path);
       writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify({ slices: [] }));
+      assert.equal(decide(repo, "brief", "approved").ok, true);
+      const before = readFileSync(path);
       const result = factory(repo, ["slices-seed", RUN, "--now", NOW]);
       assert.deepEqual(result, { ok: false, out: "plan/slices.json has no slices\n" });
       assert.deepEqual(readFileSync(path), before);
       return result;
+    },
+  },
+  {
+    id: "brief-approval-binds-the-presented-plan-bytes",
+    file: "skills/feature/SKILL.md",
+    fragment: "Only after that approval succeeds, invoke the separate first seed using the exact plan bytes that were\npresented.",
+    expect: "refused",
+    matches: /^plan\/slices\.json changed since the brief gate was presented; re-present it before approving\n$/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      const plan = join(repo, ".factory", RUN, "plan", "slices.json");
+      const path = join(repo, ".factory", RUN, "run.json");
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      // Present plan A, then swap the file while the gate is still pending. Binding at approval
+      // instead of at presentation would hash B here and call it approved.
+      writeFileSync(plan, JSON.stringify(PLAN));
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--now", NOW]).ok, true);
+      const bound = JSON.parse(readFileSync(path, "utf8")).plan_digest;
+      assert.match(bound ?? "", /^sha256:[0-9a-f]{64}$/u, "presenting the brief gate must bind the plan bytes");
+      writeFileSync(plan, JSON.stringify({ slices: [{ ...PLAN.slices[0], id: "s2", test_plan: [] }] }));
+      const before = readFileSync(path);
+      const result = factory(repo, ["gate", RUN, "brief", "approved", "--now", NOW]);
+      assert.deepEqual(result, { ok: false,
+        out: "plan/slices.json changed since the brief gate was presented; re-present it before approving\n" });
+      assert.deepEqual(readFileSync(path), before, "a refused approval must not touch the manifest");
+      // Restoring the presented bytes lets the same approval through, so the guard binds bytes
+      // rather than blocking the flow.
+      writeFileSync(plan, JSON.stringify(PLAN));
+      assert.equal(factory(repo, ["gate", RUN, "brief", "approved", "--now", NOW]).ok, true);
+      assert.equal(JSON.parse(readFileSync(path, "utf8")).plan_digest, bound, "approval must keep the presented digest");
+      return result;
+    },
+  },
+  {
+    id: "slices-seed-binds-the-approved-plan-bytes",
+    file: "skills/feature/SKILL.md",
+    fragment: "Only after that approval succeeds, invoke the separate first seed using the exact plan bytes that were\npresented.",
+    expect: "refused",
+    matches: /^plan\/slices\.json is not the plan the brief gate approved\n$/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      const plan = join(repo, ".factory", RUN, "plan", "slices.json");
+      const path = join(repo, ".factory", RUN, "run.json");
+      // Approve plan A, then swap the file for a plan B nobody reviewed.
+      writeFileSync(plan, JSON.stringify(PLAN));
+      assert.equal(decide(repo, "brief", "approved").ok, true);
+      const swapped = { slices: [{ ...PLAN.slices[0], id: "s2", paths: ["other/"], test_plan: [] }] };
+      writeFileSync(plan, JSON.stringify(swapped));
+      const before = readFileSync(path);
+      const result = factory(repo, ["slices-seed", RUN, "--now", NOW]);
+      assert.deepEqual(result, { ok: false, out: "plan/slices.json is not the plan the brief gate approved\n" });
+      assert.deepEqual(readFileSync(path), before);
+      // The approved plan still seeds, so the guard binds bytes rather than blocking the flow.
+      writeFileSync(plan, JSON.stringify(PLAN));
+      assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW]).ok, true);
+      return result;
+    },
+  },
+  {
+    id: "slices-seed-requires-brief-approval",
+    file: "skills/feature/SKILL.md",
+    fragment: "Never invoke `slices-seed` before Brief approval.",
+    expect: "refused",
+    matches: /^slices-seed requires the Brief gate to be approved\n$/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify(PLAN));
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      const result = factory(repo, ["slices-seed", RUN, "--now", NOW]);
+      const run = JSON.parse(readFileSync(join(repo, ".factory", RUN, "run.json"), "utf8"));
+      assert.deepEqual(run.slices, []);
+      assert.equal(run.gates.story.status, "approved");
+      assert.equal(run.gates.brief, undefined);
+      return result;
+    },
+  },
+  {
+    id: "brief-approval-records-unseeded-state",
+    file: "skills/feature/SKILL.md",
+    fragment: "On approval, record only the Brief decision. This produces a durable Brief-approved, zero-slices state",
+    expect: "allowed",
+    matches: /"brief": "approved"[\s\S]*"slices": \[\][\s\S]*"next": "seed-slices"/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify(PLAN));
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      assert.equal(decide(repo, "brief", "approved").ok, true);
+      const run = JSON.parse(readFileSync(join(repo, ".factory", RUN, "run.json"), "utf8"));
+      assert.equal(run.gates.brief.status, "approved");
+      assert.deepEqual(run.slices, []);
+      return factory(repo, ["status", RUN, "--json"]);
+    },
+  },
+  {
+    id: "approved-plan-uses-separate-first-seed",
+    file: "skills/feature/SKILL.md",
+    fragment: "Only after that approval succeeds, invoke the separate first seed",
+    expect: "allowed",
+    matches: /seeded: 1/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify(PLAN));
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      assert.equal(decide(repo, "brief", "approved").ok, true);
+      const status = factory(repo, ["status", RUN, "--json"]);
+      assert.equal(JSON.parse(status.out).next, "seed-slices");
+      return factory(repo, ["slices-seed", RUN, "--now", NOW]);
+    },
+  },
+  {
+    id: "pending-brief-changes-loop-represents-revised-plan",
+    file: "skills/feature/SKILL.md",
+    fragment: "`pending` → `changes` → revise → `pending` → re-present → decision.",
+    expect: "allowed",
+    matches: /seeded: 1/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      const planPath = join(repo, ".factory", RUN, "plan", "slices.json");
+      writeFileSync(planPath, JSON.stringify(PLAN));
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact", "artifacts/technical-brief.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "changes", "--now", NOW]).ok, true);
+      assert.deepEqual(JSON.parse(readFileSync(join(repo, ".factory", RUN, "run.json"), "utf8")).slices, []);
+      const revised = { slices: [{ ...PLAN.slices[0], paths: ["src/revised/"] }] };
+      writeFileSync(planPath, JSON.stringify(revised));
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact", "artifacts/technical-brief.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "approved", "--now", NOW]).ok, true);
+      const result = factory(repo, ["slices-seed", RUN, "--now", NOW]);
+      assert.deepEqual(JSON.parse(readFileSync(join(repo, ".factory", RUN, "run.json"), "utf8")).slices[0].paths, revised.slices[0].paths);
+      return result;
+    },
+  },
+  {
+    id: "failed-first-seed-retries-identical-presented-bytes",
+    file: "skills/feature/SKILL.md",
+    fragment: "restore the exact unchanged presented bytes and retry that\nfirst seed.",
+    expect: "allowed",
+    matches: /seeded: 1/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      const planPath = join(repo, ".factory", RUN, "plan", "slices.json");
+      const presented = `${JSON.stringify(PLAN, null, 2)}\n`;
+      writeFileSync(planPath, presented);
+      assert.equal(decide(repo, "brief", "approved").ok, true);
+      rmSync(planPath);
+      const failed = factory(repo, ["slices-seed", RUN, "--now", NOW]);
+      assert.equal(failed.ok, false);
+      assert.match(failed.out, /^could not read plan\/slices\.json:/u);
+      const status = JSON.parse(factory(repo, ["status", RUN, "--json"]).out);
+      assert.equal(status.gates.brief, "approved");
+      assert.deepEqual(status.slices, []);
+      assert.equal(status.next, "seed-slices");
+      writeFileSync(planPath, presented);
+      assert.equal(readFileSync(planPath, "utf8"), presented);
+      return factory(repo, ["slices-seed", RUN, "--now", NOW]);
+    },
+  },
+  {
+    id: "approved-plan-reopens-before-byte-change",
+    file: "skills/feature/SKILL.md",
+    fragment: "reopen the approved\nBrief directly to `pending` **before mutating the plan**",
+    expect: "allowed",
+    matches: /seeded: 1/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      const planPath = join(repo, ".factory", RUN, "plan", "slices.json");
+      const presented = JSON.stringify(PLAN);
+      writeFileSync(planPath, presented);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact", "artifacts/technical-brief.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "approved", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--now", NOW]).ok, true);
+      assert.equal(readFileSync(planPath, "utf8"), presented);
+      const revised = { slices: [{ ...PLAN.slices[0], test_plan: ["revised-test"] }] };
+      writeFileSync(planPath, JSON.stringify(revised));
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact", "artifacts/technical-brief.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "approved", "--now", NOW]).ok, true);
+      const result = factory(repo, ["slices-seed", RUN, "--now", NOW]);
+      assert.deepEqual(JSON.parse(readFileSync(join(repo, ".factory", RUN, "run.json"), "utf8")).slices[0].test_plan, revised.slices[0].test_plan);
+      return result;
+    },
+  },
+  {
+    id: "approved-unseeded-status-outranks-later-work",
+    file: "skills/feature/SKILL.md",
+    fragment: "whose status reports `next: seed-slices`",
+    expect: "allowed",
+    matches: /"next": "seed-slices"/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      writeFileSync(join(repo, ".factory", RUN, "plan", "slices.json"), JSON.stringify(PLAN));
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      assert.equal(decide(repo, "brief", "approved").ok, true);
+      assert.equal(factory(repo, ["step", RUN, "test-verifier", "running", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "pre_pr", "pending", "--now", NOW]).ok, true);
+      return factory(repo, ["status", RUN, "--json"]);
     },
   },
   {
@@ -268,7 +478,7 @@ const CLAIMS = [
     file: "skills/feature/SKILL.md",
     fragment: "**all three gates currently approved**",
     expect: "refused",
-    matches: /every gate must be approved; not approved: story\(absent\), brief\(absent\)/u,
+    matches: /every gate must be approved; not approved: story\(absent\)/u,
     act(repo) {
       seeded(repo);
       // pre_pr alone, which is all the old check consulted.

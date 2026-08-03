@@ -7,6 +7,7 @@
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
@@ -79,6 +80,38 @@ function parse(command, args) {
 }
 
 const key = (flag) => flag.slice(2).replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
+
+function planDigest(bytes) {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+// Read when the gate is *presented*, not when it is approved. Approval-time hashing left a window:
+// present plan A, edit plan/slices.json to plan B while the gate is still pending, approve, and the
+// approval hashes B - so the digest proved the seed matched what the approval command read rather
+// than what a human was shown. Presenting is the moment the plan is put in front of somebody, and
+// the skill already says to reopen the gate to `pending` before mutating the plan, so a legitimate
+// revision re-presents and re-binds. A presentation with no plan file is refused: the plan is the
+// artifact that gate exists to review.
+function presentedPlanDigest(runDir) {
+  try {
+    return planDigest(readFileSync(join(runDir, "plan/slices.json")));
+  } catch (error) {
+    throw new CliError(`could not read plan/slices.json to bind the brief presentation: ${error.message}`);
+  }
+}
+
+// `pending` binds the presented bytes. `approved` keeps that binding and refuses if the file has
+// moved since, so the window between presentation and decision is closed rather than re-hashed.
+// Any other decision clears it: nothing is bound until a plan is presented again.
+function briefDigestFor(decision, state, runDir) {
+  if (decision === "pending") return presentedPlanDigest(runDir);
+  if (decision !== "approved") return null;
+  if (!state.plan_digest) throw new CliError("the brief gate was not presented; move it to pending first");
+  if (state.plan_digest !== presentedPlanDigest(runDir)) {
+    throw new CliError("plan/slices.json changed since the brief gate was presented; re-present it before approving");
+  }
+  return state.plan_digest;
+}
 
 function runDirFor(flags, runId) {
   if (!runId) throw new CliError("a <run-id> is required");
@@ -165,9 +198,15 @@ const HANDLERS = {
   async ["slices-seed"]([runId], flags) {
     const runDir = runDirFor(flags, runId);
     const from = flags.from ?? "plan/slices.json";
+    let bytes;
+    try {
+      bytes = readFileSync(join(runDir, from));
+    } catch (error) {
+      throw new CliError(`could not read ${from}: ${error.message}`);
+    }
     let plan;
     try {
-      plan = JSON.parse(readFileSync(join(runDir, from), "utf8"));
+      plan = JSON.parse(bytes.toString("utf8"));
     } catch (error) {
       throw new CliError(`could not read ${from}: ${error.message}`);
     }
@@ -178,6 +217,17 @@ const HANDLERS = {
       participants: [{ familyId: "slices", mode: "seed" }],
       apply: (state) => {
         if (state.slices.length > 0) throw new Error("slices are already seeded");
+        // The gate approved bytes, not a filename. Without this the ordering fix is prose: a plan
+        // revised after approval seeds unreviewed `paths` and `test_plan`, immutable from here, an
+        // empty test_plan among them. Absent digest refuses rather than waves through - re-approving
+        // the brief gate records one, and the gate may re-open while the plan is unseeded.
+        // Guarded on approval so the gates contract keeps its own refusal when the gate is not
+        // approved at all; this one answers "approved, but is this what was approved".
+        if (state.gates.brief?.status === "approved") {
+          if (!state.plan_digest) throw new Error("the brief gate approved no plan digest; re-approve it before seeding");
+          if (state.plan_digest !== planDigest(bytes)) throw new Error(`${from} is not the plan the brief gate approved`);
+        }
+        if (state.gates.brief?.status !== "approved") throw new Error("slices-seed requires the Brief gate to be approved");
         return {
           ...state,
           updated_at: at,
@@ -438,6 +488,7 @@ const HANDLERS = {
       validator: null,
       terminal_result: null,
       pr_url: null,
+      plan_digest: null,
     });
     for (const dir of ["plan", "artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
     try {
@@ -559,6 +610,7 @@ const HANDLERS = {
             artifact: flags.artifact ?? state.gates[name]?.artifact ?? null,
           },
         },
+        ...(name === "brief" ? { plan_digest: briefDigestFor(decision, state, runDir) } : {}),
       }),
     });
     return emit(flags, { run_id: runId, gate: name, status: next.gates[name].status, at: next.gates[name].at });

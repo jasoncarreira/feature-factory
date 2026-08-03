@@ -34,9 +34,11 @@ const RUN_JSON_KEYS = [
   // viso's fifteen
   "version", "run_id", "jira_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
   "status", "max_parallel_slices", "max_retries", "gates", "steps", "slices", "validator", "pr_url",
-  // the three justified additions. base_commit was dropped: it was written and never
-  // read, which is the standard a durable field has to meet.
-  "mode", "terminal_result",
+  // the four justified additions. base_commit was dropped: it was written and never
+  // read, which is the standard a durable field has to meet. plan_digest meets it: the seed reads
+  // it and refuses on mismatch, which is the only thing binding the plan a human approved to the
+  // one that gets ratified.
+  "mode", "terminal_result", "plan_digest",
 ];
 
 const FAMILIES = ["envelope", "gates", "steps", "slices", "verdict"];
@@ -293,7 +295,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 18, "eighteen: viso's fifteen plus mode, terminal_result, and pr_base");
+    assert.equal(RUN_KEYS.length, 19, "nineteen: viso's fifteen plus mode, terminal_result, pr_base, and plan_digest");
   });
 
   it("registers exactly the declared families", () => {
@@ -451,7 +453,21 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // reused before and after the gate loop so unopened gates cannot mask in-flight work. The old
     // inline scans were removed; no further safe deletion exists in this narrow state projection
     // without obscuring its public precedence contract.
-    assert.ok(total < 2671, `production source is ${total} lines; the tripwire is 2671`);
+    // 2670 -> 2726 (#178). Gate 2 now presents the plan before it is seeded, which needs a
+    // `seed-slices` state in nextAction, a checked first seed, and — the largest part — a
+    // `plan_digest` that binds the seeded bytes to the ones a human was shown.
+    //
+    // Two review rounds shaped that binding and both were right. The first: gate ordering alone left
+    // the approval bound to a *filename*, so approve plan A, edit plan/slices.json, seed plan B, and
+    // the ratified `paths` and `test_plan` are ones nobody reviewed — an empty test_plan among them,
+    // which waives the observed test run. The second: hashing at *approval* left a window, because
+    // the plan is presented when the gate moves to `pending`. So the digest is taken at presentation
+    // and approval refuses if the file moved since, rather than re-hashing whatever is on disk.
+    //
+    // The lines are that binding at three points, the refusals at each, and the notes recording why
+    // a filename was never the thing being approved. Well inside the 2900 Jason authorized for this
+    // batch; the number is what it landed on, not what was allowed.
+    assert.ok(total < 2727, `production source is ${total} lines; the tripwire is 2727`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
