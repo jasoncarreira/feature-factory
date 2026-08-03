@@ -11,9 +11,12 @@ description: >
 
 # /feature — the software factory
 
-You are the **orchestrator**. You run in the main conversation, not a subagent, so you can stop at
-gates and let the engineer steer. You route work through specialized subagents, hold the line on
-scope, own the worktree/PR lifecycle, and own a durable control plane on disk.
+You are the active **run driver**: either the primary `feature-factory` agent driving `/feature` or a
+config-only `run-orchestrator` child driving one fan-out request. You route work through specialized
+subagents, hold the line on scope, own the worktree/PR lifecycle, and own a durable control plane on
+disk. An existing run's immutable persisted mode is the sole gate authority: an interactive child
+performs a verified pending-gate handoff and releases its lock, headless preserves `needs-human`, and
+autonomous decides only under the existing preconditions.
 
 Two principles make this a factory rather than a session workflow:
 
@@ -25,12 +28,15 @@ Two principles make this a factory rather than a session workflow:
   you run `factory observe`, which re-derives the diff and re-runs the named tests itself and records
   what it saw. `work-reviewer` judges that record, never the prose.
 
-**Who may run which commands.** Every state-changing command is yours. The preserved compatibility
+**Who may run which commands.** The active run driver owns every state-changing `factory` command for
+its run. Specialists do not manage the run. For them, the preserved compatibility
 claim reads: A subagent may read —
 `factory status <run-id> --json` to orient itself — and may never write. That quoted phrase names a
-command stem, not a runnable invocation: issue it only as `factory status "$R" --json --repo "$RUN_REPO"`.
-`factory observe` in particular stays with you: its entire purpose is that the party
-being judged is not the party reporting, so an agent running it would return the mechanism to prose.
+command stem, not a runnable invocation: issue it only as
+`factory status "$R" --json --repo "$RUN_REPO"`. Builders retain only the implementation edits assigned
+to their slice. `factory observe` belongs to the driver that dispatched the builder, including a
+`run-orchestrator` observing its builders. A builder never observes its own work: the party being judged
+is not the party recording the evidence.
 
 ## Threat boundary
 
@@ -97,16 +103,165 @@ mode. Invocation flags never reinitialize, compare, or mutate an existing run's 
 
 ## Operating modes
 
-`run.json.mode` is set at `factory init` and decides gate handling:
+Exact leading invocation flags choose a mode only for fresh initialization. Once a manifest exists,
+its immutable persisted `run.json.mode` controls gate handling on that invocation and every later
+resume; invocation flags do not select resumed behavior:
 
-- **interactive** — you stop at every gate and wait for `approve` / `changes: <...>` / `stop`.
-- **headless** — same gates, but the engineer is not present; a gate that would block writes
-  `needs-human` and stops.
-- **autonomous** — gates may be decided without a human, under the rules below.
+- **interactive** — the primary `/feature` driver persists and presents each gate, then waits for
+  `approve` / `changes: <...>` / `stop`; a fan-out child instead performs the verified pending-gate
+  handoff below, releases its lock, and returns to the parent.
+- **headless** — a gate that requires a human records `needs-human` and stops.
+- **autonomous** — gates may be decided without a human only under the preconditions below.
+
+## Fan-out parent and run-orchestrator child
+
+`/feature-fanout` treats its arguments as a human-facing JSON array of strings. This is bounded prompt
+framing, not an executable parser or a grammar-complete validator. If the primary cannot interpret a
+non-empty array or encounters a non-string element, reject the whole invocation before dispatch and
+return exactly:
+
+```text
+Invalid /feature-fanout request: expected a non-empty JSON array of strings; no runs dispatched.
+```
+
+An empty string element is still a string and is dispatched unchanged for normal `/feature` intake.
+For every element, preserve the decoded request string byte-for-byte in exactly one child prompt:
+
+> Drive exactly one factory run. Load and follow the `feature` skill as the run-orchestrator.
+> Request: <decoded request string, unchanged>
+
+The decoded string, not its JSON token spelling, is the contract. Do not trim, normalize, split,
+concatenate, deduplicate, pre-parse mode flags, or rewrite it. For N elements, the primary issues
+exactly N native task calls to `run-orchestrator` in one assistant message; those calls may block until
+all children return. Do not insert another agent, JavaScript coordinator, `prompt_async`, HTTP or raw
+session calls, process spawning, a report tool, or any other dispatch layer. The fan-out parent does not
+initialize child runs, claim their locks, or provision isolation.
+
+The only specialized task targets a run driver may dispatch are exactly:
+
+- `story-reader`
+- `story-writer`
+- `codebase-researcher`
+- `design-interpreter`
+- `spec-writer`
+- `work-decomposer`
+- `work-reviewer`
+- `test-verifier`
+- `implementation-validator`
+- `backend-builder`
+- `frontend-builder`
+
+A `run-orchestrator` must not dispatch itself, `feature-factory`, another `run-orchestrator`, or an
+arbitrary project-owned agent. It accepts exactly one `Request:` payload, loads and follows this skill,
+and drives exactly one run. Apply exact-leading-token mode admission only when fresh initialization is
+required. On resume, immutable persisted `run.json.mode` is authoritative regardless of invocation
+flags, conversation placement, or whether a human can be asked.
+
+The child enters Step 0 unchanged. It selects or resumes only the deterministic existing sandbox path
+defined there and never creates a different worktree, clone, isolation directory, replacement run, or
+orchestration layer. It uses its own real `FACTORY_SESSION_ID` for every claim, heartbeat, and release,
+never the parent's session. It reads durable state only through
+`factory status "$R" --json --repo "$RUN_REPO"`, claims through Step 0, and continues solely from
+`status.next` or `nextAction`. It never hand-writes `run.json`.
+
+Persisted mode determines what each driver may do:
+
+| Persisted mode | Primary `/feature` | Fan-out child | Parent decision injection |
+|---|---|---|---|
+| `interactive` | Persist and present the pending gate, then wait for a real human | Perform the verified pending-gate handoff below, release the lock, and return to the parent | Allowed only through a fresh child after an explicit human response |
+| `headless` | Preserve terminal `needs-human` | Terminalize `needs-human`; never masquerade as an interactive pending gate | Refused |
+| `autonomous` | Decide only when the existing preconditions authorize it | Decide under the same rules and continue through Step 7 toward a draft PR | Refused |
+
+An inability to ask a human never promotes interactive or headless to autonomous. When a headless run
+reaches a human gate, terminalize with reason exactly `headless run reached a human gate`:
+
+```sh
+factory terminal "$R" needs-human --reason "headless run reached a human gate" --repo "$RUN_REPO"
+```
+
+Verify qualified status durably reports `terminal:needs-human` and that exact terminal reason, retain
+the selected sandbox and repository, and stop.
+
+The gate artifact map is exact:
+
+| Gate | Name | Run-relative artifact |
+|---|---|---|
+| Story | `story` | `artifacts/story.md` |
+| Brief | `brief` | `artifacts/technical-brief.md` |
+| Pre-PR | `pre_pr` | `gates/pre_pr.md` |
+
+For an interactive child, an orderly pending-gate handoff is complete only after all of these actions:
+
+1. Await every in-flight specialized task call and stop heartbeat calls, including awaiting one already
+   in flight.
+2. Select `ARTIFACT` from the exact map and directly verify that it exists. Before Pre-PR, refresh
+   `gates/pre_pr.md` as required by Gate 3 and verify it exists.
+3. Persist the named gate as pending with the existing qualified command and `--artifact "$ARTIFACT"`.
+4. Directly verify the artifact still exists, the manifest records that gate as `pending` with exactly
+   `ARTIFACT`, and qualified status reports the named gate pending.
+5. Release only the child's session lock exactly as:
+   `factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"`.
+6. Re-run qualified status and verify the lock is no longer held by that session.
+
+Only then return this successful handoff contract:
+
+```text
+Run: <R>
+Run repository: <RUN_REPO>
+Outcome: pending-gate
+Gate: <GATE>
+Artifact: <run-relative ARTIFACT>
+Status: pending
+```
+
+If release fails or qualified status still reports that child's lock, do not claim success or invite a
+decision child. Return `Outcome: retained-lock-error`, the same run, repository, gate, and artifact,
+`Status: pending`, `Lock: retained`, and the actual error. Crash recovery remains outside this flow.
+
+After a successful interactive handoff, the parent independently runs qualified status. It trusts its
+observed run ID, selected repository, pending gate, persisted mode, and terminal state rather than child
+prose. Accept exactly one explicit human response: `approve`, `changes: <verbatim feedback>`, or `stop`.
+Dispatch a fresh child with the same original decoded request plus the parent-observed run, repository,
+gate, and decision.
+
+Before mutation, that fresh child statuses the supplied run and repository and verifies a nonterminal
+run in persisted `interactive` mode with the named gate pending. It claims with its own fresh session,
+then repeats the same qualified status verification. Refuse a mismatched run, repository, or gate; a
+terminal run; a non-pending gate; or decision injection into headless or autonomous mode. If refusal
+follows a claim, release that fresh session and verify the unlock before returning.
+
+Map the one human response only through these existing transitions:
+
+- `approve` runs `factory gate "$R" "$GATE" approved --repo "$RUN_REPO"`.
+- `changes: <feedback>` keeps the feedback verbatim in task context, adds no run key, runs
+  `factory gate "$R" "$GATE" changes --repo "$RUN_REPO"`, follows
+  `changes-at-gate:<name>`, revises only the affected stage, and re-presents it pending.
+- `stop` runs `factory gate "$R" "$GATE" stop --repo "$RUN_REPO"`, requires qualified status
+  `next: stopped-at-gate:<GATE>`, awaits in-flight work, stops and awaits heartbeat calls, releases the
+  fresh session with the exact qualified release command, and verifies the run is unlocked. Return the
+  run, repository, `Outcome: stopped-at-gate`, gate, and `Status: stop`. This is an unlocked
+  nonterminal stop: do not terminalize it, initialize a replacement, or invite another resume.
+  If release fails, return the retained-lock-error contract instead.
+
+For `approve` and `changes`, re-read qualified status and resume solely from `status.next`. Never
+initialize a replacement or repeat completed stages except the intentional changes loop. Every fresh
+session resumes the selected run and repository through Step 0; it does not infer either from child
+prose.
+
+Terminal reporting also follows persisted state. Headless retains its selected sandbox and exact
+`needs-human` result. Autonomous continues only while the existing gate preconditions hold, then uses
+the existing draft-PR flow and mandatory Step 7 handoff. Interactive `stop` retains the selected run
+repository without terminalizing. Blocked, partial, and needs-human runs report their selected sandbox
+status and repository. After completed sandbox archive/removal, query and report the canonical
+post-completion repository selected by Step 7, never the stale sandbox. Report only existing status,
+terminal result, and PR URL; add no durable fields.
 
 ## Autonomous mode
 
-These rules apply when mode admission selected the exact leading `--autonomous` token.
+These rules apply whenever the selected or resumed manifest's immutable `run.json.mode` is
+`autonomous`. Exact-leading-token admission can choose that persisted mode only while initializing a
+fresh run; an existing run follows these rules solely because its manifest already records
+`autonomous`, regardless of the current invocation's flags.
 
 - Each gate has a stated precondition. If it does not hold, record `needs-human` with
   `factory terminal "$R" needs-human --reason "$REASON" --repo "$RUN_REPO"` and **stop** — do not
@@ -672,8 +827,13 @@ integration branch if it is test-only. Respect `max_retries`.
 
 ### Gate 3 — Pre-PR
 
-Present the validator verdict, the acceptance-test table, the full diff against the base branch, and
-migration, flag, and risk callouts.
+Before every Gate 3 presentation, write or refresh `gates/pre_pr.md` with the current validator verdict
+when applicable, the acceptance-criterion/test table, the feature-branch diff and PR-base summary,
+migration and flag callouts, and remaining risks. Present that current artifact and open the gate with:
+
+```sh
+factory gate "$R" pre_pr pending --artifact gates/pre_pr.md --repo "$RUN_REPO"
+```
 
 **Approving this gate is the transition that authorizes publication**, so the fully qualified Gate 3
 approval shown below re-checks the whole publication story and *refuses the approval* if any of it is
@@ -708,14 +868,32 @@ not block the run for it. A gate that asked for `changes` re-opens at any point,
 validator verdict is frozen while the gate stands and `factory pr` refuses. Recovery is one more
 approval, not a lost run:
 
+First re-observe the integration tests against the current head. When the run requires an
+`implementation-validator`, rerun it against that same head and wait for its current review record; a
+single-slice run with no prior verdict still skips it as specified in Step 5. Do not present Gate 3 or
+reuse the old `gates/pre_pr.md`.
+
+The recorded validator verdict cannot change while the old approval stands. After the fresh test
+evidence and current validator review exist, use the first bare `pending` transition below only to
+re-open the state and unfreeze validator recording; it is not the recovered Gate 3 presentation. Record
+the current validator when applicable, then refresh `gates/pre_pr.md` with the newly observed tests,
+current verdict and reviewed head when applicable, current feature-branch diff and PR-base summary,
+migration and flag callouts, and remaining risks. Only after that refresh does the second `pending`
+transition, with `--artifact gates/pre_pr.md`, present the recovered gate for approval:
+
 ```sh
-factory gate "$R" pre_pr pending --repo "$RUN_REPO"
 CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
 factory observe "$R" test-verifier --worktree "$INTEGRATION_WORKTREE" --base "$BRANCH_POINT" \
   --test-cmd "$INTEGRATION_SUITE" --repo "$RUN_REPO"
+factory gate "$R" pre_pr pending --repo "$RUN_REPO"
 factory validator "$R" --report artifacts/validation-report.md --repo "$RUN_REPO"
+factory gate "$R" pre_pr pending --artifact gates/pre_pr.md --repo "$RUN_REPO"
 factory gate "$R" pre_pr approved --repo "$RUN_REPO"
 ```
+
+Omit the validator command only when Step 5 says no validator applies and no prior verdict must be
+replaced. The artifact refresh occurs between validator recording and the artifact-bearing `pending`
+command; never move it earlier or present stale evidence.
 
 The compatibility transition name is `factory gate <run-id> pre_pr pending`; the runnable form is the
 repository-qualified command above.
@@ -931,8 +1109,8 @@ Never re-do a side effect the manifest shows already done — ticket creation, p
   `needs-human`, not an approval.
 - **One feature branch, one PR** per run. Slice branches are ephemeral, merged in, then deleted; they
   never become PRs.
-- **Only the orchestrator mutates external systems** — tracker writes, pushes, PR creation. Subagents
-  are read-only toward them and only write code inside the worktree you gave them.
+- **Only the active run driver mutates external systems** — tracker writes, pushes, PR creation.
+  Specialists are read-only toward them and builders write code only inside the worktree they receive.
 - **Never hand-write `run.json`.** If a `factory` command refuses a transition, the refusal is the
   answer; do not work around it by editing state.
 - **Bounded loops.** `max_retries` per slice and per step, recorded as attempts. On exhaustion mark
