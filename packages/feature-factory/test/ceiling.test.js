@@ -436,6 +436,16 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // handler. Catching that is work-reviewer's job and its prose now names it; making it unnecessary
     // is work-decomposer's, which now bounds the expected change before paths are seeded. What is left
     // for the assertion is unauthorized growth, and `<` does that.
+    //
+    // Issue #187 centralized duplicate scope assertions in this ledger. State-relocation AC8 and
+    // terminal-handoff AC20 each pinned production at exactly 2665 lines; those exact guards were
+    // removed because `< 2666` is now the sole executable production budget and intentionally
+    // permits reductions.
+    //
+    // State-relocation AC14 separately pinned `bin/factory.js` at 702 physical lines to enforce
+    // zero physical growth. That narrower 702-line zero-growth rule is intentionally retired
+    // without a replacement per-file budget. Its value and intent remain historical rationale
+    // only; the aggregate ceiling does not provide or enforce that guarantee.
     assert.ok(total < 2666, `production source is ${total} lines; the tripwire is 2666`);
   });
 
@@ -471,6 +481,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // have had no test left at all.
     // 83 -> 87 funds the four AC-mapped lifecycle sites approved for issue 173: sandbox,
     // effective push, state relocation, and terminal handoff.
+    // Issue #187 removed terminal-handoff AC20's duplicate exact 87-site guard. `<= 87` is now
+    // the sole executable `it(`/`test(` call-site budget and intentionally permits reductions.
     assert.ok(count <= 87, `${count} tests; the budget is 87`);
   });
 });
