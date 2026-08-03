@@ -431,7 +431,6 @@ function commonJsLoads(tokens) {
   const seen = new Set();
   function add(token, opening, invocation = "direct") {
     const module = staticModuleArgument(tokens, opening, parentheses, invocation);
-    if (module === null) return;
     const key = `${token.start}:${module}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -484,7 +483,6 @@ function builtinModuleLoads(tokens) {
   const seen = new Set();
   function add(token, opening, invocation = "direct") {
     const module = staticModuleArgument(tokens, opening, parentheses, invocation);
-    if (module === null) return;
     const key = `${token.start}:${module}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -669,6 +667,19 @@ function forbiddenConfigurationModule(specifier) {
     || /(?:^|\/)(?:profiles?|agents?)(?:\/|\.(?:json|mjs|cjs|js|md)|$)/u.test(specifier);
 }
 
+// This scanner is deliberately bounded to the registration pair. A new package-local module is not
+// harmless plumbing: it would let registration move a configuration read or loader beyond the two
+// sources this allowlist examines. Keep the existing import graph explicit; widening it requires
+// expanding the scanner and its controls in the same change.
+const ALLOWED_REGISTRATION_LOCAL_IMPORTS = {
+  "plugin/index.js": new Set(["../observe/runs.js", "./config.js"]),
+  "plugin/config.js": new Set(),
+};
+
+function packageLocalRegistrationImport(specifier) {
+  return specifier.startsWith("./") || specifier.startsWith("../");
+}
+
 function registrationReadOffenders(input) {
   const offenders = [];
   for (const [path, source] of sourceEntries(input)) {
@@ -683,6 +694,10 @@ function registrationReadOffenders(input) {
       if (reference.kind === "dynamic") {
         offenders.push(tokenOffender(path, token, "dynamic import"));
         continue;
+      }
+      if (packageLocalRegistrationImport(reference.module)
+        && !ALLOWED_REGISTRATION_LOCAL_IMPORTS[path]?.has(reference.module)) {
+        offenders.push(tokenOffender(path, token, "unscanned package-local static import"));
       }
       if (forbiddenConfigurationModule(reference.module)) {
         offenders.push(tokenOffender(path, token, "forbidden static configuration import"));
@@ -800,8 +815,9 @@ function registrationReadOffenders(input) {
       offenders.push(tokenOffender(path, tokens[index + 1], `filesystem member read ${member}`));
     }
     for (const load of commonJsLoads(tokens)) {
-      offenders.push(tokenOffender(path, load.token, "CommonJS require"));
-      if (forbiddenConfigurationModule(load.module)) {
+      const reason = load.module === null ? "CommonJS require with variable argument" : "CommonJS require";
+      offenders.push(tokenOffender(path, load.token, reason));
+      if (load.module !== null && forbiddenConfigurationModule(load.module)) {
         offenders.push(tokenOffender(path, load.token, "CommonJS configuration load"));
       }
       if (["fs", "node:fs", "fs/promises", "node:fs/promises"].includes(load.module)) {
@@ -809,7 +825,10 @@ function registrationReadOffenders(input) {
       }
     }
     for (const load of builtinModuleLoads(tokens)) {
-      offenders.push(tokenOffender(path, load.token, `alternate built-in module acquisition ${load.module}`));
+      const reason = load.module === null
+        ? "alternate built-in module acquisition with variable argument"
+        : `alternate built-in module acquisition ${load.module}`;
+      offenders.push(tokenOffender(path, load.token, reason));
     }
     offenders.push(...createRequireLoaderOffenders(path, tokens));
     if (path === "plugin/config.js") {
@@ -1050,9 +1069,11 @@ describe("package boundary", () => {
       ["computed-call-commonjs-config.js", 'module["require"].call("safe-this", "../.claude/config.mjs");', "CommonJS configuration load"],
       ["computed-apply-commonjs-config.js", 'module["require"].apply("safe-this", ["../.claude/config.mjs"]);', "CommonJS configuration load"],
       ["member-alias-commonjs-config.js", 'const load = module["require"];\nload("../.claude/settings.json");', "CommonJS configuration load"],
+      ["variable-commonjs.js", 'const target = ".opencode/opencode.json";\nrequire(target);', "CommonJS require with variable argument"],
       ["called-commonjs-filesystem.js", 'require.call("safe-this", "node:fs");', "CommonJS filesystem load node:fs"],
       ["applied-commonjs-filesystem.js", 'require.apply("safe-this", ["node:fs/promises"]);', "CommonJS filesystem load node:fs/promises"],
       ["builtin-filesystem.js", 'process.getBuiltinModule("node:fs");', "alternate built-in module acquisition node:fs"],
+      ["variable-builtin.js", 'const target = ".claude/settings.json";\nprocess.getBuiltinModule(target);', "alternate built-in module acquisition with variable argument"],
       ["aliased-builtin-filesystem.js", 'const builtin = process.getBuiltinModule;\nbuiltin("node:fs/promises");', "alternate built-in module acquisition node:fs/promises"],
       ["called-builtin-filesystem.js", 'process.getBuiltinModule.call(process, "node:fs");', "alternate built-in module acquisition node:fs"],
       ["applied-builtin-filesystem.js", 'process.getBuiltinModule.apply(process, ["node:fs/promises"]);', "alternate built-in module acquisition node:fs/promises"],
@@ -1068,6 +1089,20 @@ describe("package boundary", () => {
       const offenders = registrationReadOffenders(fixture);
       assertReason(offenders, "plugin/config.js", reason, file);
     }
+
+    const importedHelper = registrationBaseline('import "./registration-helper.js";');
+    importedHelper.set("plugin/registration-helper.js", [
+      'import { readFileSync } from "node:fs";',
+      'try { readFileSync(".claude/settings.json", "utf8"); } catch {}',
+      "eval(source);",
+    ].join("\n"));
+    const helperOffenders = registrationReadOffenders(importedHelper);
+    assertReason(helperOffenders, "plugin/config.js", "unscanned package-local static import",
+      "a registration helper cannot hide a foreign configuration read");
+    assertReason(helperOffenders, "plugin/registration-helper.js", "node:fs import outside plugin/config.js",
+      "the imported helper's swallowed foreign read is still a registration offender");
+    assertReason(executionOffenders(importedHelper), "plugin/registration-helper.js", "executable eval identifier",
+      "the imported helper's configuration execution is still an execution offender");
   });
 
   it("cannot execute configuration content", () => {
