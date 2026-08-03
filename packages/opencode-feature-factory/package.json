@@ -1,6 +1,6 @@
 {
   "name": "opencode-feature-factory",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "OpenCode integration for feature-factory: server plugin and sidebar. Reads run state; never writes it.",
   "type": "module",
   "license": "MIT",
@@ -20,7 +20,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "feature-factory": "0.3.1"
+    "feature-factory": "0.3.2"
   },
   "scripts": {
     "build": "rm -rf tui/dist && esbuild tui/index.jsx --bundle --platform=node --format=esm --jsx=automatic --jsx-import-source=@opentui/solid --packages=external --outfile=tui/dist/index.js",
