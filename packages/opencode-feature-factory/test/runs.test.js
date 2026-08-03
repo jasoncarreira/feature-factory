@@ -736,6 +736,62 @@ describe("registering the workflow with the host", () => {
     return cfg;
   }
 
+  it("keeps workflow registration and generated TUI polling loadable for a parseable run missing steps", async () => {
+    const root = repo("invalid-load");
+    const calls = { registered: [], disposers: [] };
+    try {
+      try {
+        const run = RUN({ run_id: "invalid-load" });
+        delete run.steps;
+        const dir = seedRun(root, "invalid-load", run);
+        const manifestPath = realpathSync(join(dir, "run.json"));
+        let snapshot;
+        assert.doesNotThrow(() => { snapshot = pollRuns(root); });
+        assert.equal(snapshot.runs.length, 1);
+        const [record] = snapshot.runs;
+        assert.equal(record.run_id, "invalid-load");
+        assert.equal(record.valid, false);
+        assert.match(record.error, /steps/u);
+        // readRunUnchecked output must pass validateRun in project before nextAction.
+        assert.equal(Object.hasOwn(record, "next"), false);
+
+        const lines = renderLines(snapshot);
+        assert.ok(lines.includes("invalid-load  INVALID"));
+        assert.ok(lines.includes(`at ${manifestPath}`));
+        assert.ok(lines.includes(record.error));
+
+        const cfg = await configured();
+        assert.equal(cfg.command.feature.agent, "feature-factory");
+        assert.equal(cfg.skills.paths.length, 1);
+        assert.match(cfg.skills.paths[0], /feature-factory\/skills$/u);
+        const expectedAgents = [
+          "backend-builder", "codebase-researcher", "design-interpreter", "frontend-builder",
+          "implementation-validator", "spec-writer", "story-reader", "story-writer",
+          "test-verifier", "work-decomposer", "work-reviewer",
+        ].sort();
+        assert.deepEqual(Object.keys(cfg.agent).filter((name) => name !== "feature-factory").sort(), expectedAgents);
+        assert.equal(Object.hasOwn(cfg.agent, "feature-factory"), true);
+        assert.equal(Object.keys(cfg.agent).length, 12);
+
+        const api = {
+          state: { path: { directory: root, worktree: root } },
+          theme: { current: { warning: "amber" } },
+          lifecycle: { onDispose(dispose) { calls.disposers.push(dispose); } },
+          slots: { register(config) { calls.registered.push(config); } },
+        };
+        const entry = (await import("../tui/dist/index.js")).default;
+        assert.doesNotThrow(() => entry.tui(api, { intervalMs: 60_000 }));
+        assert.equal(calls.registered.length, 1);
+        assert.equal(typeof calls.registered[0].slots?.[SLOT], "function");
+        assert.equal(calls.disposers.length, 1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    } finally {
+      for (const dispose of calls.disposers) dispose();
+    }
+  });
+
   const CONTROLLED_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
   const FACTORY_PERMISSION_POLICY = {
     "backend-builder": ["allow", "allow", "deny", "deny"],
