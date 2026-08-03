@@ -160,11 +160,11 @@ function coversPath(declared, file) {
   return file.startsWith(`${normalizedDeclared}/`);
 }
 
-// Privileged control-plane paths are refused for every slice regardless of what it
-// declared: a builder that edits the factory's own state is not doing the work it
-// was dispatched for.
+// .gitignore can conceal files from cleanliness and observed-diff checks, so it is
+// refused with control-plane prefixes regardless of ownership. Ecosystem manifests
+// are authorized through ratified seeded ownership instead.
 const PRIVILEGED_PREFIXES = Object.freeze([CONTROL_PLANE, ".git"]);
-const PRIVILEGED_EXACT = Object.freeze([".gitignore", "package.json", "package-lock.json"]);
+const PRIVILEGED_EXACT = Object.freeze([".gitignore"]);
 
 export function privilegedPaths(filesChanged) {
   return filesChanged.filter((file) => PRIVILEGED_PREFIXES.some((prefix) => file === prefix || file.startsWith(`${prefix}/`))

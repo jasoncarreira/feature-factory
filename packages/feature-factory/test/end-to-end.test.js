@@ -34,7 +34,7 @@ const RUN = "app-1";
 const NOW = (minute) => `2026-07-30T12:${String(minute).padStart(2, "0")}:00Z`;
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true, testPlan = ["t"], legacy = false } = {}) {
+function project(name, { seed = true, testPlan = ["t"], legacy = false, paths = ["src/app/"] } = {}) {
   const repo = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(repo, "init", "-q", "-b", "feature");
   git(repo, "config", "user.email", "t@example.com");
@@ -58,7 +58,7 @@ function project(name, { seed = true, testPlan = ["t"], legacy = false } = {}) {
     writeFileSync(join(runDir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
   }
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({
-    slices: [{ id: "be-thing", stack: "backend", paths: ["src/app/"], depends_on: [], acceptance: ["AC1"], test_plan: testPlan }],
+    slices: [{ id: "be-thing", stack: "backend", paths, depends_on: [], acceptance: ["AC1"], test_plan: testPlan }],
   }, null, 2));
   if (seed) {
     approveEarlyGates(repo, NOW(1));
@@ -68,13 +68,13 @@ function project(name, { seed = true, testPlan = ["t"], legacy = false } = {}) {
 }
 
 // Build the slice, optionally touching an extra path, and return its head.
-function buildSlice(repo, { extra = null } = {}) {
+function buildSlice(repo, { extra = null, extraContent = "extra\n" } = {}) {
   const basePoint = git(repo, "rev-parse", "HEAD");
   git(repo, "checkout", "-q", "-b", "slice");
   writeFileSync(join(repo, "src", "app", "thing.ts"), "slice\n");
   if (extra) {
     mkdirSync(join(repo, dirname(extra)), { recursive: true });
-    writeFileSync(join(repo, extra), "extra\n");
+    writeFileSync(join(repo, extra), extraContent);
   }
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "slice work");
@@ -120,8 +120,8 @@ function approveGate(repo, name, at) {
 }
 
 describe("end to end — a merge is refused through the real CLI", () => {
-  function upToReview(name, buildOptions) {
-    const p = project(name);
+  function upToReview(name, buildOptions, projectOptions = {}) {
+    const p = project(name, projectOptions);
     const { head: sliceHead } = buildSlice(p.repo, buildOptions);
     const activated = factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
     assert.equal(activated.ok, true, activated.stderr);
@@ -163,17 +163,30 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { rmSync(p.repo, { recursive: true, force: true }); }
   });
 
-  it("refuses a slice that touched a privileged control-plane path", () => {
-    // package.json rather than .factory/: the control plane is gitignored, so it can
-    // never reach a diff. A slice quietly adding a dependency is the realistic case
-    // and is trackable.
-    const p = upToReview("privileged", { extra: "package.json" });
-    try {
-      const mergeCommit = mergeIntoFeature(p.repo);
-      const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
-      assert.equal(merged.ok, false);
-      assert.match(merged.stderr, /privileged control-plane paths/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+  it("governs manifests through seeded ownership while .gitignore stays privileged", () => {
+    const cases = [
+      { name: "owned-package", extra: "package.json", extraContent: "{}\n", paths: ["src/app/", "package.json"], status: "merged" },
+      { name: "owned-lockfile", extra: "package-lock.json", extraContent: "{\"lockfileVersion\":3}\n", paths: ["src/app/", "package-lock.json"], status: "merged" },
+      { name: "unowned-package", extra: "package.json", extraContent: "{}\n", paths: ["src/app/"], error: "slice 'be-thing' changed paths it does not own: package.json" },
+      { name: "owned-gitignore", extra: ".gitignore", extraContent: ".factory/\n# slice change\n", paths: ["src/app/", ".gitignore"], error: "slice 'be-thing' changed privileged control-plane paths: .gitignore" },
+    ];
+
+    for (const scenario of cases) {
+      const p = upToReview(scenario.name, { extra: scenario.extra, extraContent: scenario.extraContent }, { paths: scenario.paths });
+      try {
+        const mergeCommit = mergeIntoFeature(p.repo);
+        const before = readFileSync(join(p.runDir, "run.json"), "utf8");
+        const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+        if (scenario.status === "merged") {
+          assert.equal(merged.ok, true, `${scenario.name}: ${merged.stderr}`);
+          assert.equal(runJson(p.runDir).slices[0].status, "merged");
+        } else {
+          assert.equal(merged.ok, false, `${scenario.name}: the merge must be refused`);
+          assert.equal(merged.stderr.trim(), scenario.error);
+          assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), before, `${scenario.name}: run.json must be untouched`);
+        }
+      } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    }
   });
 
   it("refuses a merge whose review approved a different commit", () => {
