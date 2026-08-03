@@ -202,6 +202,37 @@ const CLAIMS = [
     },
   },
   {
+    id: "brief-approval-binds-the-presented-plan-bytes",
+    file: "skills/feature/SKILL.md",
+    fragment: "Only after that approval succeeds, invoke the separate first seed using the exact plan bytes that were\npresented.",
+    expect: "refused",
+    matches: /^plan\/slices\.json changed since the brief gate was presented; re-present it before approving\n$/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      const plan = join(repo, ".factory", RUN, "plan", "slices.json");
+      const path = join(repo, ".factory", RUN, "run.json");
+      assert.equal(decide(repo, "story", "approved").ok, true);
+      // Present plan A, then swap the file while the gate is still pending. Binding at approval
+      // instead of at presentation would hash B here and call it approved.
+      writeFileSync(plan, JSON.stringify(PLAN));
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--now", NOW]).ok, true);
+      const bound = JSON.parse(readFileSync(path, "utf8")).plan_digest;
+      assert.match(bound ?? "", /^sha256:[0-9a-f]{64}$/u, "presenting the brief gate must bind the plan bytes");
+      writeFileSync(plan, JSON.stringify({ slices: [{ ...PLAN.slices[0], id: "s2", test_plan: [] }] }));
+      const before = readFileSync(path);
+      const result = factory(repo, ["gate", RUN, "brief", "approved", "--now", NOW]);
+      assert.deepEqual(result, { ok: false,
+        out: "plan/slices.json changed since the brief gate was presented; re-present it before approving\n" });
+      assert.deepEqual(readFileSync(path), before, "a refused approval must not touch the manifest");
+      // Restoring the presented bytes lets the same approval through, so the guard binds bytes
+      // rather than blocking the flow.
+      writeFileSync(plan, JSON.stringify(PLAN));
+      assert.equal(factory(repo, ["gate", RUN, "brief", "approved", "--now", NOW]).ok, true);
+      assert.equal(JSON.parse(readFileSync(path, "utf8")).plan_digest, bound, "approval must keep the presented digest");
+      return result;
+    },
+  },
+  {
     id: "slices-seed-binds-the-approved-plan-bytes",
     file: "skills/feature/SKILL.md",
     fragment: "Only after that approval succeeds, invoke the separate first seed using the exact plan bytes that were\npresented.",

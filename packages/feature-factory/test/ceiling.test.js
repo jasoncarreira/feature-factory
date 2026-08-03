@@ -35,8 +35,8 @@ const RUN_JSON_KEYS = [
   "version", "run_id", "jira_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
   "status", "max_parallel_slices", "max_retries", "gates", "steps", "slices", "validator", "pr_url",
   // the four justified additions. base_commit was dropped: it was written and never
-  // read, which is the standard a durable field has to meet. plan_digest meets it: the seed
-  // reads it and refuses on mismatch, which is the only thing binding an approved plan to the
+  // read, which is the standard a durable field has to meet. plan_digest meets it: the seed reads
+  // it and refuses on mismatch, which is the only thing binding the plan a human approved to the
   // one that gets ratified.
   "mode", "terminal_result", "plan_digest",
 ];
@@ -420,16 +420,54 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //
     // Neither part is a feature, and the lines are the two checks plus the notes recording that the
     // original falsification of this pre-check's removal ran only where inodes are not reused.
-    // 2665 -> 2667 (#178): nextAction seed-slices branch and checked Brief-approval seed guard.
     //
-    // 2667 -> 2703, review of #186, and over that issue's authorized 2675 - Jason approved the
-    // field directly rather than the run absorbing the overshoot. Gate ordering alone left the
-    // approval bound to a filename: approve plan A, edit plan/slices.json, seed plan B, and the
-    // ratified `paths` and `test_plan` are ones nobody reviewed - an empty test_plan among them,
-    // which waives the observed test run. The lines are the digest recorded at brief approval,
-    // the comparison at the seed, and the refusal when no digest exists, plus the notes saying
-    // why a filename was never the thing being approved.
-    assert.ok(total < 2704, `production source is ${total} lines; the tripwire is 2704`);
+    // Equality was tried here and reverted, so that the argument survives instead of being re-run.
+    // `assert.strictEqual(total, 2665)` records reductions as well as growth, which is a real gain:
+    // under `<`, trimming five lines leaves five lines of headroom nobody voted for, and the next
+    // addition spends it silently. It is not worth what it costs. A run that deletes a line
+    // incidentally then fails a lock its plan never predicted, whose file it does not own, and the
+    // cheapest way back to green is to ADD a meaningless line. Manufacturing scope to satisfy an
+    // assertion is worse than the offset equality was meant to catch, and it is the move an agent
+    // optimizing for a green suite will find first. Deletions are also far more often incidental than
+    // additions, so that friction lands squarely on the behaviour this repo wants to encourage.
+    //
+    // Neither comparison catches an offset. A diff that adds one line and deletes an unrelated one
+    // nets zero either way; no assertion on a single total can see it. Run 175 did exactly that - it
+    // needed one line to split a diagnostic conflating two causes, could not raise the number because
+    // this file was outside its slice's approved paths, and paid with a comment line in the same
+    // handler. Catching that is work-reviewer's job and its prose now names it; making it unnecessary
+    // is work-decomposer's, which now bounds the expected change before paths are seeded. What is left
+    // for the assertion is unauthorized growth, and `<` does that.
+    //
+    // Issue #187 centralized duplicate scope assertions in this ledger. State-relocation AC8 and
+    // terminal-handoff AC20 each pinned production at exactly 2665 lines; those exact guards were
+    // removed because `< 2666` is now the sole executable production budget and intentionally
+    // permits reductions.
+    //
+    // State-relocation AC14 separately pinned `bin/factory.js` at 702 physical lines to enforce
+    // zero physical growth. That narrower 702-line zero-growth rule is intentionally retired
+    // without a replacement per-file budget. Its value and intent remain historical rationale
+    // only; the aggregate ceiling does not provide or enforce that guarantee.
+    //
+    // 2666 -> 2671 for issue #195's 2670-line result: one centralized slice-action helper is
+    // reused before and after the gate loop so unopened gates cannot mask in-flight work. The old
+    // inline scans were removed; no further safe deletion exists in this narrow state projection
+    // without obscuring its public precedence contract.
+    // 2670 -> 2726 (#178). Gate 2 now presents the plan before it is seeded, which needs a
+    // `seed-slices` state in nextAction, a checked first seed, and — the largest part — a
+    // `plan_digest` that binds the seeded bytes to the ones a human was shown.
+    //
+    // Two review rounds shaped that binding and both were right. The first: gate ordering alone left
+    // the approval bound to a *filename*, so approve plan A, edit plan/slices.json, seed plan B, and
+    // the ratified `paths` and `test_plan` are ones nobody reviewed — an empty test_plan among them,
+    // which waives the observed test run. The second: hashing at *approval* left a window, because
+    // the plan is presented when the gate moves to `pending`. So the digest is taken at presentation
+    // and approval refuses if the file moved since, rather than re-hashing whatever is on disk.
+    //
+    // The lines are that binding at three points, the refusals at each, and the notes recording why
+    // a filename was never the thing being approved. Well inside the 2900 Jason authorized for this
+    // batch; the number is what it landed on, not what was allowed.
+    assert.ok(total < 2727, `production source is ${total} lines; the tripwire is 2727`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
@@ -464,6 +502,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // have had no test left at all.
     // 83 -> 87 funds the four AC-mapped lifecycle sites approved for issue 173: sandbox,
     // effective push, state relocation, and terminal handoff.
+    // Issue #187 removed terminal-handoff AC20's duplicate exact 87-site guard. `<= 87` is now
+    // the sole executable `it(`/`test(` call-site budget and intentionally permits reductions.
     assert.ok(count <= 87, `${count} tests; the budget is 87`);
   });
 });

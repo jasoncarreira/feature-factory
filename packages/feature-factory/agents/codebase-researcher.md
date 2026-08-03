@@ -55,6 +55,8 @@ acknowledged gap, because the decomposer will assign ownership from it.
 - Existing components doing something similar — name them as the pattern to copy
 - Relevant shared pieces (guards, pipes, utilities)
 
+**Repo-wide rules.** Name the files that enforce a constraint across the whole repository, and say what each asserts: a coverage floor, a bundle or performance budget, a maximum file length, a dependency or import allowlist, a public-API or snapshot test, an exact list of permitted names, a cap on how much of something may exist. A lint config or CI threshold counts — it need not be a test. The decomposer assigns ownership of these files before `paths` freeze and can only do that for files this map names; one it misses becomes a build that must either edit out of lane or work around the rule.
+
 For both: identify the **closest existing example** to copy, and call out anything that looks like a landmine (subtree code, prod migration, shared store, auth-gated path).
 
 ## Working style
@@ -100,6 +102,9 @@ Every in-scope row cites a concrete sink/call site; record deliberate exclusions
 ### Patterns to follow
 - <e.g. "list reads go through the projection layer, not the entity directly">
 - <e.g. "these components share state through X, see Y">
+
+### Repo-wide rules
+- `<file>` — <what it asserts, and the current value if it states one> | none
 
 ### Landmines
 - <subtree / prod migration / shared state / perf / none>

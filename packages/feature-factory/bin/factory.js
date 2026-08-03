@@ -85,14 +85,32 @@ function planDigest(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
-// Read at approval, so the digest is of what was presented. A brief approval with no plan file is
-// refused: the plan is the artifact that gate exists to review.
-function approvedPlanDigest(runDir) {
+// Read when the gate is *presented*, not when it is approved. Approval-time hashing left a window:
+// present plan A, edit plan/slices.json to plan B while the gate is still pending, approve, and the
+// approval hashes B - so the digest proved the seed matched what the approval command read rather
+// than what a human was shown. Presenting is the moment the plan is put in front of somebody, and
+// the skill already says to reopen the gate to `pending` before mutating the plan, so a legitimate
+// revision re-presents and re-binds. A presentation with no plan file is refused: the plan is the
+// artifact that gate exists to review.
+function presentedPlanDigest(runDir) {
   try {
     return planDigest(readFileSync(join(runDir, "plan/slices.json")));
   } catch (error) {
-    throw new CliError(`could not read plan/slices.json to bind the brief approval: ${error.message}`);
+    throw new CliError(`could not read plan/slices.json to bind the brief presentation: ${error.message}`);
   }
+}
+
+// `pending` binds the presented bytes. `approved` keeps that binding and refuses if the file has
+// moved since, so the window between presentation and decision is closed rather than re-hashed.
+// Any other decision clears it: nothing is bound until a plan is presented again.
+function briefDigestFor(decision, state, runDir) {
+  if (decision === "pending") return presentedPlanDigest(runDir);
+  if (decision !== "approved") return null;
+  if (!state.plan_digest) throw new CliError("the brief gate was not presented; move it to pending first");
+  if (state.plan_digest !== presentedPlanDigest(runDir)) {
+    throw new CliError("plan/slices.json changed since the brief gate was presented; re-present it before approving");
+  }
+  return state.plan_digest;
 }
 
 function runDirFor(flags, runId) {
@@ -592,7 +610,7 @@ const HANDLERS = {
             artifact: flags.artifact ?? state.gates[name]?.artifact ?? null,
           },
         },
-        ...(name === "brief" ? { plan_digest: decision === "approved" ? approvedPlanDigest(runDir) : null } : {}),
+        ...(name === "brief" ? { plan_digest: briefDigestFor(decision, state, runDir) } : {}),
       }),
     });
     return emit(flags, { run_id: runId, gate: name, status: next.gates[name].status, at: next.gates[name].at });

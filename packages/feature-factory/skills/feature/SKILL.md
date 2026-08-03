@@ -445,7 +445,11 @@ factory status "$R" --json --repo "$RUN_REPO"
 ```
 
 Only after that approval succeeds, invoke the separate first seed using the exact plan bytes that were
-presented. Continue to Step 4 only after this command succeeds:
+presented. Those bytes are bound when the gate is moved to `pending`, so the plan must be written
+before it is presented, and must not change between presentation and decision: approving a plan that
+moved since presentation is refused, and so is seeding bytes other than the ones bound. To revise,
+reopen the gate to `pending` after the change, which re-presents and re-binds. Continue to Step 4 only
+after this command succeeds:
 
 ```sh
 factory slices-seed "$R" --from plan/slices.json --repo "$RUN_REPO"
