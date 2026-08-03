@@ -12,9 +12,6 @@
 // doing", for the sidebar and for anything else that asks.
 import { registerWorkflow } from "./config.js";
 
-export { readRun, readRunUnchecked, nextAction } from "feature-factory";
-export { registerWorkflow, registerAgents, registerSkill, registerCommand, parseFrontmatter } from "./config.js";
-
 // The plugin's one job: register the workflow with the host.
 //
 // It previously returned no hooks, on the reasoning that no session or task event is load-bearing
