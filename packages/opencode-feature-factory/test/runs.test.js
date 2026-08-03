@@ -736,6 +736,16 @@ describe("registering the workflow with the host", () => {
     return cfg;
   }
 
+  it("root plugin exposes only a host-callable default factory", async () => {
+    const moduleNamespace = await import("opencode-feature-factory");
+    assert.deepEqual(Object.keys(moduleNamespace), ["default"]);
+    for (const factory of Object.values(moduleNamespace)) {
+      assert.equal(typeof factory, "function");
+      const hooks = await factory({});
+      assert.equal(typeof hooks.config, "function");
+    }
+  });
+
   it("keeps workflow registration and generated TUI polling loadable for a parseable run missing steps", async () => {
     const root = repo("invalid-load");
     const calls = { registered: [], disposers: [] };
