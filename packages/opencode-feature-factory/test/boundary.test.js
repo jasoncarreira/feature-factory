@@ -224,6 +224,8 @@ function sourceTokens(source) {
     let previous = null;
     const parenthesisContexts = [];
     const braceContexts = [];
+    let pendingFunctionDeclaration = false;
+    let pendingClassDeclaration = false;
     while (index < source.length) {
       const character = source[index];
       if (/\s/u.test(character)) {
@@ -269,6 +271,10 @@ function sourceTokens(source) {
         const isMember = prior?.value === "." || prior?.value === "?.";
         previous.regexPrefix = REGEX_PREFIX_KEYWORDS.has(previous.value) && !isMember;
         previous.controlParen = CONTROL_PAREN_KEYWORDS.has(previous.value) && !isMember;
+        const declarationPosition = !prior || [";", "{", "}"].includes(prior.value)
+          || (prior.type === "identifier" && ["async", "default", "export"].includes(prior.value));
+        if (previous.value === "function") pendingFunctionDeclaration = declarationPosition;
+        if (previous.value === "class") pendingClassDeclaration = declarationPosition;
         index = end;
         continue;
       }
@@ -281,8 +287,13 @@ function sourceTokens(source) {
       }
       if (character === "{") {
         braceDepth += 1;
-        braceContexts.push(!previous || previous.regexPrefix || previous.value === "=>" || previous.value === ";"
-          || previous.value === "{" || (previous.type === "identifier" && ["do", "else", "finally", "try"].includes(previous.value)));
+        const classDeclarationBody = pendingClassDeclaration
+          && (previous?.type === "identifier" || [")", "]", "}"].includes(previous?.value));
+        const declarationBody = previous?.functionDeclarationClose === true || classDeclarationBody;
+        braceContexts.push(declarationBody || !previous || previous.regexPrefix || previous.value === "=>"
+          || previous.value === ";" || previous.value === "{"
+          || (previous.type === "identifier" && ["do", "else", "finally", "try"].includes(previous.value)));
+        if (classDeclarationBody) pendingClassDeclaration = false;
         previous = emit("punctuator", character, index, index + 1);
         index += 1;
         continue;
@@ -297,10 +308,19 @@ function sourceTokens(source) {
       }
       const token = MULTI_CHARACTER_TOKENS.find((candidate) => source.startsWith(candidate, index)) ?? character;
       let regexPrefix = false;
-      if (token === "(") parenthesisContexts.push(previous?.controlParen === true);
-      if (token === ")") regexPrefix = parenthesisContexts.pop() ?? false;
+      let functionDeclarationClose = false;
+      if (token === "(") {
+        parenthesisContexts.push({ control: previous?.controlParen === true, functionDeclaration: pendingFunctionDeclaration });
+        pendingFunctionDeclaration = false;
+      }
+      if (token === ")") {
+        const context = parenthesisContexts.pop();
+        regexPrefix = context?.control ?? false;
+        functionDeclarationClose = context?.functionDeclaration ?? false;
+      }
       previous = emit("punctuator", token, index, index + token.length);
       previous.regexPrefix = regexPrefix;
+      previous.functionDeclarationClose = functionDeclarationClose;
       index += token.length;
     }
     return index;
@@ -346,14 +366,43 @@ function staticString(token) {
   return token?.type === "string" || token?.type === "template" ? token.value : null;
 }
 
-function firstStaticArgument(tokens, opening, parentheses) {
+function expressionRanges(tokens, start, end) {
+  const ranges = [];
+  const depths = { "(": 0, "[": 0, "{": 0 };
+  const closing = { ")": "(", "]": "[", "}": "{" };
+  let rangeStart = start;
+  for (let index = start; index < end; index += 1) {
+    if (depths[tokens[index].value] !== undefined) depths[tokens[index].value] += 1;
+    else if (closing[tokens[index].value]) depths[closing[tokens[index].value]] -= 1;
+    else if (tokens[index].value === "," && Object.values(depths).every((depth) => depth === 0)) {
+      ranges.push({ start: rangeStart, end: index });
+      rangeStart = index + 1;
+    }
+  }
+  ranges.push({ start: rangeStart, end });
+  return ranges;
+}
+
+function staticRangeValue(tokens, range, parentheses) {
+  let { start, end } = range;
+  while (tokens[start]?.value === "(" && parentheses.get(start) === end - 1) {
+    start += 1;
+    end -= 1;
+  }
+  return end === start + 1 ? staticString(tokens[start]) : null;
+}
+
+function staticModuleArgument(tokens, opening, parentheses, invocation) {
   const closing = parentheses.get(opening);
   if (closing === undefined) return null;
-  for (let index = opening + 1; index < closing; index += 1) {
-    const value = staticString(tokens[index]);
-    if (value !== null) return value;
-  }
-  return null;
+  const arguments_ = expressionRanges(tokens, opening + 1, closing);
+  const position = invocation === "direct" ? 0 : 1;
+  const argument = arguments_[position];
+  if (!argument) return null;
+  if (invocation !== "apply") return staticRangeValue(tokens, argument, parentheses);
+  if (tokens[argument.start]?.value !== "[" || tokens[argument.end - 1]?.value !== "]") return null;
+  const applied = expressionRanges(tokens, argument.start + 1, argument.end - 1)[0];
+  return applied ? staticRangeValue(tokens, applied, parentheses) : null;
 }
 
 function commonJsLoads(tokens) {
@@ -380,8 +429,8 @@ function commonJsLoads(tokens) {
 
   const loads = [];
   const seen = new Set();
-  function add(token, opening) {
-    const module = firstStaticArgument(tokens, opening, parentheses);
+  function add(token, opening, invocation = "direct") {
+    const module = staticModuleArgument(tokens, opening, parentheses, invocation);
     if (module === null) return;
     const key = `${token.start}:${module}`;
     if (seen.has(key)) return;
@@ -394,12 +443,17 @@ function commonJsLoads(tokens) {
       const bounds = parenthesizedBounds(tokens, index, index, parentheses);
       if (tokens[bounds.last + 1]?.value === "(") add(token, bounds.last + 1);
       if (tokens[bounds.last + 1]?.value === "." && ["call", "apply"].includes(tokens[bounds.last + 2]?.value)
-        && tokens[bounds.last + 3]?.value === "(") add(token, bounds.last + 3);
+        && tokens[bounds.last + 3]?.value === "(") add(token, bounds.last + 3, tokens[bounds.last + 2].value);
     }
-    if (token.type === "identifier" && token.value === "require" && tokens[index - 1]?.value === "."
-      && tokens[index + 1]?.value === "(") add(token, index + 1);
-    if (staticString(token) === "require" && tokens[index - 1]?.value === "[" && tokens[index + 1]?.value === "]"
-      && tokens[index + 2]?.value === "(") add(token, index + 2);
+    const dotMember = token.type === "identifier" && token.value === "require" && tokens[index - 1]?.value === ".";
+    const computedMember = staticString(token) === "require" && tokens[index - 1]?.value === "["
+      && tokens[index + 1]?.value === "]";
+    const memberEnd = computedMember ? index + 1 : index;
+    if ((dotMember || computedMember) && tokens[memberEnd + 1]?.value === "(") add(token, memberEnd + 1);
+    if ((dotMember || computedMember) && tokens[memberEnd + 1]?.value === "."
+      && ["call", "apply"].includes(tokens[memberEnd + 2]?.value) && tokens[memberEnd + 3]?.value === "(") {
+      add(token, memberEnd + 3, tokens[memberEnd + 2].value);
+    }
   }
   return loads;
 }
@@ -428,8 +482,8 @@ function builtinModuleLoads(tokens) {
 
   const loads = [];
   const seen = new Set();
-  function add(token, opening) {
-    const module = firstStaticArgument(tokens, opening, parentheses);
+  function add(token, opening, invocation = "direct") {
+    const module = staticModuleArgument(tokens, opening, parentheses, invocation);
     if (module === null) return;
     const key = `${token.start}:${module}`;
     if (seen.has(key)) return;
@@ -442,15 +496,17 @@ function builtinModuleLoads(tokens) {
       const bounds = parenthesizedBounds(tokens, index, index, parentheses);
       if (tokens[bounds.last + 1]?.value === "(") add(token, bounds.last + 1);
       if (tokens[bounds.last + 1]?.value === "." && ["call", "apply"].includes(tokens[bounds.last + 2]?.value)
-        && tokens[bounds.last + 3]?.value === "(") add(token, bounds.last + 3);
+        && tokens[bounds.last + 3]?.value === "(") add(token, bounds.last + 3, tokens[bounds.last + 2].value);
     }
-    if (token.type === "identifier" && token.value === "getBuiltinModule" && tokens[index - 1]?.value === "."
-      && tokens[index + 1]?.value === "(") add(token, index + 1);
-    if (token.type === "identifier" && token.value === "getBuiltinModule" && tokens[index - 1]?.value === "."
-      && tokens[index + 1]?.value === "." && ["call", "apply"].includes(tokens[index + 2]?.value)
-      && tokens[index + 3]?.value === "(") add(token, index + 3);
-    if (staticString(token) === "getBuiltinModule" && tokens[index - 1]?.value === "[" && tokens[index + 1]?.value === "]"
-      && tokens[index + 2]?.value === "(") add(token, index + 2);
+    const dotMember = token.type === "identifier" && token.value === "getBuiltinModule" && tokens[index - 1]?.value === ".";
+    const computedMember = staticString(token) === "getBuiltinModule" && tokens[index - 1]?.value === "["
+      && tokens[index + 1]?.value === "]";
+    const memberEnd = computedMember ? index + 1 : index;
+    if ((dotMember || computedMember) && tokens[memberEnd + 1]?.value === "(") add(token, memberEnd + 1);
+    if ((dotMember || computedMember) && tokens[memberEnd + 1]?.value === "."
+      && ["call", "apply"].includes(tokens[memberEnd + 2]?.value) && tokens[memberEnd + 3]?.value === "(") {
+      add(token, memberEnd + 3, tokens[memberEnd + 2].value);
+    }
   }
   return loads;
 }
@@ -963,7 +1019,9 @@ describe("package boundary", () => {
     ]);
     assert.deepEqual(registrationReadOffenders(registration), []);
     assert.deepEqual(registrationReadOffenders(registrationBaseline()), []);
-    assert.deepEqual(registrationReadOffenders(registrationBaseline('const quoted = "readFileSync createRequire";\nconst prompt = `readFileSync createRequire`;')), []);
+    assert.deepEqual(registrationReadOffenders(registrationBaseline('const quoted = "readFileSync";')), []);
+    assert.deepEqual(registrationReadOffenders(registrationBaseline('const quoted = "createRequire";')), []);
+    assert.deepEqual(registrationReadOffenders(registrationBaseline('const prompt = `readFileSync createRequire`;')), []);
 
     const controls = [
       ["discarded-direct.js", 'readFileSync("opencode.json", "utf8");', "extra direct readFileSync"],
@@ -986,10 +1044,21 @@ describe("package boundary", () => {
       ["bracket-read.js", 'fs["readFileSync"]("opencode.json", "utf8");', "filesystem member read readFileSync"],
       ["aliased-commonjs-config.js", 'const load = require;\nload("../.claude/config.mjs");', "CommonJS configuration load"],
       ["member-commonjs-config.js", 'module.require("../.opencode/profiles.json");', "CommonJS configuration load"],
+      ["member-call-commonjs-config.js", 'module.require.call("safe-this", "../.claude/config.mjs");', "CommonJS configuration load"],
+      ["member-apply-commonjs-config.js", 'module.require.apply("safe-this", ["../.claude/config.mjs"]);', "CommonJS configuration load"],
+      ["computed-commonjs-config.js", 'module["require"]("../.opencode/profiles.json");', "CommonJS configuration load"],
+      ["computed-call-commonjs-config.js", 'module["require"].call("safe-this", "../.claude/config.mjs");', "CommonJS configuration load"],
+      ["computed-apply-commonjs-config.js", 'module["require"].apply("safe-this", ["../.claude/config.mjs"]);', "CommonJS configuration load"],
       ["member-alias-commonjs-config.js", 'const load = module["require"];\nload("../.claude/settings.json");', "CommonJS configuration load"],
+      ["called-commonjs-filesystem.js", 'require.call("safe-this", "node:fs");', "CommonJS filesystem load node:fs"],
+      ["applied-commonjs-filesystem.js", 'require.apply("safe-this", ["node:fs/promises"]);', "CommonJS filesystem load node:fs/promises"],
       ["builtin-filesystem.js", 'process.getBuiltinModule("node:fs");', "alternate built-in module acquisition node:fs"],
       ["aliased-builtin-filesystem.js", 'const builtin = process.getBuiltinModule;\nbuiltin("node:fs/promises");', "alternate built-in module acquisition node:fs/promises"],
       ["called-builtin-filesystem.js", 'process.getBuiltinModule.call(process, "node:fs");', "alternate built-in module acquisition node:fs"],
+      ["applied-builtin-filesystem.js", 'process.getBuiltinModule.apply(process, ["node:fs/promises"]);', "alternate built-in module acquisition node:fs/promises"],
+      ["computed-builtin-filesystem.js", 'process["getBuiltinModule"]("node:fs");', "alternate built-in module acquisition node:fs"],
+      ["computed-call-builtin-filesystem.js", 'process["getBuiltinModule"].call(process, "node:fs");', "alternate built-in module acquisition node:fs"],
+      ["computed-apply-builtin-filesystem.js", 'process["getBuiltinModule"].apply(process, ["node:fs/promises"]);', "alternate built-in module acquisition node:fs/promises"],
       ["duplicate-directory.js", "readdirSync(dir);", "duplicate allowed readdirSync"],
       ["duplicate-file.js", 'readFileSync(join(dir, file), "utf8");', "duplicate allowed readFileSync"],
       ["require-loader.js", 'createRequire(import.meta.url)("../.claude/config.mjs");', "createRequire result invoked as loader"],
@@ -1010,6 +1079,10 @@ describe("package boundary", () => {
       ["literal-text.js", '// eval(source); new Function(source);\nconst words = "eval Function";\nconst pattern = /eval\\s+Function[)]/giu;\nconst prompt = `eval and Function stay literal`;'],
       ["safe-template.js", 'const ratio = total / divisor / 2;\nconst text = `safe ${JSON.parse(value).name} ${"eval"} ${/Function/u} ${`nested ${"Function"}`}`;\nglobalThis[`safe`](value);\nvalue.match(/Function|eval/gu);\nif (ready) /eval|Function/u.test(value);'],
       ["post-block-regex.js", "if (ready) {} /eval|Function/u.test(value);"],
+      ["post-function-regex.js", "function declared() {} /eval|Function/u.test(value);"],
+      ["post-class-regex.js", "class Declared {} /eval|Function/u.test(value);"],
+      ["safe-commonjs-this-arg.js", 'module.require.call("node:vm", "safe-module");\nmodule["require"].apply("node:vm", ["safe-module"]);'],
+      ["safe-builtin-this-arg.js", 'process.getBuiltinModule.call("node:vm", "node:path");\nprocess["getBuiltinModule"].apply("node:vm", ["node:path"]);'],
     ]);
     assert.deepEqual(executionOffenders(allowed), []);
 
@@ -1036,8 +1109,18 @@ describe("package boundary", () => {
       ["require-vm.js", 'const vm = require("node:vm");', "CommonJS vm load"],
       ["aliased-require-vm.js", 'const load = require;\nconst vm = load("node:vm");', "CommonJS vm load"],
       ["member-require-vm.js", 'const vm = module.require("vm");', "CommonJS vm load"],
+      ["member-call-require-vm.js", 'const vm = module.require.call("safe-this", "node:vm");', "CommonJS vm load"],
+      ["member-apply-require-vm.js", 'const vm = module.require.apply("safe-this", ["vm"]);', "CommonJS vm load"],
+      ["computed-require-vm.js", 'const vm = module["require"]("node:vm");', "CommonJS vm load"],
+      ["computed-call-require-vm.js", 'const vm = module["require"].call("safe-this", "vm");', "CommonJS vm load"],
+      ["computed-apply-require-vm.js", 'const vm = module["require"].apply("safe-this", ["node:vm"]);', "CommonJS vm load"],
       ["member-alias-require-vm.js", 'const load = module["require"];\nconst vm = load("node:vm");', "CommonJS vm load"],
       ["builtin-vm.js", 'const vm = process.getBuiltinModule("node:vm");', "built-in vm load"],
+      ["called-builtin-vm.js", 'const vm = process.getBuiltinModule.call("safe-this", "node:vm");', "built-in vm load"],
+      ["applied-builtin-vm.js", 'const vm = process.getBuiltinModule.apply("safe-this", ["vm"]);', "built-in vm load"],
+      ["computed-builtin-vm.js", 'const vm = process["getBuiltinModule"]("node:vm");', "built-in vm load"],
+      ["computed-call-builtin-vm.js", 'const vm = process["getBuiltinModule"].call("safe-this", "vm");', "built-in vm load"],
+      ["computed-apply-builtin-vm.js", 'const vm = process["getBuiltinModule"].apply("safe-this", ["node:vm"]);', "built-in vm load"],
       ["dynamic-import.js", 'const parser = await import("safe-parser");', "dynamic import"],
       ["named-loader.js", 'import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\nload("config.js");', "createRequire result invoked as loader"],
       ["aliased-loader.js", 'import { createRequire as makeRequire } from "node:module";\nconst load = makeRequire(import.meta.url);\nload("config.js");', "createRequire result invoked as loader"],
