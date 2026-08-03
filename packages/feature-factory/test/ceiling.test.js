@@ -446,7 +446,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // zero physical growth. That narrower 702-line zero-growth rule is intentionally retired
     // without a replacement per-file budget. Its value and intent remain historical rationale
     // only; the aggregate ceiling does not provide or enforce that guarantee.
-    assert.ok(total < 2666, `production source is ${total} lines; the tripwire is 2666`);
+    //
+    // 2666 -> 2671 for issue #195's 2670-line result: one centralized slice-action helper is
+    // reused before and after the gate loop so unopened gates cannot mask in-flight work. The old
+    // inline scans were removed; no further safe deletion exists in this narrow state projection
+    // without obscuring its public precedence contract.
+    assert.ok(total < 2671, `production source is ${total} lines; the tripwire is 2671`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
