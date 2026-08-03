@@ -56,12 +56,24 @@ or by role, with per-agent exceptions where a role is not uniform:
 }]
 ```
 
-**Per project**, a repository's own `opencode.json` outranks all of it, because the host merges that
-before this plugin runs:
+### Per-repository overrides
+
+A repository's own `opencode.json` outranks all of it, because the host merges that before this
+plugin runs:
 
 ```jsonc
 { "agent": { "work-reviewer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" } } }
 ```
+
+For a targeted repository model or effort (`variant`) override, configure `agent.<name>.model` and/or
+`agent.<name>.variant` in that repository's `opencode.json`.
+
+OpenCode merges this file into `cfg` before the plugin runs; the plugin does not read `opencode.json`
+itself.
+
+**Warning:** Project-level plugin `profiles` replace the plugin's configured `profiles`; they are not
+partially merged. Supplying only part of `profiles` drops omitted entries and can silently make
+unmentioned agents fall back to OpenCode defaults. Use the targeted `agent` override above instead.
 
 What configuration cannot change: **who may edit, and who may delegate.** Those come from each agent's
 declared tools, because a reviewer that can modify the code it judges breaks the separation the chain

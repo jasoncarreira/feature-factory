@@ -727,13 +727,70 @@ describe("registering the workflow with the host", () => {
   // by hand, and when they had not, the run loaded a stale skill from a previous era and began
   // reverse-engineering how to hand-write run.json. Registration through the `config` hook removes the
   // install step entirely — and writes nothing, so it needs no exemption from the boundary test.
-  async function configured(options = {}) {
+  async function configured(options = {}, cfg = {}) {
     const plugin = (await import("../plugin/index.js")).default;
     const hooks = await plugin({}, options);
-    const cfg = {};
     await hooks.config(cfg);
     return cfg;
   }
+
+  const CONTROLLED_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
+  const FACTORY_PERMISSION_POLICY = {
+    "backend-builder": ["allow", "allow", "deny", "deny"],
+    "codebase-researcher": ["deny", "allow", "deny", "deny"],
+    "design-interpreter": ["deny", "deny", "deny", "deny"],
+    "frontend-builder": ["allow", "allow", "deny", "deny"],
+    "implementation-validator": ["deny", "allow", "deny", "deny"],
+    "spec-writer": ["deny", "deny", "deny", "deny"],
+    "story-reader": ["deny", "deny", "deny", "deny"],
+    "story-writer": ["deny", "deny", "deny", "deny"],
+    "test-verifier": ["allow", "allow", "deny", "deny"],
+    "work-decomposer": ["deny", "allow", "deny", "deny"],
+    "work-reviewer": ["deny", "allow", "deny", "deny"],
+    "feature-factory": ["allow", "allow", "allow", "allow"],
+  };
+
+  function controlledPermissions(permission) {
+    return Object.fromEntries(CONTROLLED_PERMISSION_KEYS.map((key) => [key, permission[key]]));
+  }
+
+  function expectedPermissions(values) {
+    return Object.fromEntries(CONTROLLED_PERMISSION_KEYS.map((key, index) => [key, values[index]]));
+  }
+
+  function oppositePermissions(values) {
+    return Object.fromEntries(CONTROLLED_PERMISSION_KEYS.map((key, index) => [
+      key, values[index] === "allow" ? "deny" : "allow",
+    ]));
+  }
+
+  it("documents safe per-repository agent overrides", () => {
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+    const sectionStart = readme.indexOf("### Per-repository overrides");
+    assert.notEqual(sectionStart, -1, "the published configuration guide must have a per-repository section");
+    const section = readme.slice(sectionStart, readme.indexOf("\n## ", sectionStart));
+    const normalized = section.replace(/\s+/gu, " ");
+    const example = /```jsonc\s+([\s\S]*?)```/u.exec(section)?.[1] ?? "";
+
+    assert.match(normalized, /opencode\.json/u);
+    assert.match(normalized, /agent\.<name>\.model/u);
+    assert.match(normalized, /agent\.<name>\.variant/u);
+    assert.match(example, /"agent"/u);
+    assert.match(example, /"model"/u);
+    assert.match(example, /"variant"/u);
+
+    const targeted = "For a targeted repository model or effort (`variant`) override, configure "
+      + "`agent.<name>.model` and/or `agent.<name>.variant` in that repository's `opencode.json`.";
+    const hostMerge = "OpenCode merges this file into `cfg` before the plugin runs; the plugin does not read "
+      + "`opencode.json` itself.";
+    const warning = "**Warning:** Project-level plugin `profiles` replace the plugin's configured `profiles`; "
+      + "they are not partially merged. Supplying only part of `profiles` drops omitted entries and can silently "
+      + "make unmentioned agents fall back to OpenCode defaults.";
+    const recommendation = "Use the targeted `agent` override above instead.";
+    for (const passage of [targeted, hostMerge, warning, recommendation]) assert.ok(normalized.includes(passage));
+    assert.ok(normalized.indexOf(recommendation) > normalized.indexOf(warning),
+      "the targeted override recommendation must follow the partial-profiles warning");
+  });
 
   it("registers the command, the skill path, and every agent the skill dispatches", async () => {
     const cfg = await configured();
@@ -780,44 +837,60 @@ describe("registering the workflow with the host", () => {
     assert.equal(agent.model, undefined, "a foreign model id would fail to resolve");
   });
 
-  it("derives each agent's permissions from the tools it declares", async () => {
-    // Flattening this was a real defect: every subagent got `edit: allow`, including
-    // `implementation-validator`, whose prompt says "Read-only: no edits, no commits", and
-    // `work-reviewer` — so a reviewer could modify the code it was judging. Separating the party
-    // being judged from the party judging is the premise of the chain.
+  it("enforces the complete controlled-permission policy for every factory agent", async () => {
     const cfg = await configured();
-    const editors = Object.entries(cfg.agent)
-      .filter(([name, agent]) => name !== "feature-factory" && agent.permission.edit === "allow")
-      .map(([name]) => name).sort();
-    assert.deepEqual(editors, ["backend-builder", "frontend-builder", "test-verifier"],
-      "only the agents that write code may edit; a judge with edit rights can make its subject pass");
-
-    // And the ones that declare no shell get none, so a reader cannot run a build.
-    for (const name of ["spec-writer", "story-writer", "story-reader", "design-interpreter"]) {
-      assert.equal(cfg.agent[name].permission.bash, "deny", `${name} declares no Bash`);
+    assert.deepEqual(Object.keys(cfg.agent).sort(), Object.keys(FACTORY_PERMISSION_POLICY).sort());
+    for (const [name, values] of Object.entries(FACTORY_PERMISSION_POLICY)) {
+      assert.deepEqual(controlledPermissions(cfg.agent[name].permission), expectedPermissions(values), name);
     }
-    assert.equal(cfg.agent["work-reviewer"].permission.bash, "allow",
-      "a reviewer may run the tests it judges, but not change them");
   });
 
-  it("resolves a model through agent, then role, then default, then one-for-all", async () => {
-    // Ported from the predecessor, which had a better vocabulary than the tier map I first wrote.
-    // Against a real configuration, five of seven roles were uniform and the two that were not are
-    // exactly what the per-agent level exists for — and a new agent inherits its role rather than
-    // needing a new entry.
-    const cfg = await configured({ profiles: {
-      "work-reviewer": { model: "exact/agent" },
-      reviewer: { model: "by/role", variant: "xhigh" },
-      default: { model: "the/default" },
-    }, profile: { model: "one/for-all" } });
+  it("resolves subagent model and variant through every precedence tier", async () => {
+    const options = {
+      profile: { model: "global/model", variant: "global-variant" },
+      profiles: {
+        default: { model: "default/model", variant: "default-variant" },
+        reviewer: { model: "reviewer/model", variant: "reviewer-variant" },
+        "work-reviewer": { model: "named/model", variant: "named-variant" },
+      },
+    };
+    const cfg = await configured(options);
+    assert.deepEqual(
+      { model: cfg.agent["work-reviewer"].model, variant: cfg.agent["work-reviewer"].variant },
+      { model: "named/model", variant: "named-variant" },
+    );
+    assert.deepEqual(
+      { model: cfg.agent["implementation-validator"].model,
+        variant: cfg.agent["implementation-validator"].variant },
+      { model: "reviewer/model", variant: "reviewer-variant" },
+    );
+    assert.deepEqual(
+      { model: cfg.agent["spec-writer"].model, variant: cfg.agent["spec-writer"].variant },
+      { model: "default/model", variant: "default-variant" },
+    );
 
-    assert.equal(cfg.agent["work-reviewer"].model, "exact/agent", "the agent's own entry wins");
-    assert.equal(cfg.agent["implementation-validator"].model, "by/role", "then its role");
-    assert.equal(cfg.agent["implementation-validator"].variant, "xhigh", "role sets variant too");
-    assert.equal(cfg.agent["spec-writer"].model, "the/default", "then the default");
+    const globalOnly = await configured({ profile: { model: "only/global", variant: "only-global-variant" } });
+    assert.deepEqual(
+      { model: globalOnly.agent["story-reader"].model, variant: globalOnly.agent["story-reader"].variant },
+      { model: "only/global", variant: "only-global-variant" },
+    );
 
-    const only = await configured({ profile: { model: "one/for-all" } });
-    assert.equal(only.agent["spec-writer"].model, "one/for-all", "then a single profile for everything");
+    const merged = await configured(options, { agent: { "work-reviewer": {
+      model: "project/model", variant: "project-variant",
+    } } });
+    assert.deepEqual(
+      { model: merged.agent["work-reviewer"].model, variant: merged.agent["work-reviewer"].variant },
+      { model: "project/model", variant: "project-variant" },
+    );
+    assert.deepEqual(
+      { model: merged.agent["implementation-validator"].model,
+        variant: merged.agent["implementation-validator"].variant },
+      { model: "reviewer/model", variant: "reviewer-variant" },
+    );
+    assert.deepEqual(
+      { model: merged.agent["spec-writer"].model, variant: merged.agent["spec-writer"].variant },
+      { model: "default/model", variant: "default-variant" },
+    );
   });
 
   it("uses the agent's declared effort when no profile sets a variant", async () => {
@@ -841,42 +914,136 @@ describe("registering the workflow with the host", () => {
     }
   });
 
-  it("lets a project configure agents without being overwritten", async () => {
-    // The host merges a repository's opencode.json before this hook runs, so anything already in the
-    // config is the project's choice and must win. This used to assign unconditionally, which
-    // discarded it silently — the reason per-project configuration appeared impossible.
-    const plugin = (await import("../plugin/index.js")).default;
-    const hooks = await plugin({}, { profiles: {
-      default: { model: "vendor/default" },
-      "work-reviewer": { model: "vendor/from-profile" },
-    } });
-    const cfg = { agent: { "work-reviewer": { model: "project/choice", variant: "low" } } };
-    await hooks.config(cfg);
-    assert.equal(cfg.agent["work-reviewer"].model, "project/choice", "the project outranks profile and default");
-    assert.equal(cfg.agent["work-reviewer"].variant, "low");
-    assert.equal(cfg.agent["spec-writer"].model, "vendor/default", "agents it did not mention keep the default");
+  it("preserves the orchestrator baseline and profile precedence", async () => {
+    const bare = await configured();
+    assert.equal(bare.agent["feature-factory"].model, undefined);
+    assert.equal(bare.agent["feature-factory"].variant, "xhigh");
+    assert.deepEqual(controlledPermissions(bare.agent["feature-factory"].permission),
+      expectedPermissions(FACTORY_PERMISSION_POLICY["feature-factory"]));
+
+    const tiers = {
+      profile: { model: "orchestrator/global", variant: "orchestrator-global-variant" },
+      default: { model: "orchestrator/default", variant: "orchestrator-default-variant" },
+      planning: { model: "orchestrator/planning", variant: "orchestrator-planning-variant" },
+      named: { model: "orchestrator/named", variant: "orchestrator-named-variant" },
+    };
+    const cases = [
+      ["global", { profile: tiers.profile }, tiers.profile],
+      ["default", { profile: tiers.profile, profiles: { default: tiers.default } }, tiers.default],
+      ["planning", { profile: tiers.profile,
+        profiles: { default: tiers.default, planning: tiers.planning } }, tiers.planning],
+      ["named", { profile: tiers.profile,
+        profiles: { default: tiers.default, planning: tiers.planning, "feature-factory": tiers.named } }, tiers.named],
+    ];
+    for (const [name, options, expected] of cases) {
+      const cfg = await configured(options);
+      assert.deepEqual(
+        { model: cfg.agent["feature-factory"].model, variant: cfg.agent["feature-factory"].variant },
+        expected,
+        name,
+      );
+    }
   });
 
-  it("refuses to let configuration grant a judge edit rights or delegation", async () => {
-    // Model and effort are preferences. Who may edit is not: a reviewer that can change the code it
-    // judges breaks the separation the chain is built on, and a delegating subagent makes the tree
-    // unbounded. Configuration cannot reach either.
-    const plugin = (await import("../plugin/index.js")).default;
-    const hooks = await plugin({}, {});
-    const cfg = { agent: { "implementation-validator": { permission: { edit: "allow", task: "allow" } } } };
-    await hooks.config(cfg);
-    assert.equal(cfg.agent["implementation-validator"].permission.edit, "deny");
-    assert.equal(cfg.agent["implementation-validator"].permission.task, "deny");
+  it("gives host-merged orchestrator preferences precedence without weakening its permissions", async () => {
+    const options = {
+      profile: { model: "global/model", variant: "global-variant" },
+      profiles: {
+        default: { model: "default/model", variant: "default-variant" },
+        planning: { model: "planning/model", variant: "planning-variant" },
+        "feature-factory": { model: "named/model", variant: "named-variant" },
+      },
+    };
+    const cfg = await configured(options, { agent: { "feature-factory": {
+      model: "project/model",
+      variant: "project-variant",
+      permission: { edit: "deny", bash: "deny", webfetch: "deny", task: "deny", "host-only": "ask" },
+    } } });
+    assert.equal(cfg.agent["feature-factory"].model, "project/model");
+    assert.equal(cfg.agent["feature-factory"].variant, "project-variant");
+    assert.deepEqual(controlledPermissions(cfg.agent["feature-factory"].permission),
+      expectedPermissions(FACTORY_PERMISSION_POLICY["feature-factory"]));
+    assert.equal(cfg.agent["feature-factory"].permission["host-only"], "ask");
   });
 
-  it("lets an operator profile set the model but never grant delegation", async () => {
-    // One level of orchestration is a property of the chain. An operator's profile may choose models —
-    // theirs already does — but a subagent that can dispatch turns the tree unbounded.
-    const cfg = await configured({ profiles: {
-      "work-reviewer": { model: "openai/gpt-5.6-sol", permission: { task: "allow" } },
-    } });
-    assert.equal(cfg.agent["work-reviewer"].model, "openai/gpt-5.6-sol", "profiles set the model");
-    assert.equal(cfg.agent["work-reviewer"].permission.task, "deny", "and cannot re-enable delegation");
-    assert.equal(cfg.agent["feature-factory"].permission.task, "allow", "only the orchestrator delegates");
+  it("holds controlled permissions against hostile project configuration", async () => {
+    const projectAgent = {
+      model: "project/external",
+      variant: "external-variant",
+      permission: { edit: "ask", bash: "allow", webfetch: "deny", task: "ask", "host-only": "opaque" },
+      arbitrary: { retained: true },
+    };
+    const projectAgents = Object.fromEntries(Object.entries(FACTORY_PERMISSION_POLICY).map(([name, values]) => [
+      name,
+      { permission: { ...oppositePermissions(values), "host-only": "ask" } },
+    ]));
+    projectAgents["project-agent"] = structuredClone(projectAgent);
+
+    const cfg = await configured({}, { agent: projectAgents });
+    for (const [name, values] of Object.entries(FACTORY_PERMISSION_POLICY)) {
+      assert.deepEqual(controlledPermissions(cfg.agent[name].permission), expectedPermissions(values), name);
+      assert.equal(cfg.agent[name].permission["host-only"], "ask", name);
+    }
+    assert.deepEqual(cfg.agent["project-agent"], projectAgent);
+  });
+
+  it("ignores hostile permission values in every factory-owned named profile", async () => {
+    const profiles = Object.fromEntries(Object.entries(FACTORY_PERMISSION_POLICY).map(([name, values], index) => [
+      name,
+      {
+        model: `profile/${name}`,
+        variant: `profile-variant-${index}`,
+        permission: oppositePermissions(values),
+      },
+    ]));
+    const cfg = await configured({ profiles });
+    for (const [name, values] of Object.entries(FACTORY_PERMISSION_POLICY)) {
+      assert.deepEqual(controlledPermissions(cfg.agent[name].permission), expectedPermissions(values), name);
+    }
+    assert.equal(cfg.agent["work-reviewer"].model, "profile/work-reviewer");
+    assert.equal(cfg.agent["work-reviewer"].variant,
+      `profile-variant-${Object.keys(FACTORY_PERMISSION_POLICY).indexOf("work-reviewer")}`);
+    assert.equal(cfg.agent["feature-factory"].model, "profile/feature-factory");
+    assert.equal(cfg.agent["feature-factory"].variant,
+      `profile-variant-${Object.keys(FACTORY_PERMISSION_POLICY).indexOf("feature-factory")}`);
+  });
+
+  it("does not discover repository or foreign-product configuration files", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ff-registration-poison-")));
+    const marker = "__ffForeignConfigPoison";
+    const poison = `globalThis.${marker} = true;\nthrow new Error("FOREIGN_CONFIG_POISON");\n`;
+    const foreignPaths = [
+      "opencode.json",
+      ".opencode/opencode.json",
+      ".opencode/profiles.json",
+      ".opencode/agents/foreign-poison.md",
+      ".claude/settings.json",
+      ".claude/profiles.json",
+      ".claude/agents/foreign-poison.md",
+      ".claude/config.mjs",
+    ];
+    try {
+      delete globalThis[marker];
+      mkdirSync(join(root, "agents"), { recursive: true });
+      mkdirSync(join(root, "skills"), { recursive: true });
+      writeFileSync(join(root, "agents", "safe-agent.md"), [
+        "---", "name: safe-agent", "description: Safe package-owned agent", "effort: low",
+        "role: research", "tools: Read", "---", "Safe prompt.", "",
+      ].join("\n"));
+      for (const relative of foreignPaths) {
+        const path = join(root, relative);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, poison);
+      }
+
+      const cfg = await configured({ root });
+      assert.deepEqual(Object.keys(cfg.agent).sort(), ["feature-factory", "safe-agent"]);
+      assert.equal(cfg.skills.paths[0], join(root, "skills"));
+      assert.equal(globalThis[marker], undefined);
+      assert.doesNotMatch(JSON.stringify(cfg), /FOREIGN_CONFIG_POISON|__ffForeignConfigPoison/u);
+    } finally {
+      delete globalThis[marker];
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
