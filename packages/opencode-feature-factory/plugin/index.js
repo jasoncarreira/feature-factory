@@ -10,11 +10,9 @@
 // than a stub — the orchestrator drives every state change through the CLI, so there is no
 // correctness work for a plugin hook to do. Its job is to answer "what is this repository's run
 // doing", for the sidebar and for anything else that asks.
-import { pollRuns } from "../observe/runs.js";
 import { registerWorkflow } from "./config.js";
 
 export { readRun, readRunUnchecked, nextAction } from "feature-factory";
-export { pollRuns, findControlPlane, listRuns, selectActiveRun } from "../observe/runs.js";
 export { registerWorkflow, registerAgents, registerSkill, registerCommand, parseFrontmatter } from "./config.js";
 
 // The plugin's one job: register the workflow with the host.

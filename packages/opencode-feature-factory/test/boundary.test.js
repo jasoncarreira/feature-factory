@@ -672,7 +672,14 @@ function forbiddenConfigurationModule(specifier) {
 // sources this allowlist examines. Keep the existing import graph explicit; widening it requires
 // expanding the scanner and its controls in the same change.
 const ALLOWED_REGISTRATION_LOCAL_IMPORTS = {
-  "plugin/index.js": new Set(["../observe/runs.js", "./config.js"]),
+  // Registration imports only the config module. `observe/runs.js` used to be re-exported here and
+  // imported for a binding nothing used, which pulled the whole run-reading module into the
+  // registration graph while this guard scanned only these two files — so an import-time read added
+  // there would have executed during registration and failed neither guard. The TUI and the tests
+  // import `observe/runs.js` directly, so nothing consumed those re-exports. Dropping the allowlist
+  // entry is the load-bearing half: re-adding the import now fails as an unscanned package-local
+  // static import rather than being waved through.
+  "plugin/index.js": new Set(["./config.js"]),
   "plugin/config.js": new Set(),
 };
 
