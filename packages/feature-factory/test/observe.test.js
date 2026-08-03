@@ -152,14 +152,17 @@ describe("attack 5 — a slice changes paths it does not own", () => {
       "a prefix that is not a path boundary must not count as ownership");
     assert.deepEqual(unownedPaths(["src/app/thing.ts"], ["src/app"]), []);
     assert.deepEqual(unownedPaths(["src/app/thing.ts"], ["src/app/thing.ts"]), []);
+    assert.deepEqual(unownedPaths(["package.json", "package-lock.json"], ["package.json", "package-lock.json"]), []);
+    assert.deepEqual(unownedPaths(["package.json"], ["src/app/"]), ["package.json"]);
     // An empty declaration owns nothing, rather than owning everything.
     assert.deepEqual(unownedPaths(changed, []), changed);
   });
 
   it("reports privileged control-plane paths regardless of declaration", () => {
-    const changed = [".factory/app-1/run.json", ".git/config", "package.json", "src/app/ok.ts"];
-    assert.deepEqual(privilegedPaths(changed).sort(),
-      [".factory/app-1/run.json", ".git/config", "package.json"].sort());
+    const privileged = [".gitignore", ".factory", ".factory/app-1/run.json", ".git", ".git/config"];
+    assert.deepEqual(privilegedPaths([...privileged, "package.json", "package-lock.json", "src/app/ok.ts"]).sort(),
+      privileged.sort());
+    assert.deepEqual(privilegedPaths(["package.json", "package-lock.json"]), []);
     // Declaring them does not grant them.
     assert.deepEqual(unownedPaths([".factory/app-1/run.json"], [".factory/"]), []);
     assert.equal(privilegedPaths([".factory/app-1/run.json"]).length, 1,
