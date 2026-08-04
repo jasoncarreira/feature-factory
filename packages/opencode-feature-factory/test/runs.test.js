@@ -1,9 +1,9 @@
 // Discovery and projection, against real directories.
 //
 // This package cannot spawn a process, so locating the control plane is filesystem reasoning and
-// the cases that matter are structural: a linked worktree, an unreadable record, several runs at
-// once. All three are built here rather than mocked, because the bug in each would be in the
-// path handling that a mock would replace.
+// the cases that matter are structural: a linked worktree, an unreadable record, legacy direct state,
+// CLI-created sandbox state, and several runs at once. They are built here rather than mocked, because
+// the bug in each would be in the path handling that a mock would replace.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -33,26 +33,22 @@ function repo(name) {
   return root;
 }
 
-// The container convention necessarily exists twice: the skill's shell *creates* it, and
-// `observe/runs.js` *reads* it, and the packages cannot share the value — this one may not import the
-// factory package for a path and may not spawn git. This helper used to be a third copy, which meant
-// the tests could agree with the reader while both drifted from the skill. It is now derived from the
-// skill's own formula, so every test that seeds a sandbox couples all three: if the skill and the
-// reader disagree, seeding lands somewhere discovery does not look and those tests fail.
+// The container convention necessarily exists twice: factory init *creates* it and `observe/runs.js`
+// *reads* it, while this package may neither import an init path nor spawn git. This fixture derives
+// the container from the skill's documented deterministic manifest candidate, so every sandbox seed
+// still couples the CLI-created location, the skill, and the reader.
 //
 // Drift here is silent and asymmetric — the run works, the sidebar reports "no runs" — which cost two
 // separate debugging rounds before the container even existed.
-const CONTAINER_FORMULA = (() => {
+const CONTAINER_NAME = (() => {
   const skill = readFileSync(new URL("../../feature-factory/skills/feature/SKILL.md", import.meta.url), "utf8");
-  const formula = /^C\s*=\s*(\S+)\s*$/mu.exec(skill)?.[1];
-  if (!formula) throw new Error("SKILL.md must state the sandbox container path as `C = <formula>`");
-  return formula;
+  const name = /`O\/(\.factory-sandboxes)\/R\/\.factory\/R`/u.exec(skill)?.[1];
+  if (!name) throw new Error("SKILL.md must state the CLI-created sandbox manifest candidate");
+  return name;
 })();
 
 function sandboxContainer(root) {
-  const match = /^O\/(.+)$/u.exec(CONTAINER_FORMULA);
-  if (!match) throw new Error("SKILL.md sandbox container formula must have the form `O/<relative-path>`");
-  return join(root, match[1]);
+  return join(root, CONTAINER_NAME);
 }
 
 function searchedLocations(...roots) {
@@ -61,6 +57,7 @@ function searchedLocations(...roots) {
 }
 
 function seedRun(root, runId, run) {
+  // Direct fixtures explicitly model the legacy `<repo>/.factory/<run-id>` compatibility path.
   const dir = join(root, ".factory", runId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
@@ -68,6 +65,7 @@ function seedRun(root, runId, run) {
 }
 
 function seedSandbox(root, runId, run) {
+  // Reader tests seed bytes directly while preserving the exact location fresh CLI init creates.
   const sandbox = join(sandboxContainer(root), runId);
   return { sandbox, dir: seedRun(sandbox, runId, run) };
 }
@@ -79,7 +77,7 @@ function deepFreeze(value) {
 }
 
 describe("control-plane discovery", () => {
-  it("finds the control plane from a nested directory", () => {
+  it("finds a legacy direct control plane from a nested directory", () => {
     const root = repo("nested");
     try {
       seedRun(root, "app-1", RUN());
@@ -88,7 +86,7 @@ describe("control-plane discovery", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("resolves a linked worktree to the main repository's control plane", () => {
+  it("resolves a linked worktree to the main repository's legacy direct control plane", () => {
     // The orchestrator makes one worktree per slice, and a linked worktree has no control plane of
     // its own — `.git` is a *file* pointing into the main repository. Without following it, opening
     // the sidebar while a slice worktree is the cwd shows no run, which is exactly when an operator
@@ -159,11 +157,11 @@ describe("control-plane discovery", () => {
     }
   });
 
-  it("unions a linked worktree's own and main control planes [AC6, AC15]", () => {
+  it("unions a linked worktree's own and main legacy direct planes [AC6, AC15]", () => {
     // Found during a real run, and caused by the previous fix. A slice worktree has no control plane
-    // of its own, so it must resolve to the main repository — but a linked worktree used as the
-    // *project* root does have one, because `factory init` writes to the directory it runs in.
-    // Resolving only to the main repository reported "no runs" while a valid run sat in the worktree.
+    // of its own, so it must resolve to the main repository — but legacy compatibility permits a
+    // linked worktree used as the *project* root to have a direct plane of its own. Resolving only to
+    // the main repository reported "no runs" while a valid legacy run sat in the worktree.
     const main = repo("linked-own");
     const linked = realpathSync(mkdtempSync(join(tmpdir(), "ff-tui-linked-own-")));
     try {
@@ -202,21 +200,21 @@ describe("control-plane discovery", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("reads the container the skill creates, stated once and derived here", () => {
-    // Names the coupling the other tests rely on implicitly. The skill is the authority — it is what
-    // the orchestrator runs — so discovery is required to agree with it, not the reverse. If the
-    // formula changes in SKILL.md and `sandboxContainer()` in observe/runs.js does not follow, a run
-    // creates its sandbox where nothing looks and the sidebar reports "no runs" while it works.
+  it("reads the CLI-created sandbox container stated by the skill", () => {
+    // Names the coupling the other tests rely on implicitly. The skill states the deterministic
+    // location that CLI init creates, so discovery is required to agree with it. If the formula
+    // changes in SKILL.md and `sandboxContainer()` in observe/runs.js does not follow, a CLI-created
+    // run appears where nothing looks and the sidebar reports "no runs" while it works.
     const root = repo("convention");
     try {
       const container = sandboxContainer(root);
       assert.equal(container, join(root, ".factory-sandboxes"),
-        "the skill's formula must still resolve to the documented shape");
+        "the skill's formula must still resolve to the CLI-created shape");
 
       const seeded = seedSandbox(root, "conv-1", RUN({ run_id: "conv-1" }));
       assert.equal(dirname(seeded.sandbox), container, "seeding uses the skill-derived container");
       assert.deepEqual(pollRuns(root).runs.map((run) => run.run_id), ["conv-1"],
-        "discovery must read the container the skill creates");
+        "discovery must read the container CLI init creates");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -238,7 +236,7 @@ describe("control-plane discovery", () => {
         ["same-id", "sandbox", true],
         ["same-id", "local", true],
         ["wrong-dir", "sandbox", false],
-      ], "[AC5, AC6] same-ID manifests remain distinct while deep and symlink children are rejected");
+      ], "[AC5, AC6] CLI-created-shape and legacy same-ID manifests remain distinct while deep and symlink children are rejected");
 
         // The container itself, not a child. `readdirSync` resolves a symlinked container, so
         // traversal crosses it before any Dirent is examined — which is exactly why the linked
@@ -261,7 +259,7 @@ describe("control-plane discovery", () => {
         "[AC5] a sandbox record carries its absolute sandbox path");
       assert.equal(snapshot.runs[0].manifest_path, realpathSync(join(sandbox.dir, "run.json")),
         "[AC6] a record carries its canonical manifest path");
-      assert.equal(snapshot.runs[1].sandbox_path, null, "[AC6] a legacy local record remains local");
+      assert.equal(snapshot.runs[1].sandbox_path, null, "[AC6] a legacy direct record remains local");
       assert.match(snapshot.runs[2].error, /does not match sandbox directory/u,
         "[AC5] a run_id mismatch is invalid rather than accepted");
       assert.deepEqual(snapshot.searched, searchedLocations(root),
