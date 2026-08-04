@@ -10,7 +10,7 @@
 // than a stub — the orchestrator drives every state change through the CLI, so there is no
 // correctness work for a plugin hook to do. Its job is to answer "what is this repository's run
 // doing", for the sidebar and for anything else that asks.
-import { registerWorkflow } from "./config.js";
+import { createBackgroundTool, registerWorkflow } from "./config.js";
 
 // The plugin's one job: register the workflow with the host.
 //
@@ -24,8 +24,9 @@ import { registerWorkflow } from "./config.js";
 // `config` is the hook that fixes it, and it writes nothing: the host takes the command, the skill
 // path and the agent definitions in memory. Upgrading the package upgrades all three, with no install
 // step and nothing stale left in a config directory.
-export default async function plugin(_input, options = {}) {
+export default async function plugin(input, options = {}) {
   return {
+    tool: { feature_background: createBackgroundTool(input) },
     // The session id, exported so a run can record the session that owns it.
     //
     // `factory lock` has always had a `session` field and the sidebar has always offered to jump to

@@ -107,6 +107,15 @@ describe("what actually ships", () => {
         join(consumer, "node_modules", "feature-factory", "package.json"), "utf8"));
       assert.equal(manifest.dependencies["feature-factory"], factory.version,
         "the installed integration must be pinned to the installed factory");
+      assert.equal(manifest.dependencies["@opencode-ai/plugin"], "1.17.13");
+      assert.equal(manifest.dependencies["@opencode-ai/sdk"], undefined);
+      const hostPlugin = JSON.parse(readFileSync(
+        join(consumer, "node_modules", "@opencode-ai", "plugin", "package.json"), "utf8"));
+      const hostSdk = JSON.parse(readFileSync(
+        join(consumer, "node_modules", "@opencode-ai", "sdk", "package.json"), "utf8"));
+      assert.equal(hostPlugin.version, "1.17.13");
+      assert.equal(hostPlugin.dependencies["@opencode-ai/sdk"], "1.17.13");
+      assert.equal(hostSdk.version, "1.17.13");
 
       // Bare specifiers, so `exports` names and conditions are exercised. Importing a manifest's
       // target path directly — which this test used to do — passes even when the export map is wrong.

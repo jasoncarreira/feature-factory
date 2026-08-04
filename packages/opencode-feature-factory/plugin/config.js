@@ -12,6 +12,184 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { tool } from "@opencode-ai/plugin";
+
+const RUN_ID = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u;
+
+function encoded(value, seen = new WeakSet()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "undefined") return { $type: "undefined" };
+  if (typeof value === "bigint") return { $type: "bigint", value: value.toString() };
+  if (typeof value === "number") return Number.isFinite(value) ? value : { $type: "nonfinite", value: String(value) };
+  if (typeof value === "symbol") return { $type: "symbol", value: String(value) };
+  if (typeof value === "function") return { $type: "function", name: value.name || null };
+  if (seen.has(value)) return { $type: "reference" };
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((entry) => encoded(entry, seen));
+  if (value instanceof Error) {
+    return {
+      $type: "error",
+      name: value.name,
+      message: value.message,
+      ...(Object.hasOwn(value, "cause") ? { cause: encoded(value.cause, seen) } : {}),
+    };
+  }
+  const properties = Object.fromEntries(Object.keys(value).map((key) => [key, encoded(value[key], seen)]));
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype === Object.prototype || prototype === null) return properties;
+  return { $type: "nonplain", constructor: value.constructor?.name || null, properties };
+}
+
+function rejected(operation, runId, reason) {
+  return {
+    status: "rejected",
+    operation,
+    ...(typeof runId === "string" && RUN_ID.test(runId) ? { runId } : {}),
+    reason,
+  };
+}
+
+function unknown(operation, runId, title, sessionId, stage, outcome) {
+  return {
+    status: "unknown",
+    operation,
+    runId,
+    title,
+    ...(sessionId ? { sessionId } : {}),
+    stage,
+    outcome,
+  };
+}
+
+function returnedOutcome(result) {
+  if (result && typeof result === "object" && result.error !== undefined) return encoded(result.error);
+  return encoded(result);
+}
+
+export function createBackgroundTool(input = {}) {
+  const client = input.client;
+  const projectId = input.project?.id;
+  const capturedDirectory = input.directory;
+  const capturedWorktree = input.worktree;
+  const inFlight = new Map();
+  const uncertain = new Map();
+
+  async function operate(operation, runId, request, decision, title) {
+    let listed;
+    try {
+      listed = await client.session.list({ query: { directory: capturedDirectory } });
+    } catch (error) {
+      return unknown(operation, runId, title, null, "list", String(error));
+    }
+    if (!listed || typeof listed !== "object" || listed.error !== undefined || !Array.isArray(listed.data)
+      || listed.data.some((session) => !session || typeof session !== "object"
+        || typeof session.id !== "string" || session.id.length === 0 || typeof session.title !== "string")) {
+      return unknown(operation, runId, title, null, "list", returnedOutcome(listed));
+    }
+    const sessionIds = listed.data.filter((session) => session.title === title).map((session) => session.id);
+    if (operation === "start" && sessionIds.length > 0) {
+      return { status: "existing", operation, runId, title, sessionIds };
+    }
+    if (operation === "answer" && sessionIds.length === 0) {
+      return { status: "not_backgrounded", operation, runId, title };
+    }
+    if (operation === "answer" && sessionIds.length > 1) {
+      return { status: "ambiguous", operation, runId, title, sessionIds };
+    }
+
+    let sessionId = sessionIds[0];
+    if (operation === "start") {
+      let created;
+      try {
+        created = await client.session.create({
+          query: { directory: capturedDirectory },
+          body: { title },
+        });
+      } catch (error) {
+        return unknown(operation, runId, title, null, "create", String(error));
+      }
+      if (!created || typeof created !== "object" || created.error !== undefined
+        || !created.data || typeof created.data !== "object"
+        || typeof created.data.id !== "string" || created.data.id.length === 0) {
+        return unknown(operation, runId, title, null, "create", returnedOutcome(created));
+      }
+      sessionId = created.data.id;
+    }
+
+    const controlText = `Drive exactly one feature-factory run as the bounded run-orchestrator. Load and follow the feature skill. The expected canonical run ID is "${runId}". The captured host worktree is "${capturedWorktree}". Independently derive the same run ID before any factory command, then enter existing Step 0. This session alone initializes or resumes the run, owns factory commands, claims and releases its lock, and continues from status.next/nextAction. Treat the next text part as the unchanged invocation request.`;
+    const parts = operation === "start"
+      ? [{ type: "text", text: controlText }, { type: "text", text: request }]
+      : [{ type: "text", text: decision }];
+    let prompted;
+    try {
+      prompted = await client.session.promptAsync({
+        path: { id: sessionId },
+        query: { directory: capturedDirectory },
+        body: { agent: "run-orchestrator", parts },
+      });
+    } catch (error) {
+      return unknown(operation, runId, title, sessionId, "prompt_async", String(error));
+    }
+    if (!prompted || typeof prompted !== "object" || prompted.error !== undefined
+      || !prompted.response || prompted.response.status !== 204) {
+      return unknown(operation, runId, title, sessionId, "prompt_async", returnedOutcome(prompted));
+    }
+    return { status: "dispatched", operation, runId, title, sessionId };
+  }
+
+  return tool({
+    description: "Start a feature-factory run in its scoped background session or answer its pending gate.",
+    args: {
+      operation: tool.schema.enum(["start", "answer"]),
+      runId: tool.schema.string(),
+      request: tool.schema.string().optional(),
+      decision: tool.schema.string().optional(),
+    },
+    async execute(args, context) {
+      const operation = args?.operation;
+      const runId = args?.runId;
+      let reason = null;
+      if (typeof runId !== "string" || !RUN_ID.test(runId)) reason = "invalid_run_id";
+      else if (operation === "start" && (typeof args.request !== "string" || args.request.trim().length === 0)) {
+        reason = "missing_request";
+      } else if (operation === "answer" && !(args.decision === "approve" || args.decision === "stop"
+        || (typeof args.decision === "string" && args.decision.startsWith("changes: ")
+          && args.decision.slice("changes: ".length).trim().length > 0))) {
+        reason = "invalid_decision";
+      } else if (operation !== "start" && operation !== "answer") reason = "invalid_operation";
+      else if (typeof projectId !== "string" || projectId.length === 0
+        || typeof capturedDirectory !== "string" || capturedDirectory.length === 0
+        || typeof capturedWorktree !== "string" || capturedWorktree.length === 0) reason = "invalid_plugin_scope";
+      else if (context?.agent !== "feature-factory") reason = "unauthorized_agent";
+      else if (context.directory !== capturedDirectory) reason = "directory_mismatch";
+      else if (context.worktree !== capturedWorktree) reason = "worktree_mismatch";
+      if (reason) return JSON.stringify(rejected(operation, runId, reason));
+
+      const key = `${projectId}\0${capturedDirectory}\0${capturedWorktree}\0${runId}`;
+      const active = inFlight.get(key);
+      if (active) {
+        if (operation !== "start" || active.operation !== "start") {
+          return JSON.stringify(rejected(operation, runId, "operation_in_flight"));
+        }
+        return JSON.stringify(await active.promise);
+      }
+      const prior = uncertain.get(key);
+      if (prior?.messageId === context.messageID) return JSON.stringify(prior.result);
+      if (prior) uncertain.delete(key);
+
+      const title = `feature-factory:${runId}@${Buffer.from(capturedWorktree, "utf8").toString("base64url")}`;
+      const promise = operate(operation, runId, args.request, args.decision, title);
+      inFlight.set(key, { operation, promise });
+      try {
+        const result = await promise;
+        if (result.status === "unknown") uncertain.set(key, { messageId: context.messageID, result });
+        return JSON.stringify(result);
+      } finally {
+        if (inFlight.get(key)?.promise === promise) inFlight.delete(key);
+      }
+    },
+  });
+}
 
 // The installed factory package's directory. Resolved through its one export rather than a
 // `./package.json` entry, so the factory's public surface stays a single module.
@@ -112,16 +290,15 @@ const ORCHESTRATOR = {
   mode: "primary",
   // The active run driver delegates and changes durable state only through factory commands.
   permission: { edit: "allow", bash: "allow", webfetch: "allow", task: "allow" },
-  prompt: "You are the feature-factory orchestrator. Follow the loaded `feature` skill exactly: it is "
-    + "the authority on the chain, the gates, and which commands are yours. Every state change goes "
-    + "through a `factory` command — never hand-write run.json. Re-derive evidence yourself rather "
-    + "than trusting a subagent's prose. Apply the loaded skill's mode-admission algorithm before "
-    + "intake: only exact standalone leading `--autonomous` and `--headless` tokens select a "
-    + "noninteractive mode; never infer mode from request prose. Persisted `run.json.mode` is immutable "
-    + "and is the sole gate authority on resume. In `interactive`, persist and present the pending gate "
-    + "and wait for a real human. In `headless`, preserve terminal `needs-human`; inability to ask never "
-    + "turns it into an interactive pending gate or autonomous decision. In `autonomous`, decide only "
-    + "when the existing preconditions authorize the decision and continue toward a draft PR.",
+  prompt: [
+    "You are the feature-factory orchestrator. Follow the loaded `feature` skill exactly: it is the authority on the chain, gates, admission, run-ID derivation, and which commands are yours. Every state change goes through a `factory` command; never hand-write run.json. Re-derive evidence yourself rather than trusting agent prose.",
+    "Apply outer background admission before mode admission. Only a case-sensitive exact `--background` first non-whitespace token is the selector. It must have at least one separator; consume the token and exactly one separator character and preserve every remaining code unit as the inner request. A later, repeated, near-miss, differently-cased, punctuated, or mode-preceded background token is request content. Empty or whitespace foreground input and a foreground request containing only repeated identical leading modes return `missing /feature request; no run created.` before effects. An outer selector with no non-mode request returns `missing /feature request after --background; no session or run created.` before effects. Conflicting inner or foreground mode prefixes use the existing exact conflict response before effects.",
+    "Apply the loaded skill's maximal mode-prefix algorithm to a derivation copy while forwarding admitted bytes unchanged: only exact standalone leading `--autonomous` and `--headless` tokens select a noninteractive mode, identical repeats are idempotent, and request prose never selects mode. Background is placement, never a mode. Persisted `run.json.mode` is immutable and is the sole gate authority on resume.",
+    "Before a background tool call, derive one canonical run ID by the skill's shared policy after inner mode admission. Classify only on a trimmed copy. Whole-candidate `N`, `#N`, or canonical `https://github.com/<owner>/<repo>/issues/N` require positive N, no query, fragment, trailing path, or extra token, read-only repository and issue resolution, and matching invocation repository; failures return `unresolvable issue reference: <unchanged reference>`, while success uses canonical decimal N without leading zeros. Otherwise collect distinct standalone case-insensitive ticket keys matching `[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*` bounded by non-ASCII-alphanumeric, count repeated identical keys once, lowercase one key, and reject multiple request keys as `ambiguous ticket keys: <sorted lowercase keys>; no session or run created.` Apply the same key rule to the current branch and reject multiple as `ambiguous branch ticket keys: <sorted lowercase keys>; no session or run created.` With no key, free text uses NFKD, removes combining marks, lowercases, replaces maximal non-`[a-z0-9]` sequences with `-`, and strips edge dashes. A final invalid or empty ID returns `cannot derive a canonical run id; no session or run created.` All these rejections occur before tool, client, manifest, factory, lock, task, sandbox, or worktree effects.",
+    "For admitted background start, do not inspect or initialize a manifest, run a factory command, claim a lock, dispatch a specialist, create isolation, or drive a stage. Call only `feature_background` with operation `start`, the canonical run ID, and the unchanged inner request. Treat `dispatched` as asynchronous admission only, never execution or completion; return immediately so this conversation remains usable. An `existing`, rejected, ambiguous, not-backgrounded, or unknown result is reported exactly and is never automatically retried.",
+    "Route a background gate answer only from either explicit `<canonical-run-id> approve`, `<canonical-run-id> stop`, or `<canonical-run-id> changes: <verbatim feedback>`, or a bare allowed decision when this conversation contains exactly one prior scoped background tool result identifying one run. Explicit ID takes precedence. Preserve the decision bytes unchanged. Invalid decisions return `invalid gate answer: expected exactly approve, changes: <feedback>, or stop; no run changed.` Missing or ambiguous context returns `cannot route gate answer: provide one canonical run id or use a conversation with exactly one prior background tool result.` Call only `feature_background` operation `answer`; never mutate locally, dispatch a fresh child, use delivery, steer, queue, wait, or treat admittedSeq as execution proof.",
+    "Foreground requests retain the existing workflow. In `interactive`, persist and present the pending gate and wait for a real human. In `headless`, preserve terminal `needs-human`; inability to ask never turns it into an interactive pending gate or autonomous decision. In `autonomous`, decide only when the existing preconditions authorize the decision and continue toward a draft PR.",
+  ].join("\n\n"),
 };
 
 // The eleven specialists a run driver dispatches. Named here rather than derived from the agents
@@ -152,22 +329,22 @@ const RUN_ORCHESTRATOR = {
     task: Object.fromEntries([...CHILD_TASK_TARGETS.map((name) => [name, "allow"]), ["*", "deny"]]),
   },
   prompt: [
-    "You are the run-orchestrator child. Load and follow the existing `feature` skill exactly. Accept exactly one `Request:` payload and drive exactly one factory run.",
-    "For fresh initialization only, apply the skill's exact-leading-token mode admission: only exact standalone leading `--autonomous` and `--headless` tokens select those modes, and request prose never selects mode. On resume, persisted `run.json.mode` is immutable and authoritative.",
+    "You are the bounded run-orchestrator for exactly one background feature-factory session. Load and follow the existing `feature` skill exactly. A start turn contains the tool's control text followed by one unchanged invocation-request text part. A later answer turn in this same session contains exactly one unchanged decision text part and no request framing.",
+    "Before the first factory command, apply the skill's maximal exact-leading-token inner mode admission to a derivation copy of the unchanged request, then independently apply the shared issue, ticket, branch, and free-text run-ID policy. The request part is already the admitted inner request, so a later or repeated `--background` token remains request content. Require exact equality with the expected canonical run ID in the control text and stop before initialization, lock, or factory effects on mismatch. For fresh initialization, only exact standalone leading `--autonomous` and `--headless` tokens select those modes, identical repeats are idempotent, and request prose never selects mode. Background is not a mode. On resume, persisted `run.json.mode` is immutable and authoritative.",
     "Enter the existing Step 0 unchanged. Select or resume only the deterministic existing sandbox path `O/.factory-sandboxes/<R>`; never initialize another path, invent isolation, create another orchestration layer, or hand-write `run.json`.",
-    "Use this child's real `FACTORY_SESSION_ID` as `SESSION_ID` for every claim, heartbeat, and release; never reuse the parent's session. Read durable state through `factory status \"$R\" --json --repo \"$RUN_REPO\"`, claim through existing Step 0, and continue only from `status.next`/`nextAction`.",
+    "Use this session's real `FACTORY_SESSION_ID` as `SESSION_ID` for every claim, heartbeat, release, and later resume. Read durable state through `factory status \"$R\" --json --repo \"$RUN_REPO\"`, claim through existing Step 0, and continue only from `status.next`/`nextAction`.",
     "This child owns state-changing `factory` commands for its run. Its task permission is target-scoped by the host: it may dispatch only these eleven specialists: `story-reader`, `story-writer`, `codebase-researcher`, `design-interpreter`, `spec-writer`, `work-decomposer`, `work-reviewer`, `test-verifier`, `implementation-validator`, `backend-builder`, and `frontend-builder`. Task calls to itself, `feature-factory`, any other `run-orchestrator`, and every arbitrary project-owned agent are refused by the host, not merely discouraged here. It may observe builders it dispatched; builders never observe themselves.",
-    "Persisted-mode authority is exact. In `interactive`, perform the orderly pending-gate handoff below, release the lock, and return to the parent. In `headless`, preserve terminal `needs-human`; do not masquerade as an interactive pending gate. In `autonomous`, decide only under the existing autonomous preconditions and continue through existing Step 7 toward a draft PR. Inability to ask never promotes `interactive` or `headless` to `autonomous`.",
+    "Persisted-mode authority is exact. In `interactive`, perform the orderly pending-gate handoff below, release the lock, and park this session. In `headless`, preserve terminal `needs-human`; do not masquerade as an interactive pending gate. In `autonomous`, decide only under the existing autonomous preconditions and continue through existing Step 7 toward a draft PR. Inability to ask never promotes `interactive` or `headless` to `autonomous`.",
     "Use this exact gate artifact map: Story gate `story` -> `artifacts/story.md`; Brief gate `brief` -> `artifacts/technical-brief.md`; Pre-PR gate `pre_pr` -> `gates/pre_pr.md`.",
     "Before every Gate 3 presentation, write or refresh `gates/pre_pr.md` with the current validator verdict when applicable, the acceptance-criterion/test table, the feature-branch diff and PR-base summary, migration and flag callouts, and remaining risks. Then open Gate 3 with `factory gate \"$R\" pre_pr pending --artifact gates/pre_pr.md --repo \"$RUN_REPO\"`.",
     "For an interactive pending-gate handoff: await every in-flight specialized task call and stop heartbeat calls; select `ARTIFACT` from the exact map; verify it exists, refreshing `gates/pre_pr.md` before Pre-PR; persist the pending gate with `factory gate \"$R\" \"$GATE\" pending --artifact \"$ARTIFACT\" --repo \"$RUN_REPO\"`; directly verify the artifact still exists, the manifest records the named gate pending with `ARTIFACT`, and qualified status reports it pending; release exactly with `factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"`; rerun qualified status and verify that session no longer holds the lock.",
     "A successful interactive handoff returns text containing exactly:\nRun: <R>\nRun repository: <RUN_REPO>\nOutcome: pending-gate\nGate: <GATE>\nArtifact: <run-relative ARTIFACT>\nStatus: pending",
     "If release fails or qualified status still reports the child lock, return:\nRun: <R>\nRun repository: <RUN_REPO>\nOutcome: retained-lock-error\nGate: <GATE>\nArtifact: <run-relative ARTIFACT>\nStatus: pending\nLock: retained\nError: <actual error>\nDo not claim successful handoff or invite a decision child.",
-    "After a pending handoff, the parent independently runs `factory status \"$R\" --json --repo \"$RUN_REPO\"` and trusts its observed run ID, selected repository, pending gate, persisted mode, and terminal state rather than child prose. It accepts exactly one explicit human response: `approve`, `changes: <verbatim feedback>`, or `stop`. It dispatches a fresh child with the unchanged original decoded request plus the parent-observed run, repository, gate, and decision.",
-    "Before decision mutation, the fresh child statuses the supplied run and repository, verifies a nonterminal state, persisted mode `interactive`, and the named pending gate, claims with its own `FACTORY_SESSION_ID` using `factory lock \"$R\" claim --session \"$SESSION_ID\" --repo \"$RUN_REPO\"`, then repeats qualified status verification. Refuse a mismatched run, repository, or gate, a terminal state, a non-pending gate, or decision injection into `headless` or `autonomous`. If refusal follows claim, release that fresh session first with `factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"`.",
+    "After a pending handoff, accept in this same session only one sole-part decision exactly equal to `approve`, `stop`, or `changes: <verbatim feedback>` with non-whitespace feedback. Refuse every other answer before mutation. Do not infer a run or gate from delivery metadata, use steer or queue behavior, or treat admittedSeq as proof that a prompt executed.",
+    "Before decision mutation, status this session's existing run and selected repository, verify a nonterminal persisted mode `interactive` run with exactly one pending gate, claim with this same `FACTORY_SESSION_ID` using `factory lock \"$R\" claim --session \"$SESSION_ID\" --repo \"$RUN_REPO\"`, then repeat qualified status verification. Refuse an early, mismatched, terminal, non-pending, multiple-pending, conflicting-lock, `headless`, or `autonomous` injection without gate mutation. If refusal follows claim, release this session first with `factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"` and verify unlock.",
     "Map `approve` to `factory gate \"$R\" \"$GATE\" approved --repo \"$RUN_REPO\"`. Map `changes: <feedback>` to `factory gate \"$R\" \"$GATE\" changes --repo \"$RUN_REPO\"`; keep feedback verbatim in task context, add no run key, follow `changes-at-gate:<name>`, revise only the affected stage, and re-present pending.",
-    "Map `stop` to `factory gate \"$R\" \"$GATE\" stop --repo \"$RUN_REPO\"`; require qualified status `next: stopped-at-gate:<GATE>`, await in-flight work, stop heartbeat calls, release the fresh child's session with `factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"`, and verify it is unlocked. Return run, repository, `Outcome: stopped-at-gate`, gate, and `Status: stop`. The gate stop ends orchestration: do not terminalize it or invite another resume. A release failure uses the retained-lock-error contract.",
-    "For approved and changes paths, reread qualified status and resume solely from `status.next`. Never initialize a replacement or repeat completed stages except the intentional changes loop.",
+    "Map `stop` to `factory gate \"$R\" \"$GATE\" stop --repo \"$RUN_REPO\"`; require qualified status `next: stopped-at-gate:<GATE>`, await in-flight work, stop heartbeat calls, release this session with `factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"`, and verify it is unlocked. Return run, repository, `Outcome: stopped-at-gate`, gate, and `Status: stop`. The gate stop ends orchestration: do not terminalize it or invite another resume. A release failure uses the retained-lock-error contract.",
+    "For approved and changes paths, reread qualified status and resume solely from `status.next`. Never initialize a replacement or repeat completed stages except the intentional changes loop. When the next interactive gate parks, persist it and release this same session's lock again.",
     "Terminal reporting follows the skill. `headless` uses existing terminal `needs-human` with reason `headless run reached a human gate` and retention rules. `autonomous` follows existing draft-PR and Step 7 behavior. An interactive `stop` remains unlocked and nonterminal at `stopped-at-gate:<name>` and retains the selected run repository. Blocked, partial, and needs-human retain selected sandbox status and repository. After Step 7 archives or removes a completed sandbox, query and report the canonical post-completion repository selected by Step 7, never a stale sandbox. Report only existing status, terminal result, and PR URL; add no durable fields.",
   ].join("\n\n"),
 };
@@ -240,31 +417,18 @@ export function registerCommand(cfg) {
   cfg.command ??= {};
   cfg.command.feature = {
     description: "Take a feature, ticket or idea end to end: story, spec, decomposition, parallel "
-      + "build, integration, gates, draft PR. Syntax: /feature [--autonomous | --headless] "
+      + "build, integration, gates, draft PR. Syntax: /feature [--background] [--autonomous | --headless] "
       + "<ticket key | feature idea>; no mode flag is interactive.",
     agent: "feature-factory",
-    template: "Load the `feature` skill and run it as the orchestrator for this request.\n\n"
-      + "Request: $ARGUMENTS\n\n"
-      + "Persist state through `factory` commands, route work to the specialized subagents the skill "
-      + "names, and observe evidence yourself. Persisted `run.json.mode` is the sole gate authority: "
-      + "`interactive` persists and presents a pending gate and waits for a real human; `headless` "
-      + "preserves terminal `needs-human`; `autonomous` decides only when existing preconditions "
-      + "authorize and continues toward a draft PR. Inability to ask never changes the persisted mode.",
-  };
-  cfg.command["feature-fanout"] = {
-    description: "Fan out independent feature runs through native task children. "
-      + "Syntax: /feature-fanout [\"<complete /feature arguments>\", ...]",
-    agent: "feature-factory",
     template: [
-      "Load the `feature` skill. Act only as the fan-out parent for this invocation.",
-      "Interpret `$ARGUMENTS` as a human-facing JSON array of strings. This is a bounded model prompt convention, not an executable parser or grammar-complete validator.",
-      "Arguments: $ARGUMENTS",
-      "If you cannot interpret a non-empty array or encounter any non-string element, reject the whole invocation before dispatch and return exactly: `Invalid /feature-fanout request: expected a non-empty JSON array of strings; no runs dispatched.` An empty array is invalid. An empty string element is valid and is dispatched unchanged for existing `/feature` intake.",
-      "For each decoded request string, preserve the decoded string byte-for-byte and unchanged. Do not trim, normalize, split, concatenate, deduplicate, pre-parse mode flags, or rewrite it. The decoded string, not its JSON token spelling, is the contract.",
-      "For N elements, issue exactly N native task calls to `run-orchestrator` in one assistant message, one child per element. Each child task prompt is exactly this framing around the unchanged decoded string:\nDrive exactly one factory run. Load and follow the `feature` skill as the run-orchestrator.\nRequest: <decoded request string, unchanged>",
-      "Native task calls may block until all children return. Use no other agent, JavaScript coordinator, `prompt_async`, raw HTTP or session calls, process spawning, report tool, or alternate dispatch mechanism.",
-      "The parent does not initialize child runs, claim child locks, or provision isolation. Each child uses only existing Step 0 and its deterministic sandbox path. Persisted `run.json.mode`, never conversation placement or human availability, governs each child independently: interactive hands off a verified pending gate and releases; headless preserves terminal `needs-human`; autonomous decides only under existing preconditions and continues toward a draft PR.",
-      "For an interactive pending-gate result, independently run qualified status and use the observed run, repository, gate, mode, and terminal state. Accept one explicit human response (`approve`, `changes: <verbatim feedback>`, or `stop`) and dispatch a fresh `run-orchestrator` child with the same unchanged original decoded request plus those observed fields and the decision. Refuse decision injection for headless or autonomous runs.",
+      "Load the `feature` skill and run it as the primary orchestrator for this invocation.",
+      "Request: $ARGUMENTS",
+      "Before effects, apply the skill's outer admission. Only exact case-sensitive `--background` as the first non-whitespace token selects background placement. Require a separator, consume exactly one separator character, and preserve every remaining inner code unit. Any later, repeated, near-miss, differently-cased, punctuated, or mode-preceded background token is request content.",
+      "Apply maximal exact-leading-token mode admission to a copy of the admitted request; preserve forwarded bytes unchanged. Exact repeated identical `--autonomous` or `--headless` prefixes are idempotent; both modes conflict; mode-only input is missing. Background is never a mode, and persisted `run.json.mode` remains the sole gate authority.",
+      "Reject empty, whitespace, or foreground mode-only input before effects with `missing /feature request; no run created.` Reject background input with no non-mode request before effects with `missing /feature request after --background; no session or run created.` Use the existing exact mode-conflict response. Do not call the tool or client and do not inspect or initialize a manifest, call factory, claim a lock, dispatch a task, create a sandbox, or drive a stage for any rejected input.",
+      "For background start, derive the canonical run ID before effects with the skill's shared issue, ticket, branch, and NFKD free-text policy. Preserve the inner request unchanged. Reject unresolvable issue references, ambiguous request or branch ticket keys, and an invalid or empty final ID with the skill's exact responses. Then invoke only `feature_background` operation `start` with that run ID and unchanged inner request. Return immediately after `dispatched`; HTTP 204 means admission only, not execution or completion. Report `existing`, `rejected`, or `unknown` without automatic retry.",
+      "For a gate answer, accept only explicit `<canonical-run-id> approve`, `<canonical-run-id> stop`, or `<canonical-run-id> changes: <verbatim feedback>`, or a bare allowed decision with exactly one prior scoped background tool result in this conversation. Explicit ID takes precedence. Invoke only `feature_background` operation `answer` with the exact decision bytes. Invalid or ambiguous routing is mutation-free. Never dispatch a fresh child, mutate a gate locally, use delivery, steer, queue, wait, or treat admittedSeq as execution proof.",
+      "For a foreground request, persist state through `factory` commands, route work to the specialized agents the skill names, and observe evidence yourself. Persisted `run.json.mode` is the sole gate authority: `interactive` persists and presents a pending gate and waits for a real human; `headless` preserves terminal `needs-human`; `autonomous` decides only when existing preconditions authorize and continues toward a draft PR. Inability to ask never changes the persisted mode.",
     ].join("\n\n"),
   };
 }
