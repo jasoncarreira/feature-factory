@@ -489,6 +489,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // The lines are that binding at three points, the refusals at each, and the notes recording why
     // a filename was never the thing being approved. Well inside the 2900 Jason authorized for this
     // batch; the number is what it landed on, not what was allowed.
+    assert.equal(total, 2719, "issue 214 must reduce the 2726-line baseline to 2719 production lines");
     assert.ok(total < 2727, `production source is ${total} lines; the tripwire is 2727`);
   });
 
