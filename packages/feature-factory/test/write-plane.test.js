@@ -3,17 +3,42 @@
 // untested claim in crash-safety code is worse than no claim.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
+import { ProtectedWriteError, writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { withRunJsonLock } from "../core/run-lock.js";
+import { dispatchInitPublication } from "../bin/init-publication.js";
 
 function root(name) {
   return mkdtempSync(join(tmpdir(), `ff-wp-${name}-`));
 }
 
 const hidden = (dir) => readdirSync(dir).filter((entry) => entry.endsWith(".tmp"));
+
+function candidate(runId = "publication") {
+  return {
+    version: 1,
+    run_id: runId,
+    issue_key: "private-value",
+    branch: `feature/${runId}`,
+    worktree: ".",
+    pr_base: "main",
+    created_at: "2026-08-04T12:00:00.000Z",
+    updated_at: "2026-08-04T12:00:00.000Z",
+    status: "running",
+    mode: "interactive",
+    max_parallel_slices: 3,
+    max_retries: 3,
+    gates: {},
+    steps: [],
+    slices: [],
+    validator: null,
+    terminal_result: null,
+    pr_url: null,
+    plan_digest: null,
+  };
+}
 
 describe("atomic writer", () => {
   it("writes, and leaves no temp file behind", async () => {
@@ -26,6 +51,87 @@ describe("atomic writer", () => {
         /protected create target already exists/u);
       assert.deepEqual(JSON.parse(readFileSync(join(dir, "run.json"), "utf8")), { version: 2 });
       assert.deepEqual(hidden(dir), [], "no temp file may survive a successful write");
+
+      const matrixRoot = realpathSync(root("init-publication"));
+      try {
+        const sandboxPath = join(matrixRoot, "sandbox");
+        const runDir = join(sandboxPath, ".factory", "publication");
+        mkdirSync(runDir, { recursive: true });
+        const sentinel = join(sandboxPath, "sentinel");
+        writeFileSync(sentinel, "preserve me\n");
+        const sentinelBefore = statSync(sentinel);
+        const run = candidate();
+        const classes = ["absent", "unsafe", "unreadable", "invalid", "different", "exact"];
+        const outcomes = [
+          { name: "normal", error: null, committed: true },
+          { name: "collision", error: new ProtectedWriteError("protected create target already exists"), committed: false },
+          { name: "cleanup-failed", error: new ProtectedWriteError("protected create published target but initial temporary cleanup failed"), committed: true },
+          { name: "cleanup-indeterminate", error: new ProtectedWriteError("protected create published target but temporary cleanup is indeterminate"), committed: true },
+          { name: "sync-failed", error: new ProtectedWriteError("protected target is committed but directory sync failed"), committed: true },
+          { name: "prelink-cleanup", error: new ProtectedWriteError("protected temporary file cleanup is indeterminate"), committed: false },
+          { name: "generic", error: new ProtectedWriteError("protected file commit failed", new Error("inner private failure")), committed: false },
+          { name: "arbitrary", error: new Error("arbitrary private failure"), committed: false },
+        ];
+        for (const outcome of outcomes) {
+          for (const classification of classes) {
+            let writerCalls = 0;
+            let observerCalls = 0;
+            let settled = false;
+            const writer = async (...args) => {
+              writerCalls += 1;
+              assert.deepEqual(args, [runDir, "run.json", run, { createOnly: true }]);
+              settled = true;
+              if (outcome.error) throw outcome.error;
+            };
+            const observeTarget = async ({ runDir: observedDir, candidate: observedCandidate, intendedBytes }) => {
+              observerCalls += 1;
+              assert.equal(settled, true);
+              assert.equal(observedDir, runDir);
+              assert.equal(observedCandidate, run);
+              assert.equal(intendedBytes, `${JSON.stringify(run, null, 2)}\n`);
+              return { classification, observedRun: run };
+            };
+            const succeeds = outcome.committed && classification === "exact";
+            if (succeeds) {
+              assert.deepEqual(await dispatchInitPublication({ runDir, sandboxPath, candidate: run }, { writer, observeTarget }), { observedRun: run }, `${outcome.name}/${classification}`);
+            } else {
+              await assert.rejects(
+                () => dispatchInitPublication({ runDir, sandboxPath, candidate: run }, { writer, observeTarget }),
+                (error) => {
+                  assert.match(error.message, new RegExp(`sandbox '${sandboxPath.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}'`, "u"));
+                  assert.match(error.message, new RegExp(`observed ${classification}`, "u"));
+                  assert.doesNotMatch(error.message, /private-value|inner private|arbitrary private/u);
+                  return true;
+                },
+                `${outcome.name}/${classification}`,
+              );
+            }
+            assert.equal(writerCalls, 1);
+            assert.equal(observerCalls, 1);
+            assert.deepEqual({ ino: statSync(sentinel).ino, bytes: readFileSync(sentinel, "utf8") }, { ino: sentinelBefore.ino, bytes: "preserve me\n" });
+          }
+        }
+
+        let observerCalls = 0;
+        await assert.rejects(
+          () => dispatchInitPublication({ runDir, sandboxPath, candidate: run }, {
+            writer: async () => {},
+            observeTarget: async () => { observerCalls += 1; throw new Error("unobservable private detail"); },
+          }),
+          (error) => {
+            assert.equal(error.message, `manifest state unobservable at sandbox '${sandboxPath}'`);
+            return true;
+          },
+        );
+        assert.equal(observerCalls, 1);
+
+        const realRunDir = join(sandboxPath, ".factory", "real-publication");
+        mkdirSync(realRunDir);
+        const realCandidate = candidate("real-publication");
+        const published = await dispatchInitPublication({ runDir: realRunDir, sandboxPath, candidate: realCandidate });
+        assert.deepEqual(published, { observedRun: realCandidate });
+        assert.equal(readFileSync(join(realRunDir, "run.json"), "utf8"), `${JSON.stringify(realCandidate, null, 2)}\n`);
+      } finally { rmSync(matrixRoot, { recursive: true, force: true }); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
