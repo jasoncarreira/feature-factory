@@ -956,7 +956,7 @@ describe("registering the workflow with the host", () => {
 
         const cfg = await configured();
         assert.equal(cfg.command.feature.agent, "feature-factory");
-        assert.deepEqual(Object.keys(cfg.command).sort(), ["feature", "feature-fanout"]);
+        assert.deepEqual(Object.keys(cfg.command), ["feature"]);
         assert.equal(cfg.skills.paths.length, 1);
         assert.match(cfg.skills.paths[0], /feature-factory\/skills$/u);
         const expectedAgents = [
@@ -1064,27 +1064,32 @@ describe("registering the workflow with the host", () => {
 
   it("registers the command, the skill path, and every agent the skill dispatches", async () => {
     const cfg = await configured();
-    assert.deepEqual(Object.keys(cfg.command).sort(), ["feature", "feature-fanout"]);
+    assert.deepEqual(Object.keys(cfg.command), ["feature"]);
     assert.equal(cfg.command.feature.agent, "feature-factory", "the command runs as the orchestrator");
     assert.equal(cfg.command.feature.description,
       "Take a feature, ticket or idea end to end: story, spec, decomposition, parallel build, "
-      + "integration, gates, draft PR. Syntax: /feature [--autonomous | --headless] "
+      + "integration, gates, draft PR. Syntax: /feature [--background] [--autonomous | --headless] "
       + "<ticket key | feature idea>; no mode flag is interactive.");
     assert.match(cfg.command.feature.template, /Request: \$ARGUMENTS/u,
       "the host must transport the raw invocation to the skill");
-    assert.match(cfg.agent["feature-factory"].prompt,
-      /Apply the loaded skill's mode-admission algorithm before intake/u,
-      "the skill owns mode admission");
-    assert.match(cfg.agent["feature-factory"].prompt,
-      /only exact standalone leading `--autonomous` and `--headless` tokens select a noninteractive mode/u,
-      "only the settled exact flags select noninteractive modes");
-    assert.match(cfg.agent["feature-factory"].prompt, /never infer mode from request prose/u,
-      "request prose cannot select a mode");
-    assert.doesNotMatch(cfg.agent["feature-factory"].prompt,
-      /unless the invocation explicitly asked for autonomous mode/u,
-      "the old prose selector must not remain");
     assert.match(cfg.agent["feature-factory"].description, /Persisted run mode is the sole gate authority/u);
     for (const passage of [
+      "Only a case-sensitive exact `--background` first non-whitespace token is the selector",
+      "consume the token and exactly one separator character and preserve every remaining code unit",
+      "A later, repeated, near-miss, differently-cased, punctuated, or mode-preceded background token is request content",
+      "missing /feature request; no run created.",
+      "missing /feature request after --background; no session or run created.",
+      "Apply the loaded skill's maximal mode-prefix algorithm to a derivation copy while forwarding admitted bytes unchanged",
+      "Background is placement, never a mode",
+      "unresolvable issue reference: <unchanged reference>",
+      "ambiguous ticket keys: <sorted lowercase keys>; no session or run created.",
+      "ambiguous branch ticket keys: <sorted lowercase keys>; no session or run created.",
+      "cannot derive a canonical run id; no session or run created.",
+      "Call only `feature_background` with operation `start`, the canonical run ID, and the unchanged inner request",
+      "asynchronous admission only, never execution or completion",
+      "explicit `<canonical-run-id> approve`, `<canonical-run-id> stop`, or `<canonical-run-id> changes: <verbatim feedback>`",
+      "Call only `feature_background` operation `answer`",
+      "never mutate locally, dispatch a fresh child, use delivery, steer, queue, wait, or treat admittedSeq as execution proof",
       "Persisted `run.json.mode` is immutable and is the sole gate authority on resume",
       "In `interactive`, persist and present the pending gate and wait for a real human",
       "In `headless`, preserve terminal `needs-human`",
@@ -1097,33 +1102,19 @@ describe("registering the workflow with the host", () => {
       "`autonomous` decides only when existing preconditions authorize",
       "Inability to ask never changes the persisted mode",
     ]) assert.ok(cfg.command.feature.template.includes(passage), passage);
-
-    const fanout = cfg.command["feature-fanout"];
-    assert.equal(fanout.agent, "feature-factory");
-    assert.equal(fanout.description, "Fan out independent feature runs through native task children. "
-      + "Syntax: /feature-fanout [\"<complete /feature arguments>\", ...]");
     for (const passage of [
-      "Interpret `$ARGUMENTS` as a human-facing JSON array of strings",
-      "bounded model prompt convention, not an executable parser or grammar-complete validator",
-      "Arguments: $ARGUMENTS",
-      "Invalid /feature-fanout request: expected a non-empty JSON array of strings; no runs dispatched.",
-      "reject the whole invocation before dispatch",
-      "An empty array is invalid",
-      "An empty string element is valid and is dispatched unchanged",
-      "preserve the decoded string byte-for-byte and unchanged",
-      "Do not trim, normalize, split, concatenate, deduplicate, pre-parse mode flags, or rewrite it",
-      "The decoded string, not its JSON token spelling, is the contract",
-      "exactly N native task calls to `run-orchestrator` in one assistant message",
-      "one child per element",
-      "Drive exactly one factory run. Load and follow the `feature` skill as the run-orchestrator.\nRequest: <decoded request string, unchanged>",
-      "Native task calls may block until all children return",
-      "Use no other agent, JavaScript coordinator, `prompt_async`, raw HTTP or session calls, process spawning, report tool, or alternate dispatch mechanism",
-      "does not initialize child runs, claim child locks, or provision isolation",
-      "Each child uses only existing Step 0 and its deterministic sandbox path",
-      "Persisted `run.json.mode`, never conversation placement or human availability, governs each child independently",
-      "dispatch a fresh `run-orchestrator` child with the same unchanged original decoded request",
-      "Refuse decision injection for headless or autonomous runs",
-    ]) assert.ok(fanout.template.includes(passage), passage);
+      "Only exact case-sensitive `--background` as the first non-whitespace token selects background placement",
+      "consume exactly one separator character, and preserve every remaining inner code unit",
+      "Any later, repeated, near-miss, differently-cased, punctuated, or mode-preceded background token is request content",
+      "preserve forwarded bytes unchanged",
+      "Background is never a mode",
+      "Do not call the tool or client and do not inspect or initialize a manifest, call factory, claim a lock, dispatch a task, create a sandbox, or drive a stage",
+      "invoke only `feature_background` operation `start` with that run ID and unchanged inner request",
+      "HTTP 204 means admission only, not execution or completion",
+      "Invoke only `feature_background` operation `answer` with the exact decision bytes",
+      "Never dispatch a fresh child, mutate a gate locally, use delivery, steer, queue, wait, or treat admittedSeq as execution proof",
+    ]) assert.ok(cfg.command.feature.template.includes(passage), passage);
+    assert.equal(Object.hasOwn(cfg.command, "feature-fanout"), false);
 
     const child = cfg.agent["run-orchestrator"];
     assert.equal(child.mode, "subagent");
@@ -1142,20 +1133,25 @@ describe("registering the workflow with the host", () => {
       "frontend-builder",
     ]) assert.ok(child.prompt.includes(`\`${name}\``), `${name} must be a named child target`);
     for (const passage of [
-      "Accept exactly one `Request:` payload and drive exactly one factory run",
-      "For fresh initialization only, apply the skill's exact-leading-token mode admission",
+      "bounded run-orchestrator for exactly one background feature-factory session",
+      "A start turn contains the tool's control text followed by one unchanged invocation-request text part",
+      "A later answer turn in this same session contains exactly one unchanged decision text part",
+      "apply the skill's maximal exact-leading-token inner mode admission to a derivation copy of the unchanged request",
+      "a later or repeated `--background` token remains request content",
+      "Require exact equality with the expected canonical run ID in the control text",
+      "For fresh initialization, only exact standalone leading `--autonomous` and `--headless` tokens select those modes",
+      "Background is not a mode",
       "persisted `run.json.mode` is immutable and authoritative",
       "Enter the existing Step 0 unchanged",
       "only the deterministic existing sandbox path `O/.factory-sandboxes/<R>`",
-      "Use this child's real `FACTORY_SESSION_ID` as `SESSION_ID`",
-      "never reuse the parent's session",
+      "Use this session's real `FACTORY_SESSION_ID` as `SESSION_ID`",
       "factory status \"$R\" --json --repo \"$RUN_REPO\"",
       "continue only from `status.next`/`nextAction`",
       "never initialize another path, invent isolation, create another orchestration layer, or hand-write `run.json`",
       "task permission is target-scoped by the host",
       "refused by the host, not merely discouraged here",
       "It may observe builders it dispatched; builders never observe themselves",
-      "In `interactive`, perform the orderly pending-gate handoff",
+      "In `interactive`, perform the orderly pending-gate park",
       "In `headless`, preserve terminal `needs-human`",
       "In `autonomous`, decide only under the existing autonomous preconditions and continue through existing Step 7",
       "Story gate `story` -> `artifacts/story.md`",
@@ -1168,13 +1164,14 @@ describe("registering the workflow with the host", () => {
       "manifest records the named gate pending with `ARTIFACT`",
       "factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"",
       "verify that session no longer holds the lock",
-      "Run: <R>\nRun repository: <RUN_REPO>\nOutcome: pending-gate\nGate: <GATE>\nArtifact: <run-relative ARTIFACT>\nStatus: pending",
+      "Run: <R>\nRun repository: <RUN_REPO>\nOutcome: parked-pending-gate\nGate: <GATE>\nArtifact: <run-relative ARTIFACT>\nStatus: pending",
       "Run: <R>\nRun repository: <RUN_REPO>\nOutcome: retained-lock-error\nGate: <GATE>\nArtifact: <run-relative ARTIFACT>\nStatus: pending\nLock: retained\nError: <actual error>",
-      "accepts exactly one explicit human response: `approve`, `changes: <verbatim feedback>`, or `stop`",
-      "fresh child with the unchanged original decoded request plus the parent-observed run, repository, gate, and decision",
-      "verifies a nonterminal state, persisted mode `interactive`, and the named pending gate",
+      "accept in this same session only one sole-part decision exactly equal to `approve`, `stop`, or `changes: <verbatim feedback>`",
+      "Refuse every other answer before mutation",
+      "Do not infer a run or gate from delivery metadata, use steer or queue behavior, or treat admittedSeq as proof",
+      "verify a nonterminal persisted mode `interactive` run with exactly one pending gate",
       "factory lock \"$R\" claim --session \"$SESSION_ID\" --repo \"$RUN_REPO\"",
-      "If refusal follows claim, release that fresh session first",
+      "If refusal follows claim, release this session first",
       "factory gate \"$R\" \"$GATE\" approved --repo \"$RUN_REPO\"",
       "factory gate \"$R\" \"$GATE\" changes --repo \"$RUN_REPO\"",
       "keep feedback verbatim in task context, add no run key",
@@ -1184,15 +1181,16 @@ describe("registering the workflow with the host", () => {
       "do not terminalize it or invite another resume",
       "resume solely from `status.next`",
       "Never initialize a replacement or repeat completed stages except the intentional changes loop",
+      "release this same session's lock again",
       "`needs-human` with reason `headless run reached a human gate`",
       "After Step 7 archives or removes a completed sandbox, query and report the canonical post-completion repository selected by Step 7",
       "Report only existing status, terminal result, and PR URL; add no durable fields",
     ]) assert.ok(child.prompt.includes(passage), passage);
+    assert.doesNotMatch(child.prompt, /Outcome: pending-gate/u);
+    assert.doesNotMatch(child.prompt, /decision child/u);
     assert.deepEqual(Object.keys(child).sort(), ["description", "mode", "permission", "prompt", "variant"]);
-    assert.deepEqual(Object.keys(fanout).sort(), ["agent", "description", "template"]);
     const registrationSource = readFileSync(new URL("../plugin/config.js", import.meta.url), "utf8");
     for (const mechanism of [
-      /\bprompt_async\s*\(/u,
       /\bfetch\s*\(/u,
       /\bJSON\.parse\s*\(/u,
       /\b(?:spawn|execFile|fork)\s*\(/u,
@@ -1200,6 +1198,240 @@ describe("registering the workflow with the host", () => {
       /node:child_process|child_process/u,
       /\b(?:coordinator|report)\s*:/u,
     ]) assert.doesNotMatch(registrationSource, mechanism);
+
+    const scope = { project: { id: "project-1" }, directory: "/repo", worktree: "/repo/🔥" };
+    const context = (overrides = {}) => ({
+      sessionID: "starter-session", messageID: "message-1", agent: "feature-factory",
+      directory: scope.directory, worktree: scope.worktree, ...overrides,
+    });
+    const resultOf = async (definition, args, overrides) => JSON.parse(
+      await definition.execute(args, context(overrides)),
+    );
+    const request = "  --autonomous Build café  ";
+    const title = `feature-factory:issue-210@${Buffer.from(scope.worktree, "utf8").toString("base64url")}`;
+    const calls = { list: [], create: [], prompt: [] };
+    const client = { session: {
+      async list(options) { calls.list.push(options); return { data: [] }; },
+      async create(options) { calls.create.push(options); return { data: { id: "session-new", title } }; },
+      async promptAsync(options) {
+        calls.prompt.push(options);
+        return { data: { admittedSeq: 99 }, response: { status: 204 } };
+      },
+    } };
+    const hooks = await plugin({ client, ...scope });
+    assert.deepEqual(Object.keys(hooks.tool), ["feature_background"]);
+    const background = hooks.tool.feature_background;
+    assert.deepEqual(Object.keys(background.args).sort(), ["decision", "operation", "request", "runId"]);
+    assert.equal(Object.hasOwn(background.args, "root"), false);
+    assert.equal(Object.hasOwn(background.args, "mode"), false);
+    const started = await resultOf(background, { operation: "start", runId: "issue-210", request });
+    assert.deepEqual(started, {
+      status: "dispatched", operation: "start", runId: "issue-210", title, sessionId: "session-new",
+    });
+    assert.deepEqual(calls.list, [{ query: { directory: scope.directory } }]);
+    assert.deepEqual(calls.create, [{ query: { directory: scope.directory }, body: { title } }]);
+    assert.deepEqual(calls.prompt, [{
+      path: { id: "session-new" },
+      query: { directory: scope.directory },
+      body: {
+        agent: "run-orchestrator",
+        parts: [
+          { type: "text", text: `Drive exactly one feature-factory run as the bounded run-orchestrator. Load and follow the feature skill. The expected canonical run ID is "issue-210". The captured host worktree is "${scope.worktree}". Independently derive the same run ID before any factory command, then enter existing Step 0. This session alone initializes or resumes the run, owns factory commands, claims and releases its lock, and continues from status.next/nextAction. Treat the next text part as the unchanged invocation request.` },
+          { type: "text", text: request },
+        ],
+      },
+    }]);
+
+    const associationCalls = { create: 0, prompt: [] };
+    const associationClient = { session: {
+      async list(options) {
+        assert.deepEqual(options, { query: { directory: scope.directory } });
+        return { data: [
+          { id: "other", title: `${title}-suffix` },
+          { id: "match-1", title },
+          { id: "match-2", title },
+        ] };
+      },
+      async create() { associationCalls.create += 1; return { data: { id: "wrong" } }; },
+      async promptAsync(options) { associationCalls.prompt.push(options); return { response: { status: 204 } }; },
+    } };
+    const association = (await plugin({ client: associationClient, ...scope })).tool.feature_background;
+    assert.deepEqual(await resultOf(association,
+      { operation: "start", runId: "issue-210", request: "request" }), {
+      status: "existing", operation: "start", runId: "issue-210", title,
+      sessionIds: ["match-1", "match-2"],
+    });
+    assert.equal(associationCalls.create, 0);
+    assert.deepEqual(associationCalls.prompt, []);
+    assert.deepEqual(await resultOf(association,
+      { operation: "answer", runId: "issue-210", decision: "approve" }, { messageID: "answer-ambiguous" }), {
+      status: "ambiguous", operation: "answer", runId: "issue-210", title,
+      sessionIds: ["match-1", "match-2"],
+    });
+
+    const answerCalls = [];
+    const answerClient = { session: {
+      async list() { return { data: [{ id: "same-session", title }] }; },
+      async create() { throw new Error("create must not be called for answer"); },
+      async promptAsync(options) { answerCalls.push(options); return { response: { status: 204 } }; },
+    } };
+    const answerTool = (await plugin({ client: answerClient, ...scope })).tool.feature_background;
+    const decision = "changes:  preserve these bytes  ";
+    assert.deepEqual(await resultOf(answerTool,
+      { operation: "answer", runId: "issue-210", decision }), {
+      status: "dispatched", operation: "answer", runId: "issue-210", title, sessionId: "same-session",
+    });
+    assert.deepEqual(answerCalls, [{
+      path: { id: "same-session" }, query: { directory: scope.directory },
+      body: { agent: "run-orchestrator", parts: [{ type: "text", text: decision }] },
+    }]);
+    const absentTool = (await plugin({ client: { session: {
+      async list() { return { data: [] }; },
+    } }, ...scope })).tool.feature_background;
+    assert.deepEqual(await resultOf(absentTool,
+      { operation: "answer", runId: "issue-210", decision: "stop" }), {
+      status: "not_backgrounded", operation: "answer", runId: "issue-210", title,
+    });
+
+    const zeroCalls = { count: 0 };
+    const untouchedClient = { session: {
+      async list() { zeroCalls.count += 1; return { data: [] }; },
+      async create() { zeroCalls.count += 1; return { data: { id: "bad" } }; },
+      async promptAsync() { zeroCalls.count += 1; return { response: { status: 204 } }; },
+    } };
+    const guarded = (await plugin({ client: untouchedClient, ...scope })).tool.feature_background;
+    for (const [args, overrides, reason] of [
+      [{ operation: "start", runId: "Bad", request: "x" }, {}, "invalid_run_id"],
+      [{ operation: "start", runId: 123, request: "x" }, {}, "invalid_run_id"],
+      [{ operation: "start", runId: "valid", request: " \n\t" }, {}, "missing_request"],
+      [{ operation: "answer", runId: "valid", decision: "Approve" }, {}, "invalid_decision"],
+      [{ operation: "answer", runId: "valid", decision: "changes:   " }, {}, "invalid_decision"],
+      [{ operation: "later", runId: "valid" }, {}, "invalid_operation"],
+      [{ operation: "start", runId: "valid", request: "x" }, { agent: "run-orchestrator" }, "unauthorized_agent"],
+      [{ operation: "start", runId: "valid", request: "x" }, { directory: "/other" }, "directory_mismatch"],
+      [{ operation: "start", runId: "valid", request: "x" }, { worktree: "/other" }, "worktree_mismatch"],
+    ]) {
+      const rejectedResult = await resultOf(guarded, args, overrides);
+      assert.equal(rejectedResult.status, "rejected");
+      assert.equal(rejectedResult.reason, reason);
+    }
+    const invalidScope = (await plugin({ client: untouchedClient, project: { id: "" },
+      directory: scope.directory, worktree: scope.worktree })).tool.feature_background;
+    assert.equal((await resultOf(invalidScope,
+      { operation: "start", runId: "valid", request: "x" })).reason, "invalid_plugin_scope");
+    assert.equal(zeroCalls.count, 0);
+
+    async function unknownCase(session, args = { operation: "start", runId: "issue-210", request: "x" }) {
+      const definition = (await plugin({ client: { session }, ...scope })).tool.feature_background;
+      return resultOf(definition, args);
+    }
+    for (const [session, stage] of [
+      [{ async list() { return { error: { code: "list" } }; } }, "list"],
+      [{ async list() { return {}; } }, "list"],
+      [{ async list() { return { data: {} }; } }, "list"],
+      [{ async list() { return { data: [{ id: "", title }] }; } }, "list"],
+      [{ async list() { throw new Error("list throw"); } }, "list"],
+      [{ async list() { return { data: [] }; }, async create() { return { error: { code: "create" } }; } }, "create"],
+      [{ async list() { return { data: [] }; }, async create() { return { data: {} }; } }, "create"],
+      [{ async list() { return { data: [] }; }, async create() { throw new Error("create throw"); } }, "create"],
+      [{ async list() { return { data: [] }; }, async create() { return { data: { id: "new" } }; },
+        async promptAsync() { return { error: { code: "prompt" }, response: { status: 204 } }; } }, "prompt_async"],
+      [{ async list() { return { data: [] }; }, async create() { return { data: { id: "new" } }; },
+        async promptAsync() { return { response: { status: 200 }, data: { admittedSeq: 1 } }; } }, "prompt_async"],
+      [{ async list() { return { data: [] }; }, async create() { return { data: { id: "new" } }; },
+        async promptAsync() { return { data: { admittedSeq: 1 } }; } }, "prompt_async"],
+      [{ async list() { return { data: [] }; }, async create() { return { data: { id: "new" } }; },
+        async promptAsync() { throw new Error("prompt throw"); } }, "prompt_async"],
+    ]) {
+      const outcome = await unknownCase(session);
+      assert.equal(outcome.status, "unknown");
+      assert.equal(outcome.stage, stage);
+      assert.doesNotThrow(() => JSON.stringify(outcome));
+    }
+
+    const complex = { absent: undefined, big: 12n, nan: Number.NaN, symbol: Symbol("s"), callable() {} };
+    complex.problem = new Error("broken", { cause: new TypeError("cause") });
+    complex.when = new Date(0);
+    complex.self = complex;
+    complex.repeated = complex.problem;
+    const encodedResult = await unknownCase({ async list() { return { error: complex }; } });
+    assert.equal(encodedResult.outcome.absent.$type, "undefined");
+    assert.deepEqual(encodedResult.outcome.big, { $type: "bigint", value: "12" });
+    assert.equal(encodedResult.outcome.nan.$type, "nonfinite");
+    assert.equal(encodedResult.outcome.symbol.$type, "symbol");
+    assert.equal(encodedResult.outcome.callable.$type, "function");
+    assert.equal(encodedResult.outcome.problem.$type, "error");
+    assert.equal(encodedResult.outcome.problem.cause.$type, "error");
+    assert.equal(encodedResult.outcome.when.$type, "nonplain");
+    assert.equal(encodedResult.outcome.self.$type, "reference");
+    assert.equal(encodedResult.outcome.repeated.$type, "reference");
+    const thrownResult = await unknownCase({ async list() { throw "verbatim thrown"; } });
+    assert.equal(thrownResult.outcome, "verbatim thrown");
+
+    let releaseShared;
+    let sharedLists = 0;
+    let sharedCreates = 0;
+    let sharedPrompts = 0;
+    const sharedClient = { session: {
+      async list() { sharedLists += 1; await new Promise((resolve) => { releaseShared = resolve; }); return { data: [] }; },
+      async create() { sharedCreates += 1; return { data: { id: "shared" } }; },
+      async promptAsync() { sharedPrompts += 1; return { response: { status: 204 } }; },
+    } };
+    const sharedTool = (await plugin({ client: sharedClient, ...scope })).tool.feature_background;
+    const sharedFirst = resultOf(sharedTool, { operation: "start", runId: "shared", request: "first" });
+    const sharedSecond = resultOf(sharedTool,
+      { operation: "start", runId: "shared", request: "second" }, { messageID: "message-2" });
+    await Promise.resolve();
+    assert.equal(sharedLists, 1);
+    releaseShared();
+    assert.deepEqual(await sharedSecond, await sharedFirst);
+    assert.deepEqual([sharedCreates, sharedPrompts], [1, 1]);
+
+    const answerWaiters = [];
+    const concurrentAnswerClient = { session: {
+      async list() { return new Promise((resolve) => answerWaiters.push(resolve)); },
+      async promptAsync() { return { response: { status: 204 } }; },
+    } };
+    const concurrentAnswer = (await plugin({ client: concurrentAnswerClient, ...scope })).tool.feature_background;
+    const firstAnswer = resultOf(concurrentAnswer,
+      { operation: "answer", runId: "issue-210", decision: "approve" });
+    const secondAnswer = await resultOf(concurrentAnswer,
+      { operation: "answer", runId: "issue-210", decision: "stop" }, { messageID: "message-2" });
+    assert.equal(secondAnswer.reason, "operation_in_flight");
+    answerWaiters[0]({ data: [{ id: "same", title }] });
+    assert.equal((await firstAnswer).status, "dispatched");
+
+    const distinctWaiters = [];
+    let distinctCreate = 0;
+    const distinctClient = { session: {
+      async list() { return new Promise((resolve) => distinctWaiters.push(resolve)); },
+      async create() { distinctCreate += 1; return { data: { id: `distinct-${distinctCreate}` } }; },
+      async promptAsync() { return { response: { status: 204 } }; },
+    } };
+    const distinctTool = (await plugin({ client: distinctClient, ...scope })).tool.feature_background;
+    const distinctA = resultOf(distinctTool, { operation: "start", runId: "run-a", request: "a" });
+    const distinctB = resultOf(distinctTool,
+      { operation: "start", runId: "run-b", request: "b" }, { messageID: "message-b" });
+    await Promise.resolve();
+    assert.equal(distinctWaiters.length, 2);
+    for (const resolve of distinctWaiters) resolve({ data: [] });
+    assert.equal((await distinctA).status, "dispatched");
+    assert.equal((await distinctB).status, "dispatched");
+
+    let uncertainLists = 0;
+    const uncertainClient = { session: {
+      async list() { uncertainLists += 1; return { error: { attempt: uncertainLists } }; },
+    } };
+    const uncertainTool = (await plugin({ client: uncertainClient, ...scope })).tool.feature_background;
+    const uncertainArgs = { operation: "start", runId: "uncertain", request: "x" };
+    const uncertainFirst = await resultOf(uncertainTool, uncertainArgs);
+    assert.deepEqual(await resultOf(uncertainTool, uncertainArgs), uncertainFirst);
+    assert.equal(uncertainLists, 1);
+    assert.equal((await resultOf(uncertainTool, uncertainArgs, { messageID: "later-human-message" })).status, "unknown");
+    assert.equal(uncertainLists, 2);
+    const reloaded = await plugin({ client: uncertainClient, ...scope });
+    assert.equal(uncertainLists, 2);
+    assert.deepEqual(Object.keys(reloaded.tool), ["feature_background"]);
 
     // The host discovers a skill from a directory, so the path must be the one the package ships.
     assert.equal(cfg.skills.paths.length, 1);
