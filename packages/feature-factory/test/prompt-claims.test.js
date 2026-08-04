@@ -888,6 +888,35 @@ const CLAIMS = [
     },
   },
   {
+    id: "github-issue-forms-select-one-cli-run",
+    file: "skills/feature/SKILL.md",
+    fragment: "Recognize an issue reference only when the entire remainder is exactly one of\n   these standalone forms: a positive decimal integer (`205`), that integer prefixed by `#` (`#205`),\n   or a canonical `https://github.com/<owner>/<repo>/issues/<positive-decimal>` URL.",
+    expect: "allowed",
+    matches: /"run_id": "205"/u,
+    act(repo) {
+      const references = [
+        "205",
+        "#205",
+        "https://github.com/jasoncarreira/opencode-feature-factory/issues/205",
+      ];
+      const runIds = references.map((reference) => {
+        const match = /^(?:#?([1-9]\d*)|https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/([1-9]\d*))$/u
+          .exec(reference);
+        assert.ok(match, `issue reference was not recognized: ${reference}`);
+        return match[1] ?? match[2];
+      });
+      assert.deepEqual(runIds, ["205", "205", "205"]);
+      const initialized = factory(repo, ["init", runIds[0], "--now", NOW]);
+      assert.equal(initialized.ok, true, initialized.out);
+      for (const runId of runIds) {
+        const status = factory(repo, ["status", runId, "--json"]);
+        assert.equal(status.ok, true, status.out);
+        assert.equal(JSON.parse(status.out).run_id, "205");
+      }
+      return factory(repo, ["status", runIds.at(-1), "--json"]);
+    },
+  },
+  {
     id: "no-mode-persists-interactive",
     file: "skills/feature/SKILL.md",
     fragment: "With no recognized leading mode token, omit `--mode`; existing `factory init` records\n     `interactive`.",
