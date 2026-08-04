@@ -12,15 +12,16 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CONTROL_PLANE } from "feature-factory";
-import { findControlPlane, listRuns, pollRuns, repositoryRoots, selectActiveRun } from "../observe/runs.js";
+import { findControlPlane, listRuns, pollRuns, repositoryRoots } from "../observe/runs.js";
 import { registerAgents } from "../plugin/config.js";
 import plugin from "../plugin/index.js";
 import { renderLines } from "../tui/lines.js";
 import { runCommands } from "../tui/commands.js";
 import { ORDER, SLOT } from "../tui/sidebar-config.js";
+import { LEGACY_RUN_MANIFESTS } from "../../../test/fixtures/legacy-run-manifests.js";
 
 const RUN = (overrides = {}) => ({
-  version: 1, run_id: "app-1", jira_key: null, branch: "feature/app-1", worktree: ".",
+  version: 1, run_id: "app-1", issue_key: null, branch: "feature/app-1", worktree: ".",
   created_at: "2026-07-30T12:00:00.000Z", updated_at: "2026-07-30T12:00:00.000Z",
   status: "running", mode: "interactive", max_parallel_slices: 3, max_retries: 3,
   gates: {}, steps: [], slices: [], validator: null, terminal_result: null, pr_url: null,
@@ -64,6 +65,13 @@ function seedRun(root, runId, run) {
   const dir = join(root, ".factory", runId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
+  return dir;
+}
+
+function seedRunBytes(root, runId, bytes) {
+  const dir = join(root, ".factory", runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "run.json"), bytes);
   return dir;
 }
 
@@ -321,18 +329,64 @@ describe("run projection", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("reports an unreadable record instead of omitting it", () => {
+  it("keeps legacy and invalid records visible without mutating them", () => {
     const root = repo("broken");
+    const archives = repo("archives");
     try {
       const dir = join(root, ".factory", "app-1");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "run.json"), "{ not json\n");
 
-      const runs = listRuns(root);
-      assert.equal(runs.length, 1, "a broken run must still appear");
-      assert.equal(runs[0].valid, false);
-      assert.match(renderLines({ repo: root, runs, active: selectActiveRun(runs) }).join("\n"), /INVALID/u);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+      const legacy = (overrides = {}) => {
+        const { issue_key, ...run } = RUN();
+        return { ...run, jira_key: issue_key, ...overrides };
+      };
+      const invalidRecords = [
+        ["dual-null", RUN({ run_id: "dual-null", jira_key: null })],
+        ["dual-equal", RUN({ run_id: "dual-equal", issue_key: "same", jira_key: "same" })],
+        ["dual-different", RUN({ run_id: "dual-different", issue_key: "new", jira_key: "old" })],
+        ["legacy-v2", legacy({ run_id: "legacy-v2", version: 2 })],
+        ["legacy-type", legacy({ run_id: "legacy-type", jira_key: 183 })],
+        ["unknown-key", RUN({ run_id: "unknown-key", unrelated: true })],
+      ];
+      for (const [runId, run] of invalidRecords) seedRun(root, runId, run);
+
+      const invalidBytes = new Map(["app-1", ...invalidRecords.map(([runId]) => runId)].map((runId) => {
+        const path = join(root, CONTROL_PLANE, runId, "run.json");
+        return [path, readFileSync(path)];
+      }));
+      const invalidSnapshot = pollRuns(root);
+      const { runs } = invalidSnapshot;
+      assert.equal(runs.length, invalidRecords.length + 1, "every invalid run must still appear");
+      assert.equal(runs.every((run) => !run.valid), true);
+      const invalidText = renderLines(invalidSnapshot).join("\n");
+      for (const run of runs) {
+        assert.match(invalidText, new RegExp(`${run.run_id}  INVALID`, "u"));
+        assert.ok(invalidText.includes(run.error));
+      }
+      for (const [path, bytes] of invalidBytes) assert.deepEqual(readFileSync(path), bytes);
+
+      for (const record of LEGACY_RUN_MANIFESTS) seedRunBytes(archives, record.id, record.bytes);
+      let archiveSnapshot;
+      for (let poll = 0; poll < 2; poll += 1) {
+        archiveSnapshot = pollRuns(archives);
+        assert.equal(archiveSnapshot.runs.length, LEGACY_RUN_MANIFESTS.length);
+        assert.equal(archiveSnapshot.runs.every((run) => run.valid), true);
+        for (const record of LEGACY_RUN_MANIFESTS) {
+          const projected = archiveSnapshot.runs.find((run) => run.run_id === record.id);
+          assert.ok(projected, `${record.source} must remain visible`);
+          assert.equal(projected.issue_key, record.id === "183" ? "183" : null);
+          assert.equal(Object.hasOwn(projected, "jira_key"), false);
+          assert.deepEqual(readFileSync(join(archives, CONTROL_PLANE, record.id, "run.json")), record.bytes,
+            `${record.source} must retain its exact bytes after poll ${poll + 1}`);
+        }
+      }
+      const run183 = archiveSnapshot.runs.find((run) => run.run_id === "183");
+      assert.match(renderLines({ repo: archives, runs: [run183], active: run183 })[0], /^183  183  completed\b/u);
+    } finally {
+      rmSync(archives, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("renders global precedence, dead sandboxes, and every invalid manifest [AC6, AC7, AC13, AC15]", () => {
@@ -456,7 +510,7 @@ describe("run projection", () => {
     const root = repo("render");
     try {
       seedRun(root, "app-1", RUN({
-        jira_key: "APP-1",
+        issue_key: "APP-1",
         gates: { story: { status: "approved", at: "2026-07-30T12:00:00.000Z", artifact: null },
           brief: { status: "pending", at: null, artifact: null } },
         slices: [
@@ -813,7 +867,7 @@ describe("registering the workflow with the host", () => {
         assert.equal(record.run_id, "invalid-load");
         assert.equal(record.valid, false);
         assert.match(record.error, /steps/u);
-        // readRunUnchecked output must pass validateRun in project before nextAction.
+        // readRunUnchecked output must pass validateRunForRead in project before nextAction.
         assert.equal(Object.hasOwn(record, "next"), false);
 
         const lines = renderLines(snapshot);
