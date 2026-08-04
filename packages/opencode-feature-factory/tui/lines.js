@@ -26,19 +26,29 @@ export function renderLines(snapshot) {
   const lines = primaryLines(run);
   const otherRuns = runs.filter((entry) => entry !== run
     && (!run.manifest_path || entry.manifest_path !== run.manifest_path));
-  const explicitDeadLocks = otherRuns.filter((entry) => entry.valid
-    && !entry.terminal && entry.deadLock && entry.sandbox_path);
-  for (const entry of explicitDeadLocks) {
-    lines.push(`${entry.run_id}  lock: stale (dead; sandbox retained)`);
-    lines.push(`sandbox: ${entry.sandbox_path}`);
+  for (const entry of otherRuns.filter((candidate) => candidate.valid && !candidate.terminal)) {
+    lines.push(...secondaryLines(entry));
   }
   for (const entry of otherRuns.filter((candidate) => !candidate.valid)) {
     lines.push(...invalidLines(entry));
   }
-  const otherCount = otherRuns.filter((entry) => entry.valid
-    && !explicitDeadLocks.includes(entry)).length;
+  const otherCount = otherRuns.filter((entry) => entry.valid && entry.terminal).length;
   if (otherCount > 0) lines.push(`(${otherCount} other run${otherCount === 1 ? "" : "s"})`);
   return lines;
+}
+
+function secondaryLines(run) {
+  if (run.deadLock && run.sandbox_path) {
+    return [
+      `${run.run_id}  lock: stale (dead; sandbox retained)`,
+      `sandbox: ${run.sandbox_path}`,
+      `next: ${run.next}`,
+    ];
+  }
+  return [
+    `${run.run_id}${run.jira_key ? `  ${run.jira_key}` : ""}`,
+    `next: ${run.next}`,
+  ];
 }
 
 function primaryLines(run) {

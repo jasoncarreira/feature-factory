@@ -132,7 +132,8 @@ function sandboxRuns(repo) {
 // The run an operator means when they open the sidebar: the one still going. Terminal runs stay
 // listed but never win, so finishing a run does not make yesterday's the headline.
 export function selectActiveRun(runs) {
-  return runs.find((run) => run.valid && !run.terminal)
+  return runs.find((run) => run.valid && !run.terminal && run.awaiting_gate)
+    ?? runs.find((run) => run.valid && !run.terminal)
     ?? runs.find((run) => run.valid && run.terminal)
     ?? runs.find((run) => !run.valid)
     ?? null;
