@@ -1181,7 +1181,7 @@ describe("registering the workflow with the host", () => {
       "task permission is target-scoped by the host",
       "refused by the host, not merely discouraged here",
       "It may observe builders it dispatched; builders never observe themselves",
-      "In `interactive`, perform the orderly pending-gate handoff",
+      "In `interactive`, perform the orderly pending-gate park",
       "In `headless`, preserve terminal `needs-human`",
       "In `autonomous`, decide only under the existing autonomous preconditions and continue through existing Step 7",
       "Story gate `story` -> `artifacts/story.md`",
@@ -1194,7 +1194,7 @@ describe("registering the workflow with the host", () => {
       "manifest records the named gate pending with `ARTIFACT`",
       "factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"",
       "verify that session no longer holds the lock",
-      "Run: <R>\nRun repository: <RUN_REPO>\nOutcome: pending-gate\nGate: <GATE>\nArtifact: <run-relative ARTIFACT>\nStatus: pending",
+      "Run: <R>\nRun repository: <RUN_REPO>\nOutcome: parked-pending-gate\nGate: <GATE>\nArtifact: <run-relative ARTIFACT>\nStatus: pending",
       "Run: <R>\nRun repository: <RUN_REPO>\nOutcome: retained-lock-error\nGate: <GATE>\nArtifact: <run-relative ARTIFACT>\nStatus: pending\nLock: retained\nError: <actual error>",
       "accept in this same session only one sole-part decision exactly equal to `approve`, `stop`, or `changes: <verbatim feedback>`",
       "Refuse every other answer before mutation",
@@ -1216,6 +1216,8 @@ describe("registering the workflow with the host", () => {
       "After Step 7 archives or removes a completed sandbox, query and report the canonical post-completion repository selected by Step 7",
       "Report only existing status, terminal result, and PR URL; add no durable fields",
     ]) assert.ok(child.prompt.includes(passage), passage);
+    assert.doesNotMatch(child.prompt, /Outcome: pending-gate/u);
+    assert.doesNotMatch(child.prompt, /decision child/u);
     assert.deepEqual(Object.keys(child).sort(), ["description", "mode", "permission", "prompt", "variant"]);
     const registrationSource = readFileSync(new URL("../plugin/config.js", import.meta.url), "utf8");
     for (const mechanism of [
