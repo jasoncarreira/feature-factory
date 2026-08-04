@@ -7,18 +7,19 @@ description: >
   written only by the `factory` CLI), evidence is observed rather than trusted from agent prose,
   high-risk steps are reviewed, and independent slices build in parallel. The compatibility shorthand
   remains `/feature [--autonomous | --headless] <ticket key | feature idea>`.
-  The complete intake is
-  `/feature [--autonomous | --headless] <ticket key | issue reference | feature idea>`.
+  The complete foreground intake is
+  `/feature [--autonomous | --headless] <ticket key | issue reference | feature idea>`; use
+  `/feature --background [--autonomous | --headless] <request>` for a dedicated host session.
 ---
 
 # /feature — the software factory
 
-You are the active **run driver**: either the primary `feature-factory` agent driving `/feature` or a
-config-only `run-orchestrator` child driving one fan-out request. You route work through specialized
-subagents, hold the line on scope, own the worktree/PR lifecycle, and own a durable control plane on
-disk. An existing run's immutable persisted mode is the sole gate authority: an interactive child
-performs a verified pending-gate handoff and releases its lock, headless preserves `needs-human`, and
-autonomous decides only under the existing preconditions.
+You are the active **run driver**: either the primary `feature-factory` agent driving a foreground
+`/feature` request or the bounded `run-orchestrator` driving one run in its dedicated background host
+session. You route work through specialized subagents, hold the line on scope, own the worktree/PR
+lifecycle, and own a durable control plane on disk. An existing run's immutable persisted mode is the
+sole gate authority: an interactive background driver performs a verified park and releases its lock,
+headless preserves `needs-human`, and autonomous decides only under the existing preconditions.
 
 Two principles make this a factory rather than a session workflow:
 
@@ -75,6 +76,18 @@ Before any intake action, including ticket, story, or design detection, branch i
 derivation, manifest or state reads, and every `factory` command, process the raw invocation arguments
 as follows:
 
+First apply placement admission. Ignore leading whitespace only while locating the first token. If that
+token is not exactly and case-sensitively `--background`, preserve the entire invocation as foreground
+input. A later token, a mode token before it, casing or punctuation variants, assignment forms, and
+near misses are ordinary foreground request content. If the first token is `--background`, it is the
+outer selector: require a following whitespace separator, consume the leading syntax, the selector,
+and exactly one separator character, and preserve every remaining code unit as the inner request.
+`--background` is placement, never a mode, and a second selector is inner request content.
+
+Apply the following mode-prefix algorithm to the foreground input or to a copy of the unchanged inner
+request. Trimming for missing-request classification and run-id derivation never changes bytes forwarded
+to a background session:
+
 1. Ignore leading whitespace. The **mode prefix** is the maximal consecutive sequence of
    whitespace-delimited tokens that are exactly and case-sensitively `--autonomous` or `--headless`.
    The first other token ends the prefix.
@@ -100,6 +113,11 @@ Natural-language intent, `--interactive`, capitalization variants, abbreviations
 punctuation forms, quoted lookalikes, and near misses are request content, not selectors. Do not add a
 generic malformed-option rejection.
 
+After successful nonconflicting admission, reject an empty, whitespace-only, or mode-only foreground
+remainder with exactly `missing /feature request; no run created.` Reject the corresponding background
+remainder with exactly `missing /feature request after --background; no session or run created.` These
+rejections and a mode conflict precede run-id derivation and every tool, client, state, or CLI action.
+
 After successful nonconflicting admission, an existing manifest always resumes its immutable persisted
 mode. Invocation flags never reinitialize, compare, or mutate an existing run's mode.
 
@@ -109,35 +127,37 @@ Exact leading invocation flags choose a mode only for fresh initialization. Once
 its immutable persisted `run.json.mode` controls gate handling on that invocation and every later
 resume; invocation flags do not select resumed behavior:
 
-- **interactive** — the primary `/feature` driver persists and presents each gate, then waits for
-  `approve` / `changes: <...>` / `stop`; a fan-out child instead performs the verified pending-gate
-  handoff below, releases its lock, and returns to the parent.
+- **interactive** — the foreground `/feature` driver persists and presents each gate, then waits for
+  `approve` / `changes: <...>` / `stop`; a background driver instead performs the verified park below,
+  releases its lock, and ends its turn without deciding the gate.
 - **headless** — a gate that requires a human records `needs-human` and stops.
 - **autonomous** — gates may be decided without a human only under the preconditions below.
 
-## Fan-out parent and run-orchestrator child
+## Background dispatch and the run-orchestrator
 
-`/feature-fanout` treats its arguments as a human-facing JSON array of strings. This is bounded prompt
-framing, not an executable parser or a grammar-complete validator. If the primary cannot interpret a
-non-empty array or encounters a non-string element, reject the whole invocation before dispatch and
-return exactly:
+For admitted background input, the primary derives the canonical run ID through the shared Step 0
+policy before any background tool call. It then invokes the single registered `feature_background` tool
+with `operation: "start"`, that canonical `runId`, and the unchanged inner `request`. It does not read or
+initialize a manifest, create a sandbox or worktree, run a `factory` command, claim a lock, dispatch a
+specialist, or drive a stage. The tool uses only its plugin-provided authenticated client and captured
+scope; the primary and the run-orchestrator never construct a URL, port, credential, raw session call,
+process, or alternate orchestration layer.
 
-```text
-Invalid /feature-fanout request: expected a non-empty JSON array of strings; no runs dispatched.
-```
+The deterministic association title is
+`feature-factory:<runId>@<base64url(UTF-8 captured worktree)>`. Exact title equality in the captured
+directory's complete host-session list is the only association. A start that finds one or more matching
+sessions reports them and creates or prompts none. With no match, the tool creates one titled session
+and admits the unchanged request asynchronously to `run-orchestrator`. A successful admission means
+only that the host accepted the prompt; it does not prove execution or completion. The primary returns
+immediately so its conversation remains usable. Do not persist placement, session association, tool
+uncertainty, or any new manifest key or state file.
 
-An empty string element is still a string and is dispatched unchanged for normal `/feature` intake.
-For every element, preserve the decoded request string byte-for-byte in exactly one child prompt:
-
-> Drive exactly one factory run. Load and follow the `feature` skill as the run-orchestrator.
-> Request: <decoded request string, unchanged>
-
-The decoded string, not its JSON token spelling, is the contract. Do not trim, normalize, split,
-concatenate, deduplicate, pre-parse mode flags, or rewrite it. For N elements, the primary issues
-exactly N native task calls to `run-orchestrator` in one assistant message; those calls may block until
-all children return. Do not insert another agent, JavaScript coordinator, `prompt_async`, HTTP or raw
-session calls, process spawning, a report tool, or any other dispatch layer. The fan-out parent does not
-initialize child runs, claim their locks, or provision isolation.
+The dedicated background session receives a bounded control part followed by the unchanged request as
+a separate text part. The `run-orchestrator` repeats outer/inner admission and the shared derivation
+before its first `factory` command and requires its result to equal the expected canonical run ID in the
+control part. A mismatch stops without manifest, lock, or CLI mutation. Only this background session
+initializes or resumes the run, uses its own real `FACTORY_SESSION_ID`, owns every state-changing
+`factory` command, dispatches specialists, observes its builders, and drives Steps 0 through 7.
 
 The only specialized task targets a run driver may dispatch are exactly:
 
@@ -154,25 +174,20 @@ The only specialized task targets a run driver may dispatch are exactly:
 - `frontend-builder`
 
 A `run-orchestrator` must not dispatch itself, `feature-factory`, another `run-orchestrator`, or an
-arbitrary project-owned agent. It accepts exactly one `Request:` payload, loads and follows this skill,
-and drives exactly one run. Apply exact-leading-token mode admission only when fresh initialization is
-required. On resume, immutable persisted `run.json.mode` is authoritative regardless of invocation
-flags, conversation placement, or whether a human can be asked.
-
-The child enters Step 0 unchanged. It selects or resumes only the deterministic existing sandbox path
-defined there and never creates a different worktree, clone, isolation directory, replacement run, or
-orchestration layer. It uses its own real `FACTORY_SESSION_ID` for every claim, heartbeat, and release,
-never the parent's session. It reads durable state only through
+arbitrary project-owned agent. It accepts one admitted request, loads and follows this skill, and drives
+exactly one run. It selects or resumes only the deterministic existing sandbox path defined in Step 0
+and never creates a different worktree, clone, isolation directory, replacement run, or orchestration
+layer. It reads durable state only through
 `factory status "$R" --json --repo "$RUN_REPO"`, claims through Step 0, and continues solely from
 `status.next` or `nextAction`. It never hand-writes `run.json`.
 
 Persisted mode determines what each driver may do:
 
-| Persisted mode | Primary `/feature` | Fan-out child | Parent decision injection |
+| Persisted mode | Foreground driver | Background run-orchestrator | Background gate answer |
 |---|---|---|---|
-| `interactive` | Persist and present the pending gate, then wait for a real human | Perform the verified pending-gate handoff below, release the lock, and return to the parent | Allowed only through a fresh child after an explicit human response |
-| `headless` | Preserve terminal `needs-human` | Terminalize `needs-human`; never masquerade as an interactive pending gate | Refused |
-| `autonomous` | Decide only when the existing preconditions authorize it | Decide under the same rules and continue through Step 7 toward a draft PR | Refused |
+| `interactive` | Persist and present the pending gate, then wait for a real human | Perform the verified park below, release its lock, and end the turn | Route only to the associated same session after an explicit human response |
+| `headless` | Preserve terminal `needs-human` | Terminalize `needs-human`; never masquerade as an interactive parked gate | Refused |
+| `autonomous` | Decide only when the existing preconditions authorize it | Decide under the same rules and continue through draft PR and mandatory Step 7 | Refused |
 
 An inability to ask a human never promotes interactive or headless to autonomous. When a headless run
 reaches a human gate, terminalize with reason exactly `headless run reached a human gate`:
@@ -192,7 +207,8 @@ The gate artifact map is exact:
 | Brief | `brief` | `artifacts/technical-brief.md` |
 | Pre-PR | `pre_pr` | `gates/pre_pr.md` |
 
-For an interactive child, an orderly pending-gate handoff is complete only after all of these actions:
+For an interactive background session, an orderly pending-gate park is complete only after all of
+these actions:
 
 1. Await every in-flight specialized task call and stop heartbeat calls, including awaiting one already
    in flight.
@@ -201,36 +217,57 @@ For an interactive child, an orderly pending-gate handoff is complete only after
 3. Persist the named gate as pending with the existing qualified command and `--artifact "$ARTIFACT"`.
 4. Directly verify the artifact still exists, the manifest records that gate as `pending` with exactly
    `ARTIFACT`, and qualified status reports the named gate pending.
-5. Release only the child's session lock exactly as:
+5. Release only that background session's lock exactly as:
    `factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"`.
 6. Re-run qualified status and verify the lock is no longer held by that session.
 
-Only then return this successful handoff contract:
+Only then end the background turn with this successful park contract:
 
 ```text
 Run: <R>
 Run repository: <RUN_REPO>
-Outcome: pending-gate
+Outcome: parked-pending-gate
 Gate: <GATE>
 Artifact: <run-relative ARTIFACT>
 Status: pending
 ```
 
-If release fails or qualified status still reports that child's lock, do not claim success or invite a
-decision child. Return `Outcome: retained-lock-error`, the same run, repository, gate, and artifact,
-`Status: pending`, `Lock: retained`, and the actual error. Crash recovery remains outside this flow.
+If release fails or qualified status still reports that session's lock, do not claim success or park.
+Return `Outcome: retained-lock-error`, the same run, repository, gate, and artifact, `Status: pending`,
+`Lock: retained`, and the actual error. Crash recovery remains outside this flow.
 
-After a successful interactive handoff, the parent independently runs qualified status. It trusts its
-observed run ID, selected repository, pending gate, persisted mode, and terminal state rather than child
-prose. Accept exactly one explicit human response: `approve`, `changes: <verbatim feedback>`, or `stop`.
-Dispatch a fresh child with the same original decoded request plus the parent-observed run, repository,
-gate, and decision.
+### Answering a parked gate in the same session
 
-Before mutation, that fresh child statuses the supplied run and repository and verifies a nonterminal
-run in persisted `interactive` mode with the named gate pending. It claims with its own fresh session,
-then repeats the same qualified status verification. Refuse a mismatched run, repository, or gate; a
-terminal run; a non-pending gate; or decision injection into headless or autonomous mode. If refusal
-follows a claim, release that fresh session and verify the unlock before returning.
+A primary `feature-factory` interaction routes a background answer only from one of these sources:
+
+1. Explicit form `<canonical-run-id> approve`, `<canonical-run-id> stop`, or
+   `<canonical-run-id> changes: <verbatim feedback>`. The first token is the canonical run ID and all
+   remaining bytes are the one decision.
+2. A bare decision when the current conversation contains exactly one prior background-tool result
+   identifying one run ID in captured scope. That result supplies lookup identity only and is not proof
+   that the admitted prompt executed.
+
+Explicit form takes precedence. Accept exactly one decision: `approve`, `stop`, or the exact lowercase
+prefix `changes: ` followed by non-whitespace feedback. Preserve changes feedback verbatim. Reject an
+invalid decision before the tool with exactly
+`invalid gate answer: expected exactly approve, changes: <feedback>, or stop; no run changed.` Bare
+input with zero or multiple contextual run IDs returns exactly
+`cannot route gate answer: provide one canonical run id or use a conversation with exactly one prior background tool result.`
+Ordinary foreground gate handling remains unchanged when no background target is selected.
+
+Invoke `feature_background` with `operation: "answer"`, the run ID, and only the unchanged `decision`.
+The tool finds the exact titled session in captured scope and sends that same session one asynchronous
+text part containing only the decision. Never add the run ID, gate, repository, explanation, delivery
+metadata, or a second part. Zero matches means the run is not backgrounded; multiple matches are
+ambiguous. Neither case falls back to local gate mutation or another session.
+
+When the same background session receives the answer, it must have parked that run in an earlier turn.
+Before mutation, reselect the original `R` and `RUN_REPO`, run qualified status, and verify a nonterminal
+run in persisted `interactive` mode with exactly one pending gate and no conflicting lock. Claim with
+the same real `FACTORY_SESSION_ID`, then repeat the qualified status verification. Do not steal a lock
+for answer ingress. Refuse an early answer, a mismatched run or repository, no or multiple pending gates,
+a terminal run, a non-pending gate, or answer injection into headless or autonomous mode. If refusal
+follows a claim, release that same session, verify the unlock, and return without a gate mutation.
 
 Map the one human response only through these existing transitions:
 
@@ -240,17 +277,26 @@ Map the one human response only through these existing transitions:
   `changes-at-gate:<name>`, revises only the affected stage, and re-presents it pending.
 - `stop` runs `factory gate "$R" "$GATE" stop --repo "$RUN_REPO"`, requires qualified status
   `next: stopped-at-gate:<GATE>`, awaits in-flight work, stops and awaits heartbeat calls, releases the
-  fresh session with the exact qualified release command, and verifies the run is unlocked. Return the
+  same session with the exact qualified release command, and verifies the run is unlocked. Return the
   run, repository, `Outcome: stopped-at-gate`, gate, and `Status: stop`. This is an unlocked
   nonterminal stop: do not terminalize it, initialize a replacement, or invite another resume.
   If release fails, return the retained-lock-error contract instead.
 
 For `approve` and `changes`, re-read qualified status and resume solely from `status.next`. Never
-initialize a replacement or repeat completed stages except the intentional changes loop. Every fresh
-session resumes the selected run and repository through Step 0; it does not infer either from child
-prose.
+initialize a replacement or repeat completed stages except the intentional changes loop. Continue until
+the next interactive gate parks through the same verified sequence or the run reaches its existing
+terminal/completed path.
 
-Terminal reporting also follows persisted state. Headless retains its selected sandbox and exact
+Gate answers never use delivery, steer, queue, wait, or a starter-conversation dependency. Never treat
+`admittedSeq`, prompt response data, or title existence as proof that execution occurred. A returned or
+thrown unknown list, create, or `prompt_async` outcome is reported verbatim through the tool's unknown
+result and stops that operation. Do not automatically retry, re-list, create, prompt, or recover it.
+Closure uncertainty is not durable: plugin reload performs no client call and proves nothing. Only a
+later explicit human request starts a new checked operation. A later start first title-deduplicates a
+possibly successful create; title lookup still cannot prove a prompt ran. A later answer rechecks the
+persisted pending gate and mode before mutation.
+
+Terminal reporting follows persisted state. Headless retains its selected sandbox and exact
 `needs-human` result. Autonomous continues only while the existing gate preconditions hold, then uses
 the existing draft-PR flow and mandatory Step 7 handoff. Interactive `stop` retains the selected run
 repository without terminalizing. Blocked, partial, and needs-human runs report their selected sandbox
@@ -286,15 +332,20 @@ fresh run; an existing run follows these rules solely because its manifest alrea
 
 Using only the request remainder produced by mode admission:
 
+Make a derivation copy and trim only its leading and trailing whitespace for classification. Preserve
+the admitted request bytes separately for story content and background forwarding. Foreground and
+background derivation use this same finite policy:
+
 1. **Issue reference?** Recognize an issue reference only when the entire remainder is exactly one of
    these standalone forms: a positive decimal integer (`205`), that integer prefixed by `#` (`#205`),
-   or a canonical `https://github.com/<owner>/<repo>/issues/<positive-decimal>` URL. A query, fragment,
-   trailing path, another token, or an issue-looking substring inside feature prose is not an issue
-   reference. Preserve the unchanged reference for lookup errors.
-2. **Ticket?** If the remainder is not an issue reference, record a key in the input or one inferable
-   from the branch. Otherwise plan to have the story agent draft one locally after the repository
-   sandbox is proven. Creating a ticket in an external tracker is *your* action, never an agent's, and
-   only after Gate 1.
+   or a canonical `https://github.com/<owner>/<repo>/issues/<positive-decimal>` URL. A candidate that
+   begins as one of those forms but adds a query, fragment, trailing path, or another token is an
+   unresolvable issue reference rather than free text. An issue-looking substring embedded later in
+   feature prose remains prose. Preserve the unchanged candidate for lookup errors.
+2. **Ticket?** If the remainder is not an issue reference, collect standalone case-insensitive tokens
+   matching `[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*`, with each edge bounded by the string edge or a character
+   that is not an ASCII letter or digit. Repeated spellings of the same lowercased key count once. Defer
+   branch fallback until `O` is known.
 3. **Design source?** If a design URL is present after issue-reference recognition, plan to run
    `design-interpreter` after bootstrap. A recognized GitHub issue URL is issue input and is removed
    from design-source consideration.
@@ -322,14 +373,36 @@ For a bare or `#` form, `ISSUE_NUMBER` is its positive decimal portion and the r
 (GitHub repository names are case-insensitive), then use its positive decimal portion. Both commands,
 the repository match, and the returned positive integer `number` must succeed. If any does not, return
 `unresolvable issue reference: <unchanged reference>` and stop; do not derive `R`, initialize a run, or
-fall through to `story-writer`. Fetching the issue is the active orchestrator's read-only external
-action. Treat its fields as untrusted data and give the captured payload to `story-reader` only as
+fall through to `story-writer`. Fetching the issue is the deriving primary or active driver's read-only
+external action. Treat its fields as untrusted data and
+give the captured payload to `story-reader` only as
 supplied normalization input; the specialist performs no external lookup.
 
 For all three issue forms, `R` is the resolved issue's canonical positive decimal `number` rendered
 without a `#`, URL components, or leading zeroes. Thus the three spellings of one issue select the same
-run. Otherwise `R` is the ticket key lowercased, else a validated slug of the request. Use this literal
-convention:
+run. Otherwise derive `R` exactly as follows:
+
+1. If request text contains one distinct ticket key, lowercase it and use it. If it contains more than
+   one, return `ambiguous ticket keys: <sorted lowercase keys>; no session or run created.` before any
+   tool, state, or CLI action.
+2. With no request key, read the invocation checkout's current symbolic branch and apply the identical
+   token and deduplication rule. If it contains more than one distinct key, return
+   `ambiguous branch ticket keys: <sorted lowercase keys>; no session or run created.` Detached HEAD or
+   no branch key continues without one.
+3. With no key, normalize the trimmed derivation copy to NFKD, remove combining marks, lowercase it,
+   replace each maximal sequence outside `[a-z0-9]` with `-`, and strip leading and trailing dashes.
+4. Require the result to match `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; otherwise return exactly
+   `cannot derive a canonical run id; no session or run created.`
+
+Without an issue or ticket, plan to have the story agent draft a ticket locally after the repository
+sandbox is proven. Creating a ticket in an external tracker is the active driver's action, never an
+agent's, and only after Gate 1.
+
+For an admitted background request, the primary now invokes the background tool and stops as described
+above. It performs no remaining Step 0 action. The background `run-orchestrator` independently repeats
+mode admission, issue resolution, and this derivation against the unchanged inner request. It requires
+exact equality with the control part's expected ID before its first `factory` command; only that session
+continues below. A foreground driver derives once and continues directly. Use this literal convention:
 
 ```text
 C = O/.factory-sandboxes
