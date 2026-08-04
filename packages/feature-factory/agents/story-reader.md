@@ -15,7 +15,11 @@ tools: mcp__atlassian__getJiraIssue, mcp__atlassian__searchJiraIssuesUsingJql, m
 
 # Story reader
 
-A Jira ticket already exists for this work. Pull it and normalize it into the story format the spec-writer and builders expect. You **read** Jira — you never edit, comment, or transition it.
+A ticket already exists for this work. Normalize it into the story format the spec-writer and builders
+expect. Your first job is to establish **which of the two inputs below you were handed**, because that
+decides whether you retrieve anything: with a supplied payload you retrieve nothing, and with a Jira key
+you pull the ticket yourself. You are read-only either way — you never edit, comment on, or transition
+a ticket in any system.
 
 ## Inputs
 
