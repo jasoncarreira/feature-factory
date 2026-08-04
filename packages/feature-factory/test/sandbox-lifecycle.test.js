@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { run } from "../bin/factory.js";
+import { dispatchInit } from "../bin/factory.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,7 +41,7 @@ function recorder(root) {
   mkdirSync(bin, { recursive: true });
   const path = join(bin, "git");
   writeFileSync(path, `#!/usr/bin/env node
-const { appendFileSync, readdirSync, statSync, writeFileSync } = require("node:fs");
+const { appendFileSync, lstatSync, readFileSync, readdirSync, statSync, writeFileSync } = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const args = process.argv.slice(2);
 const clone = args[0] === "clone";
@@ -61,6 +61,13 @@ if (process.cwd() === process.env.MISMATCH_SANDBOX && probe === process.env.MISM
 }
 const result = spawnSync(process.env.REAL_GIT, args, { stdio: "inherit", env: process.env });
 if (result.error) throw result.error;
+if (clone && result.status === 0) {
+  const snap = (path, bytes = false) => {
+    const stats = lstatSync(path);
+    return { path, dev: stats.dev, ino: stats.ino, mode: stats.mode, type: stats.isDirectory() ? "directory" : stats.isFile() ? "file" : stats.isSymbolicLink() ? "symlink" : "other", bytes: bytes ? readFileSync(path, "utf8") : null };
+  };
+  appendFileSync(process.env.GIT_LOG, JSON.stringify({ cloneSnapshot: { sandbox: snap(destination), tracked: snap(destination + "/tracked.txt", true), head: snap(destination + "/.git/HEAD", true) } }) + "\\n");
+}
 process.exit(result.status === null ? 1 : result.status);
 `);
   chmodSync(path, 0o755);
@@ -93,6 +100,23 @@ function clones(record) {
 function snapshot(path) {
   const stats = lstatSync(path);
   return { dev: stats.dev, ino: stats.ino, mode: stats.mode, bytes: readFileSync(join(path, "sentinel"), "utf8") };
+}
+
+function pathSnapshot(path, bytes = false) {
+  const stats = lstatSync(path);
+  return {
+    path, dev: stats.dev, ino: stats.ino, mode: stats.mode,
+    type: stats.isDirectory() ? "directory" : stats.isFile() ? "file" : stats.isSymbolicLink() ? "symlink" : "other",
+    bytes: bytes ? readFileSync(path, "utf8") : null,
+  };
+}
+
+function assertClonePreserved(record) {
+  const before = events(record).find((event) => event.cloneSnapshot)?.cloneSnapshot;
+  assert.ok(before);
+  assert.deepEqual(pathSnapshot(before.sandbox.path), before.sandbox);
+  assert.deepEqual(pathSnapshot(before.tracked.path, true), before.tracked);
+  assert.deepEqual(pathSnapshot(before.head.path, true), before.head);
 }
 
 test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local sandbox", async () => {
@@ -142,21 +166,47 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.equal(clones(collisionRecord).length, 0);
     assert.equal(statSync(join(collisionSandbox, "sentinel")).ino, collisionBefore.ino);
 
+    const unsafeTarget = join(root, "unsafe-destination-target");
+    mkdirSync(unsafeTarget);
+    writeFileSync(join(unsafeTarget, "sentinel"), "unsafe target stays\n");
+    for (const kind of ["file", "symlink"]) {
+      const unsafeSource = operator(root, `destination-${kind}`);
+      const unsafeRecord = recorder(join(root, `destination-${kind}-recorder`));
+      const unsafeSandbox = join(realpathSync(unsafeSource), ".factory-sandboxes", `destination-${kind}`);
+      mkdirSync(dirname(unsafeSandbox));
+      if (kind === "file") writeFileSync(unsafeSandbox, "regular destination stays\n");
+      else symlinkSync(unsafeTarget, unsafeSandbox);
+      const before = kind === "file"
+        ? { ...pathSnapshot(unsafeSandbox, true), target: null }
+        : { ...pathSnapshot(unsafeSandbox), target: readlinkSync(unsafeSandbox) };
+      const unsafe = invoke(unsafeSource, ["init", `destination-${kind}`, "--now", NOW], unsafeRecord);
+      assert.equal(unsafe.ok, false);
+      assert.match(unsafe.stderr, new RegExp(unsafeSandbox.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+      assert.match(unsafe.stderr, kind === "file" ? /regular file/u : /symbolic link/u);
+      assert.equal(clones(unsafeRecord).length, 0);
+      const after = kind === "file"
+        ? { ...pathSnapshot(unsafeSandbox, true), target: null }
+        : { ...pathSnapshot(unsafeSandbox), target: readlinkSync(unsafeSandbox) };
+      assert.deepEqual(after, before);
+      assert.equal(readFileSync(join(unsafeTarget, "sentinel"), "utf8"), "unsafe target stays\n");
+    }
+
     const scalarCases = [
-      { args: ["init"], match: /exactly one <run-id>/u },
-      { args: ["init", "one", "two"], match: /exactly one <run-id>/u },
-      { args: ["init", "Bad"], match: /run\.run_id/u },
-      { args: ["init", "scalar", "--branch", ""], match: /run\.branch/u },
-      { args: ["init", "scalar", "--worktree", " "], match: /run\.worktree/u },
-      { args: ["init", "scalar", "--pr-base", ""], match: /run\.pr_base/u },
-      { args: ["init", "scalar", "--issue", ""], match: /run\.issue_key/u },
-      { args: ["init", "scalar", "--mode", "batch"], match: /run\.mode/u },
-      { args: ["init", "scalar", "--mode", "interactive", "--mode", "batch"], match: /run\.mode/u },
-      { args: ["init", "scalar", "--max-parallel-slices", "0"], match: /positive integer/u },
-      { args: ["init", "scalar", "--max-retries", "1.5"], match: /positive integer/u },
-      { args: ["init", "scalar", "--max-retries", "9007199254740992"], match: /positive integer/u },
-      { args: ["init", "scalar", "--now", ""], match: /ISO timestamp/u },
-      { args: ["init", "scalar", "--now", "never"], match: /ISO timestamp/u },
+      { args: ["init"], positional: [], flags: {}, match: /exactly one <run-id>/u },
+      { args: ["init", "one", "two"], positional: ["one", "two"], flags: {}, match: /exactly one <run-id>/u },
+      { args: ["init", "Bad"], positional: ["Bad"], flags: {}, match: /run\.run_id/u },
+      { args: ["init", "scalar", "--repo", " "], positional: ["scalar"], flags: { repo: " " }, match: /--repo/u },
+      { args: ["init", "scalar", "--branch", ""], positional: ["scalar"], flags: { branch: "" }, match: /run\.branch/u },
+      { args: ["init", "scalar", "--worktree", " "], positional: ["scalar"], flags: { worktree: " " }, match: /run\.worktree/u },
+      { args: ["init", "scalar", "--pr-base", ""], positional: ["scalar"], flags: { prBase: "" }, match: /run\.pr_base/u },
+      { args: ["init", "scalar", "--issue", ""], positional: ["scalar"], flags: { issue: "" }, match: /run\.issue_key/u },
+      { args: ["init", "scalar", "--mode", "batch"], positional: ["scalar"], flags: { mode: "batch" }, match: /run\.mode/u },
+      { args: ["init", "scalar", "--mode", "interactive", "--mode", "batch"], positional: ["scalar"], flags: { mode: "batch" }, match: /run\.mode/u },
+      { args: ["init", "scalar", "--max-parallel-slices", "0"], positional: ["scalar"], flags: { maxParallelSlices: "0" }, match: /positive integer/u },
+      { args: ["init", "scalar", "--max-retries", "1.5"], positional: ["scalar"], flags: { maxRetries: "1.5" }, match: /positive integer/u },
+      { args: ["init", "scalar", "--max-retries", "9007199254740992"], positional: ["scalar"], flags: { maxRetries: "9007199254740992" }, match: /positive integer/u },
+      { args: ["init", "scalar", "--now", ""], positional: ["scalar"], flags: { now: "" }, match: /ISO timestamp/u },
+      { args: ["init", "scalar", "--now", "never"], positional: ["scalar"], flags: { now: "never" }, match: /ISO timestamp/u },
     ];
     for (const [index, row] of scalarCases.entries()) {
       const scalarSource = operator(root, `scalar-${index}`);
@@ -166,17 +216,25 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       assert.match(observed.stderr, row.match);
       assert.match(observed.stderr, /no sandbox path was derived or created/u);
       assert.equal(clones(scalarRecord).length, 0);
+      assert.deepEqual(events(scalarRecord), []);
       assert.equal(existsSync(join(scalarSource, ".factory-sandboxes")), false);
-    }
-    const blankRepo = invoke(source, ["init", "blank-repo", "--repo", " "], record);
-    assert.equal(blankRepo.ok, false);
-    assert.match(blankRepo.stderr, /--repo must be a non-empty string; no sandbox path was derived or created/u);
-    const cwd = process.cwd;
-    process.cwd = () => { throw new Error("cwd accessed"); };
-    try {
-      await assert.rejects(() => run(["init", "Bad"]), /no sandbox path was derived or created/u);
-    } finally {
-      process.cwd = cwd;
+      const seamCalls = [];
+      const operations = new Proxy({}, {
+        get(_target, property) {
+          seamCalls.push(String(property));
+          throw new Error(`effect seam accessed: ${String(property)}`);
+        },
+      });
+      const originalCwd = process.cwd;
+      let cwdCalls = 0;
+      process.cwd = () => { cwdCalls += 1; throw new Error("cwd accessed"); };
+      try {
+        await assert.rejects(() => dispatchInit(row.positional, row.flags, operations), row.match);
+      } finally {
+        process.cwd = originalCwd;
+      }
+      assert.equal(cwdCalls, 0);
+      assert.deepEqual(seamCalls, []);
     }
 
     const duplicateSource = operator(root, "duplicates");
@@ -247,6 +305,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       assert.equal(clones(physicalRecord).length, 1);
       assert.equal(existsSync(join(physicalSandbox, ".factory", row.name, "run.json")), false);
       assert.deepEqual(snapshot(external), externalBefore);
+      assertClonePreserved(physicalRecord);
     }
 
     const escapeSource = operator(root, "worktree-escape", (repository) => symlinkSync(external, join(repository, "escape")));
@@ -256,6 +315,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.match(escape.stderr, /physical containment could not be proved/u);
     assert.equal(clones(escapeRecord).length, 1);
     assert.deepEqual(snapshot(external), externalBefore);
+    assertClonePreserved(escapeRecord);
 
     for (const [name, probe] of [["top-mismatch", "rev-parse --show-toplevel"], ["git-mismatch", "rev-parse --absolute-git-dir"], ["common-mismatch", "rev-parse --git-common-dir"]]) {
       const mismatchSource = operator(root, name);
@@ -268,6 +328,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       assert.match(mismatch.stderr, /physical containment could not be proved/u);
       assert.equal(clones(mismatchRecord).length, 1);
       assert.equal(existsSync(join(mismatchSandbox, ".factory", name, "run.json")), false);
+      assertClonePreserved(mismatchRecord);
     }
 
     const symlinkContainerSource = operator(root, "container-link");
@@ -285,11 +346,22 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     const legacySource = operator(root, "legacy");
     const legacy = seedLegacyRun(legacySource, "legacy", { branch: "main", pr_base: "main" });
     assert.equal(JSON.parse(readFileSync(join(legacy.runDir, "run.json"), "utf8")).run_id, "legacy");
+    const missingBase = seedLegacyRun(legacySource, "legacy-missing-base", { branch: "main", pr_base: undefined });
+    assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(missingBase.runDir, "run.json"), "utf8")), "pr_base"), false);
+    const malformedRoot = join(root, "malformed-legacy");
+    mkdirSync(malformedRoot);
+    assert.throws(() => seedLegacyRun(malformedRoot, "malformed", { mode: "invalid", pr_base: undefined }), /run\.mode/u);
+    assert.equal(existsSync(join(malformedRoot, ".factory")), false);
 
     const initSource = readFileSync(join(pkg, "bin", "factory.js"), "utf8");
-    const initBody = initSource.slice(initSource.indexOf("async init(positional"), initSource.indexOf("\n  status(", initSource.indexOf("async init(positional")));
-    assert.equal((initBody.match(/\["clone", "--local", "--", operatorRoot, S\]/gu) ?? []).length, 1);
-    assert.doesNotMatch(initBody, /--no-hardlinks|copy|staging|quarantine|ownership|rmSync|rmdir|unlink|recursive|retry/iu);
+    const dispatchBody = initSource.slice(initSource.indexOf("export async function dispatchInit"), initSource.indexOf("\nfunction preflightInit"));
+    const observeSource = readFileSync(join(pkg, "observe", "index.js"), "utf8");
+    const proofBody = observeSource.slice(observeSource.indexOf("export function proveInitContainment"), observeSource.indexOf("\nfunction summarize"));
+    const publicationBody = readFileSync(join(pkg, "bin", "init-publication.js"), "utf8");
+    const ownedProduction = [initSource, proofBody, publicationBody].join("\n");
+    assert.equal((dispatchBody.match(/\["clone", "--local", "--", operatorRoot, S\]/gu) ?? []).length, 1);
+    assert.match(dispatchBody, /await dispatchInitPublication\(\{ runDir, sandboxPath: S, candidate: run \}\)/u);
+    assert.doesNotMatch(ownedProduction, /--no-hardlinks|\b(?:copyFile|cp|rm|rmSync|rmdir|unlink|unlinkSync)\s*\(|staging path|quarantine|ownership (?:record|evidence)|attempt-numbered/iu);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

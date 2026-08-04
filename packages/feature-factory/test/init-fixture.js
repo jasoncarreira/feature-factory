@@ -43,8 +43,9 @@ export function seedLegacyRun(repository, runId, overrides = {}) {
     plan_digest: null,
     ...overrides,
   };
-  if (Object.hasOwn(overrides, "pr_base") && overrides.pr_base === undefined) delete run.pr_base;
-  else validateRun(run);
+  const omitPrBase = Object.hasOwn(overrides, "pr_base") && overrides.pr_base === undefined;
+  if (omitPrBase) delete run.pr_base;
+  validateRun(omitPrBase ? { ...run, pr_base: null } : run);
   const runDir = join(repository, ".factory", runId);
   for (const path of [runDir, ...["plan", "artifacts", "evidence", "reviews"].map((name) => join(runDir, name)), join(repository, ".factory", "worktrees", runId)]) {
     mkdirSync(path, { recursive: true });

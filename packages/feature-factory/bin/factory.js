@@ -40,6 +40,11 @@ export const COMMANDS = Object.freeze({
 });
 
 const BOOLEAN_FLAGS = new Set(["--json"]);
+const INIT_OPERATIONS = Object.freeze({
+  cwd: () => process.cwd(), resolvePath: resolve, joinPath: join,
+  realpath: realpathSync, lstat: lstatSync, mkdir: mkdirSync, readdir: readdirSync,
+  runGit: git, prove: proveInitContainment, publish: dispatchInitPublication,
+});
 
 class CliError extends Error {
   constructor(message, options) {
@@ -451,97 +456,7 @@ const HANDLERS = {
     });
   },
   async init(positional, flags) {
-    const candidate = preflightInit(positional, flags);
-    const runId = candidate.run_id;
-    const operatorInput = resolve(flags.repo ?? process.cwd());
-    let operatorRoot;
-    try {
-      operatorRoot = realpathSync(operatorInput);
-    } catch {
-      const S = join(operatorInput, ".factory-sandboxes", runId);
-      throw new CliError(`operator repository is not observable; sandbox path '${S}' was not created`);
-    }
-    const C = join(operatorRoot, ".factory-sandboxes");
-    const S = join(C, runId);
-    const runDir = join(S, CONTROL_PLANE, runId);
-    const legacyManifest = join(operatorRoot, CONTROL_PLANE, runId, "run.json");
-    const sandboxManifest = join(runDir, "run.json");
-
-    let top;
-    try {
-      const observed = git(operatorRoot, ["rev-parse", "--show-toplevel"]);
-      top = observed.ok && observed.stdout.trim() ? realpathSync(resolve(operatorRoot, observed.stdout.trim())) : null;
-    } catch {
-      top = null;
-    }
-    if (top !== operatorRoot) throw new CliError(`--repo must name the canonical operator repository root; sandbox path '${S}' was not created`);
-
-    let legacyPresent;
-    let sandboxPresent;
-    let sandboxExists;
-    try {
-      legacyPresent = present(legacyManifest);
-      sandboxPresent = present(sandboxManifest);
-      sandboxExists = present(S);
-    } catch (error) {
-      throw new CliError(`could not inspect destination policy for sandbox '${S}'`, { cause: error });
-    }
-    if (legacyPresent && sandboxPresent) {
-      throw new CliError(`ambiguous run '${runId}': manifests exist at '${legacyManifest}' and '${sandboxManifest}'; inspect status with --repo '${operatorRoot}' and --repo '${S}'`);
-    }
-    if (legacyPresent) throw new CliError(`run '${runId}' already exists at '${legacyManifest}'; run status/resume with --repo '${operatorRoot}'; sandbox path '${S}' was not created`);
-    if (sandboxPresent) throw new CliError(`run '${runId}' already exists at '${sandboxManifest}'; run status/resume with --repo '${S}'`);
-    if (sandboxExists) throw new CliError(`sandbox destination '${S}' already exists without a manifest; it was not reused, changed, or deleted`);
-
-    try {
-      if (present(C)) exactDirectory(C);
-      else {
-        mkdirSync(C);
-        exactDirectory(C);
-      }
-      mkdirSync(S);
-      exactDirectory(S);
-      if (readdirSync(S).length !== 0) throw new Error("reserved destination is not empty");
-    } catch (error) {
-      throw new CliError(`could not reserve empty sandbox '${S}'; existing state was preserved`, { cause: error });
-    }
-
-    const cloned = git(operatorRoot, ["clone", "--local", "--", operatorRoot, S]);
-    if (!cloned.ok) {
-      let manifest;
-      try {
-        manifest = present(sandboxManifest) ? "present" : "absent";
-      } catch {
-        manifest = "unobservable";
-      }
-      throw new CliError(`git clone failed for sandbox '${S}'; run.json is ${manifest}; sandbox was retained`);
-    }
-
-    let proof;
-    try {
-      proof = proveInitContainment({ operatorRoot, sandboxPath: S, runId, worktree: candidate.worktree });
-    } catch (error) {
-      throw new CliError(`physical containment could not be proved for sandbox '${S}'; sandbox was retained`, { cause: error });
-    }
-
-    let prBase = candidate.pr_base;
-    if (prBase === null) {
-      const observed = git(proof.configuredWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-      prBase = observed.ok ? observed.stdout.trim() : "";
-      if (!prBase) throw new CliError(`could not observe a symbolic branch in PR base worktree '${candidate.worktree}' for sandbox '${S}'; pass --pr-base <branch> explicitly; sandbox was retained`);
-    }
-    let run;
-    try {
-      run = validateRun({ ...candidate, pr_base: prBase });
-    } catch (error) {
-      throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
-    }
-    const { observedRun } = await dispatchInitPublication({ runDir, sandboxPath: S, candidate: run });
-    return emit(flags, {
-      run_id: observedRun.run_id, run_dir: runDir, sandbox_path: proof.sandboxPath,
-      branch: observedRun.branch, worktree: observedRun.worktree, pr_base: observedRun.pr_base,
-      status: observedRun.status, mode: observedRun.mode,
-    });
+    return dispatchInit(positional, flags);
   },
 
   status([runId], flags) {
@@ -704,6 +619,120 @@ const HANDLERS = {
   },
 };
 
+export async function dispatchInit(positional, flags, operations = INIT_OPERATIONS) {
+  const candidate = preflightInit(positional, flags);
+  const {
+    cwd, resolvePath, joinPath, realpath, lstat, mkdir, readdir,
+    runGit, prove, publish,
+  } = operations;
+  const dispatchInitPublication = publish;
+  const runId = candidate.run_id;
+  const operatorInput = resolvePath(flags.repo ?? cwd());
+  let operatorRoot;
+  try {
+    operatorRoot = realpath(operatorInput);
+  } catch {
+    const S = joinPath(operatorInput, ".factory-sandboxes", runId);
+    throw new CliError(`operator repository is not observable; sandbox path '${S}' was not created`);
+  }
+  const C = joinPath(operatorRoot, ".factory-sandboxes");
+  const S = joinPath(C, runId);
+  const runDir = joinPath(S, CONTROL_PLANE, runId);
+  const legacyManifest = joinPath(operatorRoot, CONTROL_PLANE, runId, "run.json");
+  const sandboxManifest = joinPath(runDir, "run.json");
+
+  let top;
+  try {
+    const observed = runGit(operatorRoot, ["rev-parse", "--show-toplevel"]);
+    top = observed.ok && observed.stdout.trim() ? realpath(resolvePath(operatorRoot, observed.stdout.trim())) : null;
+  } catch {
+    top = null;
+  }
+  if (top !== operatorRoot) throw new CliError(`--repo must name the canonical operator repository root; sandbox path '${S}' was not created`);
+
+  let legacyState;
+  let containerState;
+  let sandboxState = { kind: "absent" };
+  let sandboxManifestState = "absent";
+  try {
+    legacyState = manifestPresence(legacyManifest, { lstat });
+    containerState = directoryState(C, { lstat, realpath });
+    if (containerState.kind === "directory") {
+      sandboxState = directoryState(S, { lstat, realpath });
+      if (sandboxState.kind === "directory") sandboxManifestState = manifestPresence(sandboxManifest, { lstat });
+    }
+  } catch (error) {
+    throw new CliError(`could not inspect destination policy for sandbox '${S}'`, { cause: error });
+  }
+  if (legacyState === "present" && sandboxManifestState === "present") {
+    throw new CliError(`ambiguous run '${runId}': manifests exist at '${legacyManifest}' and '${sandboxManifest}'; inspect status with --repo '${operatorRoot}' and --repo '${S}'`);
+  }
+  if (containerState.kind === "unsafe") {
+    const legacy = legacyState === "present" ? `; run status/resume for '${legacyManifest}' with --repo '${operatorRoot}'` : "";
+    throw new CliError(`sandbox container '${C}' is ${containerState.type}; sandbox path '${S}' was not changed${legacy}`);
+  }
+  if (sandboxState.kind === "unsafe") {
+    const legacy = legacyState === "present" ? `; run status/resume for '${legacyManifest}' with --repo '${operatorRoot}'` : "";
+    throw new CliError(`sandbox destination '${S}' is ${sandboxState.type}; it was not reused, changed, or deleted${legacy}`);
+  }
+  if (legacyState === "present") throw new CliError(`run '${runId}' already exists at '${legacyManifest}'; run status/resume with --repo '${operatorRoot}'; sandbox path '${S}' was not created`);
+  if (sandboxManifestState === "present") throw new CliError(`run '${runId}' already exists at '${sandboxManifest}'; run status/resume with --repo '${S}'`);
+  if (sandboxState.kind === "directory") {
+    const detail = sandboxManifestState === "blocked" ? " with a manifest path blocked by a non-directory component" : " without a manifest";
+    throw new CliError(`sandbox destination '${S}' already exists${detail}; it was not reused, changed, or deleted`);
+  }
+
+  try {
+    const observedContainer = directoryState(C, { lstat, realpath });
+    if (observedContainer.kind === "absent") mkdir(C);
+    else if (observedContainer.kind !== "directory") throw new Error(`unsafe sandbox container '${C}'`);
+    exactDirectory(C, { lstat, realpath });
+    mkdir(S);
+    exactDirectory(S, { lstat, realpath });
+    if (readdir(S).length !== 0) throw new Error("reserved destination is not empty");
+  } catch (error) {
+    throw new CliError(`could not reserve empty sandbox '${S}'; existing state was preserved`, { cause: error });
+  }
+
+  const cloned = runGit(operatorRoot, ["clone", "--local", "--", operatorRoot, S]);
+  if (!cloned.ok) {
+    let manifest;
+    try {
+      const state = manifestPresence(sandboxManifest, { lstat });
+      manifest = state === "present" ? "present" : state === "absent" ? "absent" : "unobservable";
+    } catch {
+      manifest = "unobservable";
+    }
+    throw new CliError(`git clone failed for sandbox '${S}'; run.json is ${manifest}; sandbox was retained`);
+  }
+
+  let proof;
+  try {
+    proof = prove({ operatorRoot, sandboxPath: S, runId, worktree: candidate.worktree });
+  } catch (error) {
+    throw new CliError(`physical containment could not be proved for sandbox '${S}'; sandbox was retained`, { cause: error });
+  }
+
+  let prBase = candidate.pr_base;
+  if (prBase === null) {
+    const observed = runGit(proof.configuredWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    prBase = observed.ok ? observed.stdout.trim() : "";
+    if (!prBase) throw new CliError(`could not observe a symbolic branch in PR base worktree '${candidate.worktree}' for sandbox '${S}'; pass --pr-base <branch> explicitly; sandbox was retained`);
+  }
+  let run;
+  try {
+    run = validateRun({ ...candidate, pr_base: prBase });
+  } catch (error) {
+    throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
+  }
+  const { observedRun } = await dispatchInitPublication({ runDir, sandboxPath: S, candidate: run });
+  return emit(flags, {
+    run_id: observedRun.run_id, run_dir: runDir, sandbox_path: proof.sandboxPath,
+    branch: observedRun.branch, worktree: observedRun.worktree, pr_base: observedRun.pr_base,
+    status: observedRun.status, mode: observedRun.mode,
+  });
+}
+
 function preflightInit(positional, flags) {
   const refusal = (message, cause) => new CliError(`${message}; no sandbox path was derived or created`, cause ? { cause } : undefined);
   if (positional.length !== 1) throw refusal("factory init requires exactly one <run-id>");
@@ -737,19 +766,34 @@ function preflightInit(positional, flags) {
   }
 }
 
-function present(path) {
+function manifestPresence(path, { lstat }) {
   try {
-    lstatSync(path);
-    return true;
+    lstat(path);
+    return "present";
   } catch (error) {
-    if (error?.code === "ENOENT") return false;
+    if (error?.code === "ENOENT") return "absent";
+    if (error?.code === "ENOTDIR") return "blocked";
     throw error;
   }
 }
 
-function exactDirectory(path) {
-  const stats = lstatSync(path);
-  if (stats.isSymbolicLink() || !stats.isDirectory() || realpathSync(path) !== path) throw new Error(`unsafe directory '${path}'`);
+function directoryState(path, { lstat, realpath }) {
+  let stats;
+  try {
+    stats = lstat(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { kind: "absent" };
+    throw error;
+  }
+  if (stats.isSymbolicLink()) return { kind: "unsafe", type: "a symbolic link" };
+  if (!stats.isDirectory()) return { kind: "unsafe", type: stats.isFile() ? "a regular file" : "an unsafe filesystem entry" };
+  if (realpath(path) !== path) return { kind: "unsafe", type: "a non-canonical directory" };
+  return { kind: "directory" };
+}
+
+function exactDirectory(path, operations) {
+  const state = directoryState(path, operations);
+  if (state.kind !== "directory") throw new Error(`unsafe directory '${path}'`);
 }
 
 function integer(value, fallback, flag) {
