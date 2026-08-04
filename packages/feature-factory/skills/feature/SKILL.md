@@ -80,9 +80,12 @@ First apply placement admission. Ignore leading whitespace only while locating t
 token is not exactly and case-sensitively `--background`, preserve the entire invocation as foreground
 input. A later token, a mode token before it, casing or punctuation variants, assignment forms, and
 near misses are ordinary foreground request content. If the first token is `--background`, it is the
-outer selector: require a following whitespace separator, consume the leading syntax, the selector,
-and exactly one separator character, and preserve every remaining code unit as the inner request.
-`--background` is placement, never a mode, and a second selector is inner request content.
+outer selector. An exact terminal `--background` with no separator, or one followed only by whitespace,
+returns exactly `missing /feature request after --background; no session or run created.` before run-id
+derivation and every tool, client, state, or CLI effect. Otherwise require a following whitespace
+separator, consume the leading syntax, the selector, and exactly one separator character, and preserve
+every remaining code unit as the inner request. `--background` is placement, never a mode, and a second
+selector is inner request content.
 
 Apply the following mode-prefix algorithm to the foreground input or to a copy of the unchanged inner
 request. Trimming for missing-request classification and run-id derivation never changes bytes forwarded
@@ -152,12 +155,15 @@ only that the host accepted the prompt; it does not prove execution or completio
 immediately so its conversation remains usable. Do not persist placement, session association, tool
 uncertainty, or any new manifest key or state file.
 
-The dedicated background session receives a bounded control part followed by the unchanged request as
-a separate text part. The `run-orchestrator` repeats outer/inner admission and the shared derivation
-before its first `factory` command and requires its result to equal the expected canonical run ID in the
-control part. A mismatch stops without manifest, lock, or CLI mutation. Only this background session
-initializes or resumes the run, uses its own real `FACTORY_SESSION_ID`, owns every state-changing
-`factory` command, dispatches specialists, observes its builders, and drives Steps 0 through 7.
+The dedicated background session receives a bounded control part followed by the unchanged inner
+request produced by outer admission as a separate text part.
+The `run-orchestrator` applies only the inner maximal mode-prefix
+admission and shared derivation before its first `factory` command. It never repeats outer background
+placement admission on the forwarded inner request, so an inner second `--background` remains request
+content. It requires the derived result to equal the expected canonical run ID in the control part. A
+mismatch stops without manifest, lock, or CLI mutation. Only this background session initializes or
+resumes the run, uses its own real `FACTORY_SESSION_ID`, owns every state-changing `factory` command,
+dispatches specialists, observes its builders, and drives Steps 0 through 7.
 
 The only specialized task targets a run driver may dispatch are exactly:
 
@@ -399,10 +405,12 @@ sandbox is proven. Creating a ticket in an external tracker is the active driver
 agent's, and only after Gate 1.
 
 For an admitted background request, the primary now invokes the background tool and stops as described
-above. It performs no remaining Step 0 action. The background `run-orchestrator` independently repeats
-mode admission, issue resolution, and this derivation against the unchanged inner request. It requires
-exact equality with the control part's expected ID before its first `factory` command; only that session
-continues below. A foreground driver derives once and continues directly. Use this literal convention:
+above. It performs no remaining Step 0 action. The background `run-orchestrator` independently applies
+only the inner maximal mode-prefix admission, issue resolution, and this derivation against the
+unchanged inner request produced by outer admission; it never reparses background placement. It
+requires exact equality with the control part's expected ID before its first `factory` command; only
+that session continues below. A foreground driver derives once and continues directly. Use this literal
+convention:
 
 ```text
 C = O/.factory-sandboxes

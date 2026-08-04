@@ -418,6 +418,12 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"lock": "absent"[\s\S]*"story": "pending"/u,
     act(repo) {
+      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const terminalSelector = "An exact terminal `--background` with no separator, or one followed only by whitespace,\nreturns exactly `missing /feature request after --background; no session or run created.` before run-id\nderivation and every tool, client, state, or CLI effect.";
+      const innerAdmission = "The `run-orchestrator` applies only the inner maximal mode-prefix\nadmission and shared derivation before its first `factory` command. It never repeats outer background\nplacement admission on the forwarded inner request, so an inner second `--background` remains request\ncontent.";
+      assert.ok(prose.includes(terminalSelector));
+      assert.ok(prose.includes(innerAdmission));
+      assert.equal(prose.includes("repeats outer/inner admission"), false);
       assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
       const artifact = join(repo, ".factory", RUN, "artifacts", "story.md");
       writeFileSync(artifact, "story\n");
