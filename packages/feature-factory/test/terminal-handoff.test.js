@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(pkg, "bin", "factory.js");
@@ -210,7 +211,7 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
   const operator = join(root, "operator");
   const container = join(operator, ".factory-sandboxes");
   const runId = `handoff-${label}`;
-  const sandbox = join(container, runId);
+  let sandbox = join(container, runId);
   const archive = join(operator, ".factory", runId);
   mkdirSync(operator);
   git(operator, "init", "--quiet", "--initial-branch=main");
@@ -220,18 +221,29 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
   git(operator, "add", "base.txt");
   git(operator, "commit", "--quiet", "-m", "base");
   if (legacy) {
-    factory(operator, "init", runId, "--branch", `feature/${runId}`, "--pr-base", "main", "--mode", mode);
-    const runPath = join(operator, ".factory", runId, "run.json");
+    const initialized = seedLegacyRun(operator, runId, { branch: `feature/${runId}`, pr_base: "main", mode });
+    const runPath = join(initialized.runDir, "run.json");
     const run = JSON.parse(readFileSync(runPath, "utf8"));
     run.pr_url = `https://example.test/${runId}`;
     writeFileSync(runPath, `${JSON.stringify(run, null, 2)}\n`);
     return { root, operator, container, sandbox, archive, runId, legacy: true };
   }
-  mkdirSync(container);
-  git(root, "clone", "--quiet", "--local", operator, sandbox);
+  const featureBranch = `feature/${runId}`;
+  const featureRef = `refs/heads/${featureBranch}`;
+  git(operator, "remote", "add", "origin", operator);
+  assert.equal(inspectRef(operator, featureRef).exists, false);
+  const initialized = initFresh(operator, [runId, "--branch", featureBranch, "--pr-base", "main", "--mode", mode]);
+  sandbox = initialized.repository;
+  assert.equal(sandbox, join(container, runId));
+  assert.equal(inspectRef(operator, featureRef).exists, false);
   git(sandbox, "config", "user.name", "Factory Test");
   git(sandbox, "config", "user.email", "factory@example.test");
-  git(sandbox, "switch", "--quiet", "-c", `feature/${runId}`);
+  const operatorPush = git(operator, "remote", "get-url", "--push", "origin");
+  git(sandbox, "config", "--replace-all", "remote.origin.pushurl", operatorPush);
+  assert.equal(git(operator, "remote", "get-url", "--push", "origin"), git(sandbox, "remote", "get-url", "--push", "origin"));
+  assert.equal(inspectRef(operator, featureRef).exists, false);
+  git(sandbox, "switch", "--quiet", "--no-track", "-c", featureBranch, git(sandbox, "rev-parse", "HEAD^{commit}"));
+  assert.equal(inspectRef(operator, featureRef).exists, false);
   writeFileSync(join(sandbox, "feature.txt"), "feature\n");
   git(sandbox, "add", "feature.txt");
   git(sandbox, "commit", "--quiet", "-m", "feature");
@@ -242,9 +254,8 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
   git(sandbox, "commit", "--quiet", "-m", "open slice");
   const openSha = git(sandbox, "rev-parse", "HEAD");
   git(sandbox, "branch", `factory/${runId}/merged`, featureSha);
-  git(sandbox, "switch", "--quiet", `feature/${runId}`);
-  factory(sandbox, "init", runId, "--branch", `feature/${runId}`, "--pr-base", "main", "--mode", mode);
-  const plane = join(sandbox, ".factory", runId);
+  git(sandbox, "switch", "--quiet", featureBranch);
+  const plane = initialized.runDir;
   const runPath = join(plane, "run.json");
   const run = JSON.parse(readFileSync(runPath, "utf8"));
   run.pr_url = `https://example.test/${runId}`;
@@ -365,21 +376,14 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.doesNotMatch(autonomous, /Creating the draft PR is the last side effect an autonomous run may perform/u,
     "AC10 autonomous mode must permit the mandatory local completed handoff after publication");
 
-  const bootstrapStart = skill.indexOf("During bootstrap and active sandbox execution");
+  const bootstrapStart = skill.indexOf("During bootstrap and active sandbox\nexecution");
   const bootstrapEnd = skill.indexOf("### Resume or collision", bootstrapStart);
   const operatorBoundary = skill.slice(bootstrapStart, bootstrapEnd);
   for (const fragment of [
-    // Reworded when the container moved inside `O` (#189): the boundary is no longer "nothing is
-    // written in O" but "nothing is written in O outside the ignored container". The fragments still
-    // pin the same guarantees; only the sentence carrying the first one changed.
-    "`O` is the operator checkout; ignored `C` and `S` are\nthe sole active-write exception inside it.",
-    "Never switch, reset, clean, stash, create a branch or\nworktree, write Git configuration, or initialize factory state directly in `O` for a fresh run.",
-    "The only pre-clone Git operations in `O` are reads",
-    "The sole completed-handoff exception comes\nafter the draft PR is recorded",
-    "fetch and verify only the recorded feature and unmerged-slice\nrefs in `O`",
-    "create and verify only the `O/.factory/R` archive",
-    "then remove only the guarded sandbox\n`S`",
-    "No other operator-checkout write or action after PR recording is permitted by this exception.",
+    "During bootstrap and active sandbox\nexecution, do not switch, reset, clean, stash, create a branch or worktree, write Git configuration, or\ninitialize factory state directly in `O`.",
+    "The only operator-checkout operations before the completed\nhandoff are reads and the Step 6 forge command.",
+    "The explicit Step 7 exclusion applies only after the\ndraft PR is recorded",
+    "guarded local-ref fetch, archive, verification, and deterministic sandbox\nremoval remain the sole completed-handoff exception to bootstrap/refusal state preservation.",
   ]) assert.ok(operatorBoundary.includes(fragment), `AC10 operator boundary is missing: ${fragment}`);
 
   const sharedModeRule = "After draft PR recording, `interactive`, `headless`, and `autonomous` modes all enter this same mandatory\nlocal completed handoff.";
