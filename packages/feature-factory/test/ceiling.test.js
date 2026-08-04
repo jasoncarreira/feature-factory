@@ -195,9 +195,19 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     const initPublicationSource = readFileSync(join(pkg, "bin", "init-publication.js"), "utf8");
     const readme = readFileSync(resolve(pkg, "..", "..", "README.md"), "utf8");
     assert.ok(COMMANDS.init.includes("--pr-base"));
-    assert.match(cliSource,
-      /publish: dispatchInitPublication,[\s\S]*?const dispatchInitPublication = publish;[\s\S]*?await dispatchInitPublication\(\{ runDir, sandboxPath: S, candidate: run \}\)/u,
-      "real init must await the private publication dispatcher with its derived paths and validated candidate");
+    const initHandler = /  async init\(positional, flags\) \{\n([\s\S]*?)\n  \},\n\n  status/u.exec(cliSource)?.[1];
+    const initOperations = /const INIT_OPERATIONS = Object\.freeze\(\{([\s\S]*?)\n\}\);/u.exec(cliSource)?.[1];
+    const dispatchInitSource = /export async function dispatchInit\(positional, flags, operations = INIT_OPERATIONS\) \{\n([\s\S]*?)\n\}\n\nfunction preflightInit/u.exec(cliSource)?.[1];
+    assert.equal(initHandler?.trim(), "return dispatchInit(positional, flags);",
+      "HANDLERS.init must delegate to dispatchInit without an operations override or direct publication");
+    assert.match(initOperations ?? "",
+      /(?:^|\n)  runGit: git, prove: proveInitContainment, publish: dispatchInitPublication,(?:\n|$)/u,
+      "dispatchInit's default operations must use the private publication dispatcher");
+    assert.match(dispatchInitSource ?? "", /(?:^|\n)  const dispatchInitPublication = publish;(?:\n|$)/u,
+      "dispatchInit must select publication from its operations");
+    assert.match(dispatchInitSource ?? "",
+      /(?:^|\n)  const \{ observedRun \} = await dispatchInitPublication\(\{ runDir, sandboxPath: S, candidate: run \}\);(?:\n|$)/u,
+      "dispatchInit must await private publication with its derived paths and validated candidate");
     assert.match(initPublicationSource,
       /\{ writer = writeProtectedJsonAtomic, observeTarget = observeInitTarget \} = \{\},[\s\S]*?await writer\(runDir, "run\.json", candidate, \{ createOnly: true \}\)/u,
       "the private dispatcher must invoke the create-only protected writer");
