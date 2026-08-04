@@ -7,13 +7,13 @@
 // exported from package.json and is imported only by bin/factory.js.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GATE_NAMES, TERMINAL_STATUSES, validateRunForRead } from "./schema.js";
+import { GATE_NAMES, TERMINAL_STATUSES, validateRun } from "./schema.js";
 
-export { CONTROL_PLANE, validateRun, validateRunForRead, SchemaError, RUN_KEYS, SCHEMA_VERSION, RUN_STATUSES, TERMINAL_STATUSES, MODES,
+export { CONTROL_PLANE, validateRun, SchemaError, RUN_KEYS, SCHEMA_VERSION, RUN_STATUSES, TERMINAL_STATUSES, MODES,
   GATE_NAMES, GATE_STATUSES, STEP_STATUSES, SLICE_STATUSES, VALIDATOR_VERDICTS } from "./schema.js";
 
 export function readRun(runDir) {
-  return validateRunForRead(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")));
+  return validateRun(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")));
 }
 
 // Read a run without validating, for diagnostics that must describe a broken

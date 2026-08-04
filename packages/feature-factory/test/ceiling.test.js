@@ -312,16 +312,28 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     const predecessorMarker = ["vi", "so"].join("");
     const repo = resolve(pkg, "..", "..");
     const predecessorExtensions = [...SOURCE_EXTENSIONS, ".jsx", ...PROSE_EXTENSIONS];
-    const predecessorFiles = execFileSync(
+    const packageFiles = execFileSync(
       "git",
       ["ls-files", "--", "packages/feature-factory", "packages/opencode-feature-factory"],
       { cwd: repo, encoding: "utf8" },
     ).split("\n").filter((path) => predecessorExtensions.some((extension) => path.endsWith(extension)))
       .map((path) => join(repo, path));
-    const predecessorOffenders = predecessorFiles
+    const predecessorOffenders = packageFiles
       .filter((path) => readFileSync(path, "utf8").toLowerCase().includes(predecessorMarker))
       .map((path) => path.slice(repo.length + 1));
     assert.deepEqual(predecessorOffenders, [], "the predecessor name must not remain in either package");
+    const removedMarkers = [
+      ["validate", "Run", "For", "Read"].join(""),
+      ["read", "Envelope"].join(""),
+      ["validate", "Envelope"].join(""),
+      ["jira", "key"].join("_"),
+    ];
+    const removedOffenders = packageFiles.flatMap((path) => {
+      const text = readFileSync(path, "utf8");
+      return removedMarkers.filter((marker) => text.includes(marker))
+        .map((marker) => `${path.slice(repo.length + 1)} :: ${marker}`);
+    });
+    assert.deepEqual(removedOffenders, [], "removed state compatibility names must not remain in either package");
   });
 
   it("declares exactly the declared run.json top-level keys", () => {
@@ -498,7 +510,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // The lines are that binding at three points, the refusals at each, and the notes recording why
     // a filename was never the thing being approved. Well inside the 2900 Jason authorized for this
     // batch; the number is what it landed on, not what was allowed.
-    assert.equal(total, 2719, "issue 214 must reduce the 2726-line baseline to 2719 production lines");
+    assert.equal(total, 2704, "issue 219 must reduce the 2719-line baseline to 2704 production lines");
     assert.ok(total < 2727, `production source is ${total} lines; the tripwire is 2727`);
   });
 
