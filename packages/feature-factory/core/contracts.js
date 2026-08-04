@@ -156,7 +156,7 @@ const steps = contract({
       }
       if (!STEP_STATUSES.includes(step.status)) throw new Error(`step '${step.agent}' status is invalid`);
     }
-    // Bounded loops: viso's max_retries, enforced rather than instructed.
+    // Bounded loops: the inherited max_retries limit is enforced rather than instructed.
     for (const step of after) {
       if (step.attempts > candidate.max_retries && step.status !== "blocked") {
         throw new Error(`step '${step.agent}' exhausted max_retries and must be blocked`);
