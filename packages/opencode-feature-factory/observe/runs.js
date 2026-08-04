@@ -42,10 +42,11 @@ function mainRepositoryOf(dir) {
 //
 // Both are needed, and getting this wrong broke the sidebar during a real run. The orchestrator makes
 // one linked worktree per slice, and those have no control plane of their own, so a slice worktree has
-// to resolve to the main repository. But a linked worktree used as the *project* root legitimately has
-// its own: `factory init` writes to whatever directory it is run in. Resolving only to the main
-// repository reported "no runs" while a valid run sat in the worktree; resolving only to the directory
-// itself would blank the sidebar inside every slice worktree.
+// to resolve to the main repository. A linked worktree used as the *project* root may have its own
+// direct control plane only for legacy compatibility. Fresh `factory init` instead creates the
+// deterministic sandbox under the operator repository's `.factory-sandboxes/<run-id>`. Resolving only
+// to the main repository reported "no runs" while a valid legacy run sat in the worktree; resolving
+// only to the directory itself would blank the sidebar inside every slice worktree.
 //
 // Order matters: a directory's own plane wins for compatibility with legacy direct records. An earlier
 // version walked up until *any* ancestor had one, which found `~/.factory` — a different tool's — so
