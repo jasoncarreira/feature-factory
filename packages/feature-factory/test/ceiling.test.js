@@ -1,7 +1,7 @@
 // The ceiling. This test exists to fail when scope grows.
 //
 // BUILD-PLAN-SMALL.md lists non-goals as refusals, not deferrals. Prose cannot
-// enforce that: the predecessor's 43,013 lines were each individually defensible
+// enforce that: the inherited 43,013 lines were each individually defensible
 // at the time. So the command set, the run.json key set, the family list, and the
 // absence of the dropped subsystems are asserted here as exact values.
 //
@@ -31,8 +31,8 @@ const CLI_COMMANDS = [
 ];
 
 const RUN_JSON_KEYS = [
-  // viso's fifteen
-  "version", "run_id", "jira_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
+  // the inherited fifteen
+  "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
   "status", "max_parallel_slices", "max_retries", "gates", "steps", "slices", "validator", "pr_url",
   // the four justified additions. base_commit was dropped: it was written and never
   // read, which is the standard a durable field has to meet. plan_digest meets it: the seed reads
@@ -53,7 +53,7 @@ const AGENT_NAMES = [
 ];
 
 // Dropped subsystems. Each was a top-level run.json field or a module in the
-// predecessor; none is required by "viso + atomic transitions + autonomy".
+// predecessor; none is required by the inherited design plus atomic transitions and autonomy.
 const FORBIDDEN_SUBSTRINGS = [
   "post_pr", "continuation", "checkpoint_source", "checkpoint_progress",
   "integration_amendment", "integration_gate", "steering", "cost_attribution",
@@ -100,7 +100,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
   it("exposes exactly the declared CLI commands, and the skill invokes only those", () => {
     assert.deepEqual(Object.keys(COMMANDS).sort(), [...CLI_COMMANDS].sort());
     assert.deepEqual(COMMANDS.init, [
-      "--repo", "--branch", "--worktree", "--pr-base", "--jira", "--mode",
+      "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode",
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
@@ -198,8 +198,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.match(initHandler, /await writeProtectedJsonAtomic\(runDir, "run\.json", run, \{ createOnly: true \}\)/u,
       "init must publish run.json through the create-only writer; ordinary rename would let a racer replace it");
     assert.ok(cliSource.includes("[--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET]"));
-    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"'));
-    assert.ok(readme.includes("factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET]"));
+    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--issue "$KEY"] [--mode "$MODE"] --repo "$S"'));
+    assert.ok(readme.includes("factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]"));
     assert.ok(markdown.includes('gh pr create --draft --base "<pr_base>" --head "<branch>"'));
 
     // Omissions and wrong argument *values* cannot be derived from the flag lists, so the few
@@ -273,7 +273,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // framework idioms that only exist in one framework
       "ngclass", "onpush", "signal store", "standalone: true",
       // named products, roles and fixtures
-      "launchdarkly", "featureflagguard", "metabaseusr", "iam_readonly", "visotrust",
+      "launchdarkly", "featureflagguard", "metabaseusr", "iam_readonly", "referenceproduct",
       "client api", "data-pw", "e2e-cli", "build:local", "format:write",
       // paths, branches and ports that are one repository's
       "src\\/main\\/", "origin\\/development", "localhost:\\d+", ":9000",
@@ -283,7 +283,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.deepEqual(leaked, [], "an agent names the reference repository's stack instead of asking this one");
 
     // Host neutrality, which is a different axis from stack neutrality and was missed by the regex
-    // above. Genericising the agents replaced viso's stack with `CLAUDE.md` throughout — one host's
+    // above. Genericising the agents replaced the inherited stack with `CLAUDE.md` throughout — one host's
     // filename, in a package whose own description says host-agnostic, shipped to run under opencode,
     // which reads AGENTS.md. Naming either file alone is the defect; naming both is the fix.
     const oneSided = prose
@@ -291,11 +291,33 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       .map(({ name }) => name);
     assert.deepEqual(oneSided, [],
       "prose names one host's instructions file alone; name both AGENTS.md and CLAUDE.md");
+
+    const tools = (text) => (/^tools:\s*(.*)$/mu.exec(text)?.[1] ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+    for (const name of ["story-reader", "design-interpreter"]) {
+      assert.deepEqual(tools(agentText.find((entry) => entry.name === name)?.text ?? ""), ["Read", "Grep", "Glob"],
+        `${name} must declare exactly the generic read capabilities`);
+    }
+    const namedToolMarker = ["mcp", "__"].join("");
+    assert.deepEqual(agentText.filter(({ text }) => text.toLowerCase().includes(namedToolMarker)).map(({ name }) => name), [],
+      "shipped agents must not contain a hardcoded external tool identifier");
+    const design = agentText.find(({ name }) => name === "design-interpreter")?.text ?? "";
+    for (const pattern of [/context[^\n]*tree|tree[^\n]*context/iu, /screenshot/iu, /token/iu, /component mapping/iu]) {
+      assert.match(design, pattern, `design-interpreter is missing capability prose: ${pattern}`);
+    }
+    assert.match(design, /absent[^.]*gap|gap[^.]*absent/iu);
+    assert.match(design, /do not infer/iu);
+    assert.doesNotMatch(design, /figma|jira|atlassian|cloudid|tracker key/iu);
+
+    const predecessorMarker = ["vi", "so"].join("");
+    const predecessorOffenders = [...files, ...proseFiles]
+      .filter((path) => readFileSync(path, "utf8").toLowerCase().includes(predecessorMarker))
+      .map((path) => path.slice(pkg.length + 1));
+    assert.deepEqual(predecessorOffenders, [], "the predecessor name must not remain in the package");
   });
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 19, "nineteen: viso's fifteen plus mode, terminal_result, pr_base, and plan_digest");
+    assert.equal(RUN_KEYS.length, 19, "nineteen: the inherited fifteen plus mode, terminal_result, pr_base, and plan_digest");
   });
 
   it("registers exactly the declared families", () => {

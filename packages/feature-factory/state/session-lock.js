@@ -1,13 +1,8 @@
-// factory.lock — viso's session lock, verbatim in shape:
-//
+// factory.lock retains the predecessor's session-lock record shape:
 //   { session, pid, run_id, branch, claimed_at, heartbeat_at }
-//
-// This is not the run-json transition lock. That one is held for microseconds
-// inside a single write; this one answers "which session owns this run", lives for
-// the length of a run, and is what makes resume / steal / abort possible.
-//
-// A fresh heartbeat means another session is working: the caller decides whether
-// to resume, steal, or abort. A heartbeat older than the TTL may be stolen.
+// Unlike the brief run-json transition lock, this answers which session owns the
+// whole run and enables resume, steal, or abort. A fresh heartbeat means another
+// session is working; one older than the TTL may be stolen.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";

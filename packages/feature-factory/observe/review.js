@@ -1,15 +1,8 @@
-// Review records, and the bindings that make a review mean something.
-//
-// viso's review record is {subject, reviewer, verdict, attempt, findings,
-// required_fixes, checked_against} — it does not say *what code* was reviewed.
-// With a human at Gate 3 that is tolerable, because the human sees the diff. In an
-// autonomous run nobody does, so a verdict must name the commit it judged:
-//
-//   attack 3 — an approval presented against a different commit
-//   attack 2 — a merged tree that differs from the reviewed tree
-//   attack 4 — a validator verdict bound to a stale head
-//
-// All three are the same defect: a judgement detached from its subject.
+// Review records need bindings to mean anything. The inherited record did not say
+// what code was reviewed; a human could see the diff, but an autonomous run cannot.
+// Every verdict therefore names the commit it judged, preventing approval against a
+// different commit, a divergent merged tree, or a stale validator head. Each is the
+// same defect: a judgement detached from its subject.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isAbsolute, sep } from "node:path";

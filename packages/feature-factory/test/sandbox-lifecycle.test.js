@@ -141,7 +141,7 @@ test("AC1/AC3/AC4/AC6/AC8 fresh and resumed runs use a contained sandbox with gu
     "SWITCHED_HEAD=\"$(git -C \"$S\" rev-parse --verify 'HEAD^{commit}')\"",
     "SWITCHED_BRANCH=\"$(git -C \"$S\" symbolic-ref --quiet --short HEAD)\"",
     "Require `SWITCHED_HEAD` to equal `SEED_HEAD` and\n`SWITCHED_BRANCH` to equal `FEATURE_BRANCH`.",
-    "factory init \"$R\" --branch \"$FEATURE_BRANCH\" --pr-base \"$PR_BASE\" [--jira \"$KEY\"] [--mode \"$MODE\"] --repo \"$S\"",
+    "factory init \"$R\" --branch \"$FEATURE_BRANCH\" --pr-base \"$PR_BASE\" [--issue \"$KEY\"] [--mode \"$MODE\"] --repo \"$S\"",
   ];
   required.forEach(position);
 
@@ -211,7 +211,7 @@ test("AC1/AC3/AC4/AC6/AC8 fresh and resumed runs use a contained sandbox with gu
     'factory status "$R" --json --repo "$RUN_REPO"',
     'factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"',
     'factory lock "$R" steal --session "$SESSION_ID" --repo "$RUN_REPO"',
-    'factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"',
+    'factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--issue "$KEY"] [--mode "$MODE"] --repo "$S"',
     'factory lock "$R" claim --session "$SESSION_ID" --repo "$S"',
     'factory status "$R" --json --repo "$S"',
     'factory heartbeat "$R" --session "$SESSION_ID" --repo "$RUN_REPO"',
