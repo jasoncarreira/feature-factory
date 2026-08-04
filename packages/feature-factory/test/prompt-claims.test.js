@@ -894,6 +894,10 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"run_id": "205"/u,
     act(repo) {
+      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      assert.match(prose, /A recognized GitHub issue URL is issue input and is removed\s+from design-source consideration\./u);
+      assert.match(prose, /`unresolvable issue reference: <unchanged reference>` and stop; do not derive `R`, initialize a run, or\s+fall through to `story-writer`\./u);
+      assert.match(prose, /For all three issue forms, `R` is the resolved issue's canonical positive decimal `number`/u);
       const references = [
         "205",
         "#205",
