@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { validateRun } from "../state/schema.js";
 import { initFresh } from "./init-fixture.js";
 
 test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", () => {
@@ -137,6 +138,32 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     && run.pr_url === null
     && run.plan_digest === null
     && status.lock === "absent";
+  const selectResume = (runDir, repository, intakeBranch) => {
+    const events = ["intake-branch"];
+    const parsedRun = validateRun(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")));
+    events.push("manifest-validated");
+    const featureBranch = parsedRun.branch;
+    events.push("feature-branch-bound");
+    const featureRef = `refs/heads/${featureBranch}`;
+    events.push("feature-ref-bound");
+    const recordedWorktree = parsedRun.worktree;
+    const lexicalWorktree = isAbsolute(recordedWorktree) ? recordedWorktree : resolve(repository, recordedWorktree);
+    const integrationWorktree = realpathSync(lexicalWorktree);
+    const fromRepository = relative(realpathSync(repository), integrationWorktree);
+    assert.equal(fromRepository.startsWith("..") || isAbsolute(fromRepository), false);
+    events.push("integration-worktree-bound");
+    const operatorGuard = operatorRefAbsent;
+    events.push("operator-guard-ready");
+    return {
+      events,
+      intakeBranch,
+      featureBranch,
+      featureRef,
+      integrationWorktree,
+      operatorGuard,
+      preLockFeatureRef: featureRef,
+    };
+  };
 
   assert.ok(resumeStart >= 0 && freshStart > resumeStart && gateOneStart > freshStart);
   assert.ok(gateThreeStart >= 0 && publicationStart > gateThreeStart && summaryStart > publicationStart);
@@ -184,6 +211,18 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     'RUN_REPO="<exact response sandbox_path>"',
     "An active sandbox resume only\nrecaptures and compares targets; it never changes remote configuration.",
   ]) required(resume, fragment, "resume selection");
+  ordered(resume, [
+    "bind it as `parsedRun`,\nand validate it",
+    "discard every intake or stale feature-branch",
+    "FEATURE_BRANCH = parsedRun.branch",
+    "FEATURE_REF = refs/heads/<exact FEATURE_BRANCH>",
+    "RECORDED_RUN_WORKTREE = parsedRun.worktree",
+    "INTEGRATION_WORKTREE = physical normalized resolution",
+    "Immediately after these bindings",
+    'git -C "$O" show-ref --verify --quiet "$FEATURE_REF"',
+    "Only after that guard passes may resume enter the effective-push proof",
+  ], "resume recorded-branch binding");
+  required(resume, "No intake or previously bound\nbranch or worktree value may participate in operator-ref, provenance, lock, dispatch, transition, or\npublication checks", "resume stale-value exclusion");
   for (const message of [
     "factory sandbox: operator effective push target unavailable; sandbox retained at <S>",
     "factory sandbox: sandbox effective push target unavailable at <S>",
@@ -284,6 +323,37 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     const progressed = provenance(crash.repository, crashBranch, false);
     assert.equal(progressed.ok, true, progressed.reason);
     assert.equal(progressed.seed, crashCreated.seed);
+    const staleIntakeBranch = "feature/stale-intake";
+    git(operator, "branch", staleIntakeBranch, "HEAD");
+    assert.equal(operatorRefAbsent(operator, staleIntakeBranch), false);
+    const resumed = selectResume(crash.runDir, crash.repository, staleIntakeBranch);
+    assert.deepEqual(resumed.events, [
+      "intake-branch",
+      "manifest-validated",
+      "feature-branch-bound",
+      "feature-ref-bound",
+      "integration-worktree-bound",
+      "operator-guard-ready",
+    ]);
+    assert.notEqual(resumed.intakeBranch, resumed.featureBranch);
+    assert.equal(resumed.featureBranch, crashBranch);
+    assert.equal(resumed.featureRef, `refs/heads/${crashBranch}`);
+    assert.equal(resumed.integrationWorktree, crash.repository);
+    assert.equal(resumed.operatorGuard(operator, resumed.featureBranch), true);
+    assert.equal(resumed.operatorGuard(operator, resumed.intakeBranch), false);
+    assert.equal(provenance(crash.repository, resumed.featureBranch, false).ok, true);
+    assert.equal(provenance(crash.repository, resumed.intakeBranch, false).ok, false);
+    assert.equal(resumed.preLockFeatureRef, `refs/heads/${crashBranch}`);
+    assert.equal(gitResult(operator, "show-ref", "--verify", "--quiet", resumed.preLockFeatureRef).status, 1);
+    assert.equal(gitResult(operator, "show-ref", "--verify", "--quiet", `refs/heads/${staleIntakeBranch}`).status, 0);
+    assert.equal(existsSync(join(crash.runDir, "factory.lock")), false);
+    const resumedStatus = factory("status", "crash-recovery", "--repo", crash.repository);
+    assert.equal(resumedStatus.branch, crashBranch);
+    assert.notEqual(resumedStatus.branch, staleIntakeBranch);
+    const publicationRef = `refs/heads/${resumedStatus.branch}`;
+    assert.equal(publicationRef, `refs/heads/${crashBranch}`);
+    assert.notEqual(publicationRef, `refs/heads/${staleIntakeBranch}`);
+    assert.equal(gitResult(bare, "show-ref", "--verify", "--quiet", publicationRef).status, 1);
     const activePushBefore = git(crash.repository, "config", "--get-all", "remote.origin.pushurl");
     git(operator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
     assert.equal(compareOnly(operator, crash.repository).ok, false);

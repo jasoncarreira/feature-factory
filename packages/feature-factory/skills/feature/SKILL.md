@@ -442,8 +442,29 @@ SESSION_ID="${FACTORY_SESSION_ID:-session-unknown-$R}"
 Require absolute canonical `RUN_REPO`, require `RUN_DIR`, `RUN_MANIFEST`, and `SLICE_ROOT` to remain
 physically contained by it, and require the response and manifest run IDs to equal `R`. Read exactly
 `RUN_MANIFEST` through the host's direct file-read capability, parse it as JSON, bind it as `parsedRun`,
-and use only `parsedRun.branch` and `parsedRun.worktree`. On resume, recorded state always supersedes
-intake branch or worktree intent.
+and validate it. For a resumed sandbox, immediately discard every intake or stale feature-branch and
+worktree value, then bind all branch-sensitive state from that validated manifest before the
+post-selection operator-ref guard or any effective-push operation:
+
+```text
+FEATURE_BRANCH = parsedRun.branch
+FEATURE_REF = refs/heads/<exact FEATURE_BRANCH>
+RECORDED_RUN_WORKTREE = parsedRun.worktree
+INTEGRATION_WORKTREE = physical normalized resolution of RECORDED_RUN_WORKTREE under RUN_REPO
+```
+
+Require the recorded branch to be nonempty and accepted by manifest validation. Resolve a relative
+recorded worktree from `RUN_REPO` and use an absolute recorded value unchanged; require the result to
+exist and remain physically contained by `RUN_REPO`. Immediately after these bindings, run the
+post-selection operator exact-ref-absent guard against `FEATURE_REF`:
+
+```sh
+git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
+```
+
+Only after that guard passes may resume enter the effective-push proof. No intake or previously bound
+branch or worktree value may participate in operator-ref, provenance, lock, dispatch, transition, or
+publication checks; recorded state always wins.
 
 **`SESSION_ID` is the session you are running in, not a name you compose.** The integration exports it
 into every shell call; read it there and never build one from the run id and date. The fallback keeps a
