@@ -72,6 +72,12 @@ function seedSandbox(root, runId, run) {
   return { sandbox, dir: seedRun(sandbox, runId, run) };
 }
 
+function deepFreeze(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
+}
+
 describe("control-plane discovery", () => {
   it("finds the control plane from a nested directory", () => {
     const root = repo("nested");
@@ -279,6 +285,58 @@ describe("control-plane discovery", () => {
 });
 
 describe("run projection", () => {
+  it("prioritizes an older gate-waiting run without requiring a lock or session", () => {
+    const root = repo("gate-priority");
+    try {
+      seedRun(root, "ordinary-newer", RUN({
+        run_id: "ordinary-newer", jira_key: "APP-2", updated_at: "2026-07-30T12:00:00.000Z",
+      }));
+      const waiting = seedSandbox(root, "waiting-older", RUN({
+        run_id: "waiting-older", jira_key: "APP-1", updated_at: "2026-07-30T11:00:00.000Z",
+        gates: { story: { status: "pending", at: null, artifact: null } },
+      }));
+
+      const snapshot = pollRuns(root);
+      assert.deepEqual(snapshot.runs.map((run) => run.run_id), ["ordinary-newer", "waiting-older"]);
+      assert.equal(snapshot.active, snapshot.runs[1], "the explicit active run may differ from the first sorted run");
+      assert.equal(snapshot.active.awaiting_gate, "story");
+      assert.equal(snapshot.active.deadLock, false, "a missing lock does not prevent gate priority");
+      assert.equal(snapshot.active.session, null, "a missing session does not prevent gate priority");
+      assert.deepEqual(renderLines(snapshot), [
+        "waiting-older  APP-1",
+        "running  interactive  feature/app-1",
+        ">> next: gate:story",
+        `sandbox: ${waiting.sandbox}`,
+        "ordinary-newer  APP-2",
+        "next: gate:story",
+      ]);
+      assert.deepEqual(runCommands(snapshot.runs, { navigate() {} }).map((command) => command.value), [],
+        "visible sessionless runs remain unavailable for navigation");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("prioritizes a gate-waiting nonterminal over a newer terminal run", () => {
+    const root = repo("gate-over-terminal");
+    try {
+      seedRun(root, "terminal-newer", RUN({
+        run_id: "terminal-newer", status: "completed", updated_at: "2026-07-30T13:00:00.000Z",
+      }));
+      seedRun(root, "waiting-older", RUN({
+        run_id: "waiting-older", updated_at: "2026-07-30T11:00:00.000Z",
+        gates: { brief: { status: "pending", at: null, artifact: null } },
+      }));
+
+      const snapshot = pollRuns(root);
+      assert.equal(snapshot.active.run_id, "waiting-older");
+      assert.deepEqual(renderLines(snapshot), [
+        "waiting-older",
+        "running  interactive  feature/app-1",
+        ">> next: gate:story",
+        "(1 other run)",
+      ]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("prefers the live run and keeps terminal ones listed", () => {
     const root = repo("several");
     try {
@@ -401,9 +459,13 @@ describe("run projection", () => {
         "live-primary", "running  interactive  feature/app-1", "next: gate:story",
         `sandbox: ${primary.sandbox}`, "lock: stale (dead; sandbox retained)",
       ], "[AC13] the primary sandbox path and dead lock follow the full live block");
-      assert.deepEqual(lines.slice(5, 7), [
-        "live-dead  lock: stale (dead; sandbox retained)", `sandbox: ${dead.sandbox}`,
-      ], "[AC13] a non-primary dead sandbox remains explicit in valid-live order");
+      assert.deepEqual(lines.slice(5, 10), [
+        "live-dead  lock: stale (dead; sandbox retained)",
+        `sandbox: ${dead.sandbox}`,
+        "next: gate:story",
+        "other-live",
+        "next: gate:story",
+      ], "every secondary nonterminal is explicit in valid-live order with its projected next action");
       const invalids = snapshot.runs.filter((run) => !run.valid);
       assert.deepEqual(lines.filter((line) => line.startsWith("at ")), invalids.map((run) => `at ${run.manifest_path}`),
         "[AC6, AC7] every invalid canonical path is rendered in deterministic order");
@@ -423,8 +485,8 @@ describe("run projection", () => {
       const firstInvalid = lines.indexOf(`${expectedInvalidPaths[0].run_id}  INVALID`);
       assert.deepEqual(lines.slice(firstInvalid, firstInvalid + expectedInvalidBlocks.length), expectedInvalidBlocks,
         "[AC6, AC7] every local/sandbox invalid renders as one adjacent ID/path/error block in deterministic ID/path order");
-      assert.equal(lines.at(-1), "(2 other runs)",
-        "[AC13, AC15] the count includes only valid records not already rendered explicitly");
+      assert.equal(lines.at(-1), "(1 other run)",
+        "[AC13, AC15] only secondary terminal records are collapsed into the count");
 
       rmSync(primary.sandbox, { recursive: true, force: true });
       rmSync(dead.sandbox, { recursive: true, force: true });
@@ -495,6 +557,53 @@ describe("run projection", () => {
       // "(attempt 2)", so a bare /attempt/ here passes for the wrong reason.
       assert.doesNotMatch(stepped(1), /spec-writer/u, "the first attempt adds nothing next: does not already say");
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("renders a recursively frozen synthetic snapshot repeatedly without mutation", () => {
+    const active = {
+      run_id: "waiting", valid: true, terminal: false, manifest_path: "/repo/waiting/run.json",
+      jira_key: "APP-1", status: "running", mode: "interactive", branch: "feature/waiting",
+      step: null, max_retries: 3, slice_total: 0, slices: [], validator: null, pr_url: null,
+      terminal_result: null, awaiting_gate: "brief", next: "gate:brief", sandbox_path: null, deadLock: false,
+    };
+    const snapshot = deepFreeze({
+      repo: "/repo",
+      active,
+      searched: ["/repo/.factory"],
+      runs: [
+        {
+          run_id: "ordinary", valid: true, terminal: false, manifest_path: "/repo/ordinary/run.json",
+          jira_key: null, next: "step:builder", sandbox_path: null, deadLock: false,
+        },
+        active,
+        {
+          run_id: "stale", valid: true, terminal: false, manifest_path: "/repo/stale/run.json",
+          jira_key: "APP-3", awaiting_gate: "review", next: "gate:review",
+          sandbox_path: "/repo/sandboxes/stale", deadLock: true,
+        },
+        { run_id: "done", valid: true, terminal: true, manifest_path: "/repo/done/run.json" },
+        { run_id: "broken", valid: false, manifest_path: "/repo/broken/run.json", error: "bad manifest" },
+      ],
+    });
+    const before = structuredClone(snapshot);
+    const expected = [
+      "waiting  APP-1",
+      "running  interactive  feature/waiting",
+      ">> next: gate:brief",
+      "ordinary",
+      "next: step:builder",
+      "stale  lock: stale (dead; sandbox retained)",
+      "sandbox: /repo/sandboxes/stale",
+      "next: gate:review",
+      "broken  INVALID",
+      "at /repo/broken/run.json",
+      "bad manifest",
+      "(1 other run)",
+    ];
+
+    assert.deepEqual(renderLines(snapshot), expected);
+    assert.deepEqual(renderLines(snapshot), expected);
+    assert.deepEqual(snapshot, before);
   });
 
   it("says so when there is no control plane at all", () => {
