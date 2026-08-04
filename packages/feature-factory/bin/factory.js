@@ -4,16 +4,17 @@
 // The orchestrator calls this CLI instead of writing control-plane state directly.
 // Flags are declared per command; unknown options fail rather than becoming missing fields.
 // Schema validation surrounds every state write.
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
-import { buildEvidence, evidenceRef, git, observeAncestry, observeWorktree, privilegedPaths, resolveWorktree, unownedPaths } from "../observe/index.js";
+import { buildEvidence, evidenceRef, git, observeAncestry, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
-import { ProtectedWriteError, writeProtectedJsonAtomic } from "../core/atomic-write.js";
+import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
+import { dispatchInitPublication } from "./init-publication.js";
 import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, validateRun } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SessionLockHeldError,
@@ -41,8 +42,8 @@ export const COMMANDS = Object.freeze({
 const BOOLEAN_FLAGS = new Set(["--json"]);
 
 class CliError extends Error {
-  constructor(message) {
-    super(message);
+  constructor(message, options) {
+    super(message, options);
     this.name = "CliError";
   }
 }
@@ -449,62 +450,98 @@ const HANDLERS = {
       ancestry, mismatches: evidence.claim_reconciliation.mismatches.map((entry) => entry.field),
     });
   },
-  async init([runId], flags) {
-    const runDir = runDirFor(flags, runId);
-    const existingError = `run '${runId}' already exists; run 'factory status ${runId} --json' and resume`;
-    if (existsSync(join(runDir, "run.json"))) throw new CliError(existingError);
-    // Derived branch and worktree record intent without performing repository actions.
-    // Explicit values still win when the caller needs a different shape.
-    const branch = flags.branch ?? `feature/${runId}`;
-    const worktree = flags.worktree ?? ".";
-    const mode = flags.mode ?? "interactive";
-    if (!MODES.includes(mode)) throw new CliError(`--mode must be one of ${MODES.join(" | ")}`);
-    const repo = resolve(flags.repo ?? process.cwd());
-    let prBase = flags.prBase;
-    if (prBase === undefined) {
-      const resolvedWorktree = resolveWorktree(repo, worktree);
-      if (!resolvedWorktree) throw new CliError(`PR base worktree '${worktree}' is not observable`);
-      const observed = git(resolvedWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-      prBase = observed.ok ? observed.stdout.trim() : "";
-      if (!prBase) throw new CliError(`could not observe a symbolic branch in PR base worktree '${worktree}'; pass --pr-base <branch> explicitly`);
-    }
-    const at = stamp(flags);
-    const run = validateRun({
-      version: SCHEMA_VERSION,
-      run_id: runId,
-      issue_key: flags.issue ?? null,
-      branch,
-      worktree,
-      pr_base: prBase,
-      created_at: at,
-      updated_at: at,
-      status: "running",
-      mode,
-      max_parallel_slices: integer(flags.maxParallelSlices, 3, "--max-parallel-slices"),
-      max_retries: integer(flags.maxRetries, 3, "--max-retries"),
-      gates: {},
-      steps: [],
-      slices: [],
-      validator: null,
-      terminal_result: null,
-      pr_url: null,
-      plan_digest: null,
-    });
-    for (const dir of ["plan", "artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
+  async init(positional, flags) {
+    const candidate = preflightInit(positional, flags);
+    const runId = candidate.run_id;
+    const operatorInput = resolve(flags.repo ?? process.cwd());
+    let operatorRoot;
     try {
-      await writeProtectedJsonAtomic(runDir, "run.json", run, { createOnly: true });
-    } catch (error) {
-      if (error instanceof ProtectedWriteError && error.message === "protected create target already exists") throw new CliError(existingError);
-      if (error instanceof ProtectedWriteError && [
-        "protected create published target but initial temporary cleanup failed",
-        "protected create published target but temporary cleanup is indeterminate",
-        "protected target is committed but directory sync failed",
-      ].includes(error.message)) {
-        throw new CliError(`run '${runId}' may already be initialized; run 'factory status ${runId} --json' before retrying`);
-      }
-      throw error;
+      operatorRoot = realpathSync(operatorInput);
+    } catch {
+      const S = join(operatorInput, ".factory-sandboxes", runId);
+      throw new CliError(`operator repository is not observable; sandbox path '${S}' was not created`);
     }
-    return emit(flags, { run_id: runId, run_dir: runDir, sandbox_path: repo, branch, worktree, pr_base: prBase, status: "running", mode });
+    const C = join(operatorRoot, ".factory-sandboxes");
+    const S = join(C, runId);
+    const runDir = join(S, CONTROL_PLANE, runId);
+    const legacyManifest = join(operatorRoot, CONTROL_PLANE, runId, "run.json");
+    const sandboxManifest = join(runDir, "run.json");
+
+    let top;
+    try {
+      const observed = git(operatorRoot, ["rev-parse", "--show-toplevel"]);
+      top = observed.ok && observed.stdout.trim() ? realpathSync(resolve(operatorRoot, observed.stdout.trim())) : null;
+    } catch {
+      top = null;
+    }
+    if (top !== operatorRoot) throw new CliError(`--repo must name the canonical operator repository root; sandbox path '${S}' was not created`);
+
+    let legacyPresent;
+    let sandboxPresent;
+    let sandboxExists;
+    try {
+      legacyPresent = present(legacyManifest);
+      sandboxPresent = present(sandboxManifest);
+      sandboxExists = present(S);
+    } catch (error) {
+      throw new CliError(`could not inspect destination policy for sandbox '${S}'`, { cause: error });
+    }
+    if (legacyPresent && sandboxPresent) {
+      throw new CliError(`ambiguous run '${runId}': manifests exist at '${legacyManifest}' and '${sandboxManifest}'; inspect status with --repo '${operatorRoot}' and --repo '${S}'`);
+    }
+    if (legacyPresent) throw new CliError(`run '${runId}' already exists at '${legacyManifest}'; run status/resume with --repo '${operatorRoot}'; sandbox path '${S}' was not created`);
+    if (sandboxPresent) throw new CliError(`run '${runId}' already exists at '${sandboxManifest}'; run status/resume with --repo '${S}'`);
+    if (sandboxExists) throw new CliError(`sandbox destination '${S}' already exists without a manifest; it was not reused, changed, or deleted`);
+
+    try {
+      if (present(C)) exactDirectory(C);
+      else {
+        mkdirSync(C);
+        exactDirectory(C);
+      }
+      mkdirSync(S);
+      exactDirectory(S);
+      if (readdirSync(S).length !== 0) throw new Error("reserved destination is not empty");
+    } catch (error) {
+      throw new CliError(`could not reserve empty sandbox '${S}'; existing state was preserved`, { cause: error });
+    }
+
+    const cloned = git(operatorRoot, ["clone", "--local", "--", operatorRoot, S]);
+    if (!cloned.ok) {
+      let manifest;
+      try {
+        manifest = present(sandboxManifest) ? "present" : "absent";
+      } catch {
+        manifest = "unobservable";
+      }
+      throw new CliError(`git clone failed for sandbox '${S}'; run.json is ${manifest}; sandbox was retained`);
+    }
+
+    let proof;
+    try {
+      proof = proveInitContainment({ operatorRoot, sandboxPath: S, runId, worktree: candidate.worktree });
+    } catch (error) {
+      throw new CliError(`physical containment could not be proved for sandbox '${S}'; sandbox was retained`, { cause: error });
+    }
+
+    let prBase = candidate.pr_base;
+    if (prBase === null) {
+      const observed = git(proof.configuredWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+      prBase = observed.ok ? observed.stdout.trim() : "";
+      if (!prBase) throw new CliError(`could not observe a symbolic branch in PR base worktree '${candidate.worktree}' for sandbox '${S}'; pass --pr-base <branch> explicitly; sandbox was retained`);
+    }
+    let run;
+    try {
+      run = validateRun({ ...candidate, pr_base: prBase });
+    } catch (error) {
+      throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
+    }
+    const { observedRun } = await dispatchInitPublication({ runDir, sandboxPath: S, candidate: run });
+    return emit(flags, {
+      run_id: observedRun.run_id, run_dir: runDir, sandbox_path: proof.sandboxPath,
+      branch: observedRun.branch, worktree: observedRun.worktree, pr_base: observedRun.pr_base,
+      status: observedRun.status, mode: observedRun.mode,
+    });
   },
 
   status([runId], flags) {
@@ -667,6 +704,54 @@ const HANDLERS = {
   },
 };
 
+function preflightInit(positional, flags) {
+  const refusal = (message, cause) => new CliError(`${message}; no sandbox path was derived or created`, cause ? { cause } : undefined);
+  if (positional.length !== 1) throw refusal("factory init requires exactly one <run-id>");
+  if (flags.repo !== undefined && (typeof flags.repo !== "string" || !flags.repo.trim())) throw refusal("--repo must be a non-empty string");
+  const runId = positional[0];
+  try {
+    const at = stamp(flags);
+    return validateRun({
+      version: SCHEMA_VERSION,
+      run_id: runId,
+      issue_key: flags.issue ?? null,
+      branch: flags.branch ?? `feature/${runId}`,
+      worktree: flags.worktree ?? ".",
+      pr_base: flags.prBase ?? null,
+      created_at: at,
+      updated_at: at,
+      status: "running",
+      mode: flags.mode ?? "interactive",
+      max_parallel_slices: integer(flags.maxParallelSlices, 3, "--max-parallel-slices"),
+      max_retries: integer(flags.maxRetries, 3, "--max-retries"),
+      gates: {},
+      steps: [],
+      slices: [],
+      validator: null,
+      terminal_result: null,
+      pr_url: null,
+      plan_digest: null,
+    });
+  } catch (error) {
+    throw refusal(error.message, error);
+  }
+}
+
+function present(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function exactDirectory(path) {
+  const stats = lstatSync(path);
+  if (stats.isSymbolicLink() || !stats.isDirectory() || realpathSync(path) !== path) throw new Error(`unsafe directory '${path}'`);
+}
+
 function integer(value, fallback, flag) {
   if (value === undefined) return fallback;
   const parsed = Number(value);
@@ -675,7 +760,7 @@ function integer(value, fallback, flag) {
 }
 
 function stamp(flags) {
-  const at = flags.now ? Date.parse(flags.now) : Date.now();
+  const at = flags.now !== undefined ? Date.parse(flags.now) : Date.now();
   if (!Number.isFinite(at)) throw new CliError("--now must be an ISO timestamp");
   return new Date(at).toISOString();
 }
