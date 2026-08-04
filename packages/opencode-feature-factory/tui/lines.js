@@ -51,13 +51,13 @@ function primaryLines(run) {
   // still has the detail.
   if (run.terminal) {
     const outcome = run.pr_url ? `${run.status}  ${run.pr_url}` : run.status;
-    const lines = [`${run.run_id}  ${outcome}`];
+    const lines = [`${run.run_id}${run.issue_key ? `  ${run.issue_key}` : ""}  ${outcome}`];
     if (run.sandbox_path) lines.push(`sandbox: ${run.sandbox_path}`);
     return lines;
   }
 
   const lines = [
-    `${run.run_id}${run.jira_key ? `  ${run.jira_key}` : ""}`,
+    `${run.run_id}${run.issue_key ? `  ${run.issue_key}` : ""}`,
     `${run.status}  ${run.mode}  ${run.branch}`,
   ];
   // Only once a step is on its second round. At attempt 1 this line would say what `next:` already

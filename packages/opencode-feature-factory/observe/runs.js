@@ -12,7 +12,7 @@
 // which is precisely when an operator most wants to see one.
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { CONTROL_PLANE, nextAction, readRunUnchecked, validateRun } from "feature-factory";
+import { CONTROL_PLANE, nextAction, readRunUnchecked, validateRunForRead } from "feature-factory";
 
 // `gitdir: <path>/.git/worktrees/<name>` → `<path>`. Returns null for an ordinary checkout, where
 // `.git` is a directory, and for anything that does not parse — a malformed pointer is not a
@@ -188,7 +188,7 @@ function project(runDir, runId, { source, sandboxPath, expectedRunId }) {
     return invalidRun(runId, observed.error, source, manifestPath, sandboxPath);
   }
   let run;
-  try { run = validateRun(observed.run); } catch (error) {
+  try { run = validateRunForRead(observed.run); } catch (error) {
     return invalidRun(runId, error.message, source, manifestPath, sandboxPath);
   }
   if (expectedRunId && run.run_id !== expectedRunId) {
@@ -208,7 +208,7 @@ function project(runDir, runId, { source, sandboxPath, expectedRunId }) {
     status: run.status,
     mode: run.mode,
     branch: run.branch,
-    jira_key: run.jira_key ?? null,
+    issue_key: run.issue_key ?? null,
     updated_at: run.updated_at ?? null,
     session: navigableSession(lock.owner?.session),
     terminal,

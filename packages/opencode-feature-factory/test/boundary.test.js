@@ -948,9 +948,13 @@ describe("package boundary", () => {
 
   it("consumes only the schema and the read-only reader", () => {
     const imported = new Set();
+    const subpathImports = [];
     for (const path of sources(opencodePkg)) {
       if (path.includes(`${opencodePkg}/test/`)) continue;
       const text = readFileSync(path, "utf8");
+      for (const reference of moduleReferences(sourceTokens(text))) {
+        if (reference.module?.startsWith("feature-factory/")) subpathImports.push(reference.module);
+      }
       for (const [, names] of text.matchAll(/(?:import|export)\s*\{([^}]*)\}\s*from\s*["']feature-factory["']/gu)) {
         for (const name of names.split(",")) {
           const trimmed = name.trim().split(/\s+as\s+/u)[0];
@@ -961,9 +965,10 @@ describe("package boundary", () => {
     // Widening this list is the signal that the boundary is wrong, not that the
     // export surface is too small.
     // `transition` is deliberately absent: it no longer exists in the package root.
-    const allowed = ["readRun", "readRunUnchecked", "nextAction", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION", "CONTROL_PLANE"];
+    const allowed = ["readRun", "readRunUnchecked", "nextAction", "validateRun", "validateRunForRead", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION", "CONTROL_PLANE"];
     const unexpected = [...imported].filter((name) => !allowed.includes(name));
     assert.deepEqual(unexpected, [], `unexpected imports from feature-factory: ${unexpected.join(", ")}`);
+    assert.deepEqual(subpathImports, [], "feature-factory imports must use only the package root");
   });
 
   it("keeps the dependency one way", () => {
@@ -1000,7 +1005,7 @@ describe("package boundary", () => {
     // resume order in the TUI. One read-only export removes a drift risk; it does not grant
     // authority, and the reachability check below still proves it cannot write.
     const allowed = [
-      "readRun", "readRunUnchecked", "nextAction", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION", "CONTROL_PLANE",
+      "readRun", "readRunUnchecked", "nextAction", "validateRun", "validateRunForRead", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION", "CONTROL_PLANE",
       "RUN_STATUSES", "TERMINAL_STATUSES", "MODES", "GATE_NAMES", "GATE_STATUSES",
       "STEP_STATUSES", "SLICE_STATUSES", "VALIDATOR_VERDICTS",
     ];
@@ -1119,7 +1124,7 @@ describe("package boundary", () => {
       ["resolver.js", 'import { createRequire } from "node:module";\nconst loader = createRequire(import.meta.url);\nloader.resolve("feature-factory");'],
       ["aliased-resolver.js", 'import { createRequire as makeRequire } from "node:module";\nconst loader = makeRequire(import.meta.url);\nloader.resolve("feature-factory");'],
       ["literal-text.js", '// eval(source); new Function(source);\nconst words = "eval Function";\nconst pattern = /eval\\s+Function[)]/giu;\nconst prompt = `eval and Function stay literal`;'],
-      ["safe-template.js", 'const ratio = total / divisor / 2;\nconst text = `safe ${JSON.parse(value).name} ${"eval"} ${/Function/u} ${`nested ${"Function"}`}`;\nglobalThis[`safe`](value);\nvalue.match(/Function|eval/gu);\nif (ready) /eval|Function/u.test(value);'],
+      ["safe-template.js", 'const ratio = total / denominator / 2;\nconst text = `safe ${JSON.parse(value).name} ${"eval"} ${/Function/u} ${`nested ${"Function"}`}`;\nglobalThis[`safe`](value);\nvalue.match(/Function|eval/gu);\nif (ready) /eval|Function/u.test(value);'],
       ["post-block-regex.js", "if (ready) {} /eval|Function/u.test(value);"],
       ["post-function-regex.js", "function declared() {} /eval|Function/u.test(value);"],
       ["post-class-regex.js", "class Declared {} /eval|Function/u.test(value);"],
@@ -1132,7 +1137,7 @@ describe("package boundary", () => {
       ["direct-eval.js", "eval(source);", "executable eval identifier"],
       ["eval-alias.js", "const execute = eval; execute(source);", "executable eval identifier"],
       ["indirect-eval.js", "(0, eval)(source);", "executable eval identifier"],
-      ["division-eval.js", "const ratio = options.return / eval(source) / divisor;", "executable eval identifier"],
+      ["division-eval.js", "const ratio = options.return / eval(source) / denominator;", "executable eval identifier"],
       ["bracket-eval.js", 'globalThis["eval"](source);', "static eval member"],
       ["template-bracket-eval.js", "globalThis[`eval`](source);", "static template eval member"],
       ["escaped-template-bracket-eval.js", "globalThis[`ev\\x61l`](source);", "static template eval member"],
