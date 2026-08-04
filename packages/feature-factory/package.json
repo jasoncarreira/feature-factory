@@ -1,6 +1,6 @@
 {
   "name": "feature-factory",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Durable, observed control plane for /feature runs. Host-agnostic: no opencode dependency.",
   "type": "module",
   "license": "MIT",
