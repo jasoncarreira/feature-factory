@@ -888,6 +888,87 @@ const CLAIMS = [
     },
   },
   {
+    id: "github-issue-forms-select-one-cli-run",
+    file: "skills/feature/SKILL.md",
+    fragment: "Recognize an issue reference only when the entire remainder is exactly one of\n   these standalone forms: a positive decimal integer (`205`), that integer prefixed by `#` (`#205`),\n   or a canonical `https://github.com/<owner>/<repo>/issues/<positive-decimal>` URL.",
+    expect: "allowed",
+    matches: /"run_id": "205"/u,
+    act(repo) {
+      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      assert.match(prose, /A recognized GitHub issue URL is issue input and is removed\s+from design-source consideration\./u);
+      assert.match(prose, /`unresolvable issue reference: <unchanged reference>` and stop; do not derive `R`, initialize a run, or\s+fall through to `story-writer`\./u);
+      assert.match(prose, /For all three issue forms, `R` is the resolved issue's canonical positive decimal `number`/u);
+      const references = [
+        "205",
+        "#205",
+        "https://github.com/jasoncarreira/opencode-feature-factory/issues/205",
+      ];
+      const runIds = references.map((reference) => {
+        const match = /^(?:#?([1-9]\d*)|https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/([1-9]\d*))$/u
+          .exec(reference);
+        assert.ok(match, `issue reference was not recognized: ${reference}`);
+        return match[1] ?? match[2];
+      });
+      assert.deepEqual(runIds, ["205", "205", "205"]);
+      const initialized = factory(repo, ["init", runIds[0], "--now", NOW]);
+      assert.equal(initialized.ok, true, initialized.out);
+      for (const runId of runIds) {
+        const status = factory(repo, ["status", runId, "--json"]);
+        assert.equal(status.ok, true, status.out);
+        assert.equal(JSON.parse(status.out).run_id, "205");
+      }
+      return factory(repo, ["status", runIds.at(-1), "--json"]);
+    },
+  },
+  {
+    // The handoff the intake depends on. Resolving the reference deterministically is worthless if the
+    // specialist it hands the payload to then does its own lookup: the resolution would go back to
+    // whichever tools happen to be configured, which is the nondeterminism this whole change removes.
+    //
+    // What this proves, stated exactly, because an earlier version of this comment overstated it:
+    // `story-reader` declares no forge tool and no general fetch capability, so it cannot retrieve a
+    // GitHub issue by any route. Grant it bash, webfetch or a forge tool and this fails.
+    //
+    // What it does NOT prove: that no lookup happens at all. The agent necessarily keeps its Atlassian
+    // tools for the Jira-key branch, and a test cannot show they go uncalled when a payload arrives.
+    // That half rests on the prompt, which is why the prompt must not contradict itself — the lead
+    // instruction routes on which input was handed over instead of unconditionally saying "pull it",
+    // and the fragment below is what fails if the no-lookup rule is reworded away.
+    id: "supplied-payload-needs-no-lookup",
+    file: "agents/story-reader.md",
+    fragment: "as `ISSUE_PAYLOAD`. Then **perform no external lookup at all**: no Jira call, no forge call, nothing.",
+    expect: "allowed",
+    matches: /"run_id": "app-1"/u,
+    act(repo) {
+      const reader = readFileSync(join(pkg, "agents", "story-reader.md"), "utf8");
+      const declared = (/^tools:(.*)$/mu.exec(reader)?.[1] ?? "")
+        .split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+      assert.ok(declared.length > 0, "story-reader must declare its tools");
+      for (const capable of ["bash", "webfetch", "write", "edit"]) {
+        assert.ok(!declared.includes(capable),
+          `story-reader must not declare ${capable}; it could fetch or mutate an issue with it`);
+      }
+      for (const tool of declared) {
+        assert.ok(!tool.includes("github") && !tool.includes("gitlab"),
+          `story-reader must not declare a forge tool (${tool}); the orchestrator owns the fetch`);
+      }
+      // The lead instruction must route on which input arrived. Unconditional "pull it" contradicted
+      // the payload branch, and a contradictory prompt makes behaviour depend on which sentence wins.
+      const lead = reader.slice(reader.indexOf("# Story reader"), reader.indexOf("## Inputs"));
+      assert.match(lead, /which of the two inputs below you were handed/u,
+        "the lead instruction must route on the input, not command a pull");
+      assert.doesNotMatch(lead, /A Jira ticket already exists for this work\. Pull it/u,
+        "the unconditional pull instruction must not return");
+      // The other half of the contract: the skill must hand the payload over as normalization input
+      // rather than as a key to resolve, or the specialist has nothing to normalize.
+      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      assert.match(prose, /give the captured payload to `story-reader` only as\s+supplied normalization input/u);
+
+      assert.equal(factory(repo, ["init", RUN, "--now", NOW]).ok, true);
+      return factory(repo, ["status", RUN, "--json"]);
+    },
+  },
+  {
     id: "no-mode-persists-interactive",
     file: "skills/feature/SKILL.md",
     fragment: "With no recognized leading mode token, omit `--mode`; existing `factory init` records\n     `interactive`.",
