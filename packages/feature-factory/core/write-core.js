@@ -10,17 +10,19 @@ export async function coordinateRunJsonTransition(runDir, options) {
   const {
     contracts,
     descriptor,
+    readEnvelope,
     validateEnvelope,
     reobservers = new Map(),
     atomicWriteHooks,
   } = options ?? {};
   const registry = contractRegistry(contracts);
   const participants = participantRegistry(descriptor, registry);
+  if (typeof readEnvelope !== "function") throw new Error("readEnvelope must be a function");
   if (typeof validateEnvelope !== "function") throw new Error("validateEnvelope must be a function");
   if (!(reobservers instanceof Map)) throw new Error("reobservers must be a Map");
 
   return withRunJsonLock(runDir, async () => {
-    const initial = deepFreeze(await readRunState(runDir, validateEnvelope));
+    const initial = deepFreeze(await readRunState(runDir, readEnvelope));
     const before = projectAll(registry, initial);
     const applied = descriptor.apply(structuredClone(initial));
     if (!applied || typeof applied !== "object" || Array.isArray(applied)) {
@@ -47,7 +49,7 @@ export async function coordinateRunJsonTransition(runDir, options) {
 
           // First comparison: gives the reobservers a state to reason about that is
           // known current as of this moment.
-          const observed = deepFreeze(await readRunState(runDir, validateEnvelope));
+          const observed = deepFreeze(await readRunState(runDir, readEnvelope));
           assertUnchanged(observed, initial);
 
           const observedProjections = projectAll(registry, observed);
@@ -67,7 +69,7 @@ export async function coordinateRunJsonTransition(runDir, options) {
           // concurrent writer running while one awaited - could commit a valid
           // record after the check, and this rename would silently overwrite it.
           // Nothing may run between this line and the rename.
-          assertUnchanged(deepFreeze(await readRunState(runDir, validateEnvelope)), initial);
+          assertUnchanged(deepFreeze(await readRunState(runDir, readEnvelope)), initial);
           await rename(source, destination);
         },
       },
@@ -82,10 +84,9 @@ function assertUnchanged(observed, initial) {
   }
 }
 
-async function readRunState(runDir, validateEnvelope) {
+async function readRunState(runDir, readEnvelope) {
   const state = JSON.parse(await readFile(join(runDir, RUN_FILE), "utf8"));
-  validateEnvelope(state);
-  return state;
+  return readEnvelope(state);
 }
 
 function contractRegistry(contracts) {

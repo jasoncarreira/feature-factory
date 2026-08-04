@@ -7,13 +7,13 @@
 // exported from package.json and is imported only by bin/factory.js.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GATE_NAMES, TERMINAL_STATUSES, validateRun } from "./schema.js";
+import { GATE_NAMES, TERMINAL_STATUSES, validateRunForRead } from "./schema.js";
 
-export { CONTROL_PLANE, validateRun, SchemaError, RUN_KEYS, SCHEMA_VERSION, RUN_STATUSES, TERMINAL_STATUSES, MODES,
+export { CONTROL_PLANE, validateRun, validateRunForRead, SchemaError, RUN_KEYS, SCHEMA_VERSION, RUN_STATUSES, TERMINAL_STATUSES, MODES,
   GATE_NAMES, GATE_STATUSES, STEP_STATUSES, SLICE_STATUSES, VALIDATOR_VERDICTS } from "./schema.js";
 
 export function readRun(runDir) {
-  return validateRun(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")));
+  return validateRunForRead(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")));
 }
 
 // Read a run without validating, for diagnostics that must describe a broken
@@ -39,8 +39,8 @@ function nextSliceAction(slices) {
 // sidebar need it, and two implementations of resume order would drift — which is the
 // defect class this codebase keeps finding. Read-only, so it belongs here.
 //
-// Resume: the first thing a returning session needs to know. Mirrors viso's
-// resume rules — a pending gate re-presents, a running slice re-observes, an
+// Resume: the first thing a returning session needs to know. Preserves the inherited
+// rules: a pending gate re-presents, a running slice re-observes, an
 // unaccepted step re-runs.
 export function nextAction(run) {
   if (TERMINAL_STATUSES.includes(run.status)) return `terminal:${run.status}`;

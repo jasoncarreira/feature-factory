@@ -335,7 +335,7 @@ describe("attack 8 — external state changes between observation and effect", (
     try {
       const runDir = f.runDir;
       writeFileSync(join(runDir, "run.json"), `${JSON.stringify({
-        version: 1, run_id: "app-1", jira_key: null, branch: "feature", worktree: ".",
+        version: 1, run_id: "app-1", issue_key: null, branch: "feature", worktree: ".",
         created_at: "2026-07-30T12:00:00.000Z", updated_at: "2026-07-30T12:00:00.000Z",
         status: "running", mode: "interactive", max_parallel_slices: 3, max_retries: 3,
         gates: {}, steps: [],

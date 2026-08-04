@@ -1,4 +1,4 @@
-// run.json adds mode, terminal_result, and pr_base to viso's fifteen fields.
+// run.json adds mode, terminal_result, and pr_base to the inherited fifteen-field baseline.
 // pr_base comes from init, is immutable through the envelope, and feeds status and Step 6.
 // mode preserves autonomous intent; terminal_result records why a run stopped.
 // base_commit was removed because no consumer used it and existing refs answer its questions.
@@ -12,7 +12,7 @@ export const SCHEMA_VERSION = 1;
 export const CONTROL_PLANE = ".factory";
 
 export const RUN_KEYS = Object.freeze([
-  "version", "run_id", "jira_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
+  "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
   "status", "mode", "max_parallel_slices", "max_retries",
   "gates", "steps", "slices", "validator", "terminal_result", "pr_url",
   // Digest of the plan bytes the brief gate approved, so the seed ratifies that plan and not a
@@ -107,7 +107,7 @@ export function validateRun(run) {
   for (const key of ["branch", "worktree"]) required(errors, run, key, "run");
   for (const key of ["created_at", "updated_at"]) pattern(errors, run, key, ISO, "run");
   for (const key of ["max_parallel_slices", "max_retries"]) positiveInt(errors, run, key, "run");
-  for (const key of ["jira_key", "pr_base", "pr_url", "plan_digest"]) optionalString(errors, run, key, "run");
+  for (const key of ["issue_key", "pr_base", "pr_url", "plan_digest"]) optionalString(errors, run, key, "run");
 
   gates(errors, run.gates);
   steps(errors, run.steps);
@@ -117,6 +117,18 @@ export function validateRun(run) {
 
   if (errors.length) throw new SchemaError(errors);
   return run;
+}
+
+export function validateRunForRead(run) {
+  if (!isRecord(run) || !Object.hasOwn(run, "jira_key")) return validateRun(run);
+  if (Object.hasOwn(run, "issue_key")) {
+    throw new SchemaError([{ path: "run", message: "issue_key and jira_key are ambiguous" }]);
+  }
+  if (run.version !== 1) {
+    throw new SchemaError([{ path: "run.version", message: "legacy jira_key is supported only for version 1" }]);
+  }
+  const adapted = Object.fromEntries(Object.entries(run).map(([key, value]) => [key === "jira_key" ? "issue_key" : key, value]));
+  return validateRun(adapted);
 }
 
 function gates(errors, value) {

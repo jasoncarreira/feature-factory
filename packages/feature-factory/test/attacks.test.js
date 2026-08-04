@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readRun } from "../state/index.js";
 import { transition } from "../state/transition.js";
-import { SchemaError, validateRun } from "../state/schema.js";
+import { SchemaError, validateRun, validateRunForRead } from "../state/schema.js";
 
 const NOW = "2026-07-30T12:00:00.000Z";
 const LATER = "2026-07-30T12:05:00.000Z";
@@ -19,7 +19,7 @@ function baseRun(overrides = {}) {
   return {
     version: 1,
     run_id: "app-1",
-    jira_key: "APP-1",
+    issue_key: "APP-1",
     branch: "APP-1-thing",
     worktree: "/repo/.worktrees/APP-1-thing",
     created_at: NOW,
@@ -105,9 +105,39 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
   });
 
   it("accepts the baseline record it is meant to accept", () => {
-    assert.equal(validateRun(baseRun()).run_id, "app-1");
+    const canonical = baseRun();
+    assert.equal(validateRun(canonical).run_id, "app-1");
+    assert.strictEqual(validateRunForRead(canonical), canonical);
     assert.equal(validateRun(baseRun({ pr_base: null })).pr_base, null);
     assert.equal(validateRun(baseRun({ pr_base: "integration" })).pr_base, "integration");
+
+    for (const issueKey of [null, "APP-1"]) {
+      const legacy = baseRun();
+      legacy.jira_key = issueKey;
+      delete legacy.issue_key;
+      const snapshot = structuredClone(legacy);
+      const adapted = validateRunForRead(legacy);
+      assert.deepEqual(legacy, snapshot);
+      assert.notStrictEqual(adapted, legacy);
+      assert.equal(adapted.issue_key, issueKey);
+      assert.equal(Object.hasOwn(adapted, "jira_key"), false);
+      assert.throws(() => validateRun(legacy), /unknown keys: jira_key/u);
+    }
+
+    for (const keys of [
+      { issue_key: "APP-1", jira_key: "APP-1" },
+      { issue_key: "APP-1", jira_key: "APP-2" },
+      { issue_key: null, jira_key: null },
+    ]) {
+      assert.throws(() => validateRunForRead(baseRun(keys)), /issue_key and jira_key are ambiguous/u);
+    }
+
+    const legacy = baseRun();
+    legacy.jira_key = legacy.issue_key;
+    delete legacy.issue_key;
+    assert.throws(() => validateRunForRead({ ...legacy, version: 2 }), /legacy jira_key is supported only for version 1/u);
+    assert.throws(() => validateRunForRead({ ...legacy, jira_key: 42 }), /run\.issue_key: must be a non-empty string/u);
+    assert.throws(() => validateRunForRead({ ...legacy, unrelated: true }), /unknown keys: unrelated/u);
   });
 });
 
@@ -115,7 +145,7 @@ describe("attack 11 — a concurrent writer changes run.json mid-transition", ()
   it("rejects on compare-and-swap with the intruder's bytes intact", async () => {
     const f = fixture("cas");
     try {
-      const intruder = baseRun({ updated_at: LATER, jira_key: "APP-999" });
+      const intruder = baseRun({ updated_at: LATER, issue_key: "APP-999" });
       const intruderBytes = `${JSON.stringify(intruder, null, 2)}\n`;
 
       await assert.rejects(
@@ -146,7 +176,7 @@ describe("attack 11 — a concurrent writer changes run.json mid-transition", ()
     // lost update actually was.
     const f = fixture("cas-late");
     try {
-      const intruder = baseRun({ updated_at: LATER, jira_key: "APP-999" });
+      const intruder = baseRun({ updated_at: LATER, issue_key: "APP-999" });
       const intruderBytes = `${JSON.stringify(intruder, null, 2)}\n`;
       let injected = false;
 
