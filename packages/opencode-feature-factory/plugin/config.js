@@ -12,7 +12,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { tool } from "@opencode-ai/plugin";
 
 const RUN_ID = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u;
 
@@ -137,13 +136,27 @@ export function createBackgroundTool(input = {}) {
     return { status: "dispatched", operation, runId, title, sessionId };
   }
 
-  return tool({
+  // A plain object, not the `tool()` helper. That helper is a pass-through which only shapes types,
+  // and reaching it meant depending on `@opencode-ai/plugin` — pinned at 1.17.13 against a host
+  // running 1.18.11, the same package whose SDK at that version is missing endpoints the 1.18.11
+  // server has. A dependency that can drift from the host, to import a function that returns its
+  // argument, and which `pack.test.js` then has to police in the packed graph.
+  //
+  // Measured on the running host: an object literal with plain descriptors is accepted, and an agent
+  // passes enum and optional parameters through it unchanged —
+  //   ⚙ probe_enum_args {"operation":"start","runId":"210","request":"hello world"}
+  //   received:         {"operation":"start","runId":"210","request":"hello world"}
+  //
+  // Nothing is lost by dropping the schemas, because `execute` below validates every argument itself:
+  // the run id against RUN_ID, the request's emptiness, the decision grammar, and the operation. The
+  // schema described parameters to the model; it never enforced them.
+  return {
     description: "Start a feature-factory run in its scoped background session or answer its pending gate.",
     args: {
-      operation: tool.schema.enum(["start", "answer"]),
-      runId: tool.schema.string(),
-      request: tool.schema.string().optional(),
-      decision: tool.schema.string().optional(),
+      operation: { type: "string", enum: ["start", "answer"], description: "start a background run, or answer its pending gate" },
+      runId: { type: "string", description: "the run id" },
+      request: { type: "string", description: "for start: the complete /feature request, forwarded unchanged" },
+      decision: { type: "string", description: "for answer: approve, stop, or changes: <feedback>" },
     },
     async execute(args, context) {
       const operation = args?.operation;
@@ -188,7 +201,7 @@ export function createBackgroundTool(input = {}) {
         if (inFlight.get(key)?.promise === promise) inFlight.delete(key);
       }
     },
-  });
+  };
 }
 
 // The installed factory package's directory. Resolved through its one export rather than a

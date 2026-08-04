@@ -20,7 +20,6 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.17.13",
     "feature-factory": "0.3.4"
   },
   "scripts": {

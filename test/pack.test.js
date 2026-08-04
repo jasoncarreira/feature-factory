@@ -107,15 +107,14 @@ describe("what actually ships", () => {
         join(consumer, "node_modules", "feature-factory", "package.json"), "utf8"));
       assert.equal(manifest.dependencies["feature-factory"], factory.version,
         "the installed integration must be pinned to the installed factory");
-      assert.equal(manifest.dependencies["@opencode-ai/plugin"], "1.17.13");
-      assert.equal(manifest.dependencies["@opencode-ai/sdk"], undefined);
-      const hostPlugin = JSON.parse(readFileSync(
-        join(consumer, "node_modules", "@opencode-ai", "plugin", "package.json"), "utf8"));
-      const hostSdk = JSON.parse(readFileSync(
-        join(consumer, "node_modules", "@opencode-ai", "sdk", "package.json"), "utf8"));
-      assert.equal(hostPlugin.version, "1.17.13");
-      assert.equal(hostPlugin.dependencies["@opencode-ai/sdk"], "1.17.13");
-      assert.equal(hostSdk.version, "1.17.13");
+      // The integration depends on the factory and nothing else. It registers a tool as a plain
+      // object literal rather than through `@opencode-ai/plugin`'s `tool()` helper — that helper is a
+      // pass-through, and depending on it would pin a host-coupled package into the packed graph for
+      // no behaviour. Both host packages stay absent, so a consumer installs neither.
+      for (const absent of ["@opencode-ai/plugin", "@opencode-ai/sdk"]) {
+        assert.equal(manifest.dependencies[absent], undefined,
+          `the integration must not depend on ${absent}; the host supplies it`);
+      }
 
       // Bare specifiers, so `exports` names and conditions are exercised. Importing a manifest's
       // target path directly — which this test used to do — passes even when the export map is wrong.
