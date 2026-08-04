@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { run as cli } from "../bin/factory.js";
 import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
 import { assertPublicationReady } from "../observe/review.js";
+import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "factory.js");
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -35,28 +36,37 @@ const NOW = (minute) => `2026-07-30T12:${String(minute).padStart(2, "0")}:00Z`;
 
 // A repository with an integration branch and one slice branched from its head.
 function project(name, { seed = true, testPlan = ["t"], legacy = false, paths = ["src/app/"] } = {}) {
-  const repo = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
-  git(repo, "init", "-q", "-b", "feature");
-  git(repo, "config", "user.email", "t@example.com");
-  git(repo, "config", "user.name", "T");
-  mkdirSync(join(repo, "src", "app"), { recursive: true });
-  writeFileSync(join(repo, "src", "app", "base.ts"), "base\n");
+  const operator = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
+  git(operator, "init", "-q", "-b", "main");
+  git(operator, "config", "user.email", "t@example.com");
+  git(operator, "config", "user.name", "T");
+  mkdirSync(join(operator, "src", "app"), { recursive: true });
+  writeFileSync(join(operator, "src", "app", "base.ts"), "base\n");
   // The control plane must be untracked. If it is not, run.json changes appear in
   // every slice diff and every merge trips the privileged-path refusal - which is
   // how this fixture first failed, and is a real deployment requirement rather than
   // a test detail.
-  writeFileSync(join(repo, ".gitignore"), ".factory/\n");
-  git(repo, "add", "-A");
-  git(repo, "commit", "-q", "-m", "base");
+  writeFileSync(join(operator, ".gitignore"), ".factory/\n.factory-sandboxes/\n");
+  git(operator, "add", "-A");
+  git(operator, "commit", "-q", "-m", "base");
+  git(operator, "remote", "add", "origin", operator);
 
-  const runDir = join(repo, ".factory", RUN);
-  const init = factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW(0)]);
-  assert.equal(init.ok, true, init.stderr);
+  let selected;
   if (legacy) {
-    const run = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
-    delete run.pr_base;
-    writeFileSync(join(runDir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
+    git(operator, "switch", "-q", "-c", "feature");
+    selected = seedLegacyRun(operator, RUN, { branch: "feature", pr_base: undefined, created_at: NOW(0) });
+  } else {
+    const fresh = initFresh(operator, [RUN, "--branch", "feature", "--worktree", ".", "--pr-base", "main", "--now", NOW(0)]);
+    const operatorPush = git(operator, "remote", "get-url", "--push", "origin");
+    git(fresh.repository, "config", "--replace-all", "remote.origin.pushurl", operatorPush);
+    assert.equal(git(fresh.repository, "remote", "get-url", "--push", "origin"), operatorPush);
+    git(fresh.repository, "config", "user.email", "t@example.com");
+    git(fresh.repository, "config", "user.name", "T");
+    git(fresh.repository, "switch", "-q", "--no-track", "-c", "feature", git(fresh.repository, "rev-parse", "HEAD^{commit}"));
+    selected = fresh;
   }
+  const repo = selected.repository;
+  const runDir = selected.runDir;
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({
     slices: [{ id: "be-thing", stack: "backend", paths, depends_on: [], acceptance: ["AC1"], test_plan: testPlan }],
   }, null, 2));
@@ -64,8 +74,10 @@ function project(name, { seed = true, testPlan = ["t"], legacy = false, paths = 
     approveEarlyGates(repo, NOW(1));
     assert.equal(factory(repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
   }
-  return { repo, runDir };
+  return { operator, repo, runDir };
 }
+
+const cleanupProject = ({ operator }) => rmSync(operator, { recursive: true, force: true });
 
 // Build the slice, optionally touching an extra path, and return its head.
 function buildSlice(repo, { extra = null, extraContent = "extra\n" } = {}) {
@@ -148,7 +160,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, true, merged.stderr);
       assert.equal(runJson(p.runDir).slices[0].status, "merged");
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses a slice that changed a path it does not own", () => {
@@ -160,7 +172,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(merged.ok, false, "the merge must be refused");
       assert.match(merged.stderr, /changed paths it does not own: src\/other\/sneak\.ts/u);
       assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), before, "run.json must be untouched");
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("governs manifests through seeded ownership while .gitignore stays privileged", () => {
@@ -185,7 +197,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
           assert.equal(merged.stderr.trim(), scenario.error);
           assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), before, `${scenario.name}: run.json must be untouched`);
         }
-      } finally { rmSync(p.repo, { recursive: true, force: true }); }
+      } finally { cleanupProject(p); }
     }
   });
 
@@ -202,7 +214,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, false, "an approval for an earlier commit must not merge a later one");
       assert.match(merged.stderr, /approved [0-9a-f]{12} but the head is [0-9a-f]{12}/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("tolerates a moved base, however it moved, and refuses unreviewed content in the merge", () => {
@@ -229,7 +241,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, true, `a moved base must not block a merge: ${merged.stderr}`);
       assert.equal(runJson(p.runDir).slices[0].status, "merged");
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses a merge that smuggles an unreviewed path", () => {
@@ -245,7 +257,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, false, "content nobody reviewed must not merge");
       assert.match(merged.stderr, /contributed paths that were not reviewed: src\/app\/smuggled\.ts/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses a merge with no observed evidence", () => {
@@ -262,7 +274,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, false, "a merge without observed evidence must be refused");
       assert.match(merged.stderr, /cannot merge without an evidence_ref/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses a merge whose evidence is not review_ready", () => {
@@ -298,9 +310,9 @@ describe("end to end — a merge is refused through the real CLI", () => {
           assert.equal(seen.ok, true, seen.stderr);
           assert.equal(seen.out.review_ready, expected,
             `an untested slice whose test_plan is ${label} must be review_ready: ${expected}`);
-        } finally { rmSync(q.repo, { recursive: true, force: true }); }
+        } finally { cleanupProject(q); }
       }
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("binds the slice base to the observed integration head, not to a supplied value", () => {
@@ -335,7 +347,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, false, "the unowned earlier commit must still be in the diff");
       assert.match(merged.stderr, /changed paths it does not own: src\/secret\.ts/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses a review that approved a different slice at the same commit", () => {
@@ -351,7 +363,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, false, "an approval for another slice must not merge this one");
       assert.match(merged.stderr, /approved 'other-slice', not 'be-thing'/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses to observe a worktree with uncommitted changes", () => {
@@ -379,7 +391,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(record.worktree_clean, false);
       assert.equal(record.tests.observed, false, "tests must not run against bytes that will not merge");
       assert.match(record.blocked_reason, /uncommitted changes/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses activation when the integration head moves before the transition commits", () => {
@@ -408,7 +420,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(activated.ok, true, activated.stderr);
       assert.equal(runJson(p.runDir).slices[0].base_ref, movedHead,
         "the persisted base must be the head observed at the commit boundary");
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses a merge whose review changed while the merge was being verified", () => {
@@ -432,7 +444,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(merged.ok, false, "a rejected review must not merge");
       assert.match(merged.stderr, /verdict is REJECT, not an approval|changed while the merge was being verified/u);
       assert.equal(runJson(p.runDir).slices[0].status, "review");
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses evidence when the test itself dirties the worktree", () => {
@@ -458,7 +470,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(record.worktree_clean, false, "a test that dirties the tree must not yield clean evidence");
       assert.equal(record.review_ready, false);
       assert.match(record.blocked_reason, /uncommitted changes|changed while the tests ran/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   // The case that exposed the old tree-equality proof: a wave's slices branch from one
@@ -544,7 +556,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const second = mergeOne("be-two", 11);
       assert.equal(second.ok, true, `second merge of the same wave must succeed: ${second.stderr}`);
       assert.deepEqual(runJson(p.runDir).slices.map((slice) => slice.status), ["merged", "merged"]);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses a merge with evidence but no review", () => {
@@ -564,7 +576,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, false);
       assert.match(merged.stderr, /cannot merge without a review_ref/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 });
 
@@ -641,8 +653,8 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
         const stopped = factory(terminal.repo, ["terminal", RUN, "blocked", "--reason", "legacy stop", "--now", NOW(8)]);
         assert.equal(stopped.ok, true, stopped.stderr);
         assert.equal(Object.hasOwn(runJson(terminal.runDir), "pr_base"), false);
-      } finally { rmSync(terminal.repo, { recursive: true, force: true }); }
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+      } finally { cleanupProject(terminal); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses a second, different PR", () => {
@@ -678,7 +690,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       assert.equal(second.ok, false, "a run has one PR");
       assert.match(second.stderr, /pr_url is immutable once recorded/u);
       assert.equal(runJson(p.runDir).pr_url, "https://example.test/pr/1");
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses a PR once the integration head has moved past what was approved", () => {
@@ -734,7 +746,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       const after = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(8)]);
       assert.equal(after.ok, true, `the run must still be able to ship: ${after.stderr}`);
       assert.equal(runJson(p.runDir).pr_url, "https://example.test/pr/1");
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses to approve Gate 3 on a run that did no work", () => {
@@ -759,7 +771,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       assert.equal(pr.ok, false);
       assert.match(pr.stderr, /every gate must be approved; not approved: pre_pr\(pending\)/u);
       assert.equal(runJson(p.runDir).pr_url, null);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses to approve Gate 3 while a slice is still open", () => {
@@ -780,7 +792,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       const blocked = approveGate(p.repo, "pre_pr", NOW(8));
       assert.equal(blocked.ok, false, "blocked work must not be published");
       assert.match(blocked.stderr, /every slice must be merged; not merged: be-thing\(blocked\)/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 
   it("refuses to approve Gate 3 with no approving verdict", () => {
@@ -792,7 +804,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       const gate = approveGate(p.repo, "pre_pr", NOW(5));
       assert.equal(gate.ok, false);
       assert.match(gate.stderr, /the validator verdict is not an approval/u);
-    } finally { rmSync(p.repo, { recursive: true, force: true }); }
+    } finally { cleanupProject(p); }
   });
 });
 
