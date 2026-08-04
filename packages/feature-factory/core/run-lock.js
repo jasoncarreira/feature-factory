@@ -168,12 +168,9 @@ async function renameOwnedLockToQuarantine(runDir, lockDir, expectedIdentity) {
   return quarantine;
 }
 
-// viso decides this with a timestamp: a lock whose heartbeat is older than the TTL
-// may be stolen. We do the same on `acquired_at`, because this lock is held for one
-// transition - a holder that has had it longer than the TTL is not working, it is
-// gone. The alternative was 520 lines of process-identity probing to steal a dead
-// owner's lock immediately rather than after the TTL, which is convenience rather
-// than correctness for a single-operator tool. Pull it back if a real case appears.
+// Staleness is decided by TTL on `acquired_at`, not process identity: this lock spans
+// one transition, so exceeding the TTL means its holder is gone. Immediate dead-owner
+// probing adds complexity for convenience rather than correctness in a single-operator tool.
 function inspectLockOwnerLiveness(owner, options = {}) {
   if (!isDurableLockOwner(owner)) return "indeterminate";
   // A lock taken on another host cannot be adjudicated from here at all.

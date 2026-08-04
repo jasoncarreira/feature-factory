@@ -83,7 +83,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const commands = documentedFactoryCommands(skill);
   assert.ok(commands.length >= 35, `expected every documented factory command shape, found ${commands.length}`);
   const nonRunnableSandboxShapes = new Set([
-    'factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--jira "$KEY"] [--mode "$MODE"] --repo "$S"',
+    'factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--issue "$KEY"] [--mode "$MODE"] --repo "$S"',
     'factory lock "$R" claim --session "$SESSION_ID" --repo "$S"',
     'factory status "$R" --json --repo "$S"',
   ]);

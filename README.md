@@ -70,7 +70,7 @@ Twelve commands. Every one that changes state is a single checked transition, an
 an error rather than a silently ignored typo.
 
 ```
-factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--jira KEY] [--mode interactive|headless|autonomous]
+factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
 factory status <run-id> [--json]
 factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
 factory heartbeat <run-id> --session ID

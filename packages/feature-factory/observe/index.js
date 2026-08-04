@@ -1,12 +1,7 @@
-// Observe, don't trust.
-//
-// viso: "A subagent's report is a claim. Before you accept a build/test step you
-// re-derive the diff and re-run its named tests yourself, write the observed
-// evidence, and let work-reviewer judge that - never the prose."
-//
-// This module is that sentence, mechanized. It is the reason `factory observe`
-// exists as a command rather than as an instruction: in an autonomous run nobody
-// checks whether the orchestrator actually re-ran anything.
+// Observe, don't trust. A subagent's report is a claim, so independently re-derive
+// the diff and re-run its named tests before work-reviewer judges observed evidence.
+// `factory observe` mechanizes that rule because an autonomous run has no human to
+// check whether the orchestrator actually observed anything.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
@@ -91,11 +86,9 @@ export function observeAncestry(worktree, ancestor, descendant, options = {}) {
 // could not run it, which is not the same as a pass.
 export function runTests(worktree, command, { runner = spawnSync, skipReason = null } = {}) {
   if (!command) {
-    // Finding 1: this used to default skipped_reason to "no test command declared",
-    // and deriveReviewReady accepts any nonempty reason - so omitting --test-cmd
-    // manufactured its own excuse and produced review_ready: true. viso's rule is
-    // "observed green, or explicitly skipped with a reason"; an omission is not an
-    // explicit anything. A skip reason now only exists if the caller declared one.
+    // Finding 1: defaulting a skip reason let omission manufacture review readiness.
+    // Tests must be observed green or explicitly skipped with a caller-declared reason;
+    // omission alone is neither.
     return { cmd: null, exit: null, observed: false, skipped_reason: skipReason };
   }
   const result = runner(command[0], command.slice(1), { cwd: worktree, encoding: "utf8", shell: false });
@@ -103,8 +96,8 @@ export function runTests(worktree, command, { runner = spawnSync, skipReason = n
   return { cmd: command.join(" "), exit, observed: exit !== null, skipped_reason: null };
 }
 
-// viso's rule, verbatim: completed, non-empty files_changed, tests observed and
-// passing (or explicitly skipped with a reason), and diff_observed.
+// Readiness requires completed, clean, changed, observed-diff evidence and tests
+// observed passing or ratified as explicitly skipped with a reason.
 export function deriveReviewReady(evidence) {
   if (evidence.status !== "completed") return false;
   // A tree with uncommitted changes cannot produce evidence about the commit it

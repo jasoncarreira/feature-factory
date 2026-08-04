@@ -87,6 +87,11 @@ describe("what actually ships", () => {
       for (const { files } of [factory, opencode]) {
         assert.deepEqual(files.filter((file) => file.includes("test/")), []);
       }
+
+      const readme = readFileSync(join(root, "README.md"), "utf8");
+      assert.deepEqual(readme.split(/\r?\n/u).filter((line) => line.startsWith("factory init <run-id>")), [
+        "factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]",
+      ]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -109,7 +114,7 @@ describe("what actually ships", () => {
         const factory = await import("feature-factory");
         const plugin = await import("opencode-feature-factory");
         const tui = await import("opencode-feature-factory/tui");
-        const missing = ["readRun", "readRunUnchecked", "nextAction", "validateRun"]
+        const missing = ["readRun", "readRunUnchecked", "nextAction", "validateRun", "validateRunForRead"]
           .filter((name) => typeof factory[name] !== "function");
         if (missing.length) throw new Error("feature-factory is missing: " + missing.join(", "));
         if (typeof plugin.default !== "function") throw new Error("plugin root must default-export a function");
@@ -134,6 +139,16 @@ describe("what actually ships", () => {
       const shim = join(consumer, "node_modules", ".bin", "factory");
       const help = execFileSync("node", [shim, "--help"], { cwd: consumer, encoding: "utf8" });
       assert.match(help, /factory init <run-id>/u, "the CLI must run through the shim and print usage");
+      assert.match(help, /--issue KEY/u, "the packed CLI must advertise the active issue flag");
+      assert.doesNotMatch(help, /--jira/u, "the packed CLI must not advertise the obsolete flag");
+
+      execFileSync("node", [
+        shim, "init", "packed-readme", "--branch", "feature/packed-readme", "--worktree", ".",
+        "--pr-base", "main", "--issue", "ISSUE-214", "--mode", "headless", "--json",
+      ], { cwd: consumer, encoding: "utf8" });
+      const run = JSON.parse(readFileSync(join(consumer, ".factory", "packed-readme", "run.json"), "utf8"));
+      assert.equal(run.issue_key, "ISSUE-214");
+      assert.equal(Object.hasOwn(run, "jira_key"), false);
 
       // And it must actually do work through the shim, not merely print. `status` on an absent run
       // exercises argument parsing and the run-directory resolution.
