@@ -2,7 +2,9 @@
 //
 // The boundary test forbids this package from spawning a process, so `git rev-parse` is not
 // available — which turns out to be the right constraint rather than an obstacle. The control plane
-// lives at `<repo>/.factory/<run-id>/run.json`, so locating it is a filesystem question.
+// is either a legacy direct record at `<repo>/.factory/<run-id>/run.json` or a CLI-created record at
+// `<operator>/.factory-sandboxes/<run-id>/.factory/<run-id>/run.json`, so locating it is a filesystem
+// question.
 //
 // The case that makes this non-trivial is a *linked worktree*. The orchestrator creates one per
 // slice, and a linked worktree has no `.factory` of its own — the control plane stays in the main
@@ -34,19 +36,21 @@ function mainRepositoryOf(dir) {
   return dirname(worktreesDir);
 }
 
-// The repositories a directory could keep its control plane in: itself, and — if it is a linked
-// worktree — the main repository it points at. Nothing above either.
+// The repositories whose direct plane a directory could expose: itself, and — if it is a linked
+// worktree — the main repository it points at. Nothing above either. Operator-root polling separately
+// reads the deterministic CLI-created sandbox container.
 //
 // Both are needed, and getting this wrong broke the sidebar during a real run. The orchestrator makes
 // one linked worktree per slice, and those have no control plane of their own, so a slice worktree has
-// to resolve to the main repository. But a linked worktree used as the *project* root legitimately has
-// its own: `factory init` writes to whatever directory it is run in. Resolving only to the main
-// repository reported "no runs" while a valid run sat in the worktree; resolving only to the directory
-// itself would blank the sidebar inside every slice worktree.
+// to resolve to the main repository. A linked worktree used as the *project* root may have its own
+// direct control plane only for legacy compatibility. Fresh `factory init` instead creates the
+// deterministic sandbox under the operator repository's `.factory-sandboxes/<run-id>`. Resolving only
+// to the main repository reported "no runs" while a valid legacy run sat in the worktree; resolving
+// only to the directory itself would blank the sidebar inside every slice worktree.
 //
-// Order matters: the directory's own control plane wins, because that is the run someone working here
-// is driving. An earlier version walked up until *any* ancestor had one, which found `~/.factory` —
-// a different tool's — so the search still stops at the repository.
+// Order matters: a directory's own plane wins for compatibility with legacy direct records. An earlier
+// version walked up until *any* ancestor had one, which found `~/.factory` — a different tool's — so
+// the search still stops at the repository.
 export function repositoryRoots(startDir) {
   let current = resolve(startDir);
   while (true) {
@@ -105,11 +109,11 @@ function localRuns(repo) {
 
 function sandboxRuns(repo) {
   const container = sandboxContainer(repo);
-  // The container itself must be a real directory, checked without following. `readdirSync` resolves
-  // a symlink, so a pre-existing `<repo>/.factory-sandboxes -> elsewhere` would enumerate another
-  // directory and report its manifests as this repository's runs — the unrelated-control-plane
-  // failure the derived location exists to prevent, and inconsistent with the orchestration contract,
-  // which refuses a symlinked container when it creates one.
+  // CLI-created records live only in this deterministic direct-child container. The container itself
+  // must be a real directory, checked without following. `readdirSync` resolves a symlink, so a
+  // pre-existing `<repo>/.factory-sandboxes -> elsewhere` would enumerate another directory and report
+  // its manifests as this repository's runs — the unrelated-control-plane failure the derived location
+  // exists to prevent, and inconsistent with the init contract, which refuses a symlinked container.
   //
   // The per-entry `isDirectory()` below cannot cover this: traversal has already crossed the
   // container before any Dirent is examined, which is why the direct-child symlink test passes while
