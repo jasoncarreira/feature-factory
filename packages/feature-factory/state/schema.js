@@ -119,18 +119,6 @@ export function validateRun(run) {
   return run;
 }
 
-export function validateRunForRead(run) {
-  if (!isRecord(run) || !Object.hasOwn(run, "jira_key")) return validateRun(run);
-  if (Object.hasOwn(run, "issue_key")) {
-    throw new SchemaError([{ path: "run", message: "issue_key and jira_key are ambiguous" }]);
-  }
-  if (run.version !== 1) {
-    throw new SchemaError([{ path: "run.version", message: "legacy jira_key is supported only for version 1" }]);
-  }
-  const adapted = Object.fromEntries(Object.entries(run).map(([key, value]) => [key === "jira_key" ? "issue_key" : key, value]));
-  return validateRun(adapted);
-}
-
 function gates(errors, value) {
   if (!isRecord(value)) return void errors.push({ path: "run.gates", message: "must be an object" });
   const unknown = Object.keys(value).filter((key) => !GATE_NAMES.includes(key));
