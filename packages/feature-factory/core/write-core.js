@@ -10,25 +10,23 @@ export async function coordinateRunJsonTransition(runDir, options) {
   const {
     contracts,
     descriptor,
-    readEnvelope,
-    validateEnvelope,
+    validateRun,
     reobservers = new Map(),
     atomicWriteHooks,
   } = options ?? {};
   const registry = contractRegistry(contracts);
   const participants = participantRegistry(descriptor, registry);
-  if (typeof readEnvelope !== "function") throw new Error("readEnvelope must be a function");
-  if (typeof validateEnvelope !== "function") throw new Error("validateEnvelope must be a function");
+  if (typeof validateRun !== "function") throw new Error("validateRun must be a function");
   if (!(reobservers instanceof Map)) throw new Error("reobservers must be a Map");
 
   return withRunJsonLock(runDir, async () => {
-    const initial = deepFreeze(await readRunState(runDir, readEnvelope));
+    const initial = deepFreeze(await readRunState(runDir, validateRun));
     const before = projectAll(registry, initial);
     const applied = descriptor.apply(structuredClone(initial));
     if (!applied || typeof applied !== "object" || Array.isArray(applied)) {
       throw new Error("transition apply must return a state object");
     }
-    validateEnvelope(applied);
+    validateRun(applied);
     const candidate = deepFreeze(applied);
     const after = projectAll(registry, candidate);
 
@@ -49,7 +47,7 @@ export async function coordinateRunJsonTransition(runDir, options) {
 
           // First comparison: gives the reobservers a state to reason about that is
           // known current as of this moment.
-          const observed = deepFreeze(await readRunState(runDir, readEnvelope));
+          const observed = deepFreeze(await readRunState(runDir, validateRun));
           assertUnchanged(observed, initial);
 
           const observedProjections = projectAll(registry, observed);
@@ -69,7 +67,7 @@ export async function coordinateRunJsonTransition(runDir, options) {
           // concurrent writer running while one awaited - could commit a valid
           // record after the check, and this rename would silently overwrite it.
           // Nothing may run between this line and the rename.
-          assertUnchanged(deepFreeze(await readRunState(runDir, readEnvelope)), initial);
+          assertUnchanged(deepFreeze(await readRunState(runDir, validateRun)), initial);
           await rename(source, destination);
         },
       },
@@ -84,9 +82,9 @@ function assertUnchanged(observed, initial) {
   }
 }
 
-async function readRunState(runDir, readEnvelope) {
+async function readRunState(runDir, validateRun) {
   const state = JSON.parse(await readFile(join(runDir, RUN_FILE), "utf8"));
-  return readEnvelope(state);
+  return validateRun(state);
 }
 
 function contractRegistry(contracts) {
