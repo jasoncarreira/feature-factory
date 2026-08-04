@@ -857,6 +857,20 @@ describe("registering the workflow with the host", () => {
   });
 
   const CONTROLLED_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
+  // The child's delegation grant is target-scoped, so its policy value is a map rather than "allow".
+  // `task` accepts a pattern map — verified on the running host through this plugin path — and a flat
+  // "allow" resolves to `pattern: "*"`, which bounds nothing: it would permit a child to invoke
+  // itself, the primary, or a peer orchestrator with only prompt text in the way. `*: "deny"` is
+  // required because every resolved agent starts from a `* -> allow` wildcard, so an omitted entry
+  // grants delegation. Asserting this map is what makes the bounded tree checkable; asserting the
+  // prompt's wording only proves the sentence is present, not that the host will refuse the call.
+  const CHILD_TASK_GRANT = Object.freeze({
+    "story-reader": "allow", "story-writer": "allow", "codebase-researcher": "allow",
+    "design-interpreter": "allow", "spec-writer": "allow", "work-decomposer": "allow",
+    "work-reviewer": "allow", "test-verifier": "allow", "implementation-validator": "allow",
+    "backend-builder": "allow", "frontend-builder": "allow",
+    "*": "deny",
+  });
   const FACTORY_PERMISSION_POLICY = {
     "backend-builder": ["allow", "allow", "deny", "deny"],
     "codebase-researcher": ["deny", "allow", "deny", "deny"],
@@ -870,7 +884,7 @@ describe("registering the workflow with the host", () => {
     "work-decomposer": ["deny", "allow", "deny", "deny"],
     "work-reviewer": ["deny", "allow", "deny", "deny"],
     "feature-factory": ["allow", "allow", "allow", "allow"],
-    "run-orchestrator": ["allow", "allow", "allow", "allow"],
+    "run-orchestrator": ["allow", "allow", "allow", CHILD_TASK_GRANT],
   };
 
   function controlledPermissions(permission) {
@@ -982,6 +996,13 @@ describe("registering the workflow with the host", () => {
     assert.equal(child.mode, "subagent");
     assert.deepEqual(controlledPermissions(child.permission),
       expectedPermissions(FACTORY_PERMISSION_POLICY["run-orchestrator"]));
+    // The bound stated as the host will enforce it. Every agent the child may reach is named, and
+    // the three it must never reach are denied by the catch-all rather than by the prompt.
+    assert.equal(child.permission.task["*"], "deny", "an unnamed target must be refused by the host");
+    for (const forbidden of ["run-orchestrator", "feature-factory"]) {
+      assert.ok(child.permission.task[forbidden] === undefined,
+        `${forbidden} must not be granted; it falls to the * deny`);
+    }
     for (const name of [
       "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer",
       "work-decomposer", "work-reviewer", "test-verifier", "implementation-validator", "backend-builder",
@@ -998,8 +1019,8 @@ describe("registering the workflow with the host", () => {
       "factory status \"$R\" --json --repo \"$RUN_REPO\"",
       "continue only from `status.next`/`nextAction`",
       "never initialize another path, invent isolation, create another orchestration layer, or hand-write `run.json`",
-      "generic task permission is not target-scoped",
-      "Refuse task calls to itself, `feature-factory`, any other `run-orchestrator`, and every arbitrary project-owned agent",
+      "task permission is target-scoped by the host",
+      "refused by the host, not merely discouraged here",
       "It may observe builders it dispatched; builders never observe themselves",
       "In `interactive`, perform the orderly pending-gate handoff",
       "In `headless`, preserve terminal `needs-human`",

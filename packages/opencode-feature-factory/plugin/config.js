@@ -124,16 +124,39 @@ const ORCHESTRATOR = {
     + "when the existing preconditions authorize the decision and continue toward a draft PR.",
 };
 
+// The eleven specialists a run driver dispatches. Named here rather than derived from the agents
+// directory because the grant must be a closed list: a new file appearing under `agents/` should not
+// silently widen who a child may invoke.
+const CHILD_TASK_TARGETS = Object.freeze([
+  "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer",
+  "work-decomposer", "work-reviewer", "test-verifier", "implementation-validator",
+  "backend-builder", "frontend-builder",
+]);
+
 const RUN_ORCHESTRATOR = {
   description: "Config-only feature-factory run driver. Drives exactly one durable run under its persisted mode.",
   mode: "subagent",
-  permission: { edit: "allow", bash: "allow", webfetch: "allow", task: "allow" },
+  // `task` is target-scoped, so the bounded tree is enforced rather than requested. A flat
+  // `task: "allow"` resolves to `pattern: "*"` and bounds nothing — it would let a child invoke
+  // itself, the primary, or a peer orchestrator, and the only thing standing in the way would be a
+  // sentence in a prompt. Verified on opencode 1.18.11 through this same plugin path, which is the
+  // path that matters: #188 is the case where a grant was accepted by config and ignored by the host,
+  // so the project-config probe alone would not have settled it.
+  //
+  // Deny `*` last is not decoration. Every resolved agent begins with a `* -> allow` wildcard, so an
+  // omitted `task` entry *grants* delegation; absence of a deny is not a deny.
+  permission: {
+    edit: "allow",
+    bash: "allow",
+    webfetch: "allow",
+    task: Object.fromEntries([...CHILD_TASK_TARGETS.map((name) => [name, "allow"]), ["*", "deny"]]),
+  },
   prompt: [
     "You are the run-orchestrator child. Load and follow the existing `feature` skill exactly. Accept exactly one `Request:` payload and drive exactly one factory run.",
     "For fresh initialization only, apply the skill's exact-leading-token mode admission: only exact standalone leading `--autonomous` and `--headless` tokens select those modes, and request prose never selects mode. On resume, persisted `run.json.mode` is immutable and authoritative.",
     "Enter the existing Step 0 unchanged. Select or resume only the deterministic existing sandbox path `O/.factory-sandboxes/<R>`; never initialize another path, invent isolation, create another orchestration layer, or hand-write `run.json`.",
     "Use this child's real `FACTORY_SESSION_ID` as `SESSION_ID` for every claim, heartbeat, and release; never reuse the parent's session. Read durable state through `factory status \"$R\" --json --repo \"$RUN_REPO\"`, claim through existing Step 0, and continue only from `status.next`/`nextAction`.",
-    "This child owns state-changing `factory` commands for its run. Its generic task permission is not target-scoped, so it may dispatch only these eleven specialists: `story-reader`, `story-writer`, `codebase-researcher`, `design-interpreter`, `spec-writer`, `work-decomposer`, `work-reviewer`, `test-verifier`, `implementation-validator`, `backend-builder`, and `frontend-builder`. Refuse task calls to itself, `feature-factory`, any other `run-orchestrator`, and every arbitrary project-owned agent. It may observe builders it dispatched; builders never observe themselves.",
+    "This child owns state-changing `factory` commands for its run. Its task permission is target-scoped by the host: it may dispatch only these eleven specialists: `story-reader`, `story-writer`, `codebase-researcher`, `design-interpreter`, `spec-writer`, `work-decomposer`, `work-reviewer`, `test-verifier`, `implementation-validator`, `backend-builder`, and `frontend-builder`. Task calls to itself, `feature-factory`, any other `run-orchestrator`, and every arbitrary project-owned agent are refused by the host, not merely discouraged here. It may observe builders it dispatched; builders never observe themselves.",
     "Persisted-mode authority is exact. In `interactive`, perform the orderly pending-gate handoff below, release the lock, and return to the parent. In `headless`, preserve terminal `needs-human`; do not masquerade as an interactive pending gate. In `autonomous`, decide only under the existing autonomous preconditions and continue through existing Step 7 toward a draft PR. Inability to ask never promotes `interactive` or `headless` to `autonomous`.",
     "Use this exact gate artifact map: Story gate `story` -> `artifacts/story.md`; Brief gate `brief` -> `artifacts/technical-brief.md`; Pre-PR gate `pre_pr` -> `gates/pre_pr.md`.",
     "Before every Gate 3 presentation, write or refresh `gates/pre_pr.md` with the current validator verdict when applicable, the acceptance-criterion/test table, the feature-branch diff and PR-base summary, migration and flag callouts, and remaining risks. Then open Gate 3 with `factory gate \"$R\" pre_pr pending --artifact gates/pre_pr.md --repo \"$RUN_REPO\"`.",
