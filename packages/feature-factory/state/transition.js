@@ -6,7 +6,7 @@
 // Contracts validate every family before atomic rename replacement.
 // `apply` receives a structured clone, never the lock, file, or rename.
 // Initialization is the only write outside this path and uses create-only publication.
-import { validateRun, validateRunForRead } from "./schema.js";
+import { validateRun } from "./schema.js";
 import { coordinateRunJsonTransition } from "../core/write-core.js";
 import { FAMILY_CONTRACTS } from "../core/contracts.js";
 
@@ -18,8 +18,7 @@ export async function transition(runDir, { participants, apply, reobservers, hoo
   return coordinateRunJsonTransition(runDir, {
     contracts: FAMILY_CONTRACTS,
     descriptor,
-    readEnvelope: validateRunForRead,
-    validateEnvelope: validateRun,
+    validateRun,
     reobservers: reobservers ?? new Map(),
     atomicWriteHooks: hooks,
   });
