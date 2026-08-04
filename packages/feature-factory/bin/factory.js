@@ -20,7 +20,7 @@ import {
 } from "../state/session-lock.js";
 
 export const COMMANDS = Object.freeze({
-  init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--jira", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
+  init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
   // No --force: `lock <id> steal` is the same operation with a name that says what it
   // does, and two spellings of "take someone else's lock" is one too many.
@@ -472,7 +472,7 @@ const HANDLERS = {
     const run = validateRun({
       version: SCHEMA_VERSION,
       run_id: runId,
-      jira_key: flags.jira ?? null,
+      issue_key: flags.issue ?? null,
       branch,
       worktree,
       pr_base: prBase,
@@ -522,6 +522,7 @@ const HANDLERS = {
     const lock = inspectSessionLock(runDir);
     return emit(flags, {
       run_id: run.run_id,
+      issue_key: run.issue_key ?? null,
       valid: true, sandbox_path: resolve(flags.repo ?? process.cwd()),
       status: run.status,
       mode: run.mode,
@@ -694,7 +695,7 @@ function emit(flags, payload) {
 function usage() {
   process.stdout.write(`factory — durable control plane for /feature runs
 
-  factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--jira KEY] [--mode interactive|headless|autonomous]
+  factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID

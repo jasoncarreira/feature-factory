@@ -13,8 +13,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as cli } from "../bin/factory.js";
-import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
+import { GATE_NAMES, nextAction, readRun, readRunUnchecked, validateRun, validateRunForRead } from "../state/index.js";
 import { assertPublicationReady } from "../observe/review.js";
+import { LEGACY_RUN_MANIFESTS } from "../../../test/fixtures/legacy-run-manifests.js";
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "factory.js");
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -107,6 +108,60 @@ function mergeIntoFeature(repo) {
 
 const runJson = (runDir) => JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
 
+function proveArchivedManifestCompatibility() {
+  assert.deepEqual(LEGACY_RUN_MANIFESTS.map(({ id }) => id), ["175", "178", "183", "187", "190", "195", "202", "203", "issue-163"]);
+  for (const { id, bytes } of LEGACY_RUN_MANIFESTS) {
+    const repo = mkdtempSync(join(tmpdir(), `ff-legacy-${id}-`));
+    const runDir = join(repo, ".factory", id);
+    const path = join(runDir, "run.json");
+    try {
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(path, bytes);
+      const raw = JSON.parse(bytes.toString("utf8"));
+      const snapshot = structuredClone(raw);
+      const adapted = validateRunForRead(raw);
+      assert.deepEqual(raw, snapshot, `${id}: validation must not mutate its input`);
+      assert.equal(adapted.issue_key, id === "183" ? "183" : null);
+      assert.equal(Object.hasOwn(adapted, "jira_key"), false);
+      assert.deepEqual(readRun(runDir), adapted);
+      const unchecked = readRunUnchecked(runDir);
+      assert.equal(unchecked.ok, true);
+      assert.equal(Object.hasOwn(unchecked.run, "jira_key"), true);
+      assert.equal(Object.hasOwn(unchecked.run, "issue_key"), false);
+      assert.deepEqual(readFileSync(path), bytes, `${id}: readRun must preserve bytes`);
+
+      const status = factory(repo, ["status", id]);
+      assert.equal(status.ok, true, `${id}: ${status.stderr}`);
+      assert.equal(status.out.valid, true);
+      assert.equal(status.out.issue_key, id === "183" ? "183" : null);
+      assert.deepEqual(readFileSync(path), bytes, `${id}: status must preserve bytes`);
+
+      const terminal = factory(repo, ["terminal", id, "completed", "--reason", "draft-pr-recorded", "--now", "2030-01-01T00:00:00.000Z"]);
+      assert.equal(terminal.ok, true, `${id}: ${terminal.stderr}`);
+      const persisted = runJson(runDir);
+      assert.strictEqual(validateRun(persisted), persisted);
+      assert.equal(Object.hasOwn(persisted, "issue_key"), true);
+      assert.equal(Object.hasOwn(persisted, "jira_key"), false);
+      assert.equal(Object.hasOwn(persisted, "plan_digest"), Object.hasOwn(raw, "plan_digest"));
+      const expected = { ...raw, issue_key: raw.jira_key, updated_at: "2030-01-01T00:00:00.000Z" };
+      delete expected.jira_key;
+      assert.deepEqual(persisted, expected, `${id}: transition must change only the key name and timestamp`);
+    } finally { rmSync(repo, { recursive: true, force: true }); }
+  }
+
+  const repo = mkdtempSync(join(tmpdir(), "ff-issue-cli-"));
+  try {
+    const initialized = factory(repo, ["init", "issue-cli", "--pr-base", "main", "--issue", "214", "--now", NOW(0)]);
+    assert.equal(initialized.ok, true, initialized.stderr);
+    const persisted = runJson(join(repo, ".factory", "issue-cli"));
+    assert.equal(persisted.issue_key, "214");
+    assert.equal(Object.hasOwn(persisted, "jira_key"), false);
+    const oldFlag = factory(repo, ["init", "old-flag", "--pr-base", "main", "--jira", "214", "--now", NOW(0)]);
+    assert.equal(oldFlag.ok, false);
+    assert.match(oldFlag.stderr, /unknown option '--jira' for 'init'/u);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+}
+
 // Every publication check now asks for all three gates, so a fixture probing one specific
 // refusal has to be otherwise-complete or the earlier gates explain the failure instead of
 // the guard under test. That masking has bitten this suite repeatedly.
@@ -142,6 +197,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
   }
 
   it("records a clean serial merge", () => {
+    proveArchivedManifestCompatibility();
     const p = upToReview("clean");
     try {
       const mergeCommit = mergeIntoFeature(p.repo);
@@ -467,7 +523,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
   // proof built on "nothing lands between branch and merge".
   it("merges two file-disjoint slices from the same wave", () => {
     // The central case, and the one that exposes the merge proof's assumption. Both
-    // slices branch from the same integration head, as viso specifies ("a slice worktree
+    // slices branch from the same integration head, as the inherited wave contract specifies ("a slice worktree
     // branched from the current feature-branch HEAD"), and merges are serial. So the
     // second merge lands on a base that has moved, and its merged tree contains the
     // first slice's work as well as its own. Tree equality cannot hold for it.
@@ -810,7 +866,7 @@ describe("what happens next", () => {
     evidence_ref: null, review_ref: null, merge_commit: status === "merged" ? "b".repeat(40) : null,
   });
   const state = (overrides = {}) => validateRun({
-    version: 1, run_id: "next-action", jira_key: null, branch: "feature/next-action", worktree: ".", pr_base: "main",
+    version: 1, run_id: "next-action", issue_key: null, branch: "feature/next-action", worktree: ".", pr_base: "main",
     created_at: at, updated_at: at, status: "running", mode: "interactive", max_parallel_slices: 2, max_retries: 3,
     gates: {}, steps: [], slices: [], validator: null, terminal_result: null, pr_url: null, ...overrides,
   });
