@@ -399,14 +399,155 @@ const CLAIMS = [
     },
   },
   {
-    id: "agents-may-read-never-write",
+    id: "active-driver-owns-state-transitions",
     file: "skills/feature/SKILL.md",
-    fragment: "A subagent may read —\n`factory status <run-id> --json` to orient itself — and may never write.",
+    fragment: "The active run driver owns every state-changing `factory` command for\nits run.",
     expect: "allowed",
-    matches: /"valid": true/u,
+    matches: /"story": "pending"/u,
     act(repo) {
-      seeded(repo);
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      writeFileSync(join(repo, ".factory", RUN, "artifacts", "story.md"), "story\n");
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]).ok, true);
       return factory(repo, ["status", RUN, "--json"]);
+    },
+  },
+  {
+    id: "interactive-child-session-a-handoff",
+    file: "skills/feature/SKILL.md",
+    fragment: "For an interactive child, an orderly pending-gate handoff is complete only after all of these actions:",
+    expect: "allowed",
+    matches: /"lock": "absent"[\s\S]*"story": "pending"/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      const artifact = join(repo, ".factory", RUN, "artifacts", "story.md");
+      writeFileSync(artifact, "story\n");
+      assert.equal(factory(repo, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]).ok, true);
+      assert.equal(existsSync(artifact), true);
+      const run = JSON.parse(readFileSync(join(repo, ".factory", RUN, "run.json"), "utf8"));
+      assert.deepEqual(run.gates.story, { status: "pending", at: null, artifact: "artifacts/story.md" });
+      const pending = JSON.parse(factory(repo, ["status", RUN, "--json"]).out);
+      assert.equal(pending.mode, "interactive");
+      assert.equal(pending.gates.story, "pending");
+      assert.equal(pending.lock_session, "session-a");
+      assert.equal(factory(repo, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
+      const result = factory(repo, ["status", RUN, "--json"]);
+      const unlocked = JSON.parse(result.out);
+      assert.equal(unlocked.lock, "absent");
+      assert.equal(unlocked.lock_session, null);
+      return result;
+    },
+  },
+  {
+    id: "exact-gate-artifact-map",
+    file: "skills/feature/SKILL.md",
+    fragment: "| Story | `story` | `artifacts/story.md` |\n| Brief | `brief` | `artifacts/technical-brief.md` |\n| Pre-PR | `pre_pr` | `gates/pre_pr.md` |",
+    expect: "allowed",
+    matches: /gate: pre_pr\nstatus: pending/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      const runDir = join(repo, ".factory", RUN);
+      const artifacts = {
+        story: "artifacts/story.md",
+        brief: "artifacts/technical-brief.md",
+        pre_pr: "gates/pre_pr.md",
+      };
+      for (const artifact of Object.values(artifacts)) {
+        mkdirSync(dirname(join(runDir, artifact)), { recursive: true });
+        writeFileSync(join(runDir, artifact), `${artifact}\n`);
+      }
+      writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify(PLAN));
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact", artifacts.story, "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "approved", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "pending", "--artifact", artifacts.brief, "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "brief", "approved", "--now", NOW]).ok, true);
+      const result = factory(repo, ["gate", RUN, "pre_pr", "pending", "--artifact", artifacts.pre_pr, "--now", NOW]);
+      assert.equal(result.ok, true, result.out);
+      const gates = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).gates;
+      assert.equal(gates.story.artifact, artifacts.story);
+      assert.equal(gates.brief.artifact, artifacts.brief);
+      assert.equal(gates.pre_pr.artifact, artifacts.pre_pr);
+      assert.equal(Object.values(artifacts).every((artifact) => existsSync(join(runDir, artifact))), true);
+      return result;
+    },
+  },
+  {
+    id: "fresh-session-b-approves",
+    file: "skills/feature/SKILL.md",
+    fragment: "`approve` runs `factory gate \"$R\" \"$GATE\" approved --repo \"$RUN_REPO\"`.",
+    expect: "allowed",
+    matches: /gate: story\nstatus: approved/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      writeFileSync(join(repo, ".factory", RUN, "artifacts", "story.md"), "story\n");
+      assert.equal(factory(repo, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
+      const parentStatus = JSON.parse(factory(repo, ["status", RUN, "--json"]).out);
+      assert.equal(parentStatus.mode, "interactive");
+      assert.equal(parentStatus.gates.story, "pending");
+      assert.equal(parentStatus.lock, "absent");
+      assert.equal(factory(repo, ["lock", RUN, "claim", "--session", "session-b", "--now", NOW]).ok, true);
+      const childStatus = JSON.parse(factory(repo, ["status", RUN, "--json"]).out);
+      assert.equal(childStatus.lock_session, "session-b");
+      assert.equal(childStatus.gates.story, "pending");
+      const result = factory(repo, ["gate", RUN, "story", "approved", "--now", NOW]);
+      assert.equal(JSON.parse(factory(repo, ["status", RUN, "--json"]).out).next, "gate:brief");
+      return result;
+    },
+  },
+  {
+    id: "fresh-session-b-changes-and-represents",
+    file: "skills/feature/SKILL.md",
+    fragment: "`changes-at-gate:<name>`, revises only the affected stage, and re-presents it pending.",
+    expect: "allowed",
+    matches: /gate: story\nstatus: pending/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      writeFileSync(join(repo, ".factory", RUN, "artifacts", "story.md"), "story\n");
+      assert.equal(factory(repo, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["lock", RUN, "claim", "--session", "session-b", "--now", NOW]).ok, true);
+      const verified = JSON.parse(factory(repo, ["status", RUN, "--json"]).out);
+      assert.equal(verified.mode, "interactive");
+      assert.equal(verified.gates.story, "pending");
+      assert.equal(verified.lock_session, "session-b");
+      assert.equal(factory(repo, ["gate", RUN, "story", "changes", "--now", NOW]).ok, true);
+      assert.equal(JSON.parse(factory(repo, ["status", RUN, "--json"]).out).next, "changes-at-gate:story");
+      writeFileSync(join(repo, ".factory", RUN, "artifacts", "story.md"), "revised story\n");
+      return factory(repo, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]);
+    },
+  },
+  {
+    id: "fresh-session-b-stops-unlocked-and-nonterminal",
+    file: "skills/feature/SKILL.md",
+    fragment: "This is an unlocked\n  nonterminal stop: do not terminalize it",
+    expect: "allowed",
+    matches: /"lock": "absent"[\s\S]*"story": "stop"[\s\S]*"terminal_result": null[\s\S]*"next": "stopped-at-gate:story"/u,
+    act(repo) {
+      assert.equal(factory(repo, ["init", RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]).ok, true);
+      writeFileSync(join(repo, ".factory", RUN, "artifacts", "story.md"), "story\n");
+      assert.equal(factory(repo, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
+      assert.equal(factory(repo, ["lock", RUN, "claim", "--session", "session-b", "--now", NOW]).ok, true);
+      const verified = JSON.parse(factory(repo, ["status", RUN, "--json"]).out);
+      assert.equal(verified.mode, "interactive");
+      assert.equal(verified.gates.story, "pending");
+      assert.equal(verified.lock_session, "session-b");
+      assert.equal(factory(repo, ["gate", RUN, "story", "stop", "--now", NOW]).ok, true);
+      const stopped = JSON.parse(factory(repo, ["status", RUN, "--json"]).out);
+      assert.equal(stopped.next, "stopped-at-gate:story");
+      assert.equal(stopped.terminal_result, null);
+      assert.equal(factory(repo, ["lock", RUN, "release", "--session", "session-b", "--now", NOW]).ok, true);
+      const result = factory(repo, ["status", RUN, "--json"]);
+      const unlocked = JSON.parse(result.out);
+      assert.equal(unlocked.lock, "absent");
+      assert.equal(unlocked.lock_session, null);
+      assert.equal(unlocked.next, "stopped-at-gate:story");
+      assert.equal(unlocked.terminal_result, null);
+      return result;
     },
   },
 
@@ -773,13 +914,23 @@ const CLAIMS = [
   {
     id: "headless-mode-persists",
     file: "skills/feature/SKILL.md",
-    fragment: "`--headless` maps only to `factory init --mode headless`.",
+    fragment: "terminalize with reason exactly `headless run reached a human gate`:",
     expect: "allowed",
-    matches: /"mode": "headless"/u,
+    matches: /"status": "needs-human"[\s\S]*"mode": "headless"[\s\S]*"terminal_result": \{\s*"status": "needs-human",\s*"reason": "headless run reached a human gate"\s*\}[\s\S]*"next": "terminal:needs-human"/u,
     act(repo) {
       const initialized = factory(repo, ["init", RUN, "--mode", "headless", "--now", NOW]);
       assert.equal(initialized.ok, true, initialized.out);
-      return factory(repo, ["status", RUN, "--json"]);
+      assert.equal(factory(repo, ["terminal", RUN, "needs-human", "--reason", "headless run reached a human gate", "--now", NOW]).ok, true);
+      const result = factory(repo, ["status", RUN, "--json"]);
+      const durable = JSON.parse(result.out);
+      assert.equal(durable.mode, "headless");
+      assert.equal(durable.status, "needs-human");
+      assert.deepEqual(durable.terminal_result, {
+        status: "needs-human",
+        reason: "headless run reached a human gate",
+      });
+      assert.equal(durable.next, "terminal:needs-human");
+      return result;
     },
   },
 ];
