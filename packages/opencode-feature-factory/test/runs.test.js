@@ -297,10 +297,10 @@ describe("run projection", () => {
     const root = repo("gate-priority");
     try {
       seedRun(root, "ordinary-newer", RUN({
-        run_id: "ordinary-newer", jira_key: "APP-2", updated_at: "2026-07-30T12:00:00.000Z",
+        run_id: "ordinary-newer", issue_key: "APP-2", updated_at: "2026-07-30T12:00:00.000Z",
       }));
       const waiting = seedSandbox(root, "waiting-older", RUN({
-        run_id: "waiting-older", jira_key: "APP-1", updated_at: "2026-07-30T11:00:00.000Z",
+        run_id: "waiting-older", issue_key: "APP-1", updated_at: "2026-07-30T11:00:00.000Z",
         gates: { story: { status: "pending", at: null, artifact: null } },
       }));
 
@@ -616,7 +616,7 @@ describe("run projection", () => {
   it("renders a recursively frozen synthetic snapshot repeatedly without mutation", () => {
     const active = {
       run_id: "waiting", valid: true, terminal: false, manifest_path: "/repo/waiting/run.json",
-      jira_key: "APP-1", status: "running", mode: "interactive", branch: "feature/waiting",
+      issue_key: "APP-1", status: "running", mode: "interactive", branch: "feature/waiting",
       step: null, max_retries: 3, slice_total: 0, slices: [], validator: null, pr_url: null,
       terminal_result: null, awaiting_gate: "brief", next: "gate:brief", sandbox_path: null, deadLock: false,
     };
@@ -627,12 +627,12 @@ describe("run projection", () => {
       runs: [
         {
           run_id: "ordinary", valid: true, terminal: false, manifest_path: "/repo/ordinary/run.json",
-          jira_key: null, next: "step:builder", sandbox_path: null, deadLock: false,
+          issue_key: null, next: "step:builder", sandbox_path: null, deadLock: false,
         },
         active,
         {
           run_id: "stale", valid: true, terminal: false, manifest_path: "/repo/stale/run.json",
-          jira_key: "APP-3", awaiting_gate: "review", next: "gate:review",
+          issue_key: "APP-3", awaiting_gate: "review", next: "gate:review",
           sandbox_path: "/repo/sandboxes/stale", deadLock: true,
         },
         { run_id: "done", valid: true, terminal: true, manifest_path: "/repo/done/run.json" },

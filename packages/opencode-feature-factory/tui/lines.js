@@ -46,7 +46,7 @@ function secondaryLines(run) {
     ];
   }
   return [
-    `${run.run_id}${run.jira_key ? `  ${run.jira_key}` : ""}`,
+    `${run.run_id}${run.issue_key ? `  ${run.issue_key}` : ""}`,
     `next: ${run.next}`,
   ];
 }
