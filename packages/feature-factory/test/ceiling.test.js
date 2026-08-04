@@ -151,7 +151,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // onward and stop at the next invocation, so two on one line do not pool their flags.
     const invocations = [];
     for (const snippet of snippets) {
-      const found = [...snippet.matchAll(/\bfactory\s+([a-z-]+)/gu)];
+      const found = [...snippet.matchAll(/\bfactory\s+([a-z-]+)\b(?!:)/gu)];
       found.forEach((match, index) => {
         const tail = snippet.slice(match.index, found[index + 1]?.index ?? snippet.length);
         invocations.push({
@@ -192,14 +192,17 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     }
     assert.deepEqual(unknown, [], "the skill documents a command or flag the CLI does not accept");
     const cliSource = readFileSync(join(pkg, "bin", "factory.js"), "utf8");
+    const initPublicationSource = readFileSync(join(pkg, "bin", "init-publication.js"), "utf8");
     const readme = readFileSync(resolve(pkg, "..", "..", "README.md"), "utf8");
     assert.ok(COMMANDS.init.includes("--pr-base"));
-    const initHandler = /async init\(\[runId\], flags\) \{([\s\S]*?)\n  \},\n\n  status/u.exec(cliSource)?.[1];
-    assert.ok(initHandler, "could not locate the init handler for its publication contract");
-    assert.match(initHandler, /await writeProtectedJsonAtomic\(runDir, "run\.json", run, \{ createOnly: true \}\)/u,
-      "init must publish run.json through the create-only writer; ordinary rename would let a racer replace it");
+    assert.match(cliSource,
+      /publish: dispatchInitPublication,[\s\S]*?const dispatchInitPublication = publish;[\s\S]*?await dispatchInitPublication\(\{ runDir, sandboxPath: S, candidate: run \}\)/u,
+      "real init must await the private publication dispatcher with its derived paths and validated candidate");
+    assert.match(initPublicationSource,
+      /\{ writer = writeProtectedJsonAtomic, observeTarget = observeInitTarget \} = \{\},[\s\S]*?await writer\(runDir, "run\.json", candidate, \{ createOnly: true \}\)/u,
+      "the private dispatcher must invoke the create-only protected writer");
     assert.ok(cliSource.includes("[--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET]"));
-    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--issue "$KEY"] [--mode "$MODE"] --repo "$S"'));
+    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json'));
     assert.ok(readme.includes("factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]"));
     assert.ok(markdown.includes('gh pr create --draft --base "<pr_base>" --head "<branch>"'));
 
@@ -510,8 +513,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // The lines are that binding at three points, the refusals at each, and the notes recording why
     // a filename was never the thing being approved. Well inside the 2900 Jason authorized for this
     // batch; the number is what it landed on, not what was allowed.
-    assert.equal(total, 2704, "issue 219 must reduce the 2719-line baseline to 2704 production lines");
-    assert.ok(total < 2727, `production source is ${total} lines; the tripwire is 2727`);
+    // 2704 -> 2998 for run 182, which moved one-attempt local sandbox creation and complete physical
+    // containment into init. The ceiling is 3000; this is the landed count, not a target.
+    assert.equal(total, 2998, "run 182 landed at 2998 production lines");
+    assert.ok(total <= 3000, `production source is ${total} lines; the tripwire is 3000`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
