@@ -1,22 +1,27 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { initFresh } from "./init-fixture.js";
 
-test("AC9/AC16-AC19 effective push targets are proven at bootstrap, resume, and publication", () => {
+test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", () => {
   const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const cli = resolve(pkg, "bin", "factory.js");
   const skill = readFileSync(resolve(pkg, "skills", "feature", "SKILL.md"), "utf8");
   const resumeStart = skill.indexOf("### Resume or collision");
-  const freshStart = skill.indexOf("### Fresh sandbox bootstrap");
-  const stepOneStart = skill.indexOf("### Gate 1 — Story");
+  const freshStart = skill.indexOf("### Fresh sandbox request");
+  const gateOneStart = skill.indexOf("### Gate 1 — Story");
+  const gateThreeStart = skill.indexOf("### Gate 3 — Pre-PR");
   const publicationStart = skill.indexOf("## Step 6 — Draft PR");
   const summaryStart = skill.indexOf("## Step 7 — Summary");
   const resume = skill.slice(resumeStart, freshStart);
-  const fresh = skill.slice(freshStart, stepOneStart);
+  const fresh = skill.slice(freshStart, gateOneStart);
+  const gateThree = skill.slice(gateThreeStart, publicationStart);
   const publication = skill.slice(publicationStart, summaryStart);
+  const summary = skill.slice(summaryStart);
   const required = (section, fragment, trace) => {
     const index = section.indexOf(fragment);
     assert.notEqual(index, -1, `${trace} contract is missing: ${fragment}`);
@@ -27,174 +32,300 @@ test("AC9/AC16-AC19 effective push targets are proven at bootstrap, resume, and 
     assert.deepEqual(positions, [...positions].sort((left, right) => left - right), `${trace} operations are out of order`);
   };
   const occurrences = (section, fragment) => section.split(fragment).length - 1;
-  const runGit = (...args) => execFileSync("git", args, {
+  const command = (name, args, options = {}) => spawnSync(name, args, {
     encoding: "utf8",
-    env: { ...process.env, LC_ALL: "C" },
-  }).trim();
-  const git = (repository, ...args) => runGit("-C", repository, ...args);
-  const publishSelectedRun = (operatorRepository, runRepository, targetRepository, status, trace) => {
-    const operatorTarget = git(operatorRepository, "remote", "get-url", "--push", "origin");
-    const runTarget = git(runRepository, "remote", "get-url", "--push", "origin");
-    assert.equal(runTarget, operatorTarget, `${trace} effective targets must compare exactly`);
-    const featureBranch = status.branch;
-    const prBase = status.pr_base;
-    const featureRef = `refs/heads/${featureBranch}`;
-    git(runRepository, "push", "--quiet", "origin", `${featureRef}:${featureRef}`);
-    const publishedHead = git(runRepository, "rev-parse", featureRef);
-    assert.equal(git(targetRepository, "rev-parse", featureRef), publishedHead, `${trace} must publish the selected RUN_REPO head`);
-    return { featureBranch, prBase, featureRef, publishedHead };
+    env: { ...process.env, LC_ALL: "C", ...options.env },
+    cwd: options.cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const gitResult = (repository, ...args) => command("git", ["-C", repository, ...args]);
+  const git = (repository, ...args) => {
+    const result = gitResult(repository, ...args);
+    assert.equal(result.status, 0, `git ${args.join(" ")} failed: ${result.stderr}`);
+    return result.stdout.trim();
   };
+  const factory = (...args) => JSON.parse(execFileSync(process.execPath, [cli, ...args, "--json"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }));
+  const snapshot = (root) => {
+    const visit = (path, name, entries) => {
+      const stat = lstatSync(path);
+      if (stat.isDirectory()) {
+        entries.push([name, "directory"]);
+        for (const child of readdirSync(path).sort()) visit(join(path, child), name ? `${name}/${child}` : child, entries);
+      } else if (stat.isSymbolicLink()) {
+        entries.push([name, "symlink"]);
+      } else {
+        entries.push([name, "file", readFileSync(path).toString("base64")]);
+      }
+    };
+    const entries = [];
+    visit(root, ".", entries);
+    return entries;
+  };
+  const effectiveTarget = (repository) => {
+    const result = gitResult(repository, "remote", "get-url", "--push", "origin");
+    return result.status === 0 && result.stdout.trim() ? { ok: true, value: result.stdout.trim() } : { ok: false };
+  };
+  const compareOnly = (operator, sandbox) => {
+    const operatorTarget = effectiveTarget(operator);
+    if (!operatorTarget.ok) return { ok: false, message: `factory sandbox: operator effective push target unavailable; sandbox retained at ${sandbox}` };
+    const sandboxTarget = effectiveTarget(sandbox);
+    if (!sandboxTarget.ok) return { ok: false, message: `factory sandbox: sandbox effective push target unavailable at ${sandbox}` };
+    if (sandboxTarget.value !== operatorTarget.value) {
+      return { ok: false, message: `factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${sandbox}` };
+    }
+    return { ok: true };
+  };
+  const configureAndCompare = (operator, sandbox, afterConfigure = () => {}) => {
+    const events = [];
+    const operatorTarget = effectiveTarget(operator);
+    events.push("operator-capture");
+    if (!operatorTarget.ok) return { ...compareOnly(operator, sandbox), events };
+    const configured = gitResult(sandbox, "config", "--replace-all", "remote.origin.pushurl", operatorTarget.value);
+    events.push("sandbox-configure");
+    if (configured.status !== 0) {
+      return { ok: false, message: `factory sandbox: sandbox effective push target unavailable at ${sandbox}`, events };
+    }
+    afterConfigure();
+    const compared = compareOnly(operator, sandbox);
+    events.push("operator-recapture", "sandbox-recapture", "compare");
+    return { ...compared, events };
+  };
+  const featureLog = (repository, branch) => {
+    const raw = git(repository, "rev-parse", "--git-path", `logs/refs/heads/${branch}`);
+    const path = isAbsolute(raw) ? raw : resolve(repository, raw);
+    const root = realpathSync(join(repository, ".git", "logs", "refs", "heads"));
+    const fromRoot = relative(root, path);
+    assert.ok(fromRoot && !fromRoot.startsWith("..") && !isAbsolute(fromRoot));
+    return path;
+  };
+  const provenance = (repository, branch, bootstrapPending) => {
+    const path = featureLog(repository, branch);
+    if (!existsSync(path)) return { ok: false, reason: "reflog absent" };
+    const lines = readFileSync(path, "utf8").trimEnd().split("\n");
+    if (bootstrapPending && lines.length !== 1) return { ok: false, reason: "bootstrap reflog count" };
+    const match = /^([0-9a-f]{40}) ([0-9a-f]{40}) .+\tbranch: Created from ([0-9a-f]{40})$/u.exec(lines[0]);
+    if (!match || match[1] !== "0".repeat(40) || match[2] !== match[3]) return { ok: false, reason: "raw creation provenance" };
+    const ancestry = gitResult(repository, "merge-base", "--is-ancestor", match[2], `refs/heads/${branch}`);
+    return ancestry.status === 0 ? { ok: true, seed: match[2], lines } : { ok: false, reason: "seed ancestry" };
+  };
+  const operatorRefAbsent = (operator, branch) => gitResult(operator, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`).status === 1;
+  const createBranch = (sandbox, branch) => {
+    assert.equal(gitResult(sandbox, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`).status, 1);
+    const log = git(sandbox, "rev-parse", "--git-path", `logs/refs/heads/${branch}`);
+    assert.equal(existsSync(isAbsolute(log) ? log : resolve(sandbox, log)), false);
+    assert.equal(gitResult(sandbox, "diff", "--quiet").status, 0);
+    assert.equal(gitResult(sandbox, "diff", "--cached", "--quiet").status, 0);
+    const seed = git(sandbox, "rev-parse", "--verify", "HEAD^{commit}");
+    git(sandbox, "switch", "--no-track", "-c", branch, seed);
+    const proof = provenance(sandbox, branch, true);
+    assert.equal(proof.ok, true, proof.reason);
+    assert.equal(proof.seed, seed);
+    assert.equal(git(sandbox, "symbolic-ref", "--quiet", "--short", "HEAD"), branch);
+    assert.equal(git(sandbox, "rev-parse", "HEAD"), seed);
+    return { seed, log: featureLog(sandbox, branch) };
+  };
+  const bootstrapPending = (run, status) => run.status === "running"
+    && run.created_at === run.updated_at
+    && Object.keys(run.gates).length === 0
+    && run.steps.length === 0
+    && run.slices.length === 0
+    && run.validator === null
+    && run.terminal_result === null
+    && run.pr_url === null
+    && run.plan_digest === null
+    && status.lock === "absent";
 
-  assert.ok(resumeStart >= 0 && freshStart > resumeStart && stepOneStart > freshStart);
-  assert.ok(publicationStart >= 0 && summaryStart > publicationStart);
-
+  assert.ok(resumeStart >= 0 && freshStart > resumeStart && gateOneStart > freshStart);
+  assert.ok(gateThreeStart >= 0 && publicationStart > gateThreeStart && summaryStart > publicationStart);
   ordered(fresh, [
-    'PUSH_TARGET="$(LC_ALL=C git -C "$O" remote get-url --push origin)"',
-    'LC_ALL=C git clone --local "$O" "$S"',
-    'git -C "$S" config --replace-all remote.origin.pushurl "$PUSH_TARGET"',
-    'RESOLVED_PUSH="$(LC_ALL=C git -C "$S" remote get-url --push origin)"',
-    "shell-string equality with\n`PUSH_TARGET` must be exact",
-    "remove only this invocation's new `S`, and refuse dispatch",
-  ], "AC16-AC18 fresh effective-push");
-  for (const fragment of [
-    "Each command must succeed and produce nonempty output.",
-    "its result includes Git's configured `pushurl` and `pushInsteadOf` semantics and may differ from the\nfetch URL.",
-    "Never read raw `remote.origin.url`, normalize the result, or expose it.",
-    "Keep `PUSH_TARGET`\nout of the control plane and logs.",
-    "Do not initialize state, claim a lock, or\nperform any external effect from the failed bootstrap.",
-  ]) required(fresh, fragment, "AC16-AC18 fresh effective-push");
-  ordered(fresh, [
-    "### Physical containment gate",
-    "Require `SWITCHED_HEAD` to equal `SEED_HEAD`",
+    'git -C "$O" show-ref --verify --quiet "$FEATURE_REF"',
     'factory init "$R" --branch "$FEATURE_BRANCH"',
-    "valid state means resume and never retry",
-    'RUN_REPO="$S"',
+    "successful JSON response selects paths",
+    "Immediately after fresh selection",
+    "### Effective push proof",
+    'git -C "$RUN_REPO" config --replace-all remote.origin.pushurl "$OPERATOR_PUSH"',
+    "the two current shell strings must be exactly equal",
+    "### Feature branch provenance and crash recovery",
+    'git -C "$INTEGRATION_WORKTREE" switch --no-track -c "$FEATURE_BRANCH" "$SEED_HEAD"',
+    "Immediately before claiming or stealing a lock",
     'factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"',
     "dispatch the planned ticket",
-  ], "AC9 fresh RUN_REPO selection");
-  assert.equal(occurrences(fresh, 'RUN_REPO="$S"'), 1);
-  const freshRunRepoVariable = /RUN_REPO="(\$S)"/u.exec(fresh)?.[1];
-  const legacyRunRepoVariable = /RUN_REPO="(\$O)"/u.exec(resume)?.[1];
-  assert.equal(freshRunRepoVariable, "$S");
-  assert.equal(legacyRunRepoVariable, "$O");
-  assert.doesNotMatch(fresh, /git -C "\$O" config .*remote\.origin\.url/u);
-
-  ordered(resume, [
-    "Every sandbox resume recaptures both effective push targets",
-    'CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"',
-    'CURRENT_SANDBOX_PUSH="$(LC_ALL=C git -C "$S" remote get-url --push origin)"',
-    "Both lookups must succeed and return nonempty output",
-    "their shell strings must be exactly equal",
-    "permits only status reads against `S`",
-    "do\nnot claim or steal the lock or publish, and refuse dispatch",
-  ], "AC17 resume effective-push");
+  ], "fresh request/push/branch/lock");
   for (const fragment of [
-    "Never persist or log either target, normalize them, or automatically reconfigure the sandbox.",
-    "A lookup\nfailure or mismatch retains `S`, exposes neither value",
-  ]) required(resume, fragment, "AC17 resume effective-push");
-  assert.equal(occurrences(resume, "config --replace-all remote.origin.pushurl"), 0);
-
+    "exact canonical `sandbox_path`",
+    "exact absolute `run_dir`",
+    "exact `branch`",
+    "exact `worktree`",
+    "exact `pr_base`",
+    "pre-reserves the deterministic sandbox",
+    "performs exactly one\n`git clone --local -- O S`",
+    "completes the physical containment proof, and only then publishes\n`run.json`",
+    "The skill does not construct or prove the sandbox.",
+    "created_at` exactly\nequals `updated_at`",
+    "qualified status reports lock state exactly `absent`",
+    "An active resume skips the configuration command",
+    "Never persist, log, echo, normalize, interpolate into a cause",
+    "Suppress target-operation stdout, stderr, and argv",
+    "oldest raw line",
+    "forty-zero old OID",
+    "branch: Created from <seed-oid>",
+    "merge-base --is-ancestor",
+    "Non-bootstrap, sandbox branch absent",
+    "Never recreate a progressed run's branch.",
+  ]) required(fresh, fragment, "ratified skill policy");
+  assert.equal(occurrences(fresh, 'git -C "$O" show-ref --verify --quiet "$FEATURE_REF"'), 4);
+  assert.equal(occurrences(fresh, "config --replace-all remote.origin.pushurl"), 1);
+  assert.doesNotMatch(fresh, /git clone --local "\$O"|--no-hardlinks|hardlink clone|\bfallback\b|copy-mode|\bstaging\b|\bretry(?:ing)?\b|alternate destination|attempt-numbered|quarantine|ownership (?:evidence|record)|rm -|rmSync|recursive removal|mkdir|pwd -P|rev-parse --absolute-git-dir/iu);
+  for (const fragment of [
+    "derive later paths only from the successful command response",
+    'RUN_REPO="<exact response sandbox_path>"',
+    "An active sandbox resume only\nrecaptures and compares targets; it never changes remote configuration.",
+  ]) required(resume, fragment, "resume selection");
+  for (const message of [
+    "factory sandbox: operator effective push target unavailable; sandbox retained at <S>",
+    "factory sandbox: sandbox effective push target unavailable at <S>",
+    "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>",
+  ]) required(fresh, message, "redacted refusal");
+  ordered(fresh, [
+    "On any capture, configuration, recapture, or equality failure",
+    "permit only `factory status",
+    "stop before branch handling",
+  ], "push refusal effects");
+  required(fresh, "stop before branch handling,\nlock claim or steal, dispatch, transition, push, forge command, or further publication.", "push refusal effects");
+  required(gateThree, "Production source: <landed count> / 3000", "Gate 3 source accounting");
   ordered(publication, [
     'factory status "$R" --json --repo "$RUN_REPO"',
+    'git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"',
+    "set +x",
     'CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"',
     'CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"',
-    "their shell strings must be exactly equal",
+    "Step 6 only compares and never runs `git config`",
     'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"',
-    'cd "$O"',
-    'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"',
+    'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"',
     'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
-  ], "AC9/AC17 publication effective-push");
-  for (const fragment of [
-    "Never persist or log either target, normalize them, or automatically reconfigure a remote.",
-    "A lookup\nfailure or mismatch leaves `RUN_REPO` intact, exposes neither value, permits status only, and blocks\nevery publication effect.",
-    "Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as\n`PR_BASE`; never infer, shorten, normalize, or substitute either value.",
-    "Publish the fully qualified\nrecorded feature ref from `RUN_REPO`, run `gh` from `O` with that exact head and base, require a draft",
-    "sandbox runs use `S` and legacy local runs use `O`\nthrough the selection already made in Step 0",
-    "`pr_url` is immutable once recorded",
-    "If PR creation returns an unknown outcome, re-observe whether the PR exists before retrying",
-    "For a legacy manifest where `pr_base` is absent or null, stop and\nrequire a human/operator to choose or confirm the exact target",
-    "Never infer it from HEAD, the feature branch, repository or forge defaults, and\nnever backfill the legacy manifest.",
-  ]) required(publication, fragment, "AC9/AC17 publication effective-push");
+    "Production source ceiling: <landed count> / 3000",
+  ], "Step 6 compare/publication");
   assert.equal(occurrences(publication, "config --replace-all remote.origin.pushurl"), 0);
-  assert.doesNotMatch(publication, /(?:--repo|git -C) "\$S"/u);
-  assert.doesNotMatch(publication, /"<(?:pr_base|branch)>"/u);
-  assert.equal(occurrences(skill, "config --replace-all remote.origin.pushurl"), 1);
+  assert.doesNotMatch(publication, /git -C "\$RUN_REPO" config/u);
+  required(summary, "guarded sandbox-removal", "Step 7 exclusion");
+  required(summary, "Only after all ref and archive verification succeeds", "Step 7 guard");
 
   const root = mkdtempSync(join(tmpdir(), "factory-effective-push-"));
   try {
     const operator = join(root, "operator");
-    const fetchRoot = join(root, "fetch-target");
-    const pushRoot = join(root, "push-target");
-    const changedPushRoot = join(root, "changed-push-target");
-    const mismatchRoot = join(root, "mismatch-target");
-    const sandbox = join(root, "sandbox");
-    const failedSandbox = join(root, "failed-sandbox");
-    const fetchRepository = join(fetchRoot, "repository.git");
-    const pushRepository = join(pushRoot, "repository.git");
+    const bare = join(root, "published.git");
+    const secretOne = "https://operator-user:credential-token@example.invalid/org/fetch-target.git";
+    const secretTwo = "https://other-user:other-token@example.invalid/org/push-target.git";
     mkdirSync(operator);
-    mkdirSync(fetchRoot);
-    mkdirSync(pushRoot);
-    runGit("init", "--bare", "--initial-branch=main", fetchRepository);
-    runGit("init", "--bare", "--initial-branch=main", pushRepository);
-    runGit("init", "--initial-branch=main", operator);
+    command("git", ["init", "--bare", "--initial-branch=main", bare]);
+    git(operator, "init", "--initial-branch=main");
     git(operator, "config", "user.name", "Factory Test");
     git(operator, "config", "user.email", "factory@example.test");
     writeFileSync(join(operator, "fixture.txt"), "effective push\n");
     git(operator, "add", "fixture.txt");
     git(operator, "commit", "-m", "fixture");
-    git(operator, "switch", "--quiet", "-c", "feature/173-3");
-    git(operator, "remote", "add", "origin", "factory-fetch:repository.git");
-    git(operator, "config", `url.${fetchRoot}/.insteadOf`, "factory-fetch:");
-    git(operator, "config", `url.${pushRoot}/.pushInsteadOf`, "factory-fetch:");
+    git(operator, "remote", "add", "origin", bare);
+    git(operator, "config", "--replace-all", "remote.origin.pushurl", secretOne);
 
-    const fetchTarget = git(operator, "remote", "get-url", "origin");
-    const capturedPushTarget = git(operator, "remote", "get-url", "--push", "origin");
-    assert.equal(fetchTarget, fetchRepository, "AC19 fetch URL must resolve through insteadOf");
-    assert.equal(capturedPushTarget, pushRepository, "AC16/AC19 push target must resolve through pushInsteadOf");
-    assert.notEqual(capturedPushTarget, fetchTarget, "AC19 fixture must have different fetch and push targets");
+    const mismatchBranch = "feature/push-mismatch";
+    assert.equal(operatorRefAbsent(operator, mismatchBranch), true);
+    const mismatch = initFresh(operator, ["push-mismatch", "--branch", mismatchBranch, "--pr-base", "main", "--now", "2026-08-04T12:00:00.000Z"]);
+    assert.equal(mismatch.response.sandbox_path, mismatch.repository);
+    assert.equal(mismatch.response.run_dir, mismatch.runDir);
+    assert.ok(isAbsolute(mismatch.repository));
+    assert.equal(realpathSync(mismatch.repository), mismatch.repository);
+    assert.equal(relative(mismatch.repository, mismatch.runDir).startsWith(".."), false);
+    assert.equal(operatorRefAbsent(operator, mismatchBranch), true);
+    const beforeMismatch = snapshot(mismatch.runDir);
+    const mismatchResult = configureAndCompare(operator, mismatch.repository, () => {
+      git(operator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
+    });
+    assert.equal(mismatchResult.ok, false);
+    assert.deepEqual(mismatchResult.events, ["operator-capture", "sandbox-configure", "operator-recapture", "sandbox-recapture", "compare"]);
+    assert.equal(mismatchResult.message, `factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${mismatch.repository}`);
+    for (const hidden of [secretOne, secretTwo, "operator-user", "credential-token", "other-user", "other-token", "fetch-target.git", "push-target.git"]) {
+      assert.equal(mismatchResult.message.includes(hidden), false, `refusal disclosed ${hidden}`);
+    }
+    assert.deepEqual(snapshot(mismatch.runDir), beforeMismatch);
+    assert.equal(gitResult(mismatch.repository, "show-ref", "--verify", "--quiet", `refs/heads/${mismatchBranch}`).status, 1);
+    assert.equal(existsSync(join(mismatch.runDir, "factory.lock")), false);
+    assert.equal(existsSync(mismatch.repository), true);
+    assert.equal(gitResult(bare, "show-ref", "--verify", "--quiet", `refs/heads/${mismatchBranch}`).status, 1);
+    const mismatchStatus = factory("status", "push-mismatch", "--repo", mismatch.repository);
+    assert.equal(mismatchStatus.valid, true);
+    assert.equal(mismatchStatus.lock, "absent");
 
-    runGit("clone", "--quiet", "--local", operator, sandbox);
-    git(sandbox, "config", "--replace-all", "remote.origin.pushurl", capturedPushTarget);
-    const sandboxPushTarget = git(sandbox, "remote", "get-url", "--push", "origin");
-    assert.equal(sandboxPushTarget, capturedPushTarget, "AC17 sandbox target must re-resolve exactly");
+    git(operator, "config", "--replace-all", "remote.origin.pushurl", secretOne);
+    const crashBranch = "feature/crash-recovery";
+    const crash = initFresh(operator, ["crash-recovery", "--branch", crashBranch, "--pr-base", "main", "--now", "2026-08-04T12:01:00.000Z"]);
+    assert.equal(gitResult(crash.repository, "config", "--get-all", "remote.origin.pushurl").status, 1);
+    const crashRun = JSON.parse(readFileSync(join(crash.runDir, "run.json"), "utf8"));
+    const crashStatus = factory("status", "crash-recovery", "--repo", crash.repository);
+    assert.equal(bootstrapPending(crashRun, crashStatus), true);
+    assert.equal(configureAndCompare(operator, crash.repository).ok, true);
+    const configuredTarget = git(crash.repository, "config", "--get-all", "remote.origin.pushurl");
+    assert.equal(configureAndCompare(operator, crash.repository).ok, true);
+    assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), configuredTarget);
+    assert.equal(operatorRefAbsent(operator, crashBranch), true);
+    const crashCreated = createBranch(crash.repository, crashBranch);
+    assert.equal(operatorRefAbsent(operator, crashBranch), true);
+    assert.equal(provenance(crash.repository, crashBranch, true).ok, true);
+    assert.equal(existsSync(join(crash.runDir, "factory.lock")), false);
 
-    const repositoriesByVariable = new Map([["$O", operator], ["$S", sandbox]]);
-    let selectedRunRepo = repositoriesByVariable.get(freshRunRepoVariable);
-    assert.equal(selectedRunRepo, sandbox, "AC9 fresh assignment must select RUN_REPO=S");
-    const freshStatus = { branch: "feature/173-3", pr_base: "main" };
-    const freshPublication = publishSelectedRun(operator, selectedRunRepo, pushRepository, freshStatus, "AC9 fresh RUN_REPO=S publication");
-    assert.equal(freshPublication.featureBranch, freshStatus.branch, "AC9 fresh publication must use the exact recorded branch");
-    assert.equal(freshPublication.prBase, freshStatus.pr_base, "AC9 fresh publication must use the exact recorded intended base");
+    writeFileSync(join(crash.runDir, "artifacts", "story.md"), "story\n");
+    factory("gate", "crash-recovery", "story", "pending", "--artifact", "artifacts/story.md", "--repo", crash.repository, "--now", "2026-08-04T12:02:00.000Z");
+    writeFileSync(join(crash.repository, "progressed.txt"), "progressed\n");
+    git(crash.repository, "add", "progressed.txt");
+    git(crash.repository, "commit", "-m", "progress branch");
+    assert.equal(provenance(crash.repository, crashBranch, true).ok, false);
+    const progressed = provenance(crash.repository, crashBranch, false);
+    assert.equal(progressed.ok, true, progressed.reason);
+    assert.equal(progressed.seed, crashCreated.seed);
+    const activePushBefore = git(crash.repository, "config", "--get-all", "remote.origin.pushurl");
+    git(operator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
+    assert.equal(compareOnly(operator, crash.repository).ok, false);
+    assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), activePushBefore);
+    git(operator, "config", "--replace-all", "remote.origin.pushurl", activePushBefore);
+    assert.equal(compareOnly(operator, crash.repository).ok, true);
+    assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), activePushBefore);
 
-    writeFileSync(join(operator, "legacy.txt"), "legacy publication\n");
-    git(operator, "add", "legacy.txt");
-    git(operator, "commit", "-m", "legacy publication fixture");
-    const legacyStatus = { branch: "feature/173-3", pr_base: "main" };
-    selectedRunRepo = repositoriesByVariable.get(legacyRunRepoVariable);
-    assert.equal(selectedRunRepo, operator, "AC9 legacy assignment must preserve RUN_REPO=O");
-    const legacyPublication = publishSelectedRun(operator, selectedRunRepo, pushRepository, legacyStatus, "AC9 legacy RUN_REPO=O publication");
-    assert.equal(legacyPublication.featureBranch, legacyStatus.branch, "AC9 legacy publication must use the exact recorded branch");
-    assert.equal(legacyPublication.prBase, legacyStatus.pr_base, "AC9 legacy publication must use the exact recorded intended base");
-    assert.notEqual(legacyPublication.publishedHead, git(sandbox, "rev-parse", legacyPublication.featureRef), "AC9 legacy publication must not push from stale S");
+    const recreatedBranch = "feature/recreated";
+    const recreated = initFresh(operator, ["recreated", "--branch", recreatedBranch, "--pr-base", "main", "--now", "2026-08-04T12:03:00.000Z"]);
+    configureAndCompare(operator, recreated.repository);
+    const firstCreation = createBranch(recreated.repository, recreatedBranch);
+    const firstRaw = readFileSync(firstCreation.log, "utf8");
+    git(recreated.repository, "switch", "main");
+    git(recreated.repository, "branch", "-D", recreatedBranch);
+    git(recreated.repository, "switch", "--no-track", "-c", recreatedBranch, firstCreation.seed);
+    writeFileSync(firstCreation.log, `${firstRaw}${readFileSync(firstCreation.log, "utf8")}`);
+    assert.equal(provenance(recreated.repository, recreatedBranch, true).ok, false);
 
-    runGit("clone", "--quiet", "--local", operator, failedSandbox);
-    git(failedSandbox, "config", "--replace-all", "remote.origin.pushurl", capturedPushTarget);
-    git(failedSandbox, "config", `url.${mismatchRoot}/.insteadOf`, `${pushRoot}/`);
-    const mismatchedTarget = git(failedSandbox, "remote", "get-url", "--push", "origin");
-    let dispatched = false;
-    if (mismatchedTarget === capturedPushTarget) dispatched = true;
-    else rmSync(failedSandbox, { recursive: true, force: true });
-    assert.notEqual(mismatchedTarget, capturedPushTarget, "AC18 fixture must exercise exact mismatch refusal");
-    assert.equal(existsSync(failedSandbox), false, "AC18 fresh mismatch must remove only the new sandbox");
-    assert.equal(dispatched, false, "AC18 fresh mismatch must dispatch nothing");
-    assert.equal(existsSync(operator), true, "AC18 fresh mismatch must retain the operator checkout");
+    const raceLooseBranch = "feature/race-loose";
+    assert.equal(operatorRefAbsent(operator, raceLooseBranch), true);
+    git(operator, "branch", raceLooseBranch, "HEAD");
+    const raceLoose = initFresh(operator, ["race-loose", "--branch", raceLooseBranch, "--pr-base", "main", "--now", "2026-08-04T12:04:00.000Z"]);
+    const raceLooseState = snapshot(raceLoose.runDir);
+    assert.equal(operatorRefAbsent(operator, raceLooseBranch), false);
+    assert.equal(gitResult(raceLoose.repository, "config", "--get-all", "remote.origin.pushurl").status, 1);
+    assert.deepEqual(snapshot(raceLoose.runDir), raceLooseState);
+    assert.equal(existsSync(join(raceLoose.runDir, "factory.lock")), false);
 
-    git(operator, "config", "--unset-all", `url.${pushRoot}/.pushInsteadOf`, "factory-fetch:");
-    git(operator, "config", `url.${changedPushRoot}/.pushInsteadOf`, "factory-fetch:");
-    const resumedOperatorTarget = git(operator, "remote", "get-url", "--push", "origin");
-    const resumedSandboxTarget = git(sandbox, "remote", "get-url", "--push", "origin");
-    assert.notEqual(resumedOperatorTarget, resumedSandboxTarget, "AC17 resume fixture must detect an effective-target change");
-    assert.equal(existsSync(sandbox), true, "AC17 resume mismatch must retain the sandbox for status");
+    const raceHeadBranch = "feature/race-head";
+    assert.equal(operatorRefAbsent(operator, raceHeadBranch), true);
+    git(operator, "switch", "-c", raceHeadBranch);
+    const raceHead = initFresh(operator, ["race-head", "--branch", raceHeadBranch, "--pr-base", "main", "--now", "2026-08-04T12:05:00.000Z"]);
+    const inheritedRefs = git(raceHead.repository, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n").sort();
+    const raceHeadState = snapshot(raceHead.runDir);
+    assert.equal(operatorRefAbsent(operator, raceHeadBranch), false);
+    assert.equal(provenance(raceHead.repository, raceHeadBranch, true).ok, false);
+    assert.deepEqual(git(raceHead.repository, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n").sort(), inheritedRefs);
+    assert.equal(gitResult(raceHead.repository, "config", "--get-all", "remote.origin.pushurl").status, 1);
+    assert.deepEqual(snapshot(raceHead.runDir), raceHeadState);
+    assert.equal(existsSync(join(raceHead.runDir, "factory.lock")), false);
+    assert.equal(existsSync(raceHead.repository), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

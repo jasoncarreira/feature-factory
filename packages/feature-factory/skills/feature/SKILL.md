@@ -409,215 +409,191 @@ above. It performs no remaining Step 0 action. The background `run-orchestrator`
 only the inner maximal mode-prefix admission, issue resolution, and this derivation against the
 unchanged inner request produced by outer admission; it never reparses background placement. It
 requires exact equality with the control part's expected ID before its first `factory` command; only
-that session continues below. A foreground driver derives once and continues directly. Use this literal
-convention:
+that session continues below. A foreground driver derives once and continues directly.
 
-```text
-C = O/.factory-sandboxes
-S = C/R
-P = S/.factory/R
-W = S/.factory/worktrees/R
-A = O/.factory/R
-```
-
-During bootstrap and active sandbox execution, `O` is the operator checkout; ignored `C` and `S` are
-the sole active-write exception inside it. Never switch, reset, clean, stash, create a branch or
-worktree, write Git configuration, or initialize factory state directly in `O` for a fresh run.
-The only pre-clone Git operations in `O` are reads, and all fresh-run and active-execution writes are
-confined to `C` or `S`. The sole completed-handoff exception comes
-after the draft PR is recorded: Step 7 may fetch and verify only the recorded feature and unmerged-slice
-refs in `O`, create and verify only the `O/.factory/R` archive, and then remove only the guarded sandbox
-`S`. No other operator-checkout write or action after PR recording is permitted by this exception.
+After derivation, `O` is the physically resolved operator checkout. During bootstrap and active sandbox
+execution, do not switch, reset, clean, stash, create a branch or worktree, write Git configuration, or
+initialize factory state directly in `O`. The only operator-checkout operations before the completed
+handoff are reads and the Step 6 forge command. The explicit Step 7 exclusion applies only after the
+draft PR is recorded: its guarded local-ref fetch, archive, verification, and deterministic sandbox
+removal remain the sole completed-handoff exception to bootstrap/refusal state preservation.
 
 ### Resume or collision
 
-Classify existing paths before creating anything. A valid legacy manifest at `A/run.json` resumes with
-`RUN_REPO="$O"`; a valid sandbox manifest at `P/run.json` resumes with `RUN_REPO="$S"`. Validate the sole
-candidate with `factory status "$R" --json --repo "$RUN_REPO"`. If both manifests exist, print both
-absolute paths and refuse as ambiguous. An invalid manifest is surfaced and never replaced.
+Before requesting a fresh run, inspect only the two deterministic manifest candidates described by the
+CLI contract: the legacy candidate under `O/.factory/R` and the sandbox candidate under
+`O/.factory-sandboxes/R/.factory/R`. They are lookup candidates, not selected paths. If both exist,
+print both absolute manifest paths and refuse as ambiguous. Select a sole candidate only after
+`factory status "$R" --json --repo "<candidate-repository>"` validates it and returns its exact
+`sandbox_path`. An invalid candidate is surfaced and never replaced. A legacy candidate selects the
+returned `O`; a sandbox candidate selects the returned sandbox. Once a manifest candidate exists, do
+not call `factory init` again or backfill a missing legacy `pr_base`.
 
-After selecting the repository, bind the only state file and worktree root that later steps may read:
+For every selected run, derive later paths only from the successful command response:
 
 ```sh
-RUN_MANIFEST="$RUN_REPO/.factory/$R/run.json"
+RUN_REPO="<exact response sandbox_path>"
+RUN_DIR="<exact init response run_dir, or $RUN_REPO/.factory/$R after status resume>"
+RUN_MANIFEST="$RUN_DIR/run.json"
 SLICE_ROOT="$RUN_REPO/.factory/worktrees/$R"
 SESSION_ID="${FACTORY_SESSION_ID:-session-unknown-$R}"
 ```
 
+Require absolute canonical `RUN_REPO`, require `RUN_DIR`, `RUN_MANIFEST`, and `SLICE_ROOT` to remain
+physically contained by it, and require the response and manifest run IDs to equal `R`. Read exactly
+`RUN_MANIFEST` through the host's direct file-read capability, parse it as JSON, bind it as `parsedRun`,
+and use only `parsedRun.branch` and `parsedRun.worktree`. On resume, recorded state always supersedes
+intake branch or worktree intent.
+
 **`SESSION_ID` is the session you are running in, not a name you compose.** The integration exports it
-into every shell call; read it there and never build one from the run id and the date. The lock
-requires a session, so the fallback keeps a run working where the integration is not installed — and
-it is deliberately not session-shaped, because the sidebar offers a jump only to a real session id. An
-unidentified run then offers no jump instead of one that lands nowhere, which is what an invented
-label did: it satisfied the lock and silently broke the jump.
+into every shell call; read it there and never build one from the run id and date. The fallback keeps a
+run operable without the integration but deliberately cannot masquerade as a real session link.
 
-Thus a sandbox selects `S/.factory/worktrees/R`; a legacy run selects its existing
-`O/.factory/worktrees/R` layout. Require `RUN_MANIFEST` and `SLICE_ROOT` to remain physically contained
-by `RUN_REPO`. Read exactly `RUN_MANIFEST` through the host's direct file-read capability: do not spawn
-a process, scan another directory, or write the file. Parse it as JSON, require CLI validation to have
-succeeded, bind the parsed object as `parsedRun`, require `parsedRun.run_id` to equal `R`, and reject a
-missing or second candidate.
+A legacy `RUN_REPO="$O"` resume keeps its existing local flow. Every sandbox selection must pass the
+effective-push and branch-provenance gate below before a lock is claimed or stolen, an agent is
+dispatched, a gate/step/slice is transitioned, or anything is published. An active sandbox resume only
+recaptures and compares targets; it never changes remote configuration.
 
-On resume, bind the recorded feature branch before any orchestration continues:
+### Fresh sandbox request
+
+**Do not ask the engineer for a branch or worktree.** For a fresh run, `FEATURE_BRANCH` is explicit
+intake intent or `feature/$R`; a repository instruction may supply an explicit override. Validate it
+with `git check-ref-format --branch "$FEATURE_BRANCH"`. Bind
+`FEATURE_REF="refs/heads/$FEATURE_BRANCH"`. Before init, require
+`git -C "$O" show-ref --verify --quiet "$FEATURE_REF"` to exit exactly 1 for ref absence. Exit 0 means
+present and every other result is a lookup error; either refuses before init.
+
+An explicit `PR_BASE` wins. Otherwise require the symbolic branch in the configured operator worktree;
+detached, missing, escaping, or unprovable worktree state is refused by init. Request one fresh sandbox
+with the operator repository as `--repo`, command first and repository flag last, and include issue and
+admitted mode flags only when present:
+
+```sh
+INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json)"
+```
+
+The init request pre-reserves the deterministic sandbox, performs exactly one
+`git clone --local -- O S`, completes the physical containment proof, and only then publishes
+`run.json`. The skill does not construct or prove the sandbox. A refused or uncertain init retains its
+reported state and path for inspection; do not substitute another destination or repeat init. Only a
+successful JSON response selects paths. Bind `RUN_REPO` from its exact canonical `sandbox_path`,
+`RUN_DIR` from its exact absolute `run_dir`, `FEATURE_BRANCH` from its exact `branch`, the integration
+worktree by resolving its exact `worktree` under `RUN_REPO`, and `PR_BASE` from its exact `pr_base`.
+Then bind `RUN_MANIFEST` and `SLICE_ROOT` from those returned roots as above. Reject a missing, extra,
+relative, escaping, mismatched, or unobservable response value.
+
+Immediately after fresh selection, and immediately after every sandbox resume selection, recheck
+`FEATURE_REF` in `O` with the same exact ref-absent requirement. This post-selection guard runs before
+effective-push capture or configuration and closes a precheck-to-clone race, including an operator ref
+created without checkout or inherited because it became operator HEAD.
+
+```sh
+git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
+```
+
+### Effective push proof
+
+Disable command tracing before any effective-target operation and do not restore it until both captured
+values are out of scope. Capture through exactly
+`LC_ALL=C git -C <repository> remote get-url --push origin`; never read raw `remote.origin.url`.
+Never persist, log, echo, normalize, interpolate into a cause, or otherwise expose a captured target.
+
+Classify bootstrap-pending only by directly validated state: run status `running`; `created_at` exactly
+equals `updated_at`; gates, steps, and slices are empty; validator, terminal result, PR URL, and plan
+digest are null; and qualified status reports lock state exactly `absent`. Only that class may
+idempotently apply the operator's captured effective target to the sandbox remote before recapturing
+both sides:
+
+```sh
+set +x
+OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
+git -C "$RUN_REPO" config --replace-all remote.origin.pushurl "$OPERATOR_PUSH"
+CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
+CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"
+```
+
+An active resume skips the configuration command and only performs the two current lookups. Every
+lookup must succeed with nonempty output, and the two current shell strings must be exactly equal.
+Use only these refusal messages:
 
 ```text
-FEATURE_BRANCH = parsedRun.branch
+factory sandbox: operator effective push target unavailable; sandbox retained at <S>
+factory sandbox: sandbox effective push target unavailable at <S>
+factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>
 ```
 
-Require a nonempty branch accepted by manifest validation. Discard any feature-branch value left from
-intake or the invocation checkout; recorded state always wins on resume.
+The failure names only the side or mismatch class and exact `RUN_REPO`; it never contains either target.
+Suppress target-operation stdout, stderr, and argv from operator-visible errors as well as logs; map a
+configuration failure to the sandbox-unavailable refusal without attaching its cause.
+On any capture, configuration, recapture, or equality failure, retain all repository and control-plane
+state, permit only `factory status "$R" --json --repo "$RUN_REPO"`, and stop before branch handling,
+lock claim or steal, dispatch, transition, push, forge command, or further publication.
 
-For either manifest shape, use the qualified status command above and resume; never treat it as a fresh
-run. Once a manifest exists, do not call `factory init` again. An existing manifest is never replaced,
-including a legacy manifest with no `pr_base`; it is resumed without backfill.
+### Feature branch provenance and crash recovery
 
-Never follow a symlink at `C` or `S`. With no legacy run to resume, a symlinked `C`, any existing `S`
-without the sole valid sandbox manifest, a non-directory path, or any other deterministic-path
-collision is fatal. Do not reuse, repair, or delete it. A resumed sandbox must pass the same physical
-containment gate as a fresh sandbox before an agent receives its path; a failed resume check retains
-the sandbox and refuses dispatch. A legacy run continues at `--repo "$O"` without migration.
-
-Every sandbox resume recaptures both effective push targets before claiming the lock or dispatching an
-agent:
+Validate the recorded `FEATURE_BRANCH` with `git check-ref-format --branch`, bind its fully qualified
+`FEATURE_REF`, and resolve `FEATURE_LOG` with:
 
 ```sh
-CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-CURRENT_SANDBOX_PUSH="$(LC_ALL=C git -C "$S" remote get-url --push origin)"
+FEATURE_LOG="$(git -C "$RUN_REPO" rev-parse --git-path "logs/refs/heads/$FEATURE_BRANCH")"
 ```
 
-Both lookups must succeed and return nonempty output, and their shell strings must be exactly equal.
-Never persist or log either target, normalize them, or automatically reconfigure the sandbox. A lookup
-failure or mismatch retains `S`, exposes neither value, and permits only status reads against `S`; do
-not claim or steal the lock or publish, and refuse dispatch.
-The legacy `RUN_REPO="$O"` resume has no sandbox target and keeps its existing local flow.
+Require that path and every existing parent component to remain physically within
+`RUN_REPO/.git/logs/refs/heads`; never follow a redirect outside it. Positive provenance means the
+oldest raw line of `FEATURE_LOG` has a forty-zero old OID, a 40-hex new OID equal to `SEED_HEAD`, and
+the exact message `branch: Created from <seed-oid>`. The message's `<seed-oid>` must equal that same new
+OID. For a present branch, validate those raw fields first and bind `SEED_HEAD` to that new OID; never
+infer it from current HEAD. Also require
+`git -C "$RUN_REPO" merge-base --is-ancestor "$SEED_HEAD" "$FEATURE_REF"`.
+Clone-generated, absent, expired, malformed, nonzero-old-OID, or differently messaged provenance is a
+refusal.
 
-On resume, claim or resume the lock at the selected repository and continue from status `next`; never
-restart or initialize:
+Immediately before accepting or creating the sandbox branch, recheck that `FEATURE_REF` is absent in
+`O`. A lookup error or present ref refuses both branch-absent and branch-present recovery.
 
 ```sh
+git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
+```
+
+- **Bootstrap-pending, sandbox branch absent:** require the fully qualified ref and reflog absent in the
+  sandbox, and require no tracked worktree or index diff; the init-owned untracked control plane is not
+  a source change. Bind `SEED_HEAD` to that worktree's
+  verified `HEAD^{commit}` and run exactly:
+  ```sh
+  git -C "$INTEGRATION_WORKTREE" switch --no-track -c "$FEATURE_BRANCH" "$SEED_HEAD"
+  ```
+  Require exactly one raw reflog line with positive provenance, symbolic HEAD equal to
+  `FEATURE_BRANCH`, and both branch HEAD and worktree HEAD equal to `SEED_HEAD`. Recheck the operator
+  ref-absent invariant before accepting the branch.
+- **Bootstrap-pending, sandbox branch present:** require no tracked worktree or index diff,
+  symbolic HEAD exactly `FEATURE_BRANCH`, exactly one raw reflog line with positive provenance, and
+  current branch/worktree HEAD equal to its new seed OID. Recheck the operator invariant before
+  accepting crash recovery. Multiple lines, including a deleted-and-recreated branch history, refuse.
+- **Non-bootstrap, sandbox branch present:** require the oldest raw reflog line to carry positive
+  provenance, require seed ancestry, and require the configured worktree on `FEATURE_BRANCH`. Current
+  HEAD may have advanced beyond the seed.
+- **Non-bootstrap, sandbox branch absent:** refuse. Never recreate a progressed run's branch.
+
+Every operator collision, worktree cleanliness failure, branch mismatch, reflog failure, or ancestry
+failure names `O`, `RUN_REPO`, and the collision class without exposing a target. It retains existing
+state and stops before lock claim or steal, dispatch, gate/step/slice transition, push, forge command,
+or publication. A bootstrap push mismatch therefore leaves the branch absent; a later invocation may
+repeat the bootstrap-pending push proof and branch-absent policy against the retained sandbox.
+
+Immediately before claiming or stealing a lock, perform the operator exact-ref-absent check once more.
+Only after it passes may the selected run continue from qualified status `next`:
+
+```sh
+git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
 factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"
 factory lock "$R" steal --session "$SESSION_ID" --repo "$RUN_REPO"
 ```
 
-### Fresh sandbox bootstrap
-
-**Do not ask the engineer for a branch or a worktree.** The CLI retains its configured-worktree
-semantics: By default, `pr_base` is the symbolic branch checked out in that configured worktree;
-`--pr-base <target-branch>` takes precedence and bypasses worktree observation. Without an override, a detached, missing, or outside-repository configured worktree is
-refused. The sandbox flow supplies the captured base explicitly and uses the sandbox root as its
-default `.` integration worktree.
-
-For a fresh run, `FEATURE_BRANCH` is explicit intake intent or `feature/$R`. The engineer supplies an
-override only when they say so or repository instructions in `AGENTS.md` or `CLAUDE.md` require it.
-Refuse if `refs/heads/$FEATURE_BRANCH` already exists in `O`.
-
-Before creating `C` or `S`, capture all clone inputs. An explicit `PR_BASE` wins and permits detached
-`O`; otherwise the symbolic branch is mandatory:
-
-```sh
-SEED_HEAD="$(git -C "$O" rev-parse --verify 'HEAD^{commit}')"
-PR_BASE="$(git -C "$O" symbolic-ref --quiet --short HEAD)"
-PUSH_TARGET="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-```
-
-Each command must succeed and produce nonempty output. Omit the symbolic-ref command only when an
-explicit `PR_BASE` was supplied. The push lookup must be exactly the effective push lookup above;
-its result includes Git's configured `pushurl` and `pushInsteadOf` semantics and may differ from the
-fetch URL. Never read raw `remote.origin.url`, normalize the result, or expose it. Keep `PUSH_TARGET`
-out of the control plane and logs. A push lookup failure refuses before `S` exists.
-
-Require `C` to be absent or a real directory, create it when absent, and recheck that `S` is absent
-immediately before cloning. Run the C-locale clone once:
-
-```sh
-LC_ALL=C git clone --local "$O" "$S"
-```
-
-Only a nonzero result whose C-locale stderr contains Git's literal `failed to create link` admits one
-fallback. Remove only the partial `S` created by this invocation, print exactly
-"factory sandbox: hardlink clone failed; retrying with --no-hardlinks", and retry once:
-
-```sh
-LC_ALL=C git clone --local --no-hardlinks "$O" "$S"
-```
-
-Do not retry any other clone failure. Never remove a path that predated this invocation, and make no
-third attempt.
-
-Configure the captured push destination only in the new sandbox, then resolve it through Git again:
-
-```sh
-git -C "$S" config --replace-all remote.origin.pushurl "$PUSH_TARGET"
-RESOLVED_PUSH="$(LC_ALL=C git -C "$S" remote get-url --push origin)"
-```
-
-Both commands must succeed, the resolved value must be nonempty, and shell-string equality with
-`PUSH_TARGET` must be exact. On configuration, lookup, or equality failure, expose neither value,
-remove only this invocation's new `S`, and refuse dispatch. Do not initialize state, claim a lock, or
-perform any external effect from the failed bootstrap.
-
-### Physical containment gate
-
-Before branch creation, initialization, or disclosing `S` to any agent, physically canonicalize the
-clone itself and Git's answers:
-
-```sh
-CANONICAL_S="$(cd "$S" && pwd -P)"
-TOP_LEVEL="$(cd "$(git -C "$S" rev-parse --show-toplevel)" && pwd -P)"
-GIT_DIR="$(cd "$(git -C "$S" rev-parse --absolute-git-dir)" && pwd -P)"
-```
-
-All three commands must succeed. Require `CANONICAL_S` and `TOP_LEVEL` to equal `S`, and `GIT_DIR` to
-equal `S/.git`. For `P` and `W`, reject symlinks in every existing path component and require their
-physical canonical locations to be strict
-descendants of `S`; a lexical prefix check is not proof. Any fresh failure removes only the new `S`;
-any resume failure retains it. Either failure stops before dispatch.
-
-Refuse an existing sandbox `refs/heads/$FEATURE_BRANCH`, then create the feature branch at the
-captured seed:
-
-```sh
-git -C "$S" switch --no-track -c "$FEATURE_BRANCH" "$SEED_HEAD"
-SWITCHED_HEAD="$(git -C "$S" rev-parse --verify 'HEAD^{commit}')"
-SWITCHED_BRANCH="$(git -C "$S" symbolic-ref --quiet --short HEAD)"
-```
-
-Both verification commands must succeed. Require `SWITCHED_HEAD` to equal `SEED_HEAD` and
-`SWITCHED_BRANCH` to equal `FEATURE_BRANCH`. Only after those checks initialize the control plane. The
-older bootstrap assertion retains the non-runnable command shape `factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--issue "$KEY"] [--mode "$MODE"] --repo "$S"`; its runnable
-selected-repository form is below.
-
-`init` creates `P`, including `plan/`, `artifacts/`, `evidence/`, and `reviews/`. Initialization is
-create-only. To resolve the unknown create outcome with status, valid state means resume and never retry.
-A scaffold-only run directory without
-`run.json` is retryable. With any record present,
-an invalid manifest means stop and surface it without overwriting it. Bind the fresh selected paths,
-then initialize with the command first and repository flag last; include issue and admitted mode flags
-only when present:
-
-```sh
-RUN_REPO="$S"
-RUN_MANIFEST="$RUN_REPO/.factory/$R/run.json"
-SLICE_ROOT="$RUN_REPO/.factory/worktrees/$R"
-$ factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--issue "$KEY"] [--mode "$MODE"] --repo "$RUN_REPO"
-$ factory status "$R" --json --repo "$RUN_REPO"
-$ factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"
-```
-
-Run status only to resolve an unknown init result; on an ordinary successful init proceed directly to
-the lock. The branch already exists and exactly matches the intent recorded by init. The retained
-non-runnable bootstrap claim shapes are `factory lock "$R" claim --session "$SESSION_ID" --repo "$S"`
-and `factory status "$R" --json --repo "$S"`; all execution uses the selected forms above.
-
-If the lock is held by another session, resume with that session, use the fully qualified steal command
-above only when the holder is gone, or abort. Refresh it around long waits with
-`factory heartbeat "$R" --session "$SESSION_ID" --repo "$RUN_REPO"`, so a crashed run becomes
-reclaimable rather than wedged. Only after bootstrap and lock handling dispatch the planned ticket,
-story, or design agent.
-
-The init result and every valid status result report `sandbox_path` as the resolved selected repository.
-Status also reports `dead_lock: true` only when the run is nonterminal and its lock is stale. This is
-reporting, not cleanup: stale nonterminal sandboxes remain in place.
+If another live session holds the lock, resume with that session or abort; steal only when qualified
+status proves the holder gone. Refresh long waits with
+`factory heartbeat "$R" --session "$SESSION_ID" --repo "$RUN_REPO"`. Only after the lock is established
+dispatch the planned ticket, story, or design agent. A valid status reports `dead_lock: true` only for
+a stale lock on a nonterminal run; it authorizes no automatic state disposal.
 
 ### Gate 1 — Story
 
@@ -942,7 +918,14 @@ integration branch if it is test-only. Respect `max_retries`.
 
 Before every Gate 3 presentation, write or refresh `gates/pre_pr.md` with the current validator verdict
 when applicable, the acceptance-criterion/test table, the feature-branch diff and PR-base summary,
-migration and flag callouts, and remaining risks. Present that current artifact and open the gate with:
+migration and flag callouts, remaining risks, and the measured landed production count using this exact
+line template:
+
+```text
+Production source: <landed count> / 3000
+```
+
+Present that current artifact and open the gate with:
 
 ```sh
 factory gate "$R" pre_pr pending --artifact gates/pre_pr.md --repo "$RUN_REPO"
@@ -1016,18 +999,25 @@ The publication command's recorded-value signature remains `gh pr create --draft
 ## Step 6 — Draft PR
 
 Immediately before any publication effect, read the delivery intent from the selected run repository,
-then recapture the operator and selected-run effective push targets:
+then, for a sandbox-selected run, repeat the operator exact-ref-absent and sandbox
+branch-provenance/ancestry gate from Step 0. Use the status response's exact recorded branch for that
+gate. A collision or provenance failure stops
+before push, `gh`, or `factory pr` and retains all state. After those checks, disable command tracing and
+recapture the operator and selected-run effective push targets without changing either remote:
 
 ```sh
 factory status "$R" --json --repo "$RUN_REPO"
+git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"
+set +x
 CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
 CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"
 ```
 
 Both lookups must succeed and return nonempty output, and their shell strings must be exactly equal.
-Never persist or log either target, normalize them, or automatically reconfigure a remote. A lookup
-failure or mismatch leaves `RUN_REPO` intact, exposes neither value, permits status only, and blocks
-every publication effect.
+Step 6 only compares and never runs `git config` or otherwise reconfigures a remote. Never persist, log,
+echo, normalize, interpolate into a cause, or expose either target. Use the same three exact redacted
+refusal messages from Step 0. A lookup failure or mismatch leaves `RUN_REPO` intact, permits status only,
+and blocks every publication effect.
 
 Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as
 `PR_BASE`; never infer, shorten, normalize, or substitute either value. Publish the fully qualified
@@ -1058,6 +1048,12 @@ record the existing PR rather than creating another. On a confirmed retry, use t
 redundancy: between the approval and this call the integration head can move, and if it has, the PR
 describes a head nobody validated. If `pr` refuses for that reason, the PR you just opened is ahead of
 what was approved — say so at the gate rather than recording it anyway.
+
+The PR body includes the same measured landed count using this exact line template:
+
+```text
+Production source ceiling: <landed count> / 3000
+```
 
 Labels, reviewers, and tracker fields are repository policy: derive them from the changed paths using
 whatever mapping the repository documents, and update the tracker only through *your* own calls.
