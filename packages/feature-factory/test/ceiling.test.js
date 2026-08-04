@@ -10,6 +10,7 @@
 // addition. Only Jason widens it.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -309,10 +310,18 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.doesNotMatch(design, /figma|jira|atlassian|cloudid|tracker key/iu);
 
     const predecessorMarker = ["vi", "so"].join("");
-    const predecessorOffenders = [...files, ...proseFiles]
+    const repo = resolve(pkg, "..", "..");
+    const predecessorExtensions = [...SOURCE_EXTENSIONS, ".jsx", ...PROSE_EXTENSIONS];
+    const predecessorFiles = execFileSync(
+      "git",
+      ["ls-files", "--", "packages/feature-factory", "packages/opencode-feature-factory"],
+      { cwd: repo, encoding: "utf8" },
+    ).split("\n").filter((path) => predecessorExtensions.some((extension) => path.endsWith(extension)))
+      .map((path) => join(repo, path));
+    const predecessorOffenders = predecessorFiles
       .filter((path) => readFileSync(path, "utf8").toLowerCase().includes(predecessorMarker))
-      .map((path) => path.slice(pkg.length + 1));
-    assert.deepEqual(predecessorOffenders, [], "the predecessor name must not remain in the package");
+      .map((path) => path.slice(repo.length + 1));
+    assert.deepEqual(predecessorOffenders, [], "the predecessor name must not remain in either package");
   });
 
   it("declares exactly the declared run.json top-level keys", () => {
