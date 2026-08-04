@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(pkg, "bin", "factory.js");
@@ -15,6 +16,16 @@ function git(repository, ...args) {
 
 function factory(repository, ...args) {
   return JSON.parse(execFileSync("node", [cli, ...args, "--repo", repository, "--json"], { encoding: "utf8" }));
+}
+
+function refAbsent(repository, ref) {
+  try {
+    git(repository, "show-ref", "--verify", "--quiet", ref);
+    return false;
+  } catch (error) {
+    if (error.status === 1) return true;
+    throw error;
+  }
 }
 
 function documentedFactoryCommands(markdown) {
@@ -31,16 +42,16 @@ function documentedFactoryCommands(markdown) {
 test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proof contracts", () => {
   const skill = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
   for (const fragment of [
-    "P = S/.factory/R",
-    "W = S/.factory/worktrees/R",
-    "RUN_MANIFEST=\"$RUN_REPO/.factory/$R/run.json\"",
+    "RUN_REPO=\"<exact response sandbox_path>\"",
+    "RUN_DIR=\"<exact init response run_dir, or $RUN_REPO/.factory/$R after status resume>\"",
+    "RUN_MANIFEST=\"$RUN_DIR/run.json\"",
     "SLICE_ROOT=\"$RUN_REPO/.factory/worktrees/$R\"",
-    "a sandbox selects `S/.factory/worktrees/R`; a legacy run selects its existing\n`O/.factory/worktrees/R` layout",
-    "Read exactly `RUN_MANIFEST` through the host's direct file-read capability",
-    "do not spawn\na process, scan another directory, or write the file",
-    "bind the parsed object as `parsedRun`, require `parsedRun.run_id` to equal `R`",
+    "A legacy candidate selects the\nreturned `O`; a sandbox candidate selects the returned sandbox",
+    "Read exactly\n`RUN_MANIFEST` through the host's direct file-read capability, parse it as JSON, bind it as `parsedRun`",
+    "response and manifest run IDs to equal `R`",
     "FEATURE_BRANCH = parsedRun.branch",
-    "Discard any feature-branch value left from\nintake or the invocation checkout; recorded state always wins on resume",
+    "immediately discard every intake or stale feature-branch and\nworktree value",
+    "recorded state always wins",
     "Every slice branch is `factory/R/<slice-id>`",
     "SLICE_WORKTREE=\"$SLICE_ROOT/$SLICE_ID\"",
     "git -C \"$RUN_REPO\" worktree add -b \"$SLICE_BRANCH\" \"$SLICE_WORKTREE\" \"$FEATURE_BRANCH\"",
@@ -76,25 +87,23 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "ROOT_SLICE = first parsedRun.slices row whose depends_on is empty",
     "BRANCH_POINT = ROOT_SLICE.base_ref",
     "Neither value comes from status, current\nHEAD, a branch name, or an unpersisted variable",
-    "report `sandbox_path` as the resolved selected repository",
-    "reports `dead_lock: true` only when the run is nonterminal and its lock is stale",
+    "validates it and returns its exact\n`sandbox_path`",
+    "status reports `dead_lock: true` only for\na stale lock on a nonterminal run",
   ]) assert.ok(skill.includes(fragment), `state-relocation contract is missing: ${fragment}`);
 
   const commands = documentedFactoryCommands(skill);
   assert.ok(commands.length >= 35, `expected every documented factory command shape, found ${commands.length}`);
-  const nonRunnableSandboxShapes = new Set([
-    'factory init "$R" --branch "$FEATURE_BRANCH" --pr-base "$PR_BASE" [--issue "$KEY"] [--mode "$MODE"] --repo "$S"',
-    'factory lock "$R" claim --session "$SESSION_ID" --repo "$S"',
-    'factory status "$R" --json --repo "$S"',
+  const nonSelectedRepositoryShapes = new Set([
+    'factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json)"',
+    'factory status "$R" --json --repo "<candidate-repository>"',
   ]);
   for (const command of commands.filter((entry) => entry.includes('"$R"'))) {
-    if (nonRunnableSandboxShapes.has(command)) continue;
+    if (nonSelectedRepositoryShapes.has(command)) continue;
     assert.match(command, /^factory [a-z-]+\s/u, `factory invocation is not command-first: ${command}`);
     assert.match(command, /--repo "\$RUN_REPO"$/u, `factory invocation lacks trailing selected RUN_REPO: ${command}`);
   }
-  assert.deepEqual(commands.filter((entry) => /--repo "\$S"$/u.test(entry)), [...nonRunnableSandboxShapes]);
-  assert.ok(skill.includes("older bootstrap assertion retains the non-runnable command shape"));
-  assert.ok(skill.includes("non-runnable bootstrap claim shapes are"));
+  assert.deepEqual(commands.filter((entry) => /--repo "\$O"/u.test(entry)), [[...nonSelectedRepositoryShapes][0]]);
+  assert.ok(commands.includes([...nonSelectedRepositoryShapes][1]));
   for (const stem of ["factory status <run-id> --json", "factory gate <run-id> pre_pr pending"]) {
     assert.ok(commands.includes(stem), `missing compatibility command stem: ${stem}`);
   }
@@ -115,6 +124,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   for (const command of commands.filter((entry) => !entry.includes('"$R"') && !entry.includes("<run-id>"))) {
     assert.ok(
       /^factory (?:observe|init|status|slice|pr)$/u.test(command)
+        || /^factory sandbox:/u.test(command)
         || /^factory slice … (?:running|merged)$/u.test(command)
         || ["factory init --mode autonomous", "factory init --mode headless"].includes(command),
       `factory command shape is neither qualified nor a declared compatibility stem: ${command}`,
@@ -158,22 +168,20 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     assert.ok(integrationProbes[index] < observation, "recorded feature branch verification must precede integration observation");
   });
 
-  const resumeSection = skill.slice(skill.indexOf("### Resume or collision"), skill.indexOf("### Fresh sandbox bootstrap"));
-  const parsedRunBinding = resumeSection.indexOf("bind the parsed object as `parsedRun`");
+  const resumeSection = skill.slice(skill.indexOf("### Resume or collision"), skill.indexOf("### Fresh sandbox request"));
+  const parsedRunBinding = resumeSection.indexOf("bind it as `parsedRun`");
   const featureBranchBinding = resumeSection.indexOf("FEATURE_BRANCH = parsedRun.branch");
-  const resumeLock = resumeSection.indexOf('factory lock "$R" claim');
-  assert.ok(parsedRunBinding >= 0 && parsedRunBinding < featureBranchBinding && featureBranchBinding < resumeLock,
+  const resumePushProof = resumeSection.indexOf("Only after that guard passes may resume enter the");
+  assert.ok(parsedRunBinding >= 0 && parsedRunBinding < featureBranchBinding && featureBranchBinding < resumePushProof,
     "resume must replace intake branch intent with parsedRun.branch before continuing");
-  assert.match(resumeSection, /recorded state always wins on resume/u);
+  assert.match(resumeSection, /recorded state always wins/u);
 
-  const fresh = skill.slice(skill.indexOf("### Fresh sandbox bootstrap"), skill.indexOf("### Gate 1 — Story"));
-  const selectedRepositoryDefinition = fresh.indexOf('RUN_REPO="$S"');
-  const selectedManifestDefinition = fresh.indexOf('RUN_MANIFEST="$RUN_REPO/.factory/$R/run.json"');
-  const selectedRootDefinition = fresh.indexOf('SLICE_ROOT="$RUN_REPO/.factory/worktrees/$R"');
-  const selectedInit = fresh.indexOf('$ factory init "$R"');
-  assert.ok(selectedRepositoryDefinition >= 0 && selectedRepositoryDefinition < selectedManifestDefinition);
-  assert.ok(selectedManifestDefinition < selectedRootDefinition && selectedRootDefinition < selectedInit,
-    "fresh selected repository paths must be defined before init");
+  const fresh = skill.slice(skill.indexOf("### Fresh sandbox request"), skill.indexOf("### Gate 1 — Story"));
+  const selectedInit = fresh.indexOf('factory init "$R"');
+  const successfulSelection = fresh.indexOf("Only a\nsuccessful JSON response selects paths");
+  const selectedRepositoryDefinition = fresh.indexOf("Bind `RUN_REPO` from its exact canonical `sandbox_path`");
+  assert.ok(selectedInit >= 0 && selectedInit < successfulSelection && successfulSelection < selectedRepositoryDefinition,
+    "fresh selected repository paths must come only from successful init output");
 
   const selectedPaths = (operator, sandbox, sandboxed, recordedWorktree) => {
     const runRepository = sandboxed ? sandbox : operator;
@@ -199,8 +207,8 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     git(repository, "add", "tracked.txt");
     git(repository, "commit", "--quiet", "-m", "fixture");
 
-    const initialized = factory(repository, "init", "state-relocation", "--branch", "feature/state-relocation", "--pr-base", "main");
-    assert.equal(initialized.sandbox_path, resolve(repository));
+    const initialized = seedLegacyRun(repository, "state-relocation", { branch: "feature/state-relocation", pr_base: "main" });
+    assert.equal(initialized.repository, resolve(repository));
     const active = factory(repository, "status", "state-relocation");
     assert.equal(active.sandbox_path, resolve(repository));
     assert.equal(active.dead_lock, false);
@@ -234,7 +242,6 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   try {
     const operator = join(root, "operator");
     const container = join(operator, ".factory-sandboxes");
-    const sandbox = join(container, "state-relocation");
     const runId = "state-relocation";
     mkdirSync(operator);
     git(operator, "init", "--quiet", "--initial-branch=main");
@@ -249,22 +256,34 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     git(operator, "add", "operator.txt", ".gitignore");
     git(operator, "commit", "--quiet", "-m", "operator seed");
     git(operator, "switch", "--quiet", "-c", "operator-work");
+    git(operator, "remote", "add", "origin", operator);
     const operatorBefore = {
       branch: git(operator, "symbolic-ref", "--quiet", "--short", "HEAD"),
       head: git(operator, "rev-parse", "HEAD"),
       status: git(operator, "status", "--porcelain"),
     };
-    mkdirSync(container);
-    execFileSync("git", ["clone", "--quiet", "--local", operator, sandbox]);
+    const featureBranch = `feature/${runId}`;
+    const featureRef = `refs/heads/${featureBranch}`;
+    assert.equal(refAbsent(operator, featureRef), true);
+    const initialized = initFresh(operator, [runId, "--branch", featureBranch, "--pr-base", "main"]);
+    const sandbox = initialized.repository;
+    assert.equal(sandbox, realpathSync(join(container, runId)));
+    assert.equal(refAbsent(operator, featureRef), true);
     git(sandbox, "config", "user.name", "Factory Test");
     git(sandbox, "config", "user.email", "factory@example.test");
-    git(sandbox, "switch", "--quiet", "-c", `feature/${runId}`);
-    factory(sandbox, "init", runId, "--branch", `feature/${runId}`, "--pr-base", "main");
-    const plane = join(sandbox, ".factory", runId);
+    const operatorPush = git(operator, "remote", "get-url", "--push", "origin");
+    git(sandbox, "config", "--replace-all", "remote.origin.pushurl", operatorPush);
+    assert.equal(git(operator, "remote", "get-url", "--push", "origin"), git(sandbox, "remote", "get-url", "--push", "origin"));
+    assert.equal(refAbsent(operator, featureRef), true);
+    const seedHead = git(sandbox, "rev-parse", "HEAD^{commit}");
+    git(sandbox, "switch", "--quiet", "--no-track", "-c", featureBranch, seedHead);
+    assert.equal(git(sandbox, "symbolic-ref", "--quiet", "--short", "HEAD"), featureBranch);
+    assert.equal(refAbsent(operator, featureRef), true);
+    const plane = initialized.runDir;
     const worktreeRoot = join(sandbox, ".factory", "worktrees", runId);
     const sliceWorktree = join(worktreeRoot, "slice-a");
     mkdirSync(worktreeRoot, { recursive: true });
-    git(sandbox, "worktree", "add", "--quiet", "-b", `factory/${runId}/slice-a`, sliceWorktree, `feature/${runId}`);
+    git(sandbox, "worktree", "add", "--quiet", "-b", `factory/${runId}/slice-a`, sliceWorktree, featureBranch);
     const canonicalSandbox = realpathSync(sandbox);
     for (const path of [plane, worktreeRoot, sliceWorktree]) {
       const physical = realpathSync(path);

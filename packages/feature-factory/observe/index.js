@@ -3,8 +3,8 @@
 // `factory observe` mechanizes that rule because an autonomous run has no human to
 // check whether the orchestrator actually observed anything.
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { CONTROL_PLANE } from "../state/schema.js";
 
 export const EVIDENCE_KEYS = Object.freeze([
@@ -15,7 +15,7 @@ export const EVIDENCE_KEYS = Object.freeze([
 ]);
 
 export function git(cwd, args, { runner = spawnSync } = {}) {
-  const result = runner("git", args, { cwd, encoding: "utf8", shell: false });
+  const result = runner("git", args, { cwd, encoding: "utf8", shell: false, env: { ...process.env, LC_ALL: "C" } });
   const status = Number.isInteger(result?.status) ? result.status : null;
   return {
     ok: status === 0,
@@ -232,6 +232,98 @@ export function resolveWorktree(repo, worktree) {
   const rel = relative(resolve(repo), absolute);
   if (rel.startsWith("..") || rel.startsWith(sep) || !existsSync(absolute)) return null;
   return absolute;
+}
+
+export function proveInitContainment({ operatorRoot, sandboxPath, runId, worktree }) {
+  const container = join(operatorRoot, ".factory-sandboxes");
+  if (sandboxPath !== join(container, runId)) throw new Error("sandbox is not the exact derived run path");
+  exactDirectory(operatorRoot);
+  exactDirectory(container);
+  exactDirectory(sandboxPath);
+  if (dirname(sandboxPath) !== container || realpathSync(dirname(sandboxPath)) !== container) throw new Error("sandbox parent is not the canonical container");
+
+  const gitDirectory = join(sandboxPath, ".git");
+  if (gitPath(sandboxPath, ["rev-parse", "--show-toplevel"]) !== sandboxPath) throw new Error("sandbox Git top level escapes the sandbox");
+  exactDirectory(gitDirectory);
+  if (gitPath(sandboxPath, ["rev-parse", "--absolute-git-dir"]) !== gitDirectory) throw new Error("sandbox Git directory is not S/.git");
+  if (gitPath(sandboxPath, ["rev-parse", "--git-common-dir"]) !== gitDirectory) throw new Error("sandbox Git common directory is not S/.git");
+
+  const configuredWorktree = resolve(sandboxPath, worktree);
+  if (!within(configuredWorktree, sandboxPath)) throw new Error("configured worktree escapes the sandbox");
+  inspectComponents(sandboxPath, configuredWorktree);
+  exactDirectory(configuredWorktree);
+  const worktreeTop = gitPath(configuredWorktree, ["rev-parse", "--show-toplevel"]);
+  if (worktreeTop !== sandboxPath && worktreeTop !== configuredWorktree) throw new Error("configured worktree Git top level escapes the sandbox");
+  const worktreeGitDirectory = gitPath(configuredWorktree, ["rev-parse", "--absolute-git-dir"]);
+  if (!within(worktreeGitDirectory, gitDirectory)) throw new Error("configured worktree Git directory escapes S/.git");
+  assertWorktreeRelationship(sandboxPath, configuredWorktree, gitDirectory, worktreeTop, worktreeGitDirectory);
+  if (gitPath(configuredWorktree, ["rev-parse", "--git-common-dir"]) !== gitDirectory) throw new Error("configured worktree Git common directory is not S/.git");
+
+  const factory = ensureDirectory(join(sandboxPath, CONTROL_PLANE), sandboxPath);
+  const runDir = ensureDirectory(join(factory, runId), factory);
+  const directories = [
+    ...["plan", "artifacts", "evidence", "reviews"].map((name) => ensureDirectory(join(runDir, name), runDir)),
+    ensureDirectory(join(factory, "worktrees"), factory),
+  ];
+  directories.push(ensureDirectory(join(directories.at(-1), runId), directories.at(-1)));
+
+  for (const path of [operatorRoot, container, sandboxPath, gitDirectory, configuredWorktree, factory, runDir, ...directories]) exactDirectory(path);
+  const finalTop = gitPath(configuredWorktree, ["rev-parse", "--show-toplevel"]);
+  const finalGitDirectory = gitPath(configuredWorktree, ["rev-parse", "--absolute-git-dir"]);
+  if (gitPath(sandboxPath, ["rev-parse", "--show-toplevel"]) !== sandboxPath
+    || gitPath(sandboxPath, ["rev-parse", "--absolute-git-dir"]) !== gitDirectory
+    || gitPath(sandboxPath, ["rev-parse", "--git-common-dir"]) !== gitDirectory
+    || gitPath(configuredWorktree, ["rev-parse", "--git-common-dir"]) !== gitDirectory) {
+    throw new Error("final Git containment proof failed");
+  }
+  assertWorktreeRelationship(sandboxPath, configuredWorktree, gitDirectory, finalTop, finalGitDirectory);
+  return { sandboxPath, configuredWorktree };
+}
+
+function exactDirectory(path) {
+  const stats = lstatSync(path);
+  if (stats.isSymbolicLink() || !stats.isDirectory() || realpathSync(path) !== path) throw new Error(`unsafe directory '${path}'`);
+  return path;
+}
+
+function ensureDirectory(path, parent) {
+  exactDirectory(parent);
+  try {
+    exactDirectory(path);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    mkdirSync(path);
+    exactDirectory(path);
+  }
+  if (dirname(path) !== parent || realpathSync(dirname(path)) !== parent || !within(realpathSync(path), parent, true)) throw new Error(`directory escapes its parent '${path}'`);
+  return path;
+}
+
+function inspectComponents(root, target) {
+  const path = relative(root, target);
+  let cursor = root;
+  for (const part of path.split(sep).filter(Boolean)) {
+    cursor = join(cursor, part);
+    const stats = lstatSync(cursor);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error(`unsafe configured worktree component '${cursor}'`);
+  }
+}
+
+function gitPath(cwd, args) {
+  const result = git(cwd, args);
+  if (!result.ok || !result.stdout.trim()) throw new Error(`Git observation failed: git ${args.join(" ")}`);
+  return realpathSync(resolve(cwd, result.stdout.trim()));
+}
+
+function assertWorktreeRelationship(sandbox, worktree, gitDirectory, top, observedGitDirectory) {
+  if (top === sandbox && observedGitDirectory === gitDirectory) return;
+  if (worktree !== sandbox && top === worktree && within(observedGitDirectory, gitDirectory, true)) return;
+  throw new Error("configured worktree Git relationship is not contained");
+}
+
+function within(child, parent, strict = false) {
+  const path = relative(parent, child);
+  return (!strict && path === "") || (path !== "" && path !== ".." && !path.startsWith(`..${sep}`) && !path.startsWith(sep));
 }
 
 function summarize(result) {

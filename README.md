@@ -84,8 +84,36 @@ factory pr <run-id> --url URL
 factory terminal <run-id> <completed|blocked|partial|needs-human> --reason TEXT
 ```
 
-Run state lives at `<repo>/.factory/<run-id>/run.json` and should be gitignored — if it is
-tracked, every slice diff carries manifest churn and every merge trips the privileged-path refusal.
+The usage lines above keep the compact advertised command shape. Every command also accepts
+`--repo PATH` and `--json`; unknown flags are errors.
+
+For a fresh run, call init with the canonical operator checkout `O` as `--repo O`. Init derives the
+single destination `S = O/.factory-sandboxes/<run-id>`, pre-reserves an empty `S`, makes exactly one
+`git clone --local -- O S` attempt, and completes the physical containment proof before publishing
+`run.json`. There is no fallback clone, staging location, or second attempt.
+
+On success, JSON output returns its canonical `sandbox_path` and absolute `run_dir`. Pass that returned
+`sandbox_path` as `--repo S` to status and every later factory command; commands do not redirect an
+operator checkout to its sandbox:
+
+```sh
+factory init "$R" --branch "$FEATURE_BRANCH" --repo "$O" --json
+factory status "$R" --json --repo "$S"
+```
+
+A destination or manifest collision is retained for inspection. The deterministic path is never
+reused, retried, or deleted during bootstrap or refusal. Resume a valid sandbox manifest with
+`--repo S`; surface invalid state instead of replacing it. `O/.factory/<run-id>` is supported only as
+a legacy direct-run location, resumed with `--repo O`, and is never migrated or backfilled by init.
+
+After selecting a fresh or resumed sandbox, the orchestrator proves the effective push targets match
+and establishes feature-branch provenance. Branch creation or recovery and provenance checks finish
+before a lock is claimed or an agent is dispatched. A push-target mismatch reports only the mismatch
+and `S`; neither effective target is printed, persisted, or included in an error cause, and the sandbox
+is retained.
+
+Run state under `S/.factory/<run-id>/run.json` should be gitignored — if it is tracked, every slice diff
+carries manifest churn and every merge trips the privileged-path refusal.
 
 `branch` is the feature branch the run builds and pushes. `pr_base` is the intended moving branch
 that the draft PR targets; it is not a slice `base_ref` SHA. By default, init records the symbolic
@@ -94,11 +122,10 @@ running elsewhere. `--pr-base` is an explicit override and bypasses that observa
 override, detached HEAD or an unobservable configured worktree fails closed. The recorded value is
 immutable and appears in both plain and JSON status.
 
-Initialization is create-only. If `run.json` already exists, use `factory status <run-id> --json` and
-resume instead of running init again; existing current and legacy manifests are never overwritten or
-backfilled. A scaffold-only `.factory/<run-id>/` directory without `run.json` is safe to retry. If init
-reports that creation may already have succeeded, status resolves the unknown outcome before any
-retry: resume valid state, retry only when no manifest exists, and stop on invalid state.
+Initialization and manifest publication are create-only. If `run.json` already exists, use qualified
+status against the selected repository and resume instead of running init again. Existing sandbox and
+legacy manifests are never overwritten or backfilled. A scaffold-only or partially created `S` without
+`run.json` is a retained collision, not a retryable destination.
 
 The orchestrator creates the external draft PR with the recorded values before recording its URL:
 
@@ -145,7 +172,10 @@ npm run test:factory
 npm run test:opencode
 ```
 
-Run sandboxes are gitignored and therefore deleted by `git clean -xdf`.
+Run sandboxes are gitignored. Sandbox deletion is allowed only during the verified Step 7 completed
+handoff, after the draft PR is recorded and local-ref fetch, control-plane archive, and archive
+verification all succeed. Bootstrap failures, collisions, push mismatches, and non-completed outcomes
+retain their sandbox for inspection.
 
 `test/ceiling.test.js` is the scope lock. It asserts the exact command set, the exact `run.json` key
 set, the family list, the absence of every dropped subsystem, that the skill invokes only commands

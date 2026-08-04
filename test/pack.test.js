@@ -24,7 +24,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,6 +56,17 @@ function installConsumer(dir) {
 // dependent's code would. A subprocess is the only honest way to do that from here.
 function importInConsumer(consumer, script) {
   return execFileSync("node", ["--input-type=module", "-e", script], { cwd: consumer, encoding: "utf8" });
+}
+
+function commitOperatorRepository(consumer) {
+  writeFileSync(join(consumer, ".gitignore"), "node_modules/\n.factory/\n.factory-sandboxes/\n");
+  writeFileSync(join(consumer, "operator.txt"), "committed operator fixture\n");
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: consumer, encoding: "utf8" });
+  execFileSync("git", ["config", "user.name", "Factory Pack Test"], { cwd: consumer });
+  execFileSync("git", ["config", "user.email", "factory-pack@example.test"], { cwd: consumer });
+  execFileSync("git", ["add", ".gitignore", "operator.txt", "package.json", "package-lock.json"], { cwd: consumer });
+  execFileSync("git", ["commit", "-m", "Create operator fixture"], { cwd: consumer, encoding: "utf8" });
+  return realpathSync(consumer);
 }
 
 describe("what actually ships", () => {
@@ -92,6 +103,26 @@ describe("what actually ships", () => {
       assert.deepEqual(readme.split(/\r?\n/u).filter((line) => line.startsWith("factory init <run-id>")), [
         "factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]",
       ]);
+      const readmeContracts = [
+        ["fresh init receives O", /canonical operator checkout `O` as `--repo O`/u],
+        ["S is deterministic", /`S = O\/\.factory-sandboxes\/<run-id>`/u],
+        ["init returns selected roots", /returns its canonical `sandbox_path` and absolute `run_dir`/u],
+        ["later commands use S", /returned\s+`sandbox_path` as `--repo S`/u],
+        ["the clone destination is pre-reserved", /pre-reserves an empty `S`/u],
+        ["one local clone is attempted", /exactly one\s+`git clone --local -- O S` attempt/u],
+        ["proof precedes publication", /physical containment proof before publishing\s+`run\.json`/u],
+        ["collisions are retained", /collision is retained for inspection/u],
+        ["collisions are not reused, retried, or deleted", /never\s+reused, retried, or deleted during bootstrap or refusal/u],
+        ["branch recovery precedes lock and dispatch", /Branch creation or recovery and provenance checks finish\s+before a lock is claimed or an agent is dispatched/u],
+        ["push-target mismatch is redacted", /neither effective target is printed, persisted, or included in an error cause/u],
+        ["direct O state is legacy only", /`O\/\.factory\/<run-id>` is supported only as\s+a legacy direct-run location/u],
+        ["deletion is Step 7 only", /Sandbox deletion is allowed only during the verified Step 7 completed\s+handoff/u],
+      ];
+      for (const [contract, pattern] of readmeContracts) {
+        assert.match(readme, pattern, `README must document that ${contract}`);
+      }
+      assert.doesNotMatch(readme, /git clean -xdf/u,
+        "README must not advertise an unverified deletion path outside Step 7");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -140,6 +171,7 @@ describe("what actually ships", () => {
     const dir = mkdtempSync(join(tmpdir(), "ff-pack-bin-"));
     try {
       const { consumer } = installConsumer(dir);
+      const operator = commitOperatorRepository(consumer);
       // `.bin/factory` is a symlink into the package. Invoking the real path instead — which this
       // test used to do — skips the one shape that broke the entry guard: `process.argv[1]` is the
       // symlink as typed while `import.meta.url` is resolved, so a naive comparison of the two makes
@@ -150,19 +182,54 @@ describe("what actually ships", () => {
       assert.match(help, /--issue KEY/u, "the packed CLI must advertise the active issue flag");
       assert.doesNotMatch(help, /--jira/u, "the packed CLI must not advertise the obsolete flag");
 
-      execFileSync("node", [
+      const initOutput = execFileSync("node", [
         shim, "init", "packed-readme", "--branch", "feature/packed-readme", "--worktree", ".",
-        "--pr-base", "main", "--issue", "ISSUE-214", "--mode", "headless", "--json",
+        "--pr-base", "main", "--issue", "ISSUE-214", "--mode", "headless", "--repo", operator, "--json",
       ], { cwd: consumer, encoding: "utf8" });
-      const run = JSON.parse(readFileSync(join(consumer, ".factory", "packed-readme", "run.json"), "utf8"));
+      const initialized = JSON.parse(initOutput);
+      const sandbox = join(operator, ".factory-sandboxes", "packed-readme");
+      const runDir = join(sandbox, ".factory", "packed-readme");
+      assert.equal(initialized.sandbox_path, sandbox, "installed init must return deterministic S");
+      assert.equal(initialized.run_dir, runDir, "installed init must return the absolute run directory in S");
+      assert.equal(existsSync(join(operator, ".factory", "packed-readme", "run.json")), false,
+        "fresh installed init must not publish a legacy direct record in O");
+      const run = JSON.parse(readFileSync(join(initialized.run_dir, "run.json"), "utf8"));
       assert.equal(run.issue_key, "ISSUE-214");
       assert.equal(Object.hasOwn(run, "jira_key"), false);
 
-      // And it must actually do work through the shim, not merely print. `status` on an absent run
-      // exercises argument parsing and the run-directory resolution.
-      const status = execFileSync("node", [shim, "status", "nope", "--json"],
+      // And it must actually do work through the shim, not merely print. Later reads select the
+      // returned sandbox explicitly rather than relying on the operator checkout to redirect them.
+      const status = execFileSync("node", [
+        shim, "status", "packed-readme", "--repo", initialized.sandbox_path, "--json",
+      ],
         { cwd: consumer, encoding: "utf8" });
-      assert.match(status, /"valid": false/u, "the CLI must report an absent run rather than crash");
+      const selected = JSON.parse(status);
+      assert.equal(selected.valid, true, "status must read the initialized record from returned S");
+      assert.equal(selected.sandbox_path, initialized.sandbox_path, "status must report the selected S");
+      const absent = execFileSync("node", [
+        shim, "status", "nope", "--repo", initialized.sandbox_path, "--json",
+      ], { cwd: consumer, encoding: "utf8" });
+      assert.match(absent, /"valid": false/u, "the CLI must report an absent run rather than crash");
+
+      const skill = readFileSync(
+        join(consumer, "node_modules", "feature-factory", "skills", "feature", "SKILL.md"), "utf8");
+      for (const [contract, pattern] of [
+        ["init is requested with O", /factory init "\$R" --branch "\$FEATURE_BRANCH"[^\n]*--repo "\$O" --json/u],
+        ["S comes from the response", /RUN_REPO="<exact response sandbox_path>"/u],
+        ["one local clone follows reservation", /pre-reserves the deterministic sandbox, performs exactly one\s+`git clone --local -- O S`/u],
+        ["physical proof precedes run.json", /completes the physical containment proof, and only then publishes\s+`run\.json`/u],
+        ["failed init is not retried", /do not substitute another destination or repeat init/u],
+        ["push mismatch omits targets", /never contains either target/u],
+        ["completed removal is guarded", /Only after all ref and archive verification succeeds, guard the destructive removal/u],
+      ]) {
+        assert.match(skill, pattern, `installed skill must preserve the contract that ${contract}`);
+      }
+      const recovery = skill.indexOf("### Feature branch provenance and crash recovery");
+      const beforeLock = skill.indexOf("Immediately before claiming or stealing a lock", recovery);
+      const lock = skill.indexOf('factory lock "$R" claim', beforeLock);
+      const dispatch = skill.indexOf("dispatch the planned ticket", lock);
+      assert.ok(recovery >= 0 && recovery < beforeLock && beforeLock < lock && lock < dispatch,
+        "installed skill must recover/prove the branch before lock and dispatch");
 
       // Executed *directly*, not through `node`. That is the only way the shebang and the executable
       // bit get exercised: npm sets the mode when packing a `bin` entry, and a tarball missing either
