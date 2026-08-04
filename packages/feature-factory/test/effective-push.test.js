@@ -316,6 +316,13 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
 
     writeFileSync(join(crash.runDir, "artifacts", "story.md"), "story\n");
     factory("gate", "crash-recovery", "story", "pending", "--artifact", "artifacts/story.md", "--repo", crash.repository, "--now", "2026-08-04T12:02:00.000Z");
+    // The sandbox is a clone, and `git clone` does not copy the operator's committer identity —
+    // it lives in the source repository's own config, not in anything cloned. On a developer
+    // machine a global identity fills the gap invisibly; on a fresh CI runner there is none, and
+    // this commit failed with `fatal: empty ident name`. Configure it here rather than relying on
+    // the environment, the same way every other fixture in this suite does.
+    git(crash.repository, "config", "user.name", "Factory Test");
+    git(crash.repository, "config", "user.email", "factory@example.test");
     writeFileSync(join(crash.repository, "progressed.txt"), "progressed\n");
     git(crash.repository, "add", "progressed.txt");
     git(crash.repository, "commit", "-m", "progress branch");
