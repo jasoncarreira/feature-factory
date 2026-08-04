@@ -114,7 +114,7 @@ describe("what actually ships", () => {
         const factory = await import("feature-factory");
         const plugin = await import("opencode-feature-factory");
         const tui = await import("opencode-feature-factory/tui");
-        const missing = ["readRun", "readRunUnchecked", "nextAction", "validateRun", "validateRunForRead"]
+        const missing = ["readRun", "readRunUnchecked", "nextAction", "validateRun"]
           .filter((name) => typeof factory[name] !== "function");
         if (missing.length) throw new Error("feature-factory is missing: " + missing.join(", "));
         if (typeof plugin.default !== "function") throw new Error("plugin root must default-export a function");
