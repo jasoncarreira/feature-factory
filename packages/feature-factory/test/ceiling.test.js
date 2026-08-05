@@ -245,17 +245,19 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Every agent the skill dispatches must ship with the package. The predecessor's agent
     // definitions lived in a separate assets/ tree, so the skill named seven agents the
     // package did not contain and could not run a feature at all.
-    const dispatched = [...new Set([...markdown.matchAll(/`([a-z]+(?:-[a-z]+)+)`/gu)]
-      .map(([, name]) => name)
-      .filter((name) => AGENT_NAMES.includes(name)))];
+    const targetList = /The only specialized task targets a run driver may dispatch are exactly:\n\n[\s\S]*?\n\n((?:- `[^`\n]+`\n)+)\nA `run-orchestrator` must not dispatch/u.exec(markdown)?.[1] ?? "";
+    const dispatched = [...new Set([...targetList.matchAll(/^- `([^`\n]+)`$/gmu)]
+      .map(([, name]) => name))];
     const shipped = readdirSync(join(pkg, "agents")).filter((entry) => entry.endsWith(".md"))
       .map((entry) => entry.replace(/\.md$/u, ""));
-    const missing = dispatched.filter((name) => !shipped.includes(name));
-    assert.deepEqual(missing, [], "the skill dispatches an agent the package does not ship");
+    assert.deepEqual(dispatched.sort(), [...AGENT_NAMES].sort(),
+      "the skill must recognize exactly the declared dispatched agents");
+    assert.ok(markdown.includes("For the OpenCode background driver, the host’s flat task allow makes the task tool available but does\nnot enforce the target names below. The list and its exclusions are prompt/skill policy."),
+      "the skill must state that target names are prompt/skill policy, not host enforcement");
     // And nothing ships that the chain never runs — security-reviewer is a declared non-goal,
     // so its presence would mean a dropped stage walked back in as a file.
-    assert.deepEqual(shipped.filter((name) => !AGENT_NAMES.includes(name)), [],
-      "an agent ships that the declared chain does not name");
+    assert.deepEqual(shipped.sort(), [...AGENT_NAMES].sort(),
+      "the shipped agents must equal the declared chain");
 
     // Two properties of the agent prompts, both defects found by reading them:
     //
