@@ -242,17 +242,29 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(merged.ok, true, `a moved base must not block a merge: ${merged.stderr}`);
       assert.equal(runJson(p.runDir).slices[0].status, "merged");
 
-      // Tolerating this shape is half the contract. The other half is telling a run when it may make
-      // the commit, and that half was missing: mimir run 1387 stopped to ask a human because an
-      // already-merged slice's test made the current slice's evidence unpassable, while the repair was
-      // permitted only at Step 5's NO-GO — after every slice merges. Pinned inside this site rather than
-      // at a new one: the budget in ceiling.test.js constrains call sites, and binding existing prose to
-      // existing behaviour is meant to arrive as data at a site that already exists.
+      // Tolerating this shape is half the contract; the other half is telling a run when it may make the
+      // commit. mimir run 1387 stopped to ask a human because an already-merged slice's test made the
+      // current slice's evidence unpassable.
+      //
+      // The first version of this pinned a Step 4 repair on the integration branch, and mimir refused it:
+      // `factory observe` runs the ratified suite with `cwd: worktree` (observe/index.js), and the slice
+      // worktree sits on its branch at an immutable `base_ref`, so a commit on the integration branch is
+      // invisible to it — while merging that commit into the slice would put an out-of-lane test path in
+      // the observed diff, which this very suite refuses two tests down. The permission lives at Step 5
+      // because that is where the tests run on the branch being repaired.
+      //
+      // So what Step 4 must say depends on activation, and both branches are pinned here: repair before a
+      // base is fixed, and blocked/partial once it is. Asserted inside this site rather than at a new one —
+      // the budget in ceiling.test.js constrains call sites, and binding existing prose to existing
+      // behaviour is meant to arrive as data at a site that already exists.
       const skillPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "skills", "feature", "SKILL.md");
       const build = readFileSync(skillPath, "utf8");
       const step4 = build.slice(build.indexOf("## Step 4 — Build slices"), build.indexOf("## Step 5 — Integrate"));
       for (const required of [
         "ratified suite fails on something this slice may not touch", // the trigger condition
+        "Not yet activated",                                          // repair lands in base_ref, suite sees it
+        "Already activated",                                          // no repair reaches the pinned worktree
+        "goes `partial`",                                             // merged slices still reach a PR
         "test files only",                                            // never production source
         "unsatisfiable for this plan",                                // not merely failing
         "its own commit",                                             // never folded into a slice merge

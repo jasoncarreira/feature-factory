@@ -843,24 +843,30 @@ Per slice:
    unless its ratified `test_plan` is empty — the waiver comes from the plan, not from you.
 
    **When the ratified suite fails on something this slice may not touch.** An already-merged slice's
-   test can assert what a later slice in the same plan must invalidate — a module's absence, an import
-   that must not appear. The failure is then neither the builder's nor fixable in the builder's lane,
-   because `paths` are immutable and the merge refuses out-of-lane paths. This is the same test-only
-   repair Step 5 permits on NO-GO, reached earlier: commit it to the integration branch before
-   re-observing, when every one of these holds.
-   - It touches **test files only** — never production source, never a privileged control-plane path.
-   - The assertion is **unsatisfiable for this plan**, not merely failing. Name the slice whose ratified
-     content makes it so; if you cannot, this rule does not apply.
-   - The property under test survives, or the reason it cannot is recorded. A repair that deletes the
-     claim rather than restating it is a finding, not a fix.
-   - It is **its own commit** on the integration branch, never folded into a slice merge, so the merge
-     proof still observes exactly the reviewed paths. A moved base is fine; unreviewed content inside a
-     merge is not.
-   - It is disclosed in the slice review and in the PR body, naming the file and the cause.
+   test can assert what a later slice in the same plan must invalidate — a module's absence, an import that
+   must not appear. Which move exists depends on whether this slice is activated yet, because `base_ref` is
+   fixed at activation and the suite above runs in `SLICE_WORKTREE`, not on the integration branch.
+   - **Not yet activated.** Commit the test-only repair to the integration branch *first*, then activate.
+     The repair is then part of this slice's `base_ref`, so the suite sees it and the slice's observed diff
+     still holds only its own paths. This is the repair Step 5 permits, taken before a base is fixed.
+   - **Already activated.** There is no repair. The worktree is pinned at an immutable `base_ref`, so a
+     commit on the integration branch is invisible to it, and bringing that commit into the slice would put
+     an out-of-lane test path in the observed diff, which the merge refuses. Mark the slice `blocked` and
+     stop dispatching its dependents. The run then goes `partial` and surfaces at the next gate, so the
+     slices that did merge still reach a PR instead of being discarded.
 
-   An out-of-lane **production** change is not this. It follows **Ownership disclosure** below, where the
-   reviewer decides whether the plan or the change is wrong. Anything outside these bounds still escalates
-   the smallest decision, per Review below — this narrows when a human is needed, not whether.
+   Either way, record the **diagnosis** and not just the failure: which slice owns the test, which
+   assertion cannot hold, and what would make it hold. That is the difference between an operator's fix
+   being one commit and being an investigation.
+
+   Wherever a test-only repair happens it is bounded: **test files only**, never production source and
+   never a privileged control-plane path; the assertion **unsatisfiable for this plan** rather than merely
+   failing, naming the slice whose ratified content makes it so; the property preserved, or the reason it
+   cannot be recorded; **its own commit**, never folded into a slice merge, so the merge proof still
+   observes exactly the reviewed paths; and disclosed in the slice review and the PR body. An out-of-lane
+   **production** change is not this — it follows **Ownership disclosure** below, where the reviewer decides
+   whether the plan or the change is wrong. Anything outside these bounds escalates the smallest decision,
+   per Review below.
 4. **Review** — `work-reviewer` with subject `<slice-id>`, the observed evidence, the slice spec, and
    the brief. Record both refs — the merge requires each:
      ```sh
@@ -897,8 +903,8 @@ whether the plan or the change is wrong. Silent out-of-lane edits are the failur
 privileged control-plane paths are never disclosable and are always refused.
 
 **A moved base is fine.** A wave's second merge lands on a base containing its sibling, and a direct
-commit to the feature branch — the test-only repair the observe step above and Step 5's NO-GO both
-permit — moves it too. The merge proof
+commit to the feature branch — the test-only repair Step 5's NO-GO permits, and the observe step above
+permits before a base is fixed — moves it too. The merge proof
 tolerates both: it checks that the merge contributed exactly the reviewed paths and that the merge's
 content on those paths matches what was reviewed, so unreviewed content inside *the merge* is refused
 while movement around it is not. What guards the branch as a whole is the integration pass: the
