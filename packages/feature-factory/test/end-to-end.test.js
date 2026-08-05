@@ -242,37 +242,35 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(merged.ok, true, `a moved base must not block a merge: ${merged.stderr}`);
       assert.equal(runJson(p.runDir).slices[0].status, "merged");
 
-      // Tolerating this shape is half the contract; the other half is telling a run when it may make the
-      // commit. mimir run 1387 stopped to ask a human because an already-merged slice's test made the
-      // current slice's evidence unpassable.
+      // Tolerating this shape is half the contract; the other half is telling a run what to do when it
+      // cannot use it. mimir run 1387 stopped to ask a human because an already-merged slice's test made
+      // the current slice's evidence unpassable, and when it resumed it got green by dropping that test
+      // from the ratified command — proving less than the plan ratified, which every downstream check
+      // then honoured.
       //
-      // The first version of this pinned a Step 4 repair on the integration branch, and mimir refused it:
-      // `factory observe` runs the ratified suite with `cwd: worktree` (observe/index.js), and the slice
-      // worktree sits on its branch at an immutable `base_ref`, so a commit on the integration branch is
-      // invisible to it — while merging that commit into the slice would put an out-of-lane test path in
-      // the observed diff, which this very suite refuses two tests down. The permission lives at Step 5
-      // because that is where the tests run on the branch being repaired.
+      // Two earlier versions of this rule tried to give Step 4 a repair. Both were unreachable, and
+      // mimir refused both: `factory observe` runs the suite with `cwd: worktree` on a pinned `base_ref`,
+      // so an integration-branch commit is invisible; and a foreign test *outside*
+      // `SLICE_TEST_COMMAND` cannot fail the observation at all, so there is no detection point for a
+      // pre-merge repair. What survives is the honest outcome — block, do not narrow — plus a pointer to
+      // Step 5, which owns the repair because that is where the suite runs on the branch being repaired.
       //
-      // So what Step 4 must say depends on activation, and both branches are pinned here: repair before a
-      // base is fixed, and blocked/partial once it is. Asserted inside this site rather than at a new one —
-      // the budget in ceiling.test.js constrains call sites, and binding existing prose to existing
-      // behaviour is meant to arrive as data at a site that already exists.
+      // Pinned inside this site rather than at a new one: the budget in ceiling.test.js constrains call
+      // sites, and binding existing prose to existing behaviour is meant to arrive as data at a site
+      // that already exists.
       const skillPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "skills", "feature", "SKILL.md");
       const build = readFileSync(skillPath, "utf8");
       const step4 = build.slice(build.indexOf("## Step 4 — Build slices"), build.indexOf("## Step 5 — Integrate"));
       for (const required of [
         "ratified suite fails on something this slice may not touch", // the trigger condition
-        "Outside the ratified command",                               // repair on the branch, integration proves it
-        "Inside the ratified command",                                // no repair reaches the pinned worktree
-        "follow the wave rule below",                                 // partial is an explicit transition, stated once
+        "is no repair available at this step",                        // the only reachable outcome
+        "follow the wave rule below",                                 // terminalizing is an explicit transition
         "Never narrow the ratified command",                          // the false green this invites
-        "test files only",                                            // never production source
-        "unsatisfiable for this plan",                                // not merely failing
-        "its own commit",                                             // never folded into a slice merge
-        "disclosed in the slice review",                              // the reviewer still decides
-        "escalate the smallest decision",                             // anything outside the bounds
+        "a false green wearing evidence's",                            // named, because it already happened
+        "Step 5's NO-GO repair owns it",                              // where the repair actually lives
+        "escalate the smallest decision",                             // anything outside this case
       ]) {
-        assert.notEqual(step4.indexOf(required), -1, `Step 4 must state the bounded repair: ${required}`);
+        assert.notEqual(step4.indexOf(required), -1, `Step 4 must state the honest outcome: ${required}`);
       }
     } finally { cleanupProject(p); }
   });

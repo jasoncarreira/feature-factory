@@ -844,24 +844,21 @@ Per slice:
 
    **When the ratified suite fails on something this slice may not touch.** An already-merged slice's
    test can assert what a later slice in the same plan must invalidate — a module's absence, an import that
-   must not appear. By the time you see it the slice is activated, so `base_ref` is already fixed and the
-   suite above runs in `SLICE_WORKTREE`, never on the integration branch. Which move exists turns on whether
-   the foreign test is in this slice's ratified command.
-   - **Outside the ratified command.** Commit the test-only repair to the integration branch, before merging
-     this slice, and let the integration pass prove it — that is where the whole suite runs. The slice's own
-     evidence stands on its ratified command, the repair is not in the slice's diff, and the merge stays
-     clean.
-   - **Inside the ratified command.** There is no repair. The worktree is pinned at an immutable `base_ref`,
-     so a commit on the integration branch is invisible to the re-observation, and bringing that commit into
-     the slice would put an out-of-lane test path in the observed diff, which the merge refuses. Mark the
-     slice `blocked`, stop dispatching its dependents, and follow the wave rule below for a partly-merged
-     run — the slices that did merge still reach a PR instead of being discarded.
+   must not appear. Such a test can only fail here if it is inside `SLICE_TEST_COMMAND`, and then **there
+   is no repair available at this step.** The slice is already activated, so `base_ref` is fixed; the suite
+   runs in `SLICE_WORKTREE`, so a commit on the integration branch is invisible to the re-observation; and
+   bringing that commit into the slice would put an out-of-lane test path in the observed diff, which the
+   merge refuses. Mark the slice `blocked`, stop dispatching its dependents, and follow the wave rule below
+   — the slices that did merge still reach a PR instead of being discarded.
 
-   **Never narrow the ratified command to get past this.** Dropping the failing path from `--test-cmd`
-   makes the observation green while proving less than the plan ratified, and every downstream check will
-   honour it — the evidence record, the review binding, and the merge all read the command you supplied,
-   not the command the plan named. If the ratified command covers the foreign test, the slice is blocked;
-   that is the honest outcome, and a narrowed command is a false green wearing evidence's clothes.
+   **Never narrow the ratified command to get past this.** Dropping the failing path from `--test-cmd` makes
+   the observation green while proving less than the plan ratified, and every downstream check honours it:
+   the evidence record, the review binding, and the merge all read the command you supplied, not the command
+   the plan named. Blocking is the honest outcome; a narrowed command is a false green wearing evidence's
+   clothes.
+
+   If the same incompatibility instead first appears in the **integrated** suite, this step is not involved
+   at all — Step 5's NO-GO repair owns it, on the branch where that suite actually runs.
 
    Either way, record the **diagnosis** and not just the failure: which slice owns the test, which
    assertion cannot hold, and what would make it hold. It goes in the slice review when the slice merges,
@@ -869,14 +866,12 @@ Per slice:
    makes the operator repeat the whole investigation. That is the difference between their fix being one
    commit and being an afternoon.
 
-   Wherever a test-only repair happens it is bounded: **test files only**, never production source and
-   never a privileged control-plane path; the assertion **unsatisfiable for this plan** rather than merely
-   failing, naming the slice whose ratified content makes it so; the property preserved, or the reason it
-   cannot be recorded; **its own commit**, never folded into a slice merge, so the merge proof still
-   observes exactly the reviewed paths; and disclosed in the slice review and the PR body. An out-of-lane
-   **production** change is not this — it follows **Ownership disclosure** below, where the reviewer decides
-   whether the plan or the change is wrong. Anything outside these bounds escalates the smallest decision,
-   per Review below.
+   Either way, record the **diagnosis** and not just the failure: which slice owns the test, which
+   assertion cannot hold, and what would make it hold. It goes in the slice review when the slice merges,
+   and in the `--reason` of the terminal transition when it does not — a reason naming only "tests failed"
+   makes the operator repeat the whole investigation. An out-of-lane **production** change is a different
+   thing entirely and follows **Ownership disclosure** below, where the reviewer decides whether the plan
+   or the change is wrong.
 4. **Review** — `work-reviewer` with subject `<slice-id>`, the observed evidence, the slice spec, and
    the brief. Record both refs — the merge requires each:
      ```sh
@@ -913,8 +908,7 @@ whether the plan or the change is wrong. Silent out-of-lane edits are the failur
 privileged control-plane paths are never disclosable and are always refused.
 
 **A moved base is fine.** A wave's second merge lands on a base containing its sibling, and a direct
-commit to the feature branch — the test-only repair Step 5's NO-GO permits, and the observe step above
-permits for a test outside a slice's ratified command — moves it too. The merge proof
+commit to the feature branch — the test-only repair Step 5's NO-GO permits — moves it too. The merge proof
 tolerates both: it checks that the merge contributed exactly the reviewed paths and that the merge's
 content on those paths matches what was reviewed, so unreviewed content inside *the merge* is refused
 while movement around it is not. What guards the branch as a whole is the integration pass: the
@@ -973,7 +967,10 @@ HEAD, a branch name, or an unpersisted variable.
 
 On NO-GO, classify each finding against the prior round and find its design-level root cause before
 spending a retry; route the top finding to the owning builder in a fresh slice worktree, or fix in the
-integration branch if it is test-only. Respect `max_retries`.
+integration branch if it is test-only. A test-only fix there touches test files only — never production
+source, never a privileged control-plane path — preserves the property under test or records why it
+cannot, lands as its own commit rather than folded into a merge, and is disclosed in the PR body naming
+the file and the cause. Respect `max_retries`.
 
 ### Gate 3 — Pre-PR
 
