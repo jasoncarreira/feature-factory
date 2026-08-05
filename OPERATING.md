@@ -46,6 +46,13 @@ Three details, each of which cost something:
   publication independent of machine state.
 - **`--log-level DEBUG --print-logs`.** The only instrument that distinguishes a stalled run from a slow
   one. Attach it always.
+- **Keep the host awake.** A batch queued overnight ran one issue and then sat idle until the machine woke
+  nine hours later. Hold sleep off around the queue, or expect to lose the night — nothing in the factory
+  reports this, because from its side no time passed at all.
+- **Detach each run from whatever supervises it.** `nohup` ignores SIGHUP but does not leave the process
+  group, so killing a supervisor kills the runs it started. One run died that way with a twenty-line log
+  reading `init` … `cleanup`, which looks like a crash on startup and is not. Give each run its own
+  session, or start it as an independently tracked job.
 
 ## 3. Signals that lie
 
@@ -60,6 +67,10 @@ Three details, each of which cost something:
 | `pgrep -f "bin/opencode run"` | real processes only |
 | non-terminal manifest + no process | a genuine orphan; needs a lock release |
 | matching package versions | **proves nothing** — see §7 |
+| `duplicate skill name" name=feature` | the run may be following a different skill entirely — see §7 |
+
+That last row is the one to internalise. It is a `WARN` among hundreds of `WARN`s, it scrolls past during
+startup, and it is the only notice you get that the run is not executing the skill you installed.
 
 The reliable health check is: a live process, a debug log that has moved within ~20 minutes, and zero
 real permission requests.
@@ -113,6 +124,29 @@ content:
 ```sh
 grep -c '<symbol-the-new-code-introduces>' ~/.config/opencode/node_modules/<package>/<file>
 ```
+
+**The file the agent reads may not be the file you installed.** Two copies of the same skill can be
+registered at once, and the stale one can win. This cost two runs, and the first diagnosis was wrong in an
+instructive way: the run refused a payload its skill explicitly permits, in the exact manner its skill
+explicitly forbids. That reads unmistakably as a model ignoring its instructions. It was obeying a
+*different* skill — a version published to the registry long ago, present because the host config named
+the plugin twice, once by path and once as a bare package name that resolves to `@latest`.
+
+Triage, when a run refuses on a rule you cannot find in your skill: **grep for the words it used.**
+
+```sh
+grep -c '<phrase from the refusal>' <installed skill> <every other registered copy>
+```
+
+Vocabulary present in one copy and absent from the other identifies which file was in force, in one
+command. It beats any amount of reasoning about why the model misbehaved, because the premise of that
+reasoning is false. Here the refusal cited a flag that had not existed for many versions, which is the
+tell: **a rule referring to machinery you do not have is not your rule.**
+
+Then look at what else that copy shipped. The stale one carried its own `assets/agent/*.md`, including a
+reviewer that does not exist in the current lineage — so every stage would have run against agent
+definitions from a dead lineage, not merely a stale skill. Prefer packages that ship no skill or agent
+assets at all: nothing to shadow with is better than shadowing detected.
 
 **Never reinstall while a run is live.** Swapping CLI flags under an orchestrator that is following the
 previously installed skill breaks it mid-flight.
