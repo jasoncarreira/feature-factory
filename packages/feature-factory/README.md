@@ -43,7 +43,9 @@ Only `resolve` is consumed now. It runs as one ordinary shell step with the conf
 unchanged, repository-root cwd, inherited environment plus the exact admitted request in
 `FACTORY_INPUT`, and no positional argument or structured stdin. Empty stdout means the input was not
 recognized. Non-empty stdout is the direct,
-unchanged `ISSUE_PAYLOAD`: one JSON object containing a valid canonical top-level string `run_id`, which
+unchanged `ISSUE_PAYLOAD`: one JSON object containing a valid canonical top-level string `run_id`, a
+non-empty string `title`, and a string `body` — all three validated before the run id is bound or anything
+is dispatched — where `run_id`
 selects the run and reaches `story-reader` without extraction, wrapping, reserialization, or
 normalization. The value matches `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; digit-only values are positive
 decimal without leading zeroes.
@@ -53,9 +55,9 @@ run effect and never falls back:
 
 ```text
 invalid factory config: .factory.json; no session or run created.
-factory config entry 'resolve' returned malformed payload; no session or run created.
-factory config entry 'resolve' failed with exit status <status>; no session or run created.
-factory config entry 'resolve' failed; exit status unavailable; no session or run created.
+factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.
+factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.
+factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.
 ```
 
 Diagnostics name only `resolve` and the status classification; neither the configured or expanded

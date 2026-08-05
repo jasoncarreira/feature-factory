@@ -90,7 +90,9 @@ Only `resolve` is consumed now. It runs as one ordinary shell step with the conf
 unchanged, repository-root cwd, inherited environment plus the exact admitted request in
 `FACTORY_INPUT`, and no positional argument or structured stdin. Empty stdout means the input was not
 recognized. Non-empty stdout is the direct,
-unchanged `ISSUE_PAYLOAD`: one JSON object containing a valid canonical top-level string `run_id`, which
+unchanged `ISSUE_PAYLOAD`: one JSON object containing a valid canonical top-level string `run_id`, a
+non-empty string `title`, and a string `body` — all three validated before the run id is bound or anything
+is dispatched — where `run_id`
 selects the run and reaches `story-reader` without extraction, wrapping, reserialization, or
 normalization. The value matches `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; digit-only values are positive
 decimal without leading zeroes.

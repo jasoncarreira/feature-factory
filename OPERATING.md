@@ -53,9 +53,11 @@ Only `resolve` is consumed today. After mode admission, it runs as one ordinary 
 configured string submitted unchanged, exact cwd `O`, the inherited environment plus `FACTORY_INPUT`,
 and no positional argument or structured stdin. `FACTORY_INPUT` is the exact admitted request remainder,
 including its original whitespace and bytes. Exit zero with no stdout means the input was not recognized;
-the factory continues ticket, design, or free-text classification without the built-in GitHub recognizer.
+the factory continues ticket, design, or free-text classification. There is no built-in recognizer to
+fall back to.
 Exit zero with stdout uses those exact bytes directly as `ISSUE_PAYLOAD`. The payload must be one JSON
-object with a valid canonical top-level string `run_id`; the factory validates that field without
+object with a valid canonical top-level string `run_id`, a non-empty string `title`, and a string `body`;
+the factory validates all three, before binding the run id or dispatching anything, without
 extracting, wrapping, reserializing, or changing the payload, then supplies the same stdout unchanged to
 `story-reader`. The value must match `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; a digit-only value must be
 positive decimal without leading zeroes.
@@ -64,20 +66,23 @@ A present malformed file or malformed non-empty resolver payload refuses, respec
 
 ```text
 invalid factory config: .factory.json; no session or run created.
-factory config entry 'resolve' returned malformed payload; no session or run created.
+factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.
 ```
 
-A configured resolver failure refuses without compatibility fallback:
+A configured resolver failure refuses, naming the reference — `FACTORY_INPUT` as admitted, truncated to
+200 characters — because an operator resolving several references cannot otherwise tell which one failed:
 
 ```text
-factory config entry 'resolve' failed with exit status <status>; no session or run created.
-factory config entry 'resolve' failed; exit status unavailable; no session or run created.
+factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.
+factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.
 ```
 
-Only an absent config file selects the existing GitHub behavior. In that compatibility path, a whole
-positive integer, `#N`, or canonical URL for an issue in the current repository is resolved with the
-existing `gh` commands. This repository intentionally has no committed config, so `205`, `#205`, and
-`https://github.com/jasoncarreira/opencode-feature-factory/issues/205` still select run `205`.
+An absent config file means no resolver is declared, and nothing is recognized or fetched: the skill
+carries no tracker grammar and no fetch command. Reference intake exists only where a repository declares
+it. **This repository declares its own**, in a committed `.factory.json`, so `205`, `#205`, and
+`https://github.com/jasoncarreira/opencode-feature-factory/issues/205` still select run `205` — through
+that declaration rather than through anything built in. A repository without one can still start a run
+from free text; it just cannot start one from a reference.
 
 The factory never prints, quotes, logs, or persists a configured command, its expanded command line,
 shell diagnostics, or credentials. This contract adds no config bridge or parser service, command
@@ -92,7 +97,10 @@ The remaining entries are declarations for later work:
 | `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked; existing push and PR behavior remains unchanged. Push-target publication is deferred to #224. |
 | `publishing_identity` | No runtime input; the static non-empty account-name string is the return value. | A missing, non-string, or empty identity makes the config malformed. | Not consumed for identity enforcement; deferred to #216. |
 
-The live file is operator-owned, gitignored, and protected by the privileged-path policy. A feature run
+The live file is operator-owned: committed, so every clone and sandbox carries it, and protected by the
+privileged-path policy rather than by being unversioned. It was `.factory/config.json` until that path
+proved unusable — `.factory/` is gitignored, so the declaration could not be committed and never reached
+a sandbox clone. A feature run
 does not create, write, merge, archive, or package it.
 
 ### Launch command
