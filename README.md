@@ -81,14 +81,15 @@ resolved Git top level:
 The root has exactly these four properties. `resolve`, `verify`, and `publish` are non-empty command
 strings. `publishing_identity` is a static non-empty account name, not a command, token, credential, or
 command result. All four entries are validated before use; a present invalid, unreadable, incomplete,
-wrong-type, whitespace-only, or unknown-property config refuses closed. Only an absent file selects the
-existing GitHub issue behavior. The factory never creates, writes, merges, archives, or packages this
+wrong-type, whitespace-only, or unknown-property config refuses closed. An absent file means no resolver
+is declared, and no reference is recognized or fetched: there is no built-in tracker grammar and no
+built-in fetch command. The factory never creates, writes, merges, archives, or packages this
 operator-owned live file.
 
 Only `resolve` is consumed now. It runs as one ordinary shell step with the configured string submitted
 unchanged, repository-root cwd, inherited environment plus the exact admitted request in
 `FACTORY_INPUT`, and no positional argument or structured stdin. Empty stdout means the input was not
-recognized and does not invoke the GitHub compatibility resolver. Non-empty stdout is the direct,
+recognized. Non-empty stdout is the direct,
 unchanged `ISSUE_PAYLOAD`: one JSON object containing a valid canonical top-level string `run_id`, which
 selects the run and reaches `story-reader` without extraction, wrapping, reserialization, or
 normalization. The value matches `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; digit-only values are positive
@@ -109,7 +110,7 @@ Neither is invoked today. Existing verification and publication remain unchanged
 publication deferred to #224. Static `publishing_identity` has no runtime input and returns the
 non-empty account-name value itself; a missing, non-string, or empty identity makes the config malformed.
 It is not yet consumed, and identity enforcement is deferred to #216. See
-[OPERATING.md](OPERATING.md) for the exact refusal text, missing-file compatibility, and credential
+[OPERATING.md](OPERATING.md) for the exact refusal text, what an absent declaration means, and credential
 guidance.
 
 ## The CLI
