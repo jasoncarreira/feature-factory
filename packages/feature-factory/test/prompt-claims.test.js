@@ -920,35 +920,71 @@ const CLAIMS = [
     },
   },
   {
-    id: "github-issue-forms-select-one-cli-run",
+    id: "repository-resolver-contract-preserves-compatibility-run",
     file: "skills/feature/SKILL.md",
-    fragment: "Recognize an issue reference only when the entire remainder is exactly one of\n   these standalone forms: a positive decimal integer (`205`), that integer prefixed by `#` (`#205`),\n   or a canonical `https://github.com/<owner>/<repo>/issues/<positive-decimal>` URL.",
+    fragment: "The optional repository-owned file is `$O/.factory/config.json`:\n\n```json\n{\n  \"resolve\": \"<non-empty shell command>\",\n  \"verify\": \"<non-empty shell command>\",\n  \"publish\": \"<non-empty shell command>\",\n  \"publishing_identity\": \"<non-empty account name>\"\n}\n```",
     expect: "allowed",
     matches: /"run_id": "205"/u,
     act(repo) {
       const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
-      assert.match(prose, /A recognized GitHub issue URL is issue input and is removed\s+from design-source consideration\./u);
-      assert.match(prose, /`unresolvable issue reference: <unchanged reference>` and stop; do not derive `R`, initialize a run, or\s+fall through to `story-writer`\./u);
-      assert.match(prose, /For all three issue forms, `R` is the resolved issue's canonical positive decimal `number`/u);
-      const references = [
+      const configured = /#### Configured resolver path\n\n([\s\S]*?)\n\n#### Missing-file compatibility/u.exec(prose)?.[1] ?? "";
+      const compatibility = /#### Missing-file compatibility\n\n([\s\S]*?)\n\n#### Resolver boundaries and deferred entries/u.exec(prose)?.[1] ?? "";
+      const boundaries = /#### Resolver boundaries and deferred entries\n\n([\s\S]*?)\n\n#### Remaining intake classification/u.exec(prose)?.[1] ?? "";
+      assert.match(prose, /root must be a JSON object with exactly those four own properties/u);
+      assert.match(prose, /`resolve`, `verify`, and\n`publish` are the only commands/u);
+      assert.match(prose, /`publishing_identity` is\na static non-empty publishing account name in the file itself, not a command, token, credential, or\ncommand result/u);
+      assert.match(prose, /Unknown or missing properties, invalid JSON, unreadable content, wrong types, and\nempty or whitespace-only values make a present file malformed/u);
+      assert.match(prose, /Validate all four entries before\nexecuting `resolve`/u);
+      assert.match(prose, /Credential values must not appear in the file/u);
+      assert.match(prose, /Only an absent `\$O\/\.factory\/config\.json` selects the compatibility path below/u);
+      assert.match(prose, /This refusal stops under the same effect-free boundary as every configured resolver refusal below/u);
+      assert.match(configured, /configured string unchanged as one ordinary shell step, with exact cwd `O`, the inherited\nenvironment plus `FACTORY_INPUT`, and no positional argument or structured stdin/u);
+      assert.match(configured, /`FACTORY_INPUT` is\nthe exact admitted request remainder after mode-prefix removal, preserving its whitespace and bytes/u);
+      assert.match(configured, /Exit zero with exactly zero stdout bytes means the resolver did not recognize an issue reference/u);
+      assert.match(configured, /Exit zero with non-empty stdout means stdout itself is `ISSUE_PAYLOAD`/u);
+      assert.match(configured, /canonical top-level string field named `run_id`/u);
+      assert.match(configured, /exact same stdout bytes unchanged to `story-reader` as\n   `ISSUE_PAYLOAD`/u);
+      assert.match(configured, /configured `run_id` must match `\^\[a-z0-9\]\(\?:\[a-z0-9\._-\]\*\[a-z0-9\]\)\?\$`/u);
+      assert.match(configured, /digit-only value must be\npositive decimal without leading zeroes\. Bind `R` exactly to that value/u);
+      assert.match(configured, /becomes the background `runId`, expected-ID comparison value, manifest candidate name,\nsandbox name, and default feature-branch suffix/u);
+      for (const refusal of [
+        "invalid factory config: .factory/config.json; no session or run created.",
+        "factory config entry 'resolve' returned malformed payload; no session or run created.",
+        "factory config entry 'resolve' failed with exit status <status>; no session or run created.",
+        "factory config entry 'resolve' failed; exit status unavailable; no session or run created.",
+      ]) assert.ok(prose.includes(refusal), `resolver refusal is missing: ${refusal}`);
+      assert.match(configured, /refusals stop before canonical run selection, `feature_background`, manifest or state reads,\nsandbox creation, every `factory` command, or specialist dispatch/u);
+      assert.match(configured, /They never use compatibility\nresolution or continue through the ticket, `story-reader`, or `story-writer` paths/u);
+      assert.match(configured, /Never print, quote,\nreproduce, log, or persist the configured command string, an expanded or resolved command line,\ncredentials, or shell\/tool diagnostics/u);
+      assert.doesNotMatch(configured, /GitHub|\bgh\s+(?:repo|issue)\b|\b(?:curl|wget)\b|["']recognized["']|command runner|parser service|\bbridge\b|\bprotocol\b|\bcache\b|payload handoff|output-size|\btimeout\b|\bretry\b|\bbuffering\b|\btruncation\b|\bredaction\b|\bstderr\b|session (?:field|key|persistence|title)/iu);
+      assert.match(compatibility, /When and only when `\$O\/\.factory\/config\.json` is absent, preserve the existing issue behavior unchanged/u);
+      assert.match(compatibility, /whole positive\ndecimal integer \(`205`\), that integer prefixed by `#` \(`#205`\), or a canonical\n`https:\/\/github\.com\/<owner>\/<repo>\/issues\/<positive-decimal>` URL/u);
+      assert.match(compatibility, /CURRENT_REPOSITORY="\$\(gh repo view/u);
+      assert.match(compatibility, /ISSUE_PAYLOAD="\$\(gh issue view/u);
+      assert.match(compatibility, /`unresolvable issue reference: <unchanged reference>` and stop; do not derive `R`, initialize a run, or\nfall through to `story-writer`/u);
+      assert.match(boundaries, /Add no helper module,\ncommand runner, parser service, repository-config execution in the integration package, plugin bridge,\ntransport, protocol, or new CLI command/u);
+      assert.match(boundaries, /Add no resolver cache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
+      assert.match(boundaries, /Add no stderr redirection or suppression rule, separate capture\npolicy, output channel, buffering, truncation, redaction, output-size limit, timeout, retry, or fallback\nafter any configured result or failure/u);
+      assert.match(boundaries, /Only `resolve` is consumed now\. The other entries are declared but not migrated/u);
+      assert.match(boundaries, /push-target migration is deferred to #224/u);
+      assert.match(boundaries, /consumption is deferred to #216/u);
+      assert.match(prose, /Foreground, background primary, and background `run-orchestrator`\nderivation use the following same configured-or-absent policy/u);
+      assert.match(prose, /background primary does not forward or persist its\npayload/u);
+      assert.match(prose, /uses its own non-empty resolver stdout unchanged as `ISSUE_PAYLOAD` and requires exact\nequality between its derived `R` and the control part's expected canonical ID before its first `factory`\ncommand/u);
+      assert.match(prose, /configured exit-zero, zero-byte result may therefore classify a bare integer as ordinary prose/u);
+      const compatibilityExamples = [
         "205",
         "#205",
         "https://github.com/jasoncarreira/opencode-feature-factory/issues/205",
       ];
-      const runIds = references.map((reference) => {
-        const match = /^(?:#?([1-9]\d*)|https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/([1-9]\d*))$/u
-          .exec(reference);
-        assert.ok(match, `issue reference was not recognized: ${reference}`);
-        return match[1] ?? match[2];
-      });
-      assert.deepEqual(runIds, ["205", "205", "205"]);
-      const initialized = initFresh(repo, [runIds[0], "--now", NOW]);
-      for (const runId of runIds) {
-        const status = factory(initialized.repository, ["status", runId, "--json"]);
+      const initialized = initFresh(repo, ["205", "--now", NOW]);
+      for (const example of compatibilityExamples) {
+        assert.ok(compatibility.includes(example));
+        const status = factory(initialized.repository, ["status", "205", "--json"]);
         assert.equal(status.ok, true, status.out);
         assert.equal(JSON.parse(status.out).run_id, "205");
       }
-      return factory(initialized.repository, ["status", runIds.at(-1), "--json"]);
+      return factory(initialized.repository, ["status", "205", "--json"]);
     },
   },
   {
