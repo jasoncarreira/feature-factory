@@ -271,6 +271,31 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //    that do not exist.
     const agentText = shipped.map((name) => ({ name, text: readFileSync(join(pkg, "agents", `${name}.md`), "utf8") }));
 
+    // 3. A plan can be contradictory in its own order and pass every check that existed. mimir run
+    //    1387 gave an earlier slice a test asserting a module's absence and a later slice the module;
+    //    pytest collection imports both test files before either runs, so the earlier suite failed the
+    //    moment the later slice landed, and `paths` freeze at seeding so nothing could repair it. The
+    //    two slices shared no path, so file-disjointness saw nothing. Four slices of work reached a stop
+    //    that was decided at seeding. The decomposer must not emit such a plan and the reviewer must
+    //    block it; both are decidable from the plan alone, which is why neither is a CLI guard.
+    //    The narrowing matters as much as the rule. A first pass blocked any earlier slice asserting a
+    //    later-owned path is unreachable, which also condemns a valid dependency-direction invariant
+    //    proven statically — the very form the decomposer recommends. So both sides are pinned on the
+    //    distinction, not merely on the prohibition: what blocks is a claim the later path invalidates.
+    const byName = new Map(agentText.map(({ name, text }) => [name, text]));
+    const decomposer = byName.get("work-decomposer") ?? "";
+    const reviewer = byName.get("work-reviewer") ?? "";
+    assert.match(decomposer, /No slice may depend on the absence of what another slice owns/u,
+      "work-decomposer must forbid a plan that contradicts its own order");
+    assert.match(decomposer, /how\*\* a negative claim survives later slices/u,
+      "work-decomposer must require a negative claim to state how it survives later slices");
+    assert.match(decomposer, /Stable once it lands/u,
+      "work-decomposer must keep the stable-invariant case, or a valid plan reads as contradictory");
+    assert.match(reviewer, /the landing of a later slice's owned path would invalidate\*\* is a BLOCKER/u,
+      "work-reviewer must block on invalidation by the later path, not on negative phrasing");
+    assert.match(reviewer, /must \*\*not\*\* be blocked/u,
+      "work-reviewer must exempt a claim whose proof survives the later slice");
+
     const claimants = agentText.filter(({ text }) => text.includes('"status":'));
     assert.ok(claimants.length >= 3, "the builders and the test-verifier all emit claim blocks");
     for (const { name, text } of claimants) {
