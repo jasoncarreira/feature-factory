@@ -864,8 +864,10 @@ Per slice:
    that is the honest outcome, and a narrowed command is a false green wearing evidence's clothes.
 
    Either way, record the **diagnosis** and not just the failure: which slice owns the test, which
-   assertion cannot hold, and what would make it hold. That is the difference between an operator's fix
-   being one commit and being an investigation.
+   assertion cannot hold, and what would make it hold. It goes in the slice review when the slice merges,
+   and in the `--reason` of the terminal transition when it does not — a reason naming only "tests failed"
+   makes the operator repeat the whole investigation. That is the difference between their fix being one
+   commit and being an afternoon.
 
    Wherever a test-only repair happens it is bounded: **test files only**, never production source and
    never a privileged control-plane path; the assertion **unsatisfiable for this plan** rather than merely
