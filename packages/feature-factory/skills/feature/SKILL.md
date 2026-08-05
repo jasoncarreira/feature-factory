@@ -849,11 +849,22 @@ Per slice:
    - **Not yet activated.** Commit the test-only repair to the integration branch *first*, then activate.
      The repair is then part of this slice's `base_ref`, so the suite sees it and the slice's observed diff
      still holds only its own paths. This is the repair Step 5 permits, taken before a base is fixed.
-   - **Already activated.** There is no repair. The worktree is pinned at an immutable `base_ref`, so a
-     commit on the integration branch is invisible to it, and bringing that commit into the slice would put
-     an out-of-lane test path in the observed diff, which the merge refuses. Mark the slice `blocked` and
-     stop dispatching its dependents. The run then goes `partial` and surfaces at the next gate, so the
-     slices that did merge still reach a PR instead of being discarded.
+   - **Already activated, and the foreign test is outside this slice's ratified command.** Commit the
+     test-only repair to the integration branch anyway, before merging this slice, and let the integration
+     pass prove it — that is where the whole suite runs. The slice's own evidence stands on its ratified
+     command, the repair is not in the slice's diff, and the merge stays clean.
+   - **Already activated, and the foreign test is inside this slice's ratified command.** There is no
+     repair. The worktree is pinned at an immutable `base_ref`, so a commit on the integration branch is
+     invisible to the re-observation, and bringing that commit into the slice would put an out-of-lane test
+     path in the observed diff, which the merge refuses. Mark the slice `blocked` and stop dispatching its
+     dependents. The run then goes `partial` and surfaces at the next gate, so the slices that did merge
+     still reach a PR instead of being discarded.
+
+   **Never narrow the ratified command to get past this.** Dropping the failing path from `--test-cmd`
+   makes the observation green while proving less than the plan ratified, and every downstream check will
+   honour it — the evidence record, the review binding, and the merge all read the command you supplied,
+   not the command the plan named. If the ratified command covers the foreign test, the slice is blocked;
+   that is the honest outcome, and a narrowed command is a false green wearing evidence's clothes.
 
    Either way, record the **diagnosis** and not just the failure: which slice owns the test, which
    assertion cannot hold, and what would make it hold. That is the difference between an operator's fix
