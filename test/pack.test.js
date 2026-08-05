@@ -31,6 +31,46 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGES = ["feature-factory", "opencode-feature-factory"];
+const CONFIG_SCHEMA = `{
+  "resolve": "<non-empty shell command>",
+  "verify": "<non-empty shell command>",
+  "publish": "<non-empty shell command>",
+  "publishing_identity": "<non-empty account name>"
+}`;
+const SKILL_CONTRACTS = [
+  ["the exact four-entry schema", (text) => text.includes(CONFIG_SCHEMA)],
+  ["only three entries are commands and identity is static", (text) => /`resolve`, `verify`, and\s+`publish` are the only commands[\s\S]*`publishing_identity` is\s+a static non-empty publishing account name/u.test(text)],
+  ["resolve uses an ordinary shell in the repository root", (text) => /configured string unchanged as one ordinary shell step, with exact cwd `O`, the inherited\s+environment plus `FACTORY_INPUT`/u.test(text)],
+  ["empty stdout means not recognized", (text) => /Exit zero with exactly zero stdout bytes means the resolver did not recognize an issue reference/u.test(text)],
+  ["stdout is the unchanged payload with a canonical run id, a title and a body", (text) => /stdout itself is `ISSUE_PAYLOAD`[\s\S]*canonical top-level string `run_id`, a non-empty string `title`, and a string `body`[\s\S]*exact same stdout bytes unchanged to `story-reader`/u.test(text)],
+  ["the payload shape is validated before anything is dispatched", (text) => /Validate `run_id`, `title`, and `body` — presence and type — before binding `R`/u.test(text)],
+  ["an absent config declares no resolver at all", (text) => /An absent `\$O\/\.factory\.json` means this repository declares no resolver/u.test(text)],
+  ["no tracker grammar or fetch command ships in the skill", (text) => !/\bgh\s+(?:repo|issue)\b/u.test(text)],
+  ["malformed config refuses closed", (text) => text.includes("invalid factory config: .factory.json; no session or run created.")],
+  ["malformed payload refuses closed, naming the reference", (text) => text.includes("factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.")],
+  ["an observed status is reported without fallback, naming the reference", (text) => text.includes("factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.")],
+  ["an unavailable status is reported without fallback, naming the reference", (text) => text.includes("factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.")],
+  ["commands and credentials are never disclosed", (text) => /Never print,\s+quote, reproduce, log, or persist the configured command string, an expanded or resolved command line,\s+credentials, or shell\/tool diagnostics/u.test(text)],
+  ["no bridge, parser, capture, session, or output mechanism is added", (text) => /Add no helper module,\s+command runner, parser service[\s\S]*plugin bridge,[\s\S]*Use the ordinary shell result directly\. Add no stderr redirection or suppression rule, separate capture\s+policy, output channel, buffering, truncation, redaction, output-size limit[\s\S]*session/u.test(text)],
+  ["publication and identity remain deferred", (text) => /push-target migration is deferred to #224[\s\S]*consumption is deferred to #216/u.test(text)],
+];
+const README_CONTRACTS = [
+  ["the exact four-entry schema", (text) => text.includes(CONFIG_SCHEMA)],
+  ["three commands and one static identity", (text) => /`resolve`, `verify`, and `publish` are non-empty command\s+strings[\s\S]*`publishing_identity` is a static non-empty account name/u.test(text)],
+  ["only resolve is consumed", (text) => /Only `resolve` is consumed now/u.test(text)],
+  ["ordinary shell, repository-root cwd, and FACTORY_INPUT", (text) => /ordinary shell step[\s\S]*repository-root cwd[\s\S]*`FACTORY_INPUT`/u.test(text)],
+  ["empty and non-empty stdout have the direct contract", (text) => /Empty stdout means the input was not\s+recognized[\s\S]*Non-empty stdout is the direct,\s+unchanged `ISSUE_PAYLOAD`[\s\S]*top-level string `run_id`/u.test(text)],
+  ["present invalid config refuses and absence declares no resolver", (text) => /present invalid,[\s\S]*config refuses closed\. An absent file means no resolver\s+is declared/u.test(text)],
+  ["commands and credentials are not disclosed", (text) => /neither the configured or expanded\s+command line, shell diagnostics, nor credentials are printed, logged, or persisted/u.test(text)],
+  ["deferred consumers are named", (text) => /push-target\s+publication deferred to\s+#224[\s\S]*identity enforcement is deferred to #216/u.test(text)],
+  ["the live config is not packaged", (text) => /live config is not part of\s+this package[\s\S]*no generated config or resolver asset is shipped/u.test(text)],
+];
+
+function assertContracts(text, contracts, artifact) {
+  for (const [contract, matches] of contracts) {
+    assert.equal(matches(text), true, `${artifact} must preserve the contract that ${contract}`);
+  }
+}
 
 function pack(name, destination) {
   const output = execFileSync("npm", ["pack", "--json", "--pack-destination", destination],
@@ -82,6 +122,19 @@ describe("what actually ships", () => {
       }
       const agents = factory.files.filter((file) => file.startsWith("agents/"));
       assert.equal(agents.length, 11, `feature-factory must ship all eleven agents, packed ${agents.length}`);
+      for (const [name, { files }] of [["feature-factory", factory], ["opencode-feature-factory", opencode]]) {
+        assert.deepEqual(files.filter((file) => file.startsWith(".factory/")), [],
+          `${name} must not package operator-owned .factory content`);
+        const repositoryCommandAssets = files.filter((file) => /(^|\/)(?:(?:factory[-_.]|generated[-_.])?(?:config|resolver)|config-resolver)(?:[./_-]|$)/u.test(file));
+        assert.deepEqual(repositoryCommandAssets,
+          name === "opencode-feature-factory" ? ["plugin/config.js"] : [],
+          `${name} must not add a generated config or resolver asset`);
+      }
+
+      const sourceSkill = readFileSync(join(root, "packages", "feature-factory", "skills", "feature", "SKILL.md"), "utf8");
+      const sourcePackageReadme = readFileSync(join(root, "packages", "feature-factory", "README.md"), "utf8");
+      assertContracts(sourceSkill, SKILL_CONTRACTS, "source skill");
+      assertContracts(sourcePackageReadme, README_CONTRACTS, "source package README");
 
       // observe/ is not an entrypoint, which is exactly why it was left out: both entrypoints import
       // it, and nothing that only reads `exports` would notice.
@@ -138,6 +191,11 @@ describe("what actually ships", () => {
         join(consumer, "node_modules", "feature-factory", "package.json"), "utf8"));
       assert.equal(manifest.dependencies["feature-factory"], factory.version,
         "the installed integration must be pinned to the installed factory");
+      assert.deepEqual(factory.exports, { ".": "./state/index.js" },
+        "the existing package export must remain sufficient");
+      assert.deepEqual(factory.files,
+        ["bin", "core", "observe", "state", "skills", "agents", "README.md", "LICENSE"],
+        "the existing files allowlist must ship the contract without generated assets");
       // The integration depends on the factory and nothing else. It registers a tool as a plain
       // object literal rather than through `@opencode-ai/plugin`'s `tool()` helper — that helper is a
       // pass-through, and depending on it would pin a host-coupled package into the packed graph for
@@ -213,6 +271,10 @@ describe("what actually ships", () => {
 
       const skill = readFileSync(
         join(consumer, "node_modules", "feature-factory", "skills", "feature", "SKILL.md"), "utf8");
+      const packageReadme = readFileSync(
+        join(consumer, "node_modules", "feature-factory", "README.md"), "utf8");
+      assertContracts(skill, SKILL_CONTRACTS, "installed skill");
+      assertContracts(packageReadme, README_CONTRACTS, "installed package README");
       for (const [contract, pattern] of [
         ["init is requested with O", /factory init "\$R" --branch "\$FEATURE_BRANCH"[^\n]*--repo "\$O" --json/u],
         ["S comes from the response", /RUN_REPO="<exact response sandbox_path>"/u],

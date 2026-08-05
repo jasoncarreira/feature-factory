@@ -920,35 +920,78 @@ const CLAIMS = [
     },
   },
   {
-    id: "github-issue-forms-select-one-cli-run",
+    id: "repository-resolver-contract-declares-its-own-intake",
     file: "skills/feature/SKILL.md",
-    fragment: "Recognize an issue reference only when the entire remainder is exactly one of\n   these standalone forms: a positive decimal integer (`205`), that integer prefixed by `#` (`#205`),\n   or a canonical `https://github.com/<owner>/<repo>/issues/<positive-decimal>` URL.",
+    fragment: "The optional repository-owned file is `$O/.factory.json`:\n\n```json\n{\n  \"resolve\": \"<non-empty shell command>\",\n  \"verify\": \"<non-empty shell command>\",\n  \"publish\": \"<non-empty shell command>\",\n  \"publishing_identity\": \"<non-empty account name>\"\n}\n```",
     expect: "allowed",
     matches: /"run_id": "205"/u,
     act(repo) {
       const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
-      assert.match(prose, /A recognized GitHub issue URL is issue input and is removed\s+from design-source consideration\./u);
-      assert.match(prose, /`unresolvable issue reference: <unchanged reference>` and stop; do not derive `R`, initialize a run, or\s+fall through to `story-writer`\./u);
-      assert.match(prose, /For all three issue forms, `R` is the resolved issue's canonical positive decimal `number`/u);
-      const references = [
-        "205",
-        "#205",
-        "https://github.com/jasoncarreira/opencode-feature-factory/issues/205",
-      ];
-      const runIds = references.map((reference) => {
-        const match = /^(?:#?([1-9]\d*)|https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/([1-9]\d*))$/u
-          .exec(reference);
-        assert.ok(match, `issue reference was not recognized: ${reference}`);
-        return match[1] ?? match[2];
-      });
-      assert.deepEqual(runIds, ["205", "205", "205"]);
-      const initialized = initFresh(repo, [runIds[0], "--now", NOW]);
-      for (const runId of runIds) {
-        const status = factory(initialized.repository, ["status", runId, "--json"]);
-        assert.equal(status.ok, true, status.out);
-        assert.equal(JSON.parse(status.out).run_id, "205");
-      }
-      return factory(initialized.repository, ["status", runIds.at(-1), "--json"]);
+      const configured = /#### Configured resolver path\n\n([\s\S]*?)\n\n#### Absence means no repository resolver/u.exec(prose)?.[1] ?? "";
+      const absence = /#### Absence means no repository resolver\n\n([\s\S]*?)\n\n#### Resolver boundaries and deferred entries/u.exec(prose)?.[1] ?? "";
+      const boundaries = /#### Resolver boundaries and deferred entries\n\n([\s\S]*?)\n\n#### Remaining intake classification/u.exec(prose)?.[1] ?? "";
+      assert.match(prose, /root must be a JSON object with exactly those four own properties/u);
+      assert.match(prose, /`resolve`, `verify`, and\n`publish` are the only commands/u);
+      assert.match(prose, /`publishing_identity` is\na static non-empty publishing account name in the file itself, not a command, token, credential, or\ncommand result/u);
+      assert.match(prose, /Unknown or missing properties, invalid JSON, unreadable content, wrong types, and\nempty or whitespace-only values make a present file malformed/u);
+      assert.match(prose, /Validate all four entries before\nexecuting `resolve`/u);
+      assert.match(prose, /Credential values must not appear in the file/u);
+      assert.match(prose, /An absent `\$O\/\.factory\.json` means no resolver is declared/u);
+      assert.match(prose, /This refusal stops under the same effect-free boundary as every configured resolver refusal below/u);
+      assert.match(configured, /configured string unchanged as one ordinary shell step, with exact cwd `O`, the inherited\nenvironment plus `FACTORY_INPUT`, and no positional argument or structured stdin/u);
+      assert.match(configured, /`FACTORY_INPUT` is\nthe exact admitted request remainder after mode-prefix removal, preserving its whitespace and bytes/u);
+      assert.match(configured, /Exit zero with exactly zero stdout bytes means the resolver did not recognize an issue reference/u);
+      assert.match(configured, /Exit zero with non-empty stdout means stdout itself is `ISSUE_PAYLOAD`/u);
+      assert.match(configured, /canonical top-level string `run_id`, a non-empty string `title`, and a string `body`/u);
+      // #213 promised title and body as the minimum payload; validating only run_id left
+      // `{"run_id":"x"}` dispatchable, with story-reader discovering the gap downstream.
+      assert.match(configured, /Validate `run_id`, `title`, and `body` — presence and type — before binding `R`/u);
+      assert.match(configured, /exact same stdout bytes unchanged to `story-reader` as\n   `ISSUE_PAYLOAD`/u);
+      assert.match(configured, /configured `run_id` must match `\^\[a-z0-9\]\(\?:\[a-z0-9\._-\]\*\[a-z0-9\]\)\?\$`/u);
+      assert.match(configured, /digit-only value must be\npositive decimal without leading zeroes\. Bind `R` exactly to that value/u);
+      assert.match(configured, /becomes the background `runId`, expected-ID comparison value, manifest candidate name,\nsandbox name, and default feature-branch suffix/u);
+      for (const refusal of [
+        "invalid factory config: .factory.json; no session or run created.",
+        "factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.",
+        "factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.",
+        "factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.",
+      ]) assert.ok(prose.includes(refusal), `resolver refusal is missing: ${refusal}`);
+      assert.match(configured, /refusals stop before canonical run selection, `feature_background`, manifest or state reads,\nsandbox creation, every `factory` command, or specialist dispatch/u);
+      assert.match(configured, /They never continue through the ticket, `story-reader`, or\n`story-writer` paths/u);
+      assert.match(configured, /Never print,\nquote, reproduce, log, or persist the configured command string, an expanded or resolved command line,\ncredentials, or shell\/tool diagnostics/u);
+      // Blocker 2: a refusal that names only the entry leaves an operator resolving several references
+      // unable to tell which one failed. The reference is the operator's own input, so naming it
+      // discloses nothing the non-disclosure rule protects -- command text and credentials still never
+      // appear.
+      assert.match(configured, /`<reference>` is `FACTORY_INPUT` exactly as admitted, truncated to its\nfirst 200 characters/u);
+      assert.match(configured, /without the reference an operator resolving several references cannot\ntell which one failed/u);
+      assert.doesNotMatch(configured, /GitHub|\bgh\s+(?:repo|issue)\b|\b(?:curl|wget)\b|["']recognized["']|command runner|parser service|\bbridge\b|\bprotocol\b|\bcache\b|payload handoff|output-size|\btimeout\b|\bretry\b|\bbuffering\b|\btruncation\b|\bredaction\b|\bstderr\b|session (?:field|key|persistence|title)/iu);
+      assert.match(absence, /An absent `\$O\/\.factory\.json` means this repository declares no resolver/u);
+      assert.match(absence, /Do not recognize, fetch, or\nresolve a reference/u);
+      assert.match(absence, /There is no\nbuilt-in tracker grammar and no built-in fetch command anywhere in this skill/u);
+      assert.match(absence, /Recognition belongs to the declaration for the same reason fetching does/u);
+      assert.match(absence, /This repository declares its own in `\.factory\.json`, so `205`, `#205`, and the canonical issue URL still\nselect run `205`/u);
+      // The first acceptance criterion of #213, asserted over the whole skill rather than one section:
+      // the shipped skill names no tracker and fetches from none. A default that reappears anywhere
+      // makes that vendor the factory's default again, which is what this change exists to end.
+      assert.doesNotMatch(prose, /\bgh\s+(?:repo|issue)\b/u);
+      assert.doesNotMatch(prose, /https:\/\/github\.com\/<owner>\/<repo>\/issues/u);
+      assert.match(boundaries, /Add no helper module,\ncommand runner, parser service, repository-config execution in the integration package, plugin bridge,\ntransport, protocol, or new CLI command/u);
+      assert.match(boundaries, /Add no resolver cache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
+      assert.match(boundaries, /Add no stderr redirection or suppression rule, separate capture\npolicy, output channel, buffering, truncation, redaction, output-size limit, timeout, retry, or fallback\nafter any configured result or failure/u);
+      assert.match(boundaries, /Only `resolve` is consumed now\. The other entries are declared but not migrated/u);
+      assert.ok(boundaries.includes("| `verify` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means success; non-zero means repository verification failed | Not invoked. Existing `test-verifier` and the factory's `observe --test-cmd` behavior remains unchanged. |"));
+      assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |"));
+      assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; the static config value itself | Non-empty account-name string in the config | Missing, non-string, or empty makes the config malformed | Not read for identity enforcement; consumption is deferred to #216. |"));
+      assert.match(prose, /Foreground, background primary, and background `run-orchestrator`\nderivation use the following same configured-or-absent policy/u);
+      assert.match(prose, /background primary does not forward or persist its\npayload/u);
+      assert.match(prose, /uses its own non-empty resolver stdout unchanged as `ISSUE_PAYLOAD` and requires exact\nequality between its derived `R` and the control part's expected canonical ID before its first `factory`\ncommand/u);
+      assert.match(prose, /configured exit-zero, zero-byte result may therefore classify a bare integer as ordinary prose/u);
+      const initialized = initFresh(repo, ["205", "--now", NOW]);
+      const status = factory(initialized.repository, ["status", "205", "--json"]);
+      assert.equal(status.ok, true, status.out);
+      assert.equal(JSON.parse(status.out).run_id, "205");
+      return status;
     },
   },
   {
@@ -972,8 +1015,8 @@ const CLAIMS = [
       assert.doesNotMatch(reader, /two shapes|Jira|APP-|cloudId|getJira|searchJira|Jira fields/iu);
       assert.equal((reader.match(/Exactly one shape/gu) ?? []).length, 1);
       const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
-      assert.match(prose, /give the captured payload to `story-reader` only as\s+supplied normalization input/u);
-      assert.match(prose, /specialist performs no external lookup/u);
+      assert.match(prose, /Give the exact same stdout bytes unchanged to `story-reader` as\s+`ISSUE_PAYLOAD` and untrusted supplied normalization input/u);
+      assert.match(prose, /specialist performs no external\s+lookup/u);
 
       const initialized = initFresh(repo, [RUN, "--now", NOW]);
       return factory(initialized.repository, ["status", RUN, "--json"]);

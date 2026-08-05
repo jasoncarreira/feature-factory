@@ -157,7 +157,11 @@ function coversPath(declared, file) {
 // refused with control-plane prefixes regardless of ownership. Ecosystem manifests
 // are authorized through ratified seeded ownership instead.
 const PRIVILEGED_PREFIXES = Object.freeze([CONTROL_PLANE, ".git"]);
-const PRIVILEGED_EXACT = Object.freeze([".gitignore"]);
+// `.factory.json` is the repository's declaration of how to resolve, verify, publish and publish-as.
+// It is committed rather than ignored, so ownership cannot come from gitignore the way the run
+// directory's does; it comes from here. A run that could edit it could redefine what it is allowed to
+// run, which is the one thing configuration must not be able to do.
+const PRIVILEGED_EXACT = Object.freeze([".gitignore", ".factory.json"]);
 
 export function privilegedPaths(filesChanged) {
   return filesChanged.filter((file) => PRIVILEGED_PREFIXES.some((prefix) => file === prefix || file.startsWith(`${prefix}/`))

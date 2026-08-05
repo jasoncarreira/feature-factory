@@ -28,6 +28,83 @@ So everything a run needs must be in the issue *before launch*:
 
 ## 2. Launching
 
+### Repository command configuration
+
+The repository operator may create an optional `$O/.factory.json`, where `O` is the physically
+resolved Git top level of the invocation checkout:
+
+```json
+{
+  "resolve": "<non-empty shell command>",
+  "verify": "<non-empty shell command>",
+  "publish": "<non-empty shell command>",
+  "publishing_identity": "<non-empty account name>"
+}
+```
+
+The root object has exactly these four properties. The first three are non-empty command strings;
+`publishing_identity` is a static non-empty account name, not a command, token, credential, or command
+result. Missing or unknown properties, invalid or unreadable JSON, wrong types, and empty or
+whitespace-only values make a present file malformed. All four entries are validated before `resolve`
+runs. A command may name credentials supplied through its inherited environment, but credential values
+must not appear in the file.
+
+Only `resolve` is consumed today. After mode admission, it runs as one ordinary shell step with its
+configured string submitted unchanged, exact cwd `O`, the inherited environment plus `FACTORY_INPUT`,
+and no positional argument or structured stdin. `FACTORY_INPUT` is the exact admitted request remainder,
+including its original whitespace and bytes. Exit zero with no stdout means the input was not recognized;
+the factory continues ticket, design, or free-text classification. There is no built-in recognizer to
+fall back to.
+Exit zero with stdout uses those exact bytes directly as `ISSUE_PAYLOAD`. The payload must be one JSON
+object with a valid canonical top-level string `run_id`, a non-empty string `title`, and a string `body`;
+the factory validates all three, before binding the run id or dispatching anything, without
+extracting, wrapping, reserializing, or changing the payload, then supplies the same stdout unchanged to
+`story-reader`. The value must match `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; a digit-only value must be
+positive decimal without leading zeroes.
+
+A present malformed file or malformed non-empty resolver payload refuses, respectively:
+
+```text
+invalid factory config: .factory.json; no session or run created.
+factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.
+```
+
+A configured resolver failure refuses, naming the reference — `FACTORY_INPUT` as admitted, truncated to
+200 characters — because an operator resolving several references cannot otherwise tell which one failed:
+
+```text
+factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.
+factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.
+```
+
+An absent config file means no resolver is declared, and nothing is recognized or fetched: the skill
+carries no tracker grammar and no fetch command. Reference intake exists only where a repository declares
+it. **This repository declares its own**, in a committed `.factory.json`, so `205`, `#205`, and
+`https://github.com/jasoncarreira/opencode-feature-factory/issues/205` still select run `205` — through
+that declaration rather than through anything built in. A repository without one can still start a run
+from free text; it just cannot start one from a reference.
+
+The factory never prints, quotes, logs, or persists a configured command, its expanded command line,
+shell diagnostics, or credentials. This contract adds no config bridge or parser service, command
+runner, payload transport, capture or stderr policy, output channel or size policy, buffering,
+truncation, redaction, timeout, retry, cache, or session behavior.
+
+The remaining entries are declarations for later work:
+
+| entry | input and return contract | failure meaning | status |
+| --- | --- | --- | --- |
+| `verify` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero succeeds; non-zero means repository verification failed. | Not invoked; existing verification remains unchanged. |
+| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked; existing push and PR behavior remains unchanged. Push-target publication is deferred to #224. |
+| `publishing_identity` | No runtime input; the static non-empty account-name string is the return value. | A missing, non-string, or empty identity makes the config malformed. | Not consumed for identity enforcement; deferred to #216. |
+
+The live file is operator-owned: committed, so every clone and sandbox carries it, and protected by the
+privileged-path policy rather than by being unversioned. It was `.factory/config.json` until that path
+proved unusable — `.factory/` is gitignored, so the declaration could not be committed and never reached
+a sandbox clone. A feature run
+does not create, write, merge, archive, or package it.
+
+### Launch command
+
 ```sh
 export GH_TOKEN=$(gh auth token -u <account>)
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper \
