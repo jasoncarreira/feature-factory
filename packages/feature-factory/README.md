@@ -60,7 +60,8 @@ factory config entry 'resolve' failed for reference <reference> with exit status
 factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.
 ```
 
-Diagnostics name only `resolve` and the status classification; neither the configured or expanded
+Diagnostics name `resolve`, the status classification, and the admitted reference bounded to 200
+characters; neither the configured or expanded
 command line, shell diagnostics, nor credentials are printed, logged, or persisted. Credential values
 stay in inherited environment variables and never in the config. The contract adds no bridge, parser
 service, command runner, capture or stderr policy, output channel or size policy, buffering, truncation,

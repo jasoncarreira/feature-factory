@@ -98,7 +98,8 @@ normalization. The value matches `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; digit-on
 decimal without leading zeroes.
 
 Malformed config, malformed payload, a non-zero exit, or unavailable exit status refuses before any
-run effect and never falls back. Diagnostics name only `resolve` and the status classification; neither
+run effect and never falls back. Diagnostics name `resolve`, the status classification, and the admitted reference bounded to 200
+characters; neither
 the configured or expanded command line, shell diagnostics, nor credentials are printed, logged, or
 persisted. Credential values stay in inherited environment variables and never in the config. The
 contract adds no bridge, parser service, command runner, capture or stderr policy, output channel or

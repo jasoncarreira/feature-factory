@@ -456,7 +456,7 @@ select run `205` — through that declaration rather than through anything built
 
 Do not create, write, merge, archive, or package `.factory.json`. It remains operator-owned:
 committed, so every clone and sandbox carries it, and refused by the privileged-path policy, so a run
-cannot widen its own configuration. It was `.factory.json` until that path proved unusable —
+cannot widen its own configuration. It lived under the gitignored `.factory/` run directory until that proved unusable —
 `.factory/` is gitignored, so the file could not be committed and never reached a sandbox clone, which
 made the deferred `verify` and `publish` entries impossible and left this repository unable to resolve
 a reference from a fresh checkout. Add no helper module,
@@ -488,7 +488,7 @@ Only `resolve` is consumed now. The other entries are declared but not migrated:
 
 #### Remaining intake classification
 
-When configured resolution returned exactly zero stdout bytes, or missing-file compatibility found no
+When a declared resolver returned exactly zero stdout bytes, or no resolver is declared and therefore no
 issue reference, continue from the original admitted request:
 
 1. **Ticket?** Collect standalone case-insensitive tokens matching
@@ -499,7 +499,8 @@ issue reference, continue from the original admitted request:
 
 A configured exit-zero, zero-byte result may therefore classify a bare integer as ordinary prose. Its
 later slug may independently have the same text, but no issue lookup or `story-reader` dispatch occurs.
-If configured or compatibility resolution did not already bind `R`, derive it exactly as follows:
+If resolution did not already bind `R` — because no resolver is declared, or a declared one returned zero
+bytes — derive it exactly as follows:
 
 1. If request text contains one distinct ticket key, lowercase it and use it. If it contains more than
    one, return `ambiguous ticket keys: <sorted lowercase keys>; no session or run created.` before any
