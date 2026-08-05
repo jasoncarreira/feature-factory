@@ -421,6 +421,13 @@ const HANDLERS = {
     // A subject with no slice row - test-verifier, an agent step - has no ratified
     // waiver and so has none: its tests must be observed.
     const slice = readRun(runDir).slices.find((entry) => entry.id === subject);
+    if (slice && flags.testCmd !== undefined
+      && !slice.test_plan.some((entry) => entry === flags.testCmd)) {
+      throw new CliError(
+        `test command for slice '${subject}' must exactly match one ratified test_plan entry; `
+        + `expected ${JSON.stringify(slice.test_plan)}; received ${JSON.stringify(flags.testCmd)}`,
+      );
+    }
     const skipReason = slice && slice.test_plan.length === 0
       ? `test_plan for '${subject}' was approved empty at slices-seed`
       : null;
