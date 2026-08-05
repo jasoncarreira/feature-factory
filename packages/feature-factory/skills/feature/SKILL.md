@@ -167,6 +167,9 @@ dispatches specialists, observes its builders, and drives Steps 0 through 7.
 
 The only specialized task targets a run driver may dispatch are exactly:
 
+For the OpenCode background driver, the host’s flat task allow makes the task tool available but does
+not enforce the target names below. The list and its exclusions are prompt/skill policy.
+
 - `story-reader`
 - `story-writer`
 - `codebase-researcher`
