@@ -803,10 +803,12 @@ afterwards:
 - `paths` — the set every later merge is judged against, so a slice that needs more scope amends the
   unseeded plan at Gate 2 rather than quietly widening. After seeding, changed scope requires a terminal
   decision or a new run; the plan cannot be amended or reseeded.
-- `test_plan` — whether the slice may ship without an observed test run. A slice with a non-empty
-  `test_plan` is not `review_ready` until you have run tests and seen them exit zero. A slice with an
-  **empty** `test_plan` is exempt. That exemption is a decision for the engineer at Gate 2, so decide
-  it in the plan and present it: there is no flag that waives tests at observation time.
+- `test_plan` — the exact executable commands authorized to prove the slice. Each non-empty entry is
+  one complete, independently sufficient command string that must be supplied verbatim as one
+  `--test-cmd` value. A slice with a non-empty `test_plan` is not `review_ready` until one ratified
+  command exits zero. A slice with an **empty** `test_plan` is exempt. That exemption is a decision for
+  the engineer at Gate 2, so decide it in the plan and present it: there is no flag that waives tests at
+  observation time.
 
 ### Gate 2 — Technical brief and slice plan
 
@@ -920,6 +922,7 @@ RECORDED_SLICE = parsedRun.slices row whose id equals SLICE_ID
 SLICE_WORKTREE = RECORDED_SLICE.worktree
 SLICE_BRANCH = RECORDED_SLICE.branch
 SLICE_BASE_REF = RECORDED_SLICE.base_ref
+SLICE_TEST_PLAN = RECORDED_SLICE.test_plan
 ```
 
 Require the row status to be `running` or `review`, all three values to be non-null, `SLICE_BASE_REF` to
@@ -928,6 +931,13 @@ be a 40-character commit SHA, `SLICE_BRANCH` to equal `factory/R/<slice-id>`, an
 --porcelain` to associate that physical path with that exact branch. A pending slice requires both path
 and ref to remain absent; an unrecorded existing path or ref is a collision. Refuse every mismatch
 instead of repairing, deleting, or reassociating it. A merged slice is never dispatched again.
+
+For a non-empty `SLICE_TEST_PLAN`, select one complete entry and bind `SLICE_TEST_COMMAND` by copying
+that persisted string verbatim. Never shorten, append to, normalize, or source it from the mutable
+`plan/slices.json`.
+`SLICE_TEST_COMMAND` must be copied verbatim from one persisted ratified `test_plan` entry; `factory observe` refuses any other supplied slice command.
+When `SLICE_TEST_PLAN` is `[]`, leave
+`SLICE_TEST_COMMAND` unset and omit `--test-cmd`; that approved empty plan is the only omission waiver.
 
 Per slice:
 
@@ -939,7 +949,7 @@ Per slice:
    ```sh
    CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
    $ factory observe "$R" "$SLICE_ID" --worktree "$SLICE_WORKTREE" --base "$SLICE_BASE_REF" \
-     --test-cmd "$SLICE_TEST_COMMAND" [--claim "$BUILDER_REPORT"] --repo "$RUN_REPO"
+     [--test-cmd "$SLICE_TEST_COMMAND"] [--claim "$BUILDER_REPORT"] --repo "$RUN_REPO"
    ```
    `base_ref` is fixed when the slice is activated and cannot be changed afterwards — it is the branch
    point, a fact about the past. A slice that needs a different base is a new slice.
@@ -963,11 +973,9 @@ Per slice:
    merge refuses. Mark the slice `blocked`, stop dispatching its dependents, and follow the wave rule below
    — the slices that did merge still reach a PR instead of being discarded.
 
-   **Never narrow the ratified command to get past this.** Dropping the failing path from `--test-cmd` makes
-   the observation green while proving less than the plan ratified, and every downstream check honours it:
-   the evidence record, the review binding, and the merge all read the command you supplied, not the command
-   the plan named. Blocking is the honest outcome; a narrowed command is a false green wearing evidence's
-   clothes.
+   **Never narrow the ratified command to get past this.** `factory observe` compares the raw supplied
+   slice command with the persisted ratified entries before tokenization or execution and refuses a
+   shortened, appended, or normalized command without writing evidence. A narrowed command is a false green wearing evidence's clothes; blocking is the honest outcome when the verbatim command fails.
 
    If the same incompatibility instead first appears in the **integrated** suite, this step is not involved
    at all — Step 5's NO-GO repair owns it, on the branch where that suite actually runs.
@@ -1052,10 +1060,11 @@ HEAD, a branch name, or an unpersisted variable.
    factory observe "$R" test-verifier --worktree "$INTEGRATION_WORKTREE" --base "$BRANCH_POINT" \
      --test-cmd "$INTEGRATION_SUITE" --repo "$RUN_REPO"
    ```
-   This writes `evidence/test-verifier.json`, which Gate 3 requires by that exact name. There is no
-   waiver: the stage exists to run the tests, so the evidence must record an observed run that exited
-   zero, against the integration head as it stands. Then `work-reviewer` confirms each criterion maps to
-   a real assertion.
+   This writes `evidence/test-verifier.json`, which Gate 3 requires by that exact name. `test-verifier`
+   is not a slice and has no slice `test_plan`, so it continues to supply its integration command. There
+   is no waiver: the stage exists to run the tests, so the evidence must record an observed run that
+   exited zero, against the integration head as it stands. Then `work-reviewer` confirms each criterion
+   maps to a real assertion.
 2. `implementation-validator` — the holistic pass across the whole diff, complementing per-slice
    reviews. **Skip it when the run has exactly one slice**: its subject is the interaction *between*
    slices, and with one there is none, so it re-reads the diff the slice reviewer just approved —
