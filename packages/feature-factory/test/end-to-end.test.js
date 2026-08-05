@@ -8,7 +8,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,9 +33,12 @@ function factory(repo, args) {
 
 const RUN = "app-1";
 const NOW = (minute) => `2026-07-30T12:${String(minute).padStart(2, "0")}:00Z`;
+const PASSING_TEST_COMMAND = "git --no-pager log -1 --format=%H";
+const FAILING_TEST_COMMAND = "git --no-pager grep --quiet THIS_STRING_IS_ABSENT";
+const DIRTYING_TEST_COMMAND = "node -e require('fs').writeFileSync('src/app/thing.ts','mutated')";
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true, testPlan = ["t"], legacy = false, paths = ["src/app/"] } = {}) {
+function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"] } = {}) {
   const operator = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(operator, "init", "-q", "-b", "main");
   git(operator, "config", "user.email", "t@example.com");
@@ -144,7 +147,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     // The orchestrator must observe before it may merge: the diff is re-derived and
     // the named tests are re-run here, not taken from a builder's report.
     const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
-      "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW(3)]);
+      "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]);
     assert.equal(observed.ok, true, observed.stderr);
     assert.equal(observed.out.review_ready, true, "the fixture must produce review_ready evidence");
     const reviewRef = writeReview(p.runDir, "be-thing", sliceHead);
@@ -308,14 +311,38 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { cleanupProject(p); }
   });
 
+  it("observe refuses slice commands outside the ratified test_plan before execution or evidence write", () => {
+    const testPlan = [
+      "git --no-pager log -1 --format=%H -- base.txt extra.txt",
+      "touch observe-command-ran",
+    ];
+    const p = project("observe-command-auth", { testPlan });
+    try {
+      const { basePoint } = buildSlice(p.repo);
+      factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
+      for (const received of [
+        "git --no-pager log -1 --format=%H -- base.txt",
+        "touch  observe-command-ran",
+      ]) {
+        const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+          "--attempt", "1", "--test-cmd", received, "--now", NOW(3)]);
+        assert.equal(observed.ok, false, "an unratified command must be refused");
+        assert.ok(observed.stderr.includes(`expected ${JSON.stringify(testPlan)}; received ${JSON.stringify(received)}`));
+      }
+      assert.equal(existsSync(join(p.repo, "observe-command-ran")), false);
+      assert.equal(existsSync(join(p.runDir, "evidence", "be-thing.json")), false);
+    } finally { cleanupProject(p); }
+  });
+
   it("refuses a merge whose evidence is not review_ready", () => {
-    const p = project("not-ready");
+    const p = project("not-ready", { testPlan: [FAILING_TEST_COMMAND] });
     try {
       const { head: sliceHead, basePoint } = buildSlice(p.repo);
       factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
       // A failing test command: observed, and observed to fail.
       const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
-        "--attempt", "1", "--test-cmd", "git --no-pager grep --quiet THIS_STRING_IS_ABSENT", "--now", NOW(3)]);
+        "--attempt", "1", "--test-cmd", FAILING_TEST_COMMAND, "--now", NOW(3)]);
+      assert.equal(observed.ok, true, observed.stderr);
       assert.equal(observed.out.review_ready, false);
       const reviewRef = writeReview(p.runDir, "be-thing", sliceHead);
       factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef, "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]);
@@ -330,7 +357,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       // observation time by the party being observed, and any nonempty string was accepted.
       // It is now the test_plan the decompose gate ratified, and both directions are
       // asserted because only the pair shows the field is being read.
-      for (const [label, testPlan, expected] of [["required", ["t"], false], ["waived", [], true]]) {
+      for (const [label, testPlan, expected] of [["required", [PASSING_TEST_COMMAND], false], ["waived", [], true]]) {
         const q = project(`test-plan-${label}`, { testPlan });
         try {
           const { basePoint: qBase } = buildSlice(q.repo);
@@ -341,6 +368,15 @@ describe("end to end — a merge is refused through the real CLI", () => {
           assert.equal(seen.ok, true, seen.stderr);
           assert.equal(seen.out.review_ready, expected,
             `an untested slice whose test_plan is ${label} must be review_ready: ${expected}`);
+          if (label === "waived") {
+            const evidencePath = join(q.runDir, "evidence", "be-thing.json");
+            const before = readFileSync(evidencePath, "utf8");
+            const supplied = factory(q.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", qBase,
+              "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]);
+            assert.equal(supplied.ok, false);
+            assert.ok(supplied.stderr.includes(`expected []; received ${JSON.stringify(PASSING_TEST_COMMAND)}`));
+            assert.equal(readFileSync(evidencePath, "utf8"), before);
+          }
         } finally { cleanupProject(q); }
       }
     } finally { cleanupProject(p); }
@@ -369,7 +405,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         "the base must be the observed integration head, not a caller's choice");
 
       factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", integrationHead,
-        "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW(3)]);
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]);
       const reviewRef = writeReview(p.runDir, "be-thing", sliceHead);
       factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef,
         "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]);
@@ -415,7 +451,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       writeFileSync(join(p.repo, "src", "app", "thing.ts"), "FIXED, but uncommitted\n");
 
       const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", integrationHead,
-        "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW(3)]);
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]);
       assert.equal(observed.ok, true, "observation still records; it just cannot be ready");
       assert.equal(observed.out.review_ready, false, "a dirty tree cannot produce review_ready evidence");
       const record = JSON.parse(readFileSync(join(p.runDir, "evidence", "be-thing.json"), "utf8"));
@@ -482,7 +518,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     // opencode's first probe: a passing test modified tracked source and left it dirty.
     // The pre-test snapshot said clean, so the evidence claimed a clean HEAD and the
     // merged tree then failed the same test.
-    const p = project("test-dirties");
+    const p = project("test-dirties", { testPlan: [DIRTYING_TEST_COMMAND] });
     try {
       const integrationHead = git(p.repo, "rev-parse", "HEAD");
       git(p.repo, "checkout", "-q", "-b", "slice");
@@ -494,7 +530,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       // A "test" that passes and writes a tracked file — ordinary behaviour for snapshot
       // updaters, formatters, and code generators. No spaces: the command splits on them.
       const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", integrationHead,
-        "--attempt", "1", "--test-cmd", "node -e require('fs').writeFileSync('src/app/thing.ts','mutated')", "--now", NOW(3)]);
+        "--attempt", "1", "--test-cmd", DIRTYING_TEST_COMMAND, "--now", NOW(3)]);
 
       assert.equal(observed.ok, true);
       const record = JSON.parse(readFileSync(join(p.runDir, "evidence", "be-thing.json"), "utf8"));
@@ -536,7 +572,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(omitted.ok, false, "a plan that never mentions tests must not seed");
       assert.match(omitted.stderr, /test_plan: must be an array of strings/u);
 
-      writeFileSync(planFile, JSON.stringify({ slices: slices.map((s) => ({ ...s, test_plan: ["t"] })) }, null, 2));
+      writeFileSync(planFile, JSON.stringify({ slices: slices.map((s) => ({ ...s, test_plan: [PASSING_TEST_COMMAND] })) }, null, 2));
       // Revising the plan after approval unbinds it: the gate approved the earlier bytes. Re-approve
       // so the seed below ratifies what was presented, which is the contract, not a fixture detail.
       assert.equal(approveGate(p.repo, "brief", NOW(1)).ok, true);
@@ -564,7 +600,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         const act = factory(p.repo, ["slice", RUN, id, "running", "--worktree", ".", "--branch", id, "--now", NOW(t)]);
         assert.equal(act.ok, true, `activate ${id}: ${act.stderr}`);
         const obs = factory(p.repo, ["observe", RUN, id, "--worktree", ".", "--base", waveBase, "--attempt", "1",
-          "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW(t + 1)]);
+          "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(t + 1)]);
         assert.equal(obs.ok, true, `observe ${id}: ${obs.stderr}`);
         writeReview(p.runDir, id, head);
         factory(p.repo, ["slice", RUN, id, "review", "--review-ref", `reviews/${id}.json`,
@@ -599,7 +635,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const { basePoint } = buildSlice(p.repo);
       factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
       const observed = factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
-        "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW(3)]);
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]);
       assert.equal(observed.out.review_ready, true, "the evidence must be otherwise acceptable");
       factory(p.repo, ["slice", RUN, "be-thing", "review", "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]);
       const mergeCommit = mergeIntoFeature(p.repo);
@@ -621,7 +657,7 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
     const { head: sliceHead, basePoint } = buildSlice(p.repo);
     factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
     factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
-      "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW(3)]);
+      "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]);
     const reviewRef = writeReview(p.runDir, "be-thing", sliceHead);
     factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef,
       "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]);

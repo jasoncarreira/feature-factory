@@ -26,9 +26,10 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = join(pkg, "bin", "factory.js");
 const RUN = "app-1";
 const NOW = "2026-07-30T12:00:00Z";
+const PASSING_TEST_COMMAND = "git --no-pager log -1 --format=%H";
 
 const PLAN = {
-  slices: [{ id: "s1", stack: "backend", paths: ["src/"], depends_on: [], acceptance: ["AC1"], test_plan: ["t"] }],
+  slices: [{ id: "s1", stack: "backend", paths: ["src/"], depends_on: [], acceptance: ["AC1"], test_plan: [PASSING_TEST_COMMAND] }],
 };
 
 function project(name) {
@@ -145,6 +146,22 @@ const CLAIMS = [
       factory(repository, ["slice", RUN, "s1", "running", "--worktree", ".", "--branch", "slice", "--now", NOW]);
       // No --test-cmd on purpose: the waiver is the only thing that can make this review-ready.
       return factory(repository, ["observe", RUN, "s1", "--worktree", ".", "--base", base, "--attempt", "1", "--now", NOW]);
+    },
+  },
+  {
+    id: "slice-observe-command-must-be-ratified",
+    file: "skills/feature/SKILL.md",
+    fragment: "`SLICE_TEST_COMMAND` must be copied verbatim from one persisted ratified `test_plan` entry; `factory observe` refuses any other supplied slice command.",
+    expect: "refused",
+    matches: /test command for slice 's1' must exactly match one ratified test_plan entry/u,
+    act(repo) {
+      const { repository, runDir, base } = activateSlice(repo);
+      const received = "git --no-pager log -1";
+      const result = factory(repository, ["observe", RUN, "s1", "--worktree", ".", "--base", base,
+        "--attempt", "1", "--test-cmd", received, "--now", NOW]);
+      assert.ok(result.out.includes(`expected ${JSON.stringify(PLAN.slices[0].test_plan)}; received ${JSON.stringify(received)}`));
+      assert.equal(existsSync(join(runDir, "evidence", "s1.json")), false);
+      return result;
     },
   },
   {
@@ -639,7 +656,7 @@ const CLAIMS = [
       // Everything the merge proof needs *except* two parents, so only that rule can explain the
       // refusal — the masking trap this suite keeps rediscovering.
       const observed = factory(repository, ["observe", RUN, "s1", "--worktree", ".", "--base", base,
-        "--attempt", "1", "--test-cmd", "git --no-pager log -1 --format=%H", "--now", NOW]);
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW]);
       assert.match(observed.out, /review_ready: true/u, observed.out);
       const head = execFileSync("git", ["rev-parse", "slice"], { cwd: repository, encoding: "utf8" }).trim();
       writeFileSync(join(runDir, "reviews", "s1.json"), JSON.stringify({

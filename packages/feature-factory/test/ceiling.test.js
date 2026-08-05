@@ -554,14 +554,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // containment into init. The ceiling is 3000; this is the landed count, not a target.
     // 2998 -> 2998 (#213). Repository command configuration changes only skill/docs/tests and costs
     // zero production lines.
-    // 2998 -> 3002 for issue 213's remediation: `.factory.json` joins the privileged-exact list, with
-    // the comment explaining why a committed file needs that policy when the ignored run directory does
-    // not. Four lines, all of them the reason rather than the mechanism.
+    // 2998 -> 3002 for issue 213's remediation: `.factory.json` joins the privileged-exact list. Issue
+    // #234 lands at 3009 by authorizing slice test commands against the persisted ratified test_plan.
     //
     // The tripwire moves 3000 -> 3600, which is the maximum Jason authorized for this batch (#213) and
     // not a number this run chose. The landed count is the assertion above; this is the bound the work
     // may not cross without a new authorization. Raise it only with one, and record the reason here.
-    assert.equal(total, 3002, "issue 213's remediation landed at 3002 production lines");
+    assert.equal(total, 3009, "issue #234 landed at 3009 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 
@@ -597,8 +596,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // have had no test left at all.
     // 83 -> 87 funds the four AC-mapped lifecycle sites approved for issue 173: sandbox,
     // effective push, state relocation, and terminal handoff.
-    // Issue #187 removed terminal-handoff AC20's duplicate exact 87-site guard. `<= 87` is now
-    // the sole executable `it(`/`test(` call-site budget and intentionally permits reductions.
-    assert.ok(count <= 87, `${count} tests; the budget is 87`);
+    // Issue #187 removed terminal-handoff AC20's duplicate guard; issue #234 raises 87 -> 88 for the
+    // real-CLI command-authorization regression. This remains the sole executable call-site budget.
+    assert.ok(count <= 88, `${count} tests; the budget is 88`);
   });
 });

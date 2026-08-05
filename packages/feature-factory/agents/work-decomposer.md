@@ -33,12 +33,15 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 An independently-implementable unit of the brief with:
 - **`paths`** — the directories/files it owns. **Two slices in the same wave must not share a path.**
 - **`acceptance`** — the subset of the story's ACs this slice satisfies.
-- **`test_plan`** — the tests that prove this slice (fed to the slice's builder + the reviewer).
-  **Required on every slice, and it decides whether that slice may ship untested.** A non-empty
-  `test_plan` means the orchestrator must observe a green test run before the slice can be reviewed
-  or merged. An **empty** array is a deliberate waiver — the right answer for a docs-only or
-  config-only slice, and the wrong one everywhere else. Omitting the field is refused outright, so
-  the waiver is always a decision somebody made rather than one that happened.
+- **`test_plan`** — the executable commands that prove this slice (fed to the slice's builder + the
+  reviewer). Each non-empty entry is one complete, independently sufficient command string, spelled
+  exactly as it will be passed as the single `--test-cmd` argument. **Required on every slice, and it
+  decides whether that slice may ship untested.** A non-empty `test_plan` means the orchestrator must
+  observe a green run of one ratified entry before the slice can be reviewed or merged.
+  An **empty** array is a deliberate waiver — the right answer for a docs-only or config-only slice,
+  and the wrong one everywhere else. Omitting the field is refused outright, so the waiver is always a
+  decision somebody made rather than one that happened. Commands use the existing shell-free whitespace
+  tokenizer: do not rely on pipelines, shell expansion, environment assignment, or quote-aware parsing.
 
 **`paths` and `test_plan` are ratified when the plan is seeded and cannot be changed afterwards.**
 Every later ownership check judges against the paths recorded then, and the test waiver cannot be
@@ -79,17 +82,17 @@ where it costs a re-read rather than a run.
      because `paths` freeze at seeding. Give this invariant to the **later** slice, or to a terminal
      integration slice that owns the boundary; never to the earlier one.
    - **Stable once it lands.** A dependency-direction invariant — this module must not reach that one —
-     stays true after the later slice exists, as long as its proof does not rest on absence. It may stay
-     with the earlier slice, and the `test_plan` must name the form it uses.
+      stays true after the later slice exists, as long as its proof does not rest on absence. It may stay
+      with the earlier slice, whose executable test command must prove that stable form.
 
    This is rule 3's problem arriving through behaviour rather than through a filename, and file-disjointness
    cannot see it: the two slices share no path.
-   So state in the `test_plan` **how** a negative claim survives later slices. Process-global state — import
-   caches, module registries, singletons — is visible to every test in the same process, so a claim written
-   against it passes alone and fails as soon as a sibling's tests are collected beside it, which makes it
-   the first kind. Prove the same claim statically over the source, or inside an isolated child process,
-   and it becomes the second. Leaving the form to the builder is how one file ends up with the same claim
-   written twice, once robustly and once not.
+   Choose a complete executable command whose tests prove **how** a negative claim survives later slices.
+   Process-global state — import caches, module registries, singletons — is visible to every test in the
+   same process, so a claim written against it passes alone and fails as soon as a sibling's tests are
+   collected beside it, which makes it the first kind. Prove the same claim statically over the source,
+   or inside an isolated child process, and it becomes the second. Leaving the form to the builder is how
+   one file ends up with the same claim written twice, once robustly and once not.
 
 ## Working style
 
@@ -112,14 +115,14 @@ Return this as your final message (consumed by the orchestrator; it writes `plan
 ### Slices
 ```json
 {"slices": [
-  {"id": "be-store", "stack": "backend", "paths": ["<domain dir>/", "<persistence dir>/"],
-   "depends_on": [], "acceptance": ["AC1"], "test_plan": ["<store test> covers AC1"]},
-  {"id": "be-api", "stack": "backend", "paths": ["<api dir>/", "<schema file>"],
-   "depends_on": ["be-store"], "acceptance": ["AC2"], "test_plan": ["<api test> covers AC2"]},
-  {"id": "fe-list", "stack": "frontend", "paths": ["<feature route dir>/"],
-   "depends_on": ["be-api"], "acceptance": ["AC3"], "test_plan": ["<component test> covers AC3"]},
-  {"id": "fe-toggle", "stack": "frontend", "paths": ["<settings route dir>/"],
-   "depends_on": [], "acceptance": ["AC4"], "test_plan": ["<toggle test> covers AC4"]}
+  {"id": "be-store", "stack": "backend", "paths": ["packages/api/src/store/", "packages/api/test/store.test.js"],
+   "depends_on": [], "acceptance": ["AC1"], "test_plan": ["node --test packages/api/test/store.test.js"]},
+  {"id": "be-api", "stack": "backend", "paths": ["packages/api/src/routes/", "packages/api/test/routes.test.js"],
+   "depends_on": ["be-store"], "acceptance": ["AC2"], "test_plan": ["node --test packages/api/test/routes.test.js"]},
+  {"id": "fe-list", "stack": "frontend", "paths": ["packages/web/src/list/"],
+   "depends_on": ["be-api"], "acceptance": ["AC3"], "test_plan": ["npm test --workspace web"]},
+  {"id": "be-docs", "stack": "backend", "paths": ["docs/api.md"],
+   "depends_on": [], "acceptance": ["AC4"], "test_plan": []}
 ]}
 ```
 
