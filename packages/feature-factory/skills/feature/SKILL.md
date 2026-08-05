@@ -860,18 +860,13 @@ Per slice:
    If the same incompatibility instead first appears in the **integrated** suite, this step is not involved
    at all — Step 5's NO-GO repair owns it, on the branch where that suite actually runs.
 
-   Either way, record the **diagnosis** and not just the failure: which slice owns the test, which
-   assertion cannot hold, and what would make it hold. It goes in the slice review when the slice merges,
-   and in the `--reason` of the terminal transition when it does not — a reason naming only "tests failed"
-   makes the operator repeat the whole investigation. That is the difference between their fix being one
-   commit and being an afternoon.
+   When you block, record the **diagnosis** and not just the failure, in the terminal transition's
+   `--reason`: which slice owns the test, which assertion cannot hold, and what would make it hold. A
+   reason naming only "tests failed" makes the operator repeat the whole investigation, which is the
+   difference between their fix being one commit and being an afternoon.
 
-   Either way, record the **diagnosis** and not just the failure: which slice owns the test, which
-   assertion cannot hold, and what would make it hold. It goes in the slice review when the slice merges,
-   and in the `--reason` of the terminal transition when it does not — a reason naming only "tests failed"
-   makes the operator repeat the whole investigation. An out-of-lane **production** change is a different
-   thing entirely and follows **Ownership disclosure** below, where the reviewer decides whether the plan
-   or the change is wrong.
+   An out-of-lane **production** change is a different thing entirely and follows **Ownership disclosure**
+   below, where the reviewer decides whether the plan or the change is wrong.
 4. **Review** — `work-reviewer` with subject `<slice-id>`, the observed evidence, the slice spec, and
    the brief. Record both refs — the merge requires each:
      ```sh
