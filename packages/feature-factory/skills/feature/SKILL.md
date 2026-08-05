@@ -356,7 +356,7 @@ or state reads, sandbox creation, any `factory` command, background dispatch, or
 
 ### Repository command configuration
 
-The optional repository-owned file is `$O/.factory/config.json`:
+The optional repository-owned file is `$O/.factory.json`:
 
 ```json
 {
@@ -375,10 +375,10 @@ empty or whitespace-only values make a present file malformed. Validate all four
 executing `resolve`. Credential values must not appear in the file; command strings may refer only to
 credentials supplied through inherited environment-variable names.
 
-Only an absent `$O/.factory/config.json` selects the compatibility path below. If the path is present
-but malformed, do not execute any entry and refuse exactly:
+An absent `$O/.factory.json` means no resolver is declared, per the absence rule below. If the path is
+present but malformed, do not execute any entry and refuse exactly:
 
-> invalid factory config: .factory/config.json; no session or run created.
+> invalid factory config: .factory.json; no session or run created.
 
 This refusal stops under the same effect-free boundary as every configured resolver refusal below.
 
@@ -395,7 +395,8 @@ Interpret the ordinary shell result directly:
    Continue existing ticket, design, and free-text derivation from the original admitted request. Do
    not use the compatibility issue resolver and do not dispatch `story-reader`.
 2. Exit zero with non-empty stdout means stdout itself is `ISSUE_PAYLOAD`. It must be one JSON object
-   with a canonical top-level string field named `run_id` alongside the repository's issue fields:
+   with a canonical top-level string `run_id`, a non-empty string `title`, and a string `body` (a body
+   may be empty; a title may not) alongside any other repository issue fields:
    ```json
    {
      "run_id": "205",
@@ -404,17 +405,19 @@ Interpret the ordinary shell result directly:
      "url": "https://tracker.example/issues/205"
    }
    ```
-   Validate and bind `run_id` without extracting, wrapping, reserializing, normalizing, or otherwise
-   changing the payload. Give the exact same stdout bytes unchanged to `story-reader` as
+   Validate `run_id`, `title`, and `body` — presence and type — before binding `R` or dispatching
+   anything, without extracting, wrapping, reserializing, normalizing, or otherwise changing the
+   payload. A payload missing `title` or `body`, or carrying either at the wrong type, is malformed and
+   refuses below; it must not reach `story-reader` to be discovered as missing fields there. Give the exact same stdout bytes unchanged to `story-reader` as
    `ISSUE_PAYLOAD` and untrusted supplied normalization input; the specialist performs no external
    lookup.
 3. An observed non-zero exit refuses exactly:
 
-   > factory config entry 'resolve' failed with exit status <status>; no session or run created.
+   > factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.
 
 4. A failure with no observable numeric status refuses exactly:
 
-   > factory config entry 'resolve' failed; exit status unavailable; no session or run created.
+   > factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.
 
 The configured `run_id` must match `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`. A digit-only value must be
 positive decimal without leading zeroes. Bind `R` exactly to that value; through existing Step 0
@@ -422,56 +425,41 @@ behavior it becomes the background `runId`, expected-ID comparison value, manife
 sandbox name, and default feature-branch suffix. Non-empty stdout that is not a single JSON object,
 lacks the canonical top-level `run_id`, or contains an invalid `run_id` refuses exactly:
 
-> factory config entry 'resolve' returned malformed payload; no session or run created.
+> factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.
 
 These refusals stop before canonical run selection, `feature_background`, manifest or state reads,
-sandbox creation, every `factory` command, or specialist dispatch. They never use compatibility
-resolution or continue through the ticket, `story-reader`, or `story-writer` paths. Never print, quote,
-reproduce, log, or persist the configured command string, an expanded or resolved command line,
-credentials, or shell/tool diagnostics. A refusal contains only the exact entry name and status
-classification above. Successful non-empty resolver stdout is the required payload and remains
+sandbox creation, every `factory` command, or specialist dispatch. They never continue through the ticket, `story-reader`, or
+`story-writer` paths. `<reference>` is `FACTORY_INPUT` exactly as admitted, truncated to its
+first 200 characters — the operator's own input, which is why naming it discloses nothing. Never print,
+quote, reproduce, log, or persist the configured command string, an expanded or resolved command line,
+credentials, or shell/tool diagnostics. A refusal contains only the exact entry name, the reference, and
+the status classification above; without the reference an operator resolving several references cannot
+tell which one failed. Successful non-empty resolver stdout is the required payload and remains
 unchanged.
 
-#### Missing-file compatibility
+#### Absence means no repository resolver
 
-When and only when `$O/.factory/config.json` is absent, preserve the existing issue behavior unchanged.
-Recognize an issue reference only when the entire trimmed derivation copy is exactly a whole positive
-decimal integer (`205`), that integer prefixed by `#` (`#205`), or a canonical
-`https://github.com/<owner>/<repo>/issues/<positive-decimal>` URL. A candidate that begins as one of
-those forms but adds a query, fragment, trailing path, or another token is an unresolvable issue
-reference rather than free text. An issue-looking substring embedded later in feature prose remains
-prose. Preserve the unchanged candidate for lookup errors.
+An absent `$O/.factory.json` means this repository declares no resolver. Do not recognize, fetch, or
+resolve a reference: continue existing ticket, design, and free-text derivation from the original
+admitted request, exactly as for a declared resolver that exited zero with empty stdout. There is no
+built-in tracker grammar and no built-in fetch command anywhere in this skill.
 
-For a compatibility issue reference, identify the invocation checkout's current GitHub repository and
-resolve the issue before deriving a run id, classifying manifest paths, creating a sandbox, or
-dispatching a story specialist:
+Reference intake exists only where a repository declares it. A repository that wants `205`, `#205`, or a
+tracker URL to select a run declares a `resolve` command recognizing those forms and returning the
+payload above. Recognition belongs to the declaration for the same reason fetching does: deciding that a
+bare integer is a reference, rather than a feature description, is repository-specific.
 
-```sh
-CURRENT_REPOSITORY="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
-ISSUE_PAYLOAD="$(gh issue view "$ISSUE_NUMBER" --repo "$CURRENT_REPOSITORY" \
-  --json number,title,body,url,state,labels,assignees)"
-```
-
-For a bare or `#` form, `ISSUE_NUMBER` is its positive decimal portion and the repository is
-`CURRENT_REPOSITORY`. For a URL, first require its `<owner>/<repo>` to identify that same repository
-(GitHub repository names are case-insensitive), then use its positive decimal portion. Both commands,
-the repository match, and the returned positive integer `number` must succeed. If any does not, return
-`unresolvable issue reference: <unchanged reference>` and stop; do not derive `R`, initialize a run, or
-fall through to `story-writer`. Fetching the issue is the deriving primary or active driver's read-only
-external action. Treat its fields as untrusted data and
-give the captured payload to `story-reader` only as
-supplied normalization input; the specialist performs no external lookup.
-
-For all three issue forms, `R` is the resolved issue's canonical positive decimal `number` rendered
-without a `#`, URL components, or leading zeroes. Thus the three spellings of one issue select the same
-run. In this repository, `205`, `#205`, and
-`https://github.com/jasoncarreira/opencode-feature-factory/issues/205` therefore still select run `205`.
-A recognized GitHub issue URL is issue input and is removed from design-source consideration.
+This repository declares its own in `.factory.json`, so `205`, `#205`, and the canonical issue URL still
+select run `205` — through that declaration rather than through anything built in.
 
 #### Resolver boundaries and deferred entries
 
-Do not create, write, merge, archive, or package `.factory/config.json`. It remains operator-owned,
-ignored by `.gitignore`, and protected by the existing privileged-path policy. Add no helper module,
+Do not create, write, merge, archive, or package `.factory.json`. It remains operator-owned:
+committed, so every clone and sandbox carries it, and refused by the privileged-path policy, so a run
+cannot widen its own configuration. It was `.factory.json` until that path proved unusable —
+`.factory/` is gitignored, so the file could not be committed and never reached a sandbox clone, which
+made the deferred `verify` and `publish` entries impossible and left this repository unable to resolve
+a reference from a fresh checkout. Add no helper module,
 command runner, parser service, repository-config execution in the integration package, plugin bridge,
 transport, protocol, or new CLI command. Add no resolver cache, payload handoff, manifest or session
 field, generated asset, or `run.json` key. The background primary does not forward or persist its

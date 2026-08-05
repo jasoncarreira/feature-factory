@@ -30,7 +30,7 @@ So everything a run needs must be in the issue *before launch*:
 
 ### Repository command configuration
 
-The repository operator may create an optional `$O/.factory/config.json`, where `O` is the physically
+The repository operator may create an optional `$O/.factory.json`, where `O` is the physically
 resolved Git top level of the invocation checkout:
 
 ```json
@@ -63,7 +63,7 @@ positive decimal without leading zeroes.
 A present malformed file or malformed non-empty resolver payload refuses, respectively:
 
 ```text
-invalid factory config: .factory/config.json; no session or run created.
+invalid factory config: .factory.json; no session or run created.
 factory config entry 'resolve' returned malformed payload; no session or run created.
 ```
 

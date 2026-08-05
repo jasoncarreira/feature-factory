@@ -66,7 +66,7 @@ has no sidebar hook, so it is never mistaken for one.
 
 ## Repository command configuration
 
-A repository operator may provide optional `$O/.factory/config.json`, where `O` is the physically
+A repository operator may provide optional `$O/.factory.json`, where `O` is the physically
 resolved Git top level:
 
 ```json

@@ -19,7 +19,7 @@ Point your agent host at `skills/feature/SKILL.md` and `agents/`, then drive run
 
 ## Repository command configuration
 
-A repository operator may provide optional `$O/.factory/config.json`, where `O` is the physically
+A repository operator may provide optional `$O/.factory.json`, where `O` is the physically
 resolved Git top level:
 
 ```json
@@ -51,7 +51,7 @@ Malformed config, malformed payload, a non-zero exit, or unavailable exit status
 run effect and never falls back:
 
 ```text
-invalid factory config: .factory/config.json; no session or run created.
+invalid factory config: .factory.json; no session or run created.
 factory config entry 'resolve' returned malformed payload; no session or run created.
 factory config entry 'resolve' failed with exit status <status>; no session or run created.
 factory config entry 'resolve' failed; exit status unavailable; no session or run created.
