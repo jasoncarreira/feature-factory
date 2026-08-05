@@ -844,21 +844,18 @@ Per slice:
 
    **When the ratified suite fails on something this slice may not touch.** An already-merged slice's
    test can assert what a later slice in the same plan must invalidate — a module's absence, an import that
-   must not appear. Which move exists depends on whether this slice is activated yet, because `base_ref` is
-   fixed at activation and the suite above runs in `SLICE_WORKTREE`, not on the integration branch.
-   - **Not yet activated.** Commit the test-only repair to the integration branch *first*, then activate.
-     The repair is then part of this slice's `base_ref`, so the suite sees it and the slice's observed diff
-     still holds only its own paths. This is the repair Step 5 permits, taken before a base is fixed.
-   - **Already activated, and the foreign test is outside this slice's ratified command.** Commit the
-     test-only repair to the integration branch anyway, before merging this slice, and let the integration
-     pass prove it — that is where the whole suite runs. The slice's own evidence stands on its ratified
-     command, the repair is not in the slice's diff, and the merge stays clean.
-   - **Already activated, and the foreign test is inside this slice's ratified command.** There is no
-     repair. The worktree is pinned at an immutable `base_ref`, so a commit on the integration branch is
-     invisible to the re-observation, and bringing that commit into the slice would put an out-of-lane test
-     path in the observed diff, which the merge refuses. Mark the slice `blocked` and stop dispatching its
-     dependents. The run then goes `partial` and surfaces at the next gate, so the slices that did merge
-     still reach a PR instead of being discarded.
+   must not appear. By the time you see it the slice is activated, so `base_ref` is already fixed and the
+   suite above runs in `SLICE_WORKTREE`, never on the integration branch. Which move exists turns on whether
+   the foreign test is in this slice's ratified command.
+   - **Outside the ratified command.** Commit the test-only repair to the integration branch, before merging
+     this slice, and let the integration pass prove it — that is where the whole suite runs. The slice's own
+     evidence stands on its ratified command, the repair is not in the slice's diff, and the merge stays
+     clean.
+   - **Inside the ratified command.** There is no repair. The worktree is pinned at an immutable `base_ref`,
+     so a commit on the integration branch is invisible to the re-observation, and bringing that commit into
+     the slice would put an out-of-lane test path in the observed diff, which the merge refuses. Mark the
+     slice `blocked`, stop dispatching its dependents, and follow the wave rule below for a partly-merged
+     run — the slices that did merge still reach a PR instead of being discarded.
 
    **Never narrow the ratified command to get past this.** Dropping the failing path from `--test-cmd`
    makes the observation green while proving less than the plan ratified, and every downstream check will
@@ -915,7 +912,7 @@ privileged control-plane paths are never disclosable and are always refused.
 
 **A moved base is fine.** A wave's second merge lands on a base containing its sibling, and a direct
 commit to the feature branch — the test-only repair Step 5's NO-GO permits, and the observe step above
-permits before a base is fixed — moves it too. The merge proof
+permits for a test outside a slice's ratified command — moves it too. The merge proof
 tolerates both: it checks that the merge contributed exactly the reviewed paths and that the merge's
 content on those paths matches what was reviewed, so unreviewed content inside *the merge* is refused
 while movement around it is not. What guards the branch as a whole is the integration pass: the

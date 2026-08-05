@@ -262,10 +262,9 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const step4 = build.slice(build.indexOf("## Step 4 — Build slices"), build.indexOf("## Step 5 — Integrate"));
       for (const required of [
         "ratified suite fails on something this slice may not touch", // the trigger condition
-        "Not yet activated",                                          // repair lands in base_ref, suite sees it
-        "outside this slice's ratified command",                      // repair on the branch, integration proves it
-        "inside this slice's ratified command",                       // no repair reaches the pinned worktree
-        "goes `partial`",                                             // merged slices still reach a PR
+        "Outside the ratified command",                               // repair on the branch, integration proves it
+        "Inside the ratified command",                                // no repair reaches the pinned worktree
+        "follow the wave rule below",                                 // partial is an explicit transition, stated once
         "Never narrow the ratified command",                          // the false green this invites
         "test files only",                                            // never production source
         "unsatisfiable for this plan",                                // not merely failing
