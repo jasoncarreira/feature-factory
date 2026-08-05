@@ -241,6 +241,26 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, true, `a moved base must not block a merge: ${merged.stderr}`);
       assert.equal(runJson(p.runDir).slices[0].status, "merged");
+
+      // Tolerating this shape is half the contract. The other half is telling a run when it may make
+      // the commit, and that half was missing: mimir run 1387 stopped to ask a human because an
+      // already-merged slice's test made the current slice's evidence unpassable, while the repair was
+      // permitted only at Step 5's NO-GO — after every slice merges. Pinned inside this site rather than
+      // at a new one: the budget in ceiling.test.js constrains call sites, and binding existing prose to
+      // existing behaviour is meant to arrive as data at a site that already exists.
+      const skillPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "skills", "feature", "SKILL.md");
+      const build = readFileSync(skillPath, "utf8");
+      const step4 = build.slice(build.indexOf("## Step 4 — Build slices"), build.indexOf("## Step 5 — Integrate"));
+      for (const required of [
+        "ratified suite fails on something this slice may not touch", // the trigger condition
+        "test files only",                                            // never production source
+        "unsatisfiable for this plan",                                // not merely failing
+        "its own commit",                                             // never folded into a slice merge
+        "disclosed in the slice review",                              // the reviewer still decides
+        "escalate the smallest decision",                             // anything outside the bounds
+      ]) {
+        assert.notEqual(step4.indexOf(required), -1, `Step 4 must state the bounded repair: ${required}`);
+      }
     } finally { cleanupProject(p); }
   });
 
