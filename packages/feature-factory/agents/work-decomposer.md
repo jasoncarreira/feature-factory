@@ -72,16 +72,24 @@ where it costs a re-read rather than a run.
 6. **No slice may depend on the absence of what another slice owns.** Cross-check every slice's
    `test_plan` against every other slice's `paths` before you emit the plan. If a slice must prove that
    something does not exist, is not imported, or is not reachable, and a different slice owns or creates
-   that thing, the plan contradicts its own order: the earlier slice's suite must fail once the later one
-   lands, and the later slice cannot repair it because `paths` freeze at seeding. Give such an invariant to
-   the **later** slice, or to a terminal integration slice that owns the boundary — never to the earlier
-   one. This is rule 3's problem arriving through behaviour rather than through a filename, and it is not
-   caught by file-disjointness: the two slices share no path.
-   State in the `test_plan` **how** a negative claim survives later slices. Process-global state — import
+   that thing, decide which of these the claim is. They are not the same, and only the first is a
+   contradiction:
+   - **Invalidated when the later path lands.** The claim holds only while the thing is absent, so the
+     earlier slice's suite must fail once the later slice lands — and the later slice cannot repair it,
+     because `paths` freeze at seeding. Give this invariant to the **later** slice, or to a terminal
+     integration slice that owns the boundary; never to the earlier one.
+   - **Stable once it lands.** A dependency-direction invariant — this module must not reach that one —
+     stays true after the later slice exists, as long as its proof does not rest on absence. It may stay
+     with the earlier slice, and the `test_plan` must name the form it uses.
+
+   This is rule 3's problem arriving through behaviour rather than through a filename, and file-disjointness
+   cannot see it: the two slices share no path.
+   So state in the `test_plan` **how** a negative claim survives later slices. Process-global state — import
    caches, module registries, singletons — is visible to every test in the same process, so a claim written
-   against it passes alone and fails as soon as a sibling's tests are collected beside it. Prove such a
-   claim in a child process, or statically over the source. Leaving the form to the builder is how one file
-   ends up with the same claim written twice, once robustly and once not.
+   against it passes alone and fails as soon as a sibling's tests are collected beside it, which makes it
+   the first kind. Prove the same claim statically over the source, or inside an isolated child process,
+   and it becomes the second. Leaving the form to the builder is how one file ends up with the same claim
+   written twice, once robustly and once not.
 
 ## Working style
 
