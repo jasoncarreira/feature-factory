@@ -69,6 +69,19 @@ where it costs a re-read rather than a run.
 4. **Every AC maps to a slice.** No orphan criteria; no slice without at least one AC.
 4b. **No slice carries them all.** Where the plan has more than one slice, none may claim the entire acceptance set. Coverage and concentration are different properties, and only coverage was ever checked: a plan whose first slice claims every criterion satisfies rule 4 perfectly and is not a decomposition. A slice must be reviewable on its own — if rejecting it would read as "N categories of behaviour are still missing" rather than naming specific defects, it is too large and must be split before seeding. A genuinely small feature may still be one slice; this is about a slice that hoards while siblings exist.
 5. **Keep slices coherent.** A slice is one layer-consistent chunk (e.g. "entity + repository", "api handler + projection", "list component + its data op"), not an arbitrary file split.
+6. **No slice may depend on the absence of what another slice owns.** Cross-check every slice's
+   `test_plan` against every other slice's `paths` before you emit the plan. If a slice must prove that
+   something does not exist, is not imported, or is not reachable, and a different slice owns or creates
+   that thing, the plan contradicts its own order: the earlier slice's suite must fail once the later one
+   lands, and the later slice cannot repair it because `paths` freeze at seeding. Give such an invariant to
+   the **later** slice, or to a terminal integration slice that owns the boundary — never to the earlier
+   one. This is rule 3's problem arriving through behaviour rather than through a filename, and it is not
+   caught by file-disjointness: the two slices share no path.
+   State in the `test_plan` **how** a negative claim survives later slices. Process-global state — import
+   caches, module registries, singletons — is visible to every test in the same process, so a claim written
+   against it passes alone and fails as soon as a sibling's tests are collected beside it. Prove such a
+   claim in a child process, or statically over the source. Leaving the form to the builder is how one file
+   ends up with the same claim written twice, once robustly and once not.
 
 ## Working style
 

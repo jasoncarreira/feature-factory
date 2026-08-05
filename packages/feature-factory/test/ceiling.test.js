@@ -271,6 +271,23 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //    that do not exist.
     const agentText = shipped.map((name) => ({ name, text: readFileSync(join(pkg, "agents", `${name}.md`), "utf8") }));
 
+    // 3. A plan can be contradictory in its own order and pass every check that existed. mimir run
+    //    1387 gave an earlier slice a test asserting a module's absence and a later slice the module;
+    //    pytest collection imports both test files before either runs, so the earlier suite failed the
+    //    moment the later slice landed, and `paths` freeze at seeding so nothing could repair it. The
+    //    two slices shared no path, so file-disjointness saw nothing. Four slices of work reached a stop
+    //    that was decided at seeding. The decomposer must not emit such a plan and the reviewer must
+    //    block it; both are decidable from the plan alone, which is why neither is a CLI guard.
+    const byName = new Map(agentText.map(({ name, text }) => [name, text]));
+    assert.match(byName.get("work-decomposer") ?? "",
+      /No slice may depend on the absence of what another slice owns/u,
+      "work-decomposer must forbid a plan that contradicts its own order");
+    assert.match(byName.get("work-decomposer") ?? "", /how\*\* a negative claim survives later slices/u,
+      "work-decomposer must require a negative claim to state how it survives later slices");
+    assert.match(byName.get("work-reviewer") ?? "",
+      /depends on the absence, non-existence, or non-reachability of a path another slice owns is a BLOCKER/u,
+      "work-reviewer must block such a plan at the brief gate, naming both slices and the path");
+
     const claimants = agentText.filter(({ text }) => text.includes('"status":'));
     assert.ok(claimants.length >= 3, "the builders and the test-verifier all emit claim blocks");
     for (const { name, text } of claimants) {
