@@ -245,9 +245,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Every agent the skill dispatches must ship with the package. The predecessor's agent
     // definitions lived in a separate assets/ tree, so the skill named seven agents the
     // package did not contain and could not run a feature at all.
-    const dispatched = [...new Set([...markdown.matchAll(/`([a-z]+(?:-[a-z]+)+)`/gu)]
-      .map(([, name]) => name)
-      .filter((name) => AGENT_NAMES.includes(name)))];
+    const targetList = /The only specialized task targets a run driver may dispatch are exactly:\n\n[\s\S]*?\n\n((?:- `[^`\n]+`\n)+)\nA `run-orchestrator` must not dispatch/u.exec(markdown)?.[1] ?? "";
+    const dispatched = [...new Set([...targetList.matchAll(/^- `([^`\n]+)`$/gmu)]
+      .map(([, name]) => name))];
     const shipped = readdirSync(join(pkg, "agents")).filter((entry) => entry.endsWith(".md"))
       .map((entry) => entry.replace(/\.md$/u, ""));
     assert.deepEqual(dispatched.sort(), [...AGENT_NAMES].sort(),
