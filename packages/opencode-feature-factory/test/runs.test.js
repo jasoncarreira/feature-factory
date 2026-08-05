@@ -988,20 +988,16 @@ describe("registering the workflow with the host", () => {
   });
 
   const CONTROLLED_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
-  // The child's delegation grant is target-scoped, so its policy value is a map rather than "allow".
-  // `task` accepts a pattern map — verified on the running host through this plugin path — and a flat
-  // "allow" resolves to `pattern: "*"`, which bounds nothing: it would permit a child to invoke
-  // itself, the primary, or a peer orchestrator with only prompt text in the way. `*: "deny"` is
-  // required because every resolved agent starts from a `* -> allow` wildcard, so an omitted entry
-  // grants delegation. Asserting this map is what makes the bounded tree checkable; asserting the
-  // prompt's wording only proves the sentence is present, not that the host will refuse the call.
-  const CHILD_TASK_GRANT = Object.freeze({
-    "story-reader": "allow", "story-writer": "allow", "codebase-researcher": "allow",
-    "design-interpreter": "allow", "spec-writer": "allow", "work-decomposer": "allow",
-    "work-reviewer": "allow", "test-verifier": "allow", "implementation-validator": "allow",
-    "backend-builder": "allow", "frontend-builder": "allow",
-    "*": "deny",
-  });
+  const CHILD_TASK_TARGETS = Object.freeze([
+    "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer",
+    "work-decomposer", "work-reviewer", "test-verifier", "implementation-validator",
+    "backend-builder", "frontend-builder",
+  ]);
+  const RUN_ORCHESTRATOR_TARGET_POLICY = [
+    "For this OpenCode background driver, the host's flat `task: \"allow\"` makes the task tool available but does not enforce target names.",
+    `The exact eleven-target list and its exclusions are prompt/skill policy: dispatch only these eleven specialists: ${CHILD_TASK_TARGETS.map((name) => `\`${name}\``).join(", ")}.`,
+    "This child must not dispatch itself, `feature-factory`, another `run-orchestrator`, or any arbitrary project-owned agent. It may observe builders it dispatched; builders never observe themselves.",
+  ].join(" ");
   const FACTORY_PERMISSION_POLICY = {
     "backend-builder": ["allow", "allow", "deny", "deny"],
     "codebase-researcher": ["deny", "allow", "deny", "deny"],
@@ -1015,7 +1011,7 @@ describe("registering the workflow with the host", () => {
     "work-decomposer": ["deny", "allow", "deny", "deny"],
     "work-reviewer": ["deny", "allow", "deny", "deny"],
     "feature-factory": ["allow", "allow", "allow", "allow"],
-    "run-orchestrator": ["allow", "allow", "allow", CHILD_TASK_GRANT],
+    "run-orchestrator": ["allow", "allow", "allow", "allow"],
   };
 
   function controlledPermissions(permission) {
@@ -1118,18 +1114,13 @@ describe("registering the workflow with the host", () => {
     assert.equal(child.mode, "subagent");
     assert.deepEqual(controlledPermissions(child.permission),
       expectedPermissions(FACTORY_PERMISSION_POLICY["run-orchestrator"]));
-    // The bound stated as the host will enforce it. Every agent the child may reach is named, and
-    // the three it must never reach are denied by the catch-all rather than by the prompt.
-    assert.equal(child.permission.task["*"], "deny", "an unnamed target must be refused by the host");
-    for (const forbidden of ["run-orchestrator", "feature-factory"]) {
-      assert.ok(child.permission.task[forbidden] === undefined,
-        `${forbidden} must not be granted; it falls to the * deny`);
+    assert.equal(typeof child.permission.task, "string");
+    assert.equal(child.permission.task, "allow");
+    assert.equal(child.prompt.endsWith(RUN_ORCHESTRATOR_TARGET_POLICY), true);
+    assert.equal(child.prompt.split(RUN_ORCHESTRATOR_TARGET_POLICY).length - 1, 1);
+    for (const name of CHILD_TASK_TARGETS) {
+      assert.ok(child.prompt.includes(`\`${name}\``), `${name} must be a prompt-level child target`);
     }
-    for (const name of [
-      "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer",
-      "work-decomposer", "work-reviewer", "test-verifier", "implementation-validator", "backend-builder",
-      "frontend-builder",
-    ]) assert.ok(child.prompt.includes(`\`${name}\``), `${name} must be a named child target`);
     for (const passage of [
       "bounded run-orchestrator for exactly one background feature-factory session",
       "A start turn contains the tool's control text followed by one unchanged invocation-request text part",
@@ -1146,8 +1137,9 @@ describe("registering the workflow with the host", () => {
       "factory status \"$R\" --json --repo \"$RUN_REPO\"",
       "continue only from `status.next`/`nextAction`",
       "never initialize another path, invent isolation, create another orchestration layer, or hand-write `run.json`",
-      "task permission is target-scoped by the host",
-      "refused by the host, not merely discouraged here",
+      "flat `task: \"allow\"` makes the task tool available but does not enforce target names",
+      "exact eleven-target list and its exclusions are prompt/skill policy",
+      "This child must not dispatch itself, `feature-factory`, another `run-orchestrator`, or any arbitrary project-owned agent",
       "It may observe builders it dispatched; builders never observe themselves",
       "In `interactive`, perform the orderly pending-gate park",
       "In `headless`, preserve terminal `needs-human`",
@@ -1198,10 +1190,14 @@ describe("registering the workflow with the host", () => {
     ]) assert.doesNotMatch(registrationSource, mechanism);
 
     const scope = { project: { id: "project-1" }, directory: "/repo", worktree: "/repo/🔥" };
-    const context = (overrides = {}) => ({
-      sessionID: "starter-session", messageID: "message-1", agent: "feature-factory",
-      directory: scope.directory, worktree: scope.worktree, ...overrides,
-    });
+    const context = (overrides = {}) => {
+      const value = {
+        sessionID: "starter-session", messageID: "message-1", agent: "build",
+        directory: scope.directory, worktree: scope.worktree, ...overrides,
+      };
+      if (Object.hasOwn(overrides, "agent") && overrides.agent === undefined) delete value.agent;
+      return value;
+    };
     const resultOf = async (definition, args, overrides) => JSON.parse(
       await definition.execute(args, context(overrides)),
     );
@@ -1239,6 +1235,14 @@ describe("registering the workflow with the host", () => {
         ],
       },
     }]);
+    const compatibilityRunId = "feature-factory-compatible";
+    const compatibilityTitle = `feature-factory:${compatibilityRunId}@${Buffer.from(scope.worktree, "utf8").toString("base64url")}`;
+    assert.deepEqual(await resultOf(background,
+      { operation: "start", runId: compatibilityRunId, request: "compatibility request" },
+      { agent: "feature-factory", messageID: "feature-factory-start" }), {
+      status: "dispatched", operation: "start", runId: compatibilityRunId,
+      title: compatibilityTitle, sessionId: "session-new",
+    });
 
     const associationCalls = { create: 0, prompt: [] };
     const associationClient = { session: {
@@ -1283,6 +1287,11 @@ describe("registering the workflow with the host", () => {
       path: { id: "same-session" }, query: { directory: scope.directory },
       body: { agent: "run-orchestrator", parts: [{ type: "text", text: decision }] },
     }]);
+    assert.deepEqual(await resultOf(answerTool,
+      { operation: "answer", runId: "issue-210", decision: "approve" },
+      { agent: "feature-factory", messageID: "feature-factory-answer" }), {
+      status: "dispatched", operation: "answer", runId: "issue-210", title, sessionId: "same-session",
+    });
     const absentTool = (await plugin({ client: { session: {
       async list() { return { data: [] }; },
     } }, ...scope })).tool.feature_background;
@@ -1291,11 +1300,11 @@ describe("registering the workflow with the host", () => {
       status: "not_backgrounded", operation: "answer", runId: "issue-210", title,
     });
 
-    const zeroCalls = { count: 0 };
+    const zeroCalls = { list: 0, create: 0, prompt: 0 };
     const untouchedClient = { session: {
-      async list() { zeroCalls.count += 1; return { data: [] }; },
-      async create() { zeroCalls.count += 1; return { data: { id: "bad" } }; },
-      async promptAsync() { zeroCalls.count += 1; return { response: { status: 204 } }; },
+      async list() { zeroCalls.list += 1; return { data: [] }; },
+      async create() { zeroCalls.create += 1; return { data: { id: "bad" } }; },
+      async promptAsync() { zeroCalls.prompt += 1; return { response: { status: 204 } }; },
     } };
     const guarded = (await plugin({ client: untouchedClient, ...scope })).tool.feature_background;
     for (const [args, overrides, reason] of [
@@ -1305,7 +1314,6 @@ describe("registering the workflow with the host", () => {
       [{ operation: "answer", runId: "valid", decision: "Approve" }, {}, "invalid_decision"],
       [{ operation: "answer", runId: "valid", decision: "changes:   " }, {}, "invalid_decision"],
       [{ operation: "later", runId: "valid" }, {}, "invalid_operation"],
-      [{ operation: "start", runId: "valid", request: "x" }, { agent: "run-orchestrator" }, "unauthorized_agent"],
       [{ operation: "start", runId: "valid", request: "x" }, { directory: "/other" }, "directory_mismatch"],
       [{ operation: "start", runId: "valid", request: "x" }, { worktree: "/other" }, "worktree_mismatch"],
     ]) {
@@ -1313,11 +1321,25 @@ describe("registering the workflow with the host", () => {
       assert.equal(rejectedResult.status, "rejected");
       assert.equal(rejectedResult.reason, reason);
     }
+    const unauthorizedAgents = [
+      "run-orchestrator", ...CHILD_TASK_TARGETS, "project-agent", "Build", "Feature-Factory",
+      undefined, null, "",
+    ];
+    for (const agent of unauthorizedAgents) {
+      for (const args of [
+        { operation: "start", runId: "valid", request: "x" },
+        { operation: "answer", runId: "valid", decision: "approve" },
+      ]) {
+        assert.deepEqual(await resultOf(guarded, args, { agent }), {
+          status: "rejected", operation: args.operation, runId: "valid", reason: "unauthorized_agent",
+        }, `${args.operation} must reject caller ${String(agent)}`);
+      }
+    }
     const invalidScope = (await plugin({ client: untouchedClient, project: { id: "" },
       directory: scope.directory, worktree: scope.worktree })).tool.feature_background;
     assert.equal((await resultOf(invalidScope,
       { operation: "start", runId: "valid", request: "x" })).reason, "invalid_plugin_scope");
-    assert.equal(zeroCalls.count, 0);
+    assert.deepEqual(zeroCalls, { list: 0, create: 0, prompt: 0 });
 
     async function unknownCase(session, args = { operation: "start", runId: "issue-210", request: "x" }) {
       const definition = (await plugin({ client: { session }, ...scope })).tool.feature_background;
@@ -1465,6 +1487,10 @@ describe("registering the workflow with the host", () => {
     for (const [name, values] of Object.entries(FACTORY_PERMISSION_POLICY)) {
       assert.deepEqual(controlledPermissions(cfg.agent[name].permission), expectedPermissions(values), name);
     }
+    assert.equal(cfg.agent["feature-factory"].permission.task, "allow");
+    assert.equal(typeof cfg.agent["run-orchestrator"].permission.task, "string");
+    assert.equal(cfg.agent["run-orchestrator"].permission.task, "allow");
+    for (const name of CHILD_TASK_TARGETS) assert.equal(cfg.agent[name].permission.task, "deny", name);
   });
 
   it("resolves subagent model and variant through every precedence tier", async () => {
@@ -1609,6 +1635,7 @@ describe("registering the workflow with the host", () => {
       description: "Project child description",
       prompt: "Project child prompt",
       mode: "primary",
+      hostOwned: { retained: true },
       permission: { edit: "deny", bash: "deny", webfetch: "deny", task: "deny", "host-only": "opaque" },
     } } });
     assert.equal(cfg.agent["feature-factory"].model, "project/model");
@@ -1619,11 +1646,24 @@ describe("registering the workflow with the host", () => {
     assert.equal(cfg.agent["run-orchestrator"].model, "project/child");
     assert.equal(cfg.agent["run-orchestrator"].variant, "project-child-variant");
     assert.equal(cfg.agent["run-orchestrator"].description, "Project child description");
-    assert.equal(cfg.agent["run-orchestrator"].prompt, "Project child prompt");
+    assert.equal(cfg.agent["run-orchestrator"].prompt,
+      `Project child prompt\n\n${RUN_ORCHESTRATOR_TARGET_POLICY}`);
     assert.equal(cfg.agent["run-orchestrator"].mode, "subagent");
+    assert.deepEqual(cfg.agent["run-orchestrator"].hostOwned, { retained: true });
     assert.deepEqual(controlledPermissions(cfg.agent["run-orchestrator"].permission),
       expectedPermissions(FACTORY_PERMISSION_POLICY["run-orchestrator"]));
+    assert.equal(typeof cfg.agent["run-orchestrator"].permission.task, "string");
+    assert.equal(cfg.agent["run-orchestrator"].permission.task, "allow");
     assert.equal(cfg.agent["run-orchestrator"].permission["host-only"], "opaque");
+
+    const emptyPrompt = await configured({}, { agent: { "run-orchestrator": { prompt: "" } } });
+    assert.equal(emptyPrompt.agent["run-orchestrator"].prompt, `\n\n${RUN_ORCHESTRATOR_TARGET_POLICY}`);
+
+    const standardPrompt = (await configured()).agent["run-orchestrator"].prompt;
+    const nonStringPrompt = await configured({ profiles: { "run-orchestrator": {
+      model: "profile/child", prompt: "Profile child prompt",
+    } } }, { agent: { "run-orchestrator": { prompt: { hostile: true } } } });
+    assert.equal(nonStringPrompt.agent["run-orchestrator"].prompt, standardPrompt);
   });
 
   it("holds controlled permissions against hostile project configuration", async () => {
@@ -1647,11 +1687,9 @@ describe("registering the workflow with the host", () => {
     }
     assert.equal(cfg.agent["run-orchestrator"].mode, "subagent");
     assert.equal(cfg.agent["feature-factory"].permission.task, "allow");
-    for (const name of [
-      "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer",
-      "work-decomposer", "work-reviewer", "test-verifier", "implementation-validator", "backend-builder",
-      "frontend-builder",
-    ]) assert.equal(cfg.agent[name].permission.task, "deny", name);
+    assert.equal(typeof cfg.agent["run-orchestrator"].permission.task, "string");
+    assert.equal(cfg.agent["run-orchestrator"].permission.task, "allow");
+    for (const name of CHILD_TASK_TARGETS) assert.equal(cfg.agent[name].permission.task, "deny", name);
     assert.deepEqual(cfg.agent["project-agent"], projectAgent);
   });
 
@@ -1661,6 +1699,7 @@ describe("registering the workflow with the host", () => {
       {
         model: `profile/${name}`,
         variant: `profile-variant-${index}`,
+        prompt: `Hostile profile prompt for ${name}`,
         permission: oppositePermissions(values),
       },
     ]));
@@ -1674,6 +1713,12 @@ describe("registering the workflow with the host", () => {
     assert.equal(cfg.agent["feature-factory"].model, "profile/feature-factory");
     assert.equal(cfg.agent["feature-factory"].variant,
       `profile-variant-${Object.keys(FACTORY_PERMISSION_POLICY).indexOf("feature-factory")}`);
+    assert.equal(cfg.agent["feature-factory"].permission.task, "allow");
+    assert.equal(typeof cfg.agent["run-orchestrator"].permission.task, "string");
+    assert.equal(cfg.agent["run-orchestrator"].permission.task, "allow");
+    assert.equal(cfg.agent["run-orchestrator"].prompt,
+      `Hostile profile prompt for run-orchestrator\n\n${RUN_ORCHESTRATOR_TARGET_POLICY}`);
+    for (const name of CHILD_TASK_TARGETS) assert.equal(cfg.agent[name].permission.task, "deny", name);
   });
 
   it("does not discover repository or foreign-product configuration files", async () => {

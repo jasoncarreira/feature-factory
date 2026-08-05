@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
 const RUN_ID = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u;
+const BACKGROUND_CALLER_AGENTS = Object.freeze(["build", "feature-factory"]);
 
 function encoded(value, seen = new WeakSet()) {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
@@ -173,7 +174,7 @@ export function createBackgroundTool(input = {}) {
       else if (typeof projectId !== "string" || projectId.length === 0
         || typeof capturedDirectory !== "string" || capturedDirectory.length === 0
         || typeof capturedWorktree !== "string" || capturedWorktree.length === 0) reason = "invalid_plugin_scope";
-      else if (context?.agent !== "feature-factory") reason = "unauthorized_agent";
+      else if (!BACKGROUND_CALLER_AGENTS.includes(context?.agent)) reason = "unauthorized_agent";
       else if (context.directory !== capturedDirectory) reason = "directory_mismatch";
       else if (context.worktree !== capturedWorktree) reason = "worktree_mismatch";
       if (reason) return JSON.stringify(rejected(operation, runId, reason));
@@ -323,30 +324,29 @@ const CHILD_TASK_TARGETS = Object.freeze([
   "backend-builder", "frontend-builder",
 ]);
 
+const RUN_ORCHESTRATOR_TARGET_POLICY = [
+  "For this OpenCode background driver, the host's flat `task: \"allow\"` makes the task tool available but does not enforce target names.",
+  `The exact eleven-target list and its exclusions are prompt/skill policy: dispatch only these eleven specialists: ${CHILD_TASK_TARGETS.map((name) => `\`${name}\``).join(", ")}.`,
+  "This child must not dispatch itself, `feature-factory`, another `run-orchestrator`, or any arbitrary project-owned agent. It may observe builders it dispatched; builders never observe themselves.",
+].join(" ");
+
 const RUN_ORCHESTRATOR = {
   description: "Config-only feature-factory run driver. Drives exactly one durable run under its persisted mode.",
   mode: "subagent",
-  // `task` is target-scoped, so the bounded tree is enforced rather than requested. A flat
-  // `task: "allow"` resolves to `pattern: "*"` and bounds nothing — it would let a child invoke
-  // itself, the primary, or a peer orchestrator, and the only thing standing in the way would be a
-  // sentence in a prompt. Verified on opencode 1.18.11 through this same plugin path, which is the
-  // path that matters: #188 is the case where a grant was accepted by config and ignored by the host,
-  // so the project-config probe alone would not have settled it.
-  //
-  // Deny `*` last is not decoration. Every resolved agent begins with a `* -> allow` wildcard, so an
-  // omitted `task` entry *grants* delegation; absence of a deny is not a deny.
+  // Flat task allow is required for task-tool availability. The host does not enforce target names;
+  // the exact eleven names and exclusions are prompt/skill policy.
   permission: {
     edit: "allow",
     bash: "allow",
     webfetch: "allow",
-    task: Object.fromEntries([...CHILD_TASK_TARGETS.map((name) => [name, "allow"]), ["*", "deny"]]),
+    task: "allow",
   },
   prompt: [
     "You are the bounded run-orchestrator for exactly one background feature-factory session. Load and follow the existing `feature` skill exactly. A start turn contains the tool's control text followed by one unchanged invocation-request text part. A later answer turn in this same session contains exactly one unchanged decision text part and no request framing.",
     "Before the first factory command, apply the skill's maximal exact-leading-token inner mode admission to a derivation copy of the unchanged request, then independently apply the shared issue, ticket, branch, and free-text run-ID policy. The request part is already the admitted inner request, so a later or repeated `--background` token remains request content. Require exact equality with the expected canonical run ID in the control text and stop before initialization, lock, or factory effects on mismatch. For fresh initialization, only exact standalone leading `--autonomous` and `--headless` tokens select those modes, identical repeats are idempotent, and request prose never selects mode. Background is not a mode. On resume, persisted `run.json.mode` is immutable and authoritative.",
     "Enter the existing Step 0 unchanged. Select or resume only the deterministic existing sandbox path `O/.factory-sandboxes/<R>`; never initialize another path, invent isolation, create another orchestration layer, or hand-write `run.json`.",
     "Use this session's real `FACTORY_SESSION_ID` as `SESSION_ID` for every claim, heartbeat, release, and later resume. Read durable state through `factory status \"$R\" --json --repo \"$RUN_REPO\"`, claim through existing Step 0, and continue only from `status.next`/`nextAction`.",
-    "This child owns state-changing `factory` commands for its run. Its task permission is target-scoped by the host: it may dispatch only these eleven specialists: `story-reader`, `story-writer`, `codebase-researcher`, `design-interpreter`, `spec-writer`, `work-decomposer`, `work-reviewer`, `test-verifier`, `implementation-validator`, `backend-builder`, and `frontend-builder`. Task calls to itself, `feature-factory`, any other `run-orchestrator`, and every arbitrary project-owned agent are refused by the host, not merely discouraged here. It may observe builders it dispatched; builders never observe themselves.",
+    "This child owns state-changing `factory` commands for its run.",
     "Persisted-mode authority is exact. In `interactive`, perform the orderly pending-gate park below, release the lock, and end this session's turn. In `headless`, preserve terminal `needs-human`; do not masquerade as an interactive pending gate. In `autonomous`, decide only under the existing autonomous preconditions and continue through existing Step 7 toward a draft PR. Inability to ask never promotes `interactive` or `headless` to `autonomous`.",
     "Use this exact gate artifact map: Story gate `story` -> `artifacts/story.md`; Brief gate `brief` -> `artifacts/technical-brief.md`; Pre-PR gate `pre_pr` -> `gates/pre_pr.md`.",
     "Before every Gate 3 presentation, write or refresh `gates/pre_pr.md` with the current validator verdict when applicable, the acceptance-criterion/test table, the feature-branch diff and PR-base summary, migration and flag callouts, and remaining risks. Then open Gate 3 with `factory gate \"$R\" pre_pr pending --artifact gates/pre_pr.md --repo \"$RUN_REPO\"`.",
@@ -359,6 +359,7 @@ const RUN_ORCHESTRATOR = {
     "Map `stop` to `factory gate \"$R\" \"$GATE\" stop --repo \"$RUN_REPO\"`; require qualified status `next: stopped-at-gate:<GATE>`, await in-flight work, stop heartbeat calls, release this session with `factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"`, and verify it is unlocked. Return run, repository, `Outcome: stopped-at-gate`, gate, and `Status: stop`. The gate stop ends orchestration: do not terminalize it or invite another resume. A release failure uses the retained-lock-error contract.",
     "For approved and changes paths, reread qualified status and resume solely from `status.next`. Never initialize a replacement or repeat completed stages except the intentional changes loop. When the next interactive gate parks, persist it and release this same session's lock again.",
     "Terminal reporting follows the skill. `headless` uses existing terminal `needs-human` with reason `headless run reached a human gate` and retention rules. `autonomous` follows existing draft-PR and Step 7 behavior. An interactive `stop` remains unlocked and nonterminal at `stopped-at-gate:<name>` and retains the selected run repository. Blocked, partial, and needs-human retain selected sandbox status and repository. After Step 7 archives or removes a completed sandbox, query and report the canonical post-completion repository selected by Step 7, never a stale sandbox. Report only existing status, terminal result, and PR URL; add no durable fields.",
+    RUN_ORCHESTRATOR_TARGET_POLICY,
   ].join("\n\n"),
 };
 
@@ -376,12 +377,17 @@ export function registerAgents(cfg, { root = factoryRoot(), ...options } = {}) {
   };
   const runOrchestratorProfile = profileFor("run-orchestrator", "planning", options) ?? {};
   const runOrchestratorProject = cfg.agent["run-orchestrator"] ?? {};
+  const selectedRunOrchestratorPrompt = Object.hasOwn(runOrchestratorProject, "prompt")
+    ? runOrchestratorProject.prompt : runOrchestratorProfile.prompt;
+  const runOrchestratorPrompt = typeof selectedRunOrchestratorPrompt === "string"
+    ? `${selectedRunOrchestratorPrompt}\n\n${RUN_ORCHESTRATOR_TARGET_POLICY}` : RUN_ORCHESTRATOR.prompt;
   cfg.agent["run-orchestrator"] = {
     ...RUN_ORCHESTRATOR,
     variant: "xhigh",
     ...runOrchestratorProfile,
     ...runOrchestratorProject,
     mode: "subagent",
+    prompt: runOrchestratorPrompt,
     permission: {
       ...RUN_ORCHESTRATOR.permission,
       ...(runOrchestratorProfile.permission ?? {}),
