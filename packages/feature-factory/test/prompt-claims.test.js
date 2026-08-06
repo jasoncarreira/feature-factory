@@ -939,7 +939,7 @@ const CLAIMS = [
   {
     id: "repository-resolver-contract-declares-its-own-intake",
     file: "skills/feature/SKILL.md",
-    fragment: "The optional repository-owned file is `$O/.factory.json`:\n\n```json\n{\n  \"resolve\": \"<non-empty shell command>\",\n  \"verify\": \"<non-empty shell command>\",\n  \"publish\": \"<non-empty shell command>\",\n  \"publishing_identity\": \"<non-empty account name>\"\n}\n```",
+    fragment: '"verify_timeout_ms": 900000',
     expect: "allowed",
     matches: /"run_id": "205"/u,
     act(repo) {
@@ -947,11 +947,12 @@ const CLAIMS = [
       const configured = /#### Configured resolver path\n\n([\s\S]*?)\n\n#### Absence means no repository resolver/u.exec(prose)?.[1] ?? "";
       const absence = /#### Absence means no repository resolver\n\n([\s\S]*?)\n\n#### Resolver and repository verification boundaries/u.exec(prose)?.[1] ?? "";
       const boundaries = /#### Resolver and repository verification boundaries\n\n([\s\S]*?)\n\n#### Remaining intake classification/u.exec(prose)?.[1] ?? "";
-      assert.match(prose, /root must be a JSON object with exactly those four own properties/u);
+      assert.match(prose, /root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and\s+`publishing_identity`, plus only the optional own property `verify_timeout_ms`/u);
       assert.match(prose, /`resolve`, `verify`, and\n`publish` are the only commands/u);
       assert.match(prose, /`publishing_identity` is\na static non-empty publishing account name in the file itself, not a command, token, credential, or\ncommand result/u);
-      assert.match(prose, /Unknown or missing properties, invalid JSON, unreadable content, wrong types, and\nempty or whitespace-only values make a present file malformed/u);
-      assert.match(prose, /Validate all four entries before\nexecuting `resolve`/u);
+      assert.match(prose, /`verify_timeout_ms` must be a positive safe integer; omission silently\ndefaults repository verification to `900000` milliseconds/u);
+      assert.match(prose, /Unknown or missing required properties,\ninvalid JSON, unreadable content, wrong types, and empty or whitespace-only required values make a\npresent file malformed/u);
+      assert.match(prose, /Validate all required entries and the optional timeout before executing\n`resolve`/u);
       assert.match(prose, /Credential values must not appear in the file/u);
       assert.match(prose, /An absent `\$O\/\.factory\.json` means no resolver is declared/u);
       assert.match(prose, /This refusal stops under the same effect-free boundary as every configured resolver refusal below/u);
@@ -969,6 +970,7 @@ const CLAIMS = [
       assert.match(configured, /becomes the background `runId`, expected-ID comparison value, manifest candidate name,\nsandbox name, and default feature-branch suffix/u);
       for (const refusal of [
         "invalid factory config: .factory.json; no session or run created.",
+        "invalid factory config: .factory.json entry 'verify_timeout_ms' must be a positive integer; no session or run created.",
         "factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.",
         "factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.",
         "factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.",
@@ -995,9 +997,10 @@ const CLAIMS = [
       assert.doesNotMatch(prose, /https:\/\/github\.com\/<owner>\/<repo>\/issues/u);
       assert.match(boundaries, /repository-config execution in the integration package except the exact\n`verify` consumer below/u);
       assert.match(boundaries, /Add no resolver cache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
-      assert.match(boundaries, /Add no stderr redirection or suppression rule, separate capture\npolicy, output channel, buffering, truncation, redaction, output-size limit, timeout, retry, or fallback\nafter any configured result or failure/u);
+      assert.match(boundaries, /For `resolve`, use the ordinary shell result directly[\s\S]*no stderr redirection or suppression rule,[\s\S]*timeout,\nretry, or fallback after any configured resolver result or failure/u);
+      assert.match(boundaries, /optional timeout and bounded\nretry below apply only to repository `verify` shell attempts, never to `resolve`, slice observation, or\nGate 3 commands/u);
       assert.match(boundaries, /`resolve` and `verify` are consumed now\. `publish` and `publishing_identity` remain deferred/u);
-      assert.ok(boundaries.includes("| `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed | Invoked once after each newly recorded merge through `observe --repository-verify`; ordinary slice and Gate 3 `--test-cmd` argv behavior remains unchanged. |"));
+      assert.match(boundaries, /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted[\s\S]*at most two executions in that merge invocation[\s\S]*timeout and retry never apply to resolver, slice, or Gate 3 commands/u);
       assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |"));
       assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; the static config value itself | Non-empty account-name string in the config | Missing, non-string, or empty makes the config malformed | Not read for identity enforcement; consumption is deferred to #216. |"));
       assert.match(prose, /Foreground, background primary, and background `run-orchestrator`\nderivation use the following same configured-or-absent policy/u);
@@ -1006,9 +1009,11 @@ const CLAIMS = [
       assert.match(prose, /configured exit-zero, zero-byte result may therefore classify a bare integer as ordinary prose/u);
       for (const postMergeClaim of [
         "production source is never repaired on the integration branch",
-        "Never rerun unchanged bytes when the outcome is unknown",
+        "`unavailable` is the only replay-eligible class",
+        "Only matching `unavailable` evidence, no active\nrepair record",
+        "do not replay again from that driver invocation after\nthe CLI has exhausted its two attempts",
         "merged-slice evidence and review\nremain preserved",
-        "A configured command may run again only after a committed test-only repair changes\nHEAD",
+        "Apart from the safe matching-unavailable replay above, a configured command may run again\nonly after a committed test-only repair changes HEAD",
         "include every attempt under\n`## Post-merge test-only repairs`",
       ]) assert.ok(prose.includes(postMergeClaim), `post-merge policy is missing: ${postMergeClaim}`);
       const initialized = initFresh(repo, ["205", "--now", NOW]);
@@ -1021,11 +1026,11 @@ const CLAIMS = [
   ...[
     {
       id: "repository-verify-integration-worktree",
-      fragment: "runs that unchanged ordinary shell command once in `INTEGRATION_WORKTREE` with inherited\n   environment and stdio",
+      fragment: "runs that unchanged ordinary shell command in `INTEGRATION_WORKTREE` with inherited environment and",
     },
     {
-      id: "post-merge-unknown-does-not-reexecute",
-      fragment: "Never rerun unchanged bytes when the outcome is unknown.",
+      id: "post-merge-unavailable-is-the-only-replay-class",
+      fragment: "`unavailable` is the only replay-eligible class.",
     },
     {
       id: "post-merge-repair-disclosure",
@@ -1038,6 +1043,56 @@ const CLAIMS = [
       return factory(initialized.repository, ["status", RUN, "--json"]);
     },
   })),
+  {
+    id: "repository-verify-exhaustion-releases-a-nonterminal-run",
+    file: "skills/feature/SKILL.md",
+    fragment: "Outcome: repository-verify-exhausted",
+    expect: "allowed",
+    matches: /"status": "running"[\s\S]*"lock": "absent"[\s\S]*"terminal_result": null/u,
+    act(repo) {
+      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const policy = prose.slice(prose.indexOf("### Orderly repository-verification exhaustion"), prose.indexOf("### Post-merge finding routing and repair journal"));
+      assert.match(policy, /terminalize means terminate the current `factory slice … merged` CLI invocation and\s+its enclosing run-driver invocation[\s\S]*does not mean the irreversible\s+factory terminal transition/u);
+      assert.match(policy, /Await every in-flight specialist task[\s\S]*Stop\s+scheduling heartbeats and await every heartbeat already in flight[\s\S]*factory lock "\$R" release --session "\$SESSION_ID" --repo "\$RUN_REPO"[\s\S]*factory status "\$R" --json --repo "\$RUN_REPO"[\s\S]*Outcome: repository-verify-exhausted/u);
+      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      assert.equal(factory(initialized.repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
+      assert.equal(factory(initialized.repository, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
+      return factory(initialized.repository, ["status", RUN, "--json"]);
+    },
+  },
+  {
+    id: "repository-verify-exhaustion-retains-an-unverified-lock",
+    file: "skills/feature/SKILL.md",
+    fragment: "selected repository, perform no further orchestration, and make no resumability claim.",
+    expect: "refused",
+    matches: /run 'app-1' is held by session session-a/u,
+    act(repo) {
+      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      assert.equal(factory(initialized.repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
+      const result = factory(initialized.repository, ["lock", RUN, "release", "--session", "session-b", "--now", NOW]);
+      const status = JSON.parse(factory(initialized.repository, ["status", RUN, "--json"]).out);
+      assert.equal(status.lock_session, "session-a");
+      assert.equal(status.terminal_result, null);
+      return result;
+    },
+  },
+  {
+    id: "repository-verify-restart-verifies-a-new-claim-before-replay",
+    file: "skills/feature/SKILL.md",
+    fragment: "never require session-ID inequality.",
+    expect: "allowed",
+    matches: /"lock": "(?:held|stale)"[\s\S]*"lock_session": "session-a"/u,
+    act(repo) {
+      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const policy = prose.slice(prose.indexOf("A later driver invocation repeats normal run selection"), prose.indexOf("### Post-merge finding routing and repair journal"));
+      assert.match(policy, /actual host-exported\s+`FACTORY_SESSION_ID`[\s\S]*factory lock "\$R" claim --session "\$SESSION_ID" --repo "\$RUN_REPO"[\s\S]*reports that exact session as owner[\s\S]*Only then may it perform same-SHA reconciliation/u);
+      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      assert.equal(factory(initialized.repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
+      assert.equal(factory(initialized.repository, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
+      assert.equal(factory(initialized.repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
+      return factory(initialized.repository, ["status", RUN, "--json"]);
+    },
+  },
   {
     id: "post-merge-production-defect-terminalizes",
     file: "skills/feature/SKILL.md",

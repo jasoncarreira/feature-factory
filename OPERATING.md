@@ -38,16 +38,19 @@ resolved Git top level of the invocation checkout:
   "resolve": "<non-empty shell command>",
   "verify": "<non-empty shell command>",
   "publish": "<non-empty shell command>",
-  "publishing_identity": "<non-empty account name>"
+  "publishing_identity": "<non-empty account name>",
+  "verify_timeout_ms": 900000
 }
 ```
 
-The root object has exactly these four properties. The first three are non-empty command strings;
-`publishing_identity` is a static non-empty account name, not a command, token, credential, or command
-result. Missing or unknown properties, invalid or unreadable JSON, wrong types, and empty or
-whitespace-only values make a present file malformed. All four entries are validated before an entry is
-used. A command may name credentials supplied through its inherited environment, but credential values
-must not appear in the file.
+The root object has four required properties and only the optional `verify_timeout_ms`. The first three
+required properties are non-empty command strings; `publishing_identity` is a static non-empty account
+name, not a command, token, credential, or command result. The timeout, when present, must be a positive
+safe integer; omission silently defaults repository verification to `900000` milliseconds. Missing
+required or unknown properties, invalid or unreadable JSON, wrong types, empty or whitespace-only
+required values, and invalid timeout values make a present file malformed. All required entries and the
+optional timeout are validated before an entry is used. A command may name credentials supplied through
+its inherited environment, but credential values must not appear in the file.
 
 `resolve` and `verify` are consumed today. After mode admission, `resolve` runs as one ordinary shell step with its
 configured string submitted unchanged, exact cwd `O`, the inherited environment plus `FACTORY_INPUT`,
@@ -66,6 +69,7 @@ A present malformed file or malformed non-empty resolver payload refuses, respec
 
 ```text
 invalid factory config: .factory.json; no session or run created.
+invalid factory config: .factory.json entry 'verify_timeout_ms' must be a positive integer; no session or run created.
 factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.
 ```
 
@@ -85,15 +89,15 @@ that declaration rather than through anything built in. A repository without one
 from free text; it just cannot start one from a reference.
 
 Resolver diagnostics never print, quote, log, or persist a configured command, its expanded command
-line, shell diagnostics, or credentials. This contract adds no config bridge or parser service, command
-runner, payload transport, capture or stderr policy, output channel or size policy, buffering,
+line, shell diagnostics, or credentials. The resolver contract adds no config bridge or parser service,
+command runner, payload transport, capture or stderr policy, output channel or size policy, buffering,
 truncation, redaction, timeout, retry, cache, or session behavior.
 
 The entries have these execution contracts:
 
 | entry | input and return contract | failure meaning | status |
 | --- | --- | --- | --- |
-| `verify` | The unchanged string runs once as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio; no structured stdin or factory payload. Stdout and stderr are visible, informational, and unparsed rather than captured or persisted. | Numeric child exit status is authoritative. Zero succeeds; non-zero means repository verification failed. | Invoked after each newly recorded merge and after each committed test-only post-merge repair. |
+| `verify` | The unchanged string runs as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio; no structured stdin or factory payload. Each attempt gets the full configured timeout. Stdout and stderr are visible, informational, and unparsed rather than captured or persisted. | Numeric child exit status is authoritative. Zero succeeds; non-zero means repository verification failed; no numeric status is unavailable. | Invoked after each newly recorded merge with at most two executions per merge or replay invocation. Direct committed test-only repair observation remains one execution. |
 | `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked; existing push and PR behavior remains unchanged. Push-target publication is deferred to #224. |
 | `publishing_identity` | No runtime input; the static non-empty account-name string is the return value. | A missing, non-string, or empty identity makes the config malformed. | Not consumed for identity enforcement; deferred to #216. |
 
@@ -109,7 +113,33 @@ Unclassifiable, interrupted-unknown, invalid-config, unobservable, and exhausted
 confirmed test-only finding may change test files only, never production or privileged paths; it uses a
 separate commit, preserves the tested property or records its loss, is bounded by `max_retries`, and is
 disclosed in the PR body. Only changed bytes from such a committed repair authorize another repository
-verification; an unknown or already known unchanged outcome is not rerun.
+verification. Canonical matching evidence has exactly four classifications: `green`, `failed`,
+`unavailable`, and `unknown`. Only `unavailable` may execute again; failed and unknown evidence never
+does.
+
+On a first unavailable merge result, the CLI freshly proves the exact worktree and branch, unchanged
+recorded merge SHA at `HEAD`, and a clean tree before one retry. Dirty, moved, unobservable, malformed,
+stale, or foreign state never executes. Each attempt receives the full timeout; there is no aggregate
+timer, third attempt, output capture, fallback, partial suite, or persistent counter. The timeout and
+retry are verify-only: resolver, slice observation, and Gate 3 remain unchanged. The same configured
+timeout applies to the one direct repository observation after a committed test-only repair without
+changing repair-journal retry policy.
+
+After two clean, unchanged unavailable executions, the current merge/replay CLI invocation and enclosing
+driver invocation terminate, but the irreversible `factory terminal` transition does not run. Durable
+state remains `running` with `terminal_result: null`. The driver stops dispatch and `status.next`, awaits
+all specialist tasks, stops and awaits all heartbeats, releases exactly its owning session, then requires
+qualified status to prove that durable state and that the session no longer owns the lock. In the normal
+uncontended path the lock must be absent before it reports `repository-verify-exhausted`.
+
+If release or qualified ownership verification fails, the driver reports `retained-lock-error` with the
+actual status, terminal result, lock, and error, retains the repository, stops all orchestration, and
+makes no resumability claim. A later invocation repeats normal run selection, manifest, provenance,
+branch, worktree, effective-push, and operator-ref checks; claims with its actual host-exported session
+ID; verifies that exact ownership; and only then replays the same-SHA merge before following
+`status.next`. The session ID may equal the prior value because verified absence and a new verified claim,
+not string inequality, establish freshness. Green and failed same-SHA evidence remains non-executing;
+unknown or unsafe state retains `needs-human` routing. Gate 3 remains separately fresh.
 
 An absent `.factory.json` remains silent compatibility behavior. At intake it declares no resolver. After
 a recorded merge it runs no repository verification, writes no canonical evidence, emits no additional

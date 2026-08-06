@@ -92,7 +92,19 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "Before consulting `status.next`, computing or activating a wave",
     "walk first\nparents from the current integration HEAD, nearest to oldest",
     "not\na base-movement-only guard",
-    "Never rerun unchanged bytes when the outcome is unknown",
+    "`unavailable` is the only replay-eligible class",
+    "Only matching `unavailable` evidence, no active\nrepair record",
+    "current integration `HEAD` equal to that row's immutable merge SHA",
+    "do not replay again from that driver invocation after\nthe CLI has exhausted its two attempts",
+    "terminalize means terminate the current `factory slice … merged` CLI invocation",
+    "it does not mean the irreversible\nfactory terminal transition",
+    "Await every in-flight specialist task",
+    "Stop\nscheduling heartbeats and await every heartbeat already in flight",
+    "Outcome: repository-verify-exhausted",
+    "Outcome: retained-lock-error",
+    "status: \"running\"`, `terminal_result: null`",
+    "actual host-exported\n`FACTORY_SESSION_ID`",
+    "never require session-ID inequality",
     "artifacts/post-merge-repairs.md",
     "planned → committed|needs-human",
     "--repository-verify --repo \"$RUN_REPO\"",
@@ -142,6 +154,21 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   assert.doesNotMatch(stepFour, /(?:--repo|git -C) "\$(?:S|O)"/u);
   assert.doesNotMatch(stepFour, /\$W\//u);
   const repairPolicy = stepFour.slice(stepFour.indexOf("### Post-merge finding routing and repair journal"), stepFour.indexOf("**Ownership disclosure.**"));
+  const exhaustionPolicy = stepFour.slice(stepFour.indexOf("### Orderly repository-verification exhaustion"), stepFour.indexOf("### Post-merge finding routing and repair journal"));
+  const exhausted = exhaustionPolicy.indexOf("Outcome: repository-verify-exhausted");
+  const quiesceTasks = exhaustionPolicy.indexOf("Await every in-flight specialist task");
+  const quiesceHeartbeats = exhaustionPolicy.indexOf("Stop\nscheduling heartbeats and await every heartbeat already in flight");
+  const release = exhaustionPolicy.indexOf('factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"');
+  const verifyRelease = exhaustionPolicy.indexOf('factory status "$R" --json --repo "$RUN_REPO"');
+  assert.ok(quiesceTasks >= 0 && quiesceTasks < quiesceHeartbeats && quiesceHeartbeats < release && release < verifyRelease && verifyRelease < exhausted,
+    "repository verification exhaustion must quiesce work, release its owner, and verify durable status before reporting");
+  const restartGuards = exhaustionPolicy.indexOf("repeats normal run selection, manifest validation, provenance, branch,");
+  const restartClaim = exhaustionPolicy.indexOf('factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"');
+  const restartOwnership = exhaustionPolicy.indexOf("reports that exact session as owner");
+  const restartReplay = exhaustionPolicy.indexOf("Only then may it perform same-SHA reconciliation");
+  assert.ok(restartGuards >= 0 && restartGuards < restartClaim && restartClaim < restartOwnership && restartOwnership < restartReplay,
+    "a later invocation must repeat normal guards and verify a new claim before same-SHA reconciliation");
+  assert.match(exhaustionPolicy, /value may equal or differ from the prior invocation's value/u);
   assert.ok(stepFour.includes("A validated active repair record supplies it only after it\nequals exactly one merged row and is an ancestor of that record's Starting head"),
     "an active repair must prove unique introducing-merge identity and ancestry");
   const fieldSentence = /Each record contains ([^.]+)\./u.exec(repairPolicy)?.[1] ?? "";
