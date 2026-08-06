@@ -235,6 +235,18 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   ], "push refusal effects");
   required(fresh, "stop before branch handling,\nlock claim or steal, dispatch, transition, push, forge command, or further publication.", "push refusal effects");
   required(gateThree, "Production source: <landed count> / 3600", "Gate 3 source accounting");
+  ordered(gateThree, [
+    "Before every Gate 3 presentation",
+    "first validate `artifacts/post-merge-repairs.md`",
+    "Then write or refresh `gates/pre_pr.md`",
+    "`## Post-merge test-only repairs` section",
+    'factory gate "$R" pre_pr pending --artifact gates/pre_pr.md',
+  ], "Gate 3 repair validation and summary");
+  for (const fragment of [
+    "summarizes every journal record in order",
+    "introducing\nmerge, attempt, Starting head, trigger result, sorted test paths, cause, property outcome and every\nproperty loss, repair commit, post-repair result, and final or active status",
+    "No attempt, outcome, or\nproperty loss may be omitted or collapsed into only the latest result",
+  ]) required(gateThree, fragment, "Gate 3 repair attempt/property-loss summary");
   ordered(publication, [
     'factory status "$R" --json --repo "$RUN_REPO"',
     'git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"',

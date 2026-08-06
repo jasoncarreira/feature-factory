@@ -1200,10 +1200,20 @@ the file and the cause. Respect `max_retries`.
 
 ### Gate 3 — Pre-PR
 
-Before every Gate 3 presentation, write or refresh `gates/pre_pr.md` with the current validator verdict
-when applicable, the acceptance-criterion/test table, the feature-branch diff and PR-base summary,
-migration and flag callouts, remaining risks, and the measured landed production count using this exact
-line template:
+Before every Gate 3 presentation, first validate `artifacts/post-merge-repairs.md` when it exists against
+the complete journal, ancestry, commit, transition, resume, attempt-bound, one-active-record, and
+latest-verified/current-green rules in Step 4. An absent journal is valid only when no test-only repair
+was attempted. A known attempted repair with no journal, or a present journal that is malformed, omitted
+from the gate artifact, active, latest-failed, exhausted, or `needs-human`, refuses presentation.
+
+Then write or refresh `gates/pre_pr.md` with the current validator verdict when applicable, the
+acceptance-criterion/test table, the feature-branch diff and PR-base summary, migration and flag
+callouts, remaining risks, and a `## Post-merge test-only repairs` section. When no repair was attempted,
+that section states so. Otherwise it summarizes every journal record in order, including introducing
+merge, attempt, Starting head, trigger result, sorted test paths, cause, property outcome and every
+property loss, repair commit, post-repair result, and final or active status. No attempt, outcome, or
+property loss may be omitted or collapsed into only the latest result. Include the measured landed
+production count using this exact line template:
 
 ```text
 Production source: <landed count> / 3600

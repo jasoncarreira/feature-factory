@@ -141,6 +141,41 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const stepFour = skill.slice(skill.indexOf("## Step 4 — Build slices"), skill.indexOf("## Step 5 — Integrate"));
   assert.doesNotMatch(stepFour, /(?:--repo|git -C) "\$(?:S|O)"/u);
   assert.doesNotMatch(stepFour, /\$W\//u);
+  const repairPolicy = stepFour.slice(stepFour.indexOf("### Post-merge finding routing and repair journal"), stepFour.indexOf("**Ownership disclosure.**"));
+  assert.ok(stepFour.includes("A validated active repair record supplies it only after it\nequals exactly one merged row and is an ancestor of that record's Starting head"),
+    "an active repair must prove unique introducing-merge identity and ancestry");
+  const fieldSentence = /Each record contains ([^.]+)\./u.exec(repairPolicy)?.[1] ?? "";
+  assert.deepEqual([...fieldSentence.matchAll(/`([^`]+)`/gu)].map((match) => match[1]), [
+    "Introducing merge", "Attempt", "Starting head", "Trigger result", "Test paths", "Cause",
+    "Property outcome", "Repair commit", "Post-repair result", "Status",
+  ], "the repair journal must retain every exact field");
+  const statusSentence = /Status is exactly ([^.]+)\./u.exec(repairPolicy)?.[1] ?? "";
+  assert.deepEqual([...statusSentence.matchAll(/`([^`]+)`/gu)].map((match) => match[1]), [
+    "planned", "committed", "verified", "failed", "exhausted", "needs-human",
+  ]);
+  for (const fragment of [
+    "attempts are ordered, contiguous, duplicate- and gap-free `1..N`",
+    "`N <= max_retries`; globally at most one record is active (`planned` or `committed`)",
+    "Immutable fields\nare introducing merge, attempt, Starting head, trigger result, paths, and cause",
+    "Starting head is exact\nHEAD at planning and must descend from the introducing merge",
+    "separate single-parent commit whose parent is Starting head",
+    "nonempty diff is exactly the sorted test paths, which changes tests only, and which is current\nHEAD when recorded",
+  ]) assert.ok(repairPolicy.includes(fragment), `repair invariant is missing: ${fragment}`);
+  const transitionSentence = /Allowed transitions are ([\s\S]*?)\nFinal records/u.exec(repairPolicy)?.[1] ?? "";
+  assert.deepEqual([...transitionSentence.matchAll(/`([^`]+ → [^`]+)`/gu)].map((match) => match[1]), [
+    "planned → committed|needs-human",
+    "committed → verified|failed|exhausted|needs-human",
+    "failed → exhausted",
+  ], "the repair journal must admit only the approved transitions");
+  for (const [state, outcomes] of [
+    ["planned", ["tree is clean", "`HEAD === Starting head`", "same known trigger", "resume edits without rerunning verify", "Otherwise terminalize"]],
+    ["committed", ["valid repair head and diff plus green evidence becomes `verified`", "known failed evidence becomes\n`failed` or `exhausted`", "unknown evidence or any mismatch terminalizes"]],
+    ["failed", ["matching\nrepair head and known failed evidence creates the next contiguous attempt when allowed", "otherwise it\nbecomes `exhausted`", "mismatch, green, or unknown terminalizes"]],
+    ["verified", ["permits progression only when\nit is latest for that introducing merge and canonical evidence is green at current HEAD", "reconcile any\nnearer recorded merge independently"]],
+    ["exhausted", ["`exhausted` and `needs-human` always block"]],
+  ]) {
+    for (const outcome of outcomes) assert.ok(repairPolicy.includes(outcome), `${state} resume outcome is missing: ${outcome}`);
+  }
   const sliceObservation = stepFour.indexOf('$ factory observe "$R" "$SLICE_ID"');
   for (const binding of [
     "SLICE_WORKTREE = RECORDED_SLICE.worktree",
@@ -174,6 +209,17 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   integrationObservations.forEach((observation, index) => {
     assert.ok(integrationProbes[index] < observation, "recorded feature branch verification must precede integration observation");
   });
+  const gateThree = stepFive.slice(stepFive.indexOf("### Gate 3 — Pre-PR"));
+  for (const fragment of [
+    "first validate `artifacts/post-merge-repairs.md`",
+    "complete journal, ancestry, commit, transition, resume, attempt-bound, one-active-record, and\nlatest-verified/current-green rules",
+    "`## Post-merge test-only repairs` section",
+    "summarizes every journal record in order",
+    "property outcome and every\nproperty loss",
+    "No attempt, outcome, or\nproperty loss may be omitted",
+  ]) assert.ok(gateThree.includes(fragment), `Gate 3 repair summary is missing: ${fragment}`);
+  assert.ok(gateThree.indexOf("first validate `artifacts/post-merge-repairs.md`") < gateThree.indexOf('factory gate "$R" pre_pr pending --artifact gates/pre_pr.md'),
+    "repair history must be validated and summarized before Gate 3 presentation");
 
   const resumeSection = skill.slice(skill.indexOf("### Resume or collision"), skill.indexOf("### Fresh sandbox request"));
   const parsedRunBinding = resumeSection.indexOf("bind it as `parsedRun`");
