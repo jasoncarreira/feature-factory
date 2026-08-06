@@ -55,6 +55,17 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       assert.equal(evidence.review_ready, false, "a failing observed test cannot be review-ready");
       const fields = evidence.claim_reconciliation.mismatches.map((entry) => entry.field);
       assert.ok(fields.includes("tests.exit"), `the claim/observation disagreement must be recorded, got ${JSON.stringify(fields)}`);
+
+      const shellCommand = "FACTORY_VALUE='two words' && test \"$FACTORY_VALUE\" = 'two words' && test -f src/app/thing.ts && exit 23";
+      const shellEvidence = buildEvidence({
+        subject: "test-verifier", runId: "app-1", attempt: 1, branch: "slice", baseRef: f.base,
+        worktree: f.root, status: "completed", testCommand: shellCommand, shellCommand: true,
+      });
+      assert.deepEqual(Object.keys(shellEvidence.tests).sort(), ["cmd", "exit", "observed", "skipped_reason"]);
+      assert.equal(shellEvidence.tests.cmd, shellCommand);
+      assert.equal(shellEvidence.tests.exit, 23);
+      assert.equal(shellEvidence.tests.observed, true);
+      assert.equal(shellEvidence.review_ready, false);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 

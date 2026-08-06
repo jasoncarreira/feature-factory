@@ -38,7 +38,7 @@ const FAILING_TEST_COMMAND = "git --no-pager grep --quiet THIS_STRING_IS_ABSENT"
 const DIRTYING_TEST_COMMAND = "node -e require('fs').writeFileSync('src/app/thing.ts','mutated')";
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"] } = {}) {
+function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], verify = null, configBytes = null } = {}) {
   const operator = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(operator, "init", "-q", "-b", "main");
   git(operator, "config", "user.email", "t@example.com");
@@ -50,6 +50,11 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
   // how this fixture first failed, and is a real deployment requirement rather than
   // a test detail.
   writeFileSync(join(operator, ".gitignore"), ".factory/\n.factory-sandboxes/\n");
+  if (configBytes !== null) writeFileSync(join(operator, ".factory.json"), configBytes);
+  else if (verify !== null) writeFileSync(join(operator, ".factory.json"), `${JSON.stringify({
+    resolve: "true", verify: typeof verify === "function" ? verify(operator) : verify,
+    publish: "true", publishing_identity: "factory-test",
+  }, null, 2)}\n`);
   git(operator, "add", "-A");
   git(operator, "commit", "-q", "-m", "base");
   git(operator, "remote", "add", "origin", operator);
@@ -162,8 +167,53 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const mergeCommit = mergeIntoFeature(p.repo);
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, true, merged.stderr);
+      assert.deepEqual(merged.out, {
+        run_id: RUN, slice: "be-thing", status: "merged", attempts: 1,
+        base_ref: p.basePoint, merge_commit: mergeCommit,
+      });
       assert.equal(runJson(p.runDir).slices[0].status, "merged");
+      assert.equal(existsSync(join(p.runDir, "evidence", "test-verifier.json")), false);
     } finally { cleanupProject(p); }
+
+    const green = upToReview("clean-config", undefined, { verify: (operator) => `node -e "require('fs').appendFileSync('${join(operator, "verify-count")}','x')"` });
+    try {
+      const mergeCommit = mergeIntoFeature(green.repo);
+      const merged = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, true, merged.stderr);
+      const evidence = JSON.parse(readFileSync(join(green.runDir, "evidence", "test-verifier.json"), "utf8"));
+      assert.equal(evidence.subject, "test-verifier");
+      assert.equal(evidence.commit, mergeCommit);
+      assert.equal(evidence.tests.exit, 0);
+      assert.equal(evidence.review_ready, true);
+      assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x");
+      const before = readFileSync(join(green.runDir, "run.json"), "utf8");
+      const replay = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(5)]);
+      assert.equal(replay.ok, true, replay.stderr);
+      assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x", "same-SHA replay must not execute verify");
+      assert.equal(readFileSync(join(green.runDir, "run.json"), "utf8"), before, "same-SHA replay must not update the run");
+      writeFileSync(join(green.repo, "src", "app", "after-merge.ts"), "moved\n");
+      git(green.repo, "add", "-A");
+      git(green.repo, "commit", "-q", "-m", "move integration head");
+      const moved = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(6)]);
+      assert.equal(moved.ok, false);
+      assert.equal(moved.stderr.trim(), `recorded merge ${mergeCommit} replay cannot reconcile the current integration head; do not re-execute factory config entry 'verify'.`);
+      assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x");
+      git(green.repo, "reset", "--hard", mergeCommit);
+      rmSync(join(green.runDir, "evidence", "test-verifier.json"));
+      const unknown = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(7)]);
+      assert.equal(unknown.ok, false);
+      assert.match(unknown.stderr, new RegExp(`post-merge verify outcome is unknown for recorded merge ${mergeCommit}`, "u"));
+      assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x", "unknown replay must not execute verify");
+    } finally { cleanupProject(green); }
+
+    const malformed = upToReview("malformed-config", undefined, { configBytes: "{\"resolve\":\"true\"}\n" });
+    try {
+      const mergeCommit = mergeIntoFeature(malformed.repo);
+      const merged = factory(malformed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, false);
+      assert.equal(merged.stderr.trim(), `factory config entry 'verify' unavailable after recorded merge ${mergeCommit}: invalid .factory.json; merged slice remains recorded; stop before advancing.`);
+      assert.equal(runJson(malformed.runDir).slices[0].status, "merged");
+    } finally { cleanupProject(malformed); }
   });
 
   it("refuses a slice that changed a path it does not own", () => {
@@ -332,6 +382,47 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(existsSync(join(p.repo, "observe-command-ran")), false);
       assert.equal(existsSync(join(p.runDir, "evidence", "be-thing.json")), false);
     } finally { cleanupProject(p); }
+
+    const q = upToReview("repository-verify-auth", undefined, { verify: "node -e \"process.exit(0)\"" });
+    try {
+      const rootBase = runJson(q.runDir).slices[0].base_ref;
+      const sliceUse = factory(q.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", rootBase,
+        "--repository-verify", "--now", NOW(3)]);
+      assert.equal(sliceUse.ok, false);
+      assert.match(sliceUse.stderr, /valid only for test-verifier/u);
+      assert.equal(existsSync(join(q.runDir, "evidence", "test-verifier.json")), false);
+      const mixed = factory(q.repo, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", rootBase,
+        "--repository-verify", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]);
+      assert.equal(mixed.ok, false);
+      assert.match(mixed.stderr, /mutually exclusive/u);
+
+      const mergeCommit = mergeIntoFeature(q.repo);
+      assert.equal(factory(q.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
+      const evidencePath = join(q.runDir, "evidence", "test-verifier.json");
+      const before = readFileSync(evidencePath, "utf8");
+      const other = join(q.repo, "other-worktree");
+      mkdirSync(other);
+      writeFileSync(join(q.repo, ".factory.json"), "{}\n");
+      const wrongWorktree = factory(q.repo, ["observe", RUN, "test-verifier", "--worktree", other, "--base", rootBase,
+        "--repository-verify", "--now", NOW(5)]);
+      assert.equal(wrongWorktree.ok, false);
+      assert.match(wrongWorktree.stderr, /integration worktree mismatch: committed/u);
+      assert.equal(readFileSync(evidencePath, "utf8"), before);
+      git(q.repo, "checkout", "--", ".factory.json");
+      rmSync(other, { recursive: true });
+      git(q.repo, "checkout", "-q", "slice");
+      const wrongBranch = factory(q.repo, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", rootBase,
+        "--repository-verify", "--now", NOW(5)]);
+      assert.equal(wrongBranch.ok, false);
+      assert.match(wrongBranch.stderr, /must have branch 'feature' checked out; observed slice/u);
+      assert.equal(readFileSync(evidencePath, "utf8"), before);
+      git(q.repo, "checkout", "-q", "--detach", mergeCommit);
+      const detached = factory(q.repo, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", rootBase,
+        "--repository-verify", "--now", NOW(5)]);
+      assert.equal(detached.ok, false);
+      assert.match(detached.stderr, /observed detached HEAD/u);
+      assert.equal(readFileSync(evidencePath, "utf8"), before);
+    } finally { cleanupProject(q); }
   });
 
   it("refuses a merge whose evidence is not review_ready", () => {
@@ -550,8 +641,10 @@ describe("end to end — a merge is refused through the real CLI", () => {
     // branched from the current feature-branch HEAD"), and merges are serial. So the
     // second merge lands on a base that has moved, and its merged tree contains the
     // first slice's work as well as its own. Tree equality cannot hold for it.
-    const p = project("wave", { seed: false });
+    const configuredVerify = (operator) => `node -e "const f=require('fs');f.appendFileSync('${join(operator, "wave-count")}','x');process.exit(f.existsSync('src/app/one/work.ts')&&f.existsSync('src/app/two/work.ts')?23:0)"`;
+    const p = project("wave", { seed: false, verify: configuredVerify });
     try {
+      const verify = JSON.parse(readFileSync(join(p.repo, ".factory.json"), "utf8")).verify;
       // Both slices declare a test_plan. This fixture used to omit it, which was how the
       // omitted-field waiver stayed invisible: the fixture institutionalized the very
       // shape that granted a silent exemption. Seeding a plan without one is now refused,
@@ -560,6 +653,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const slices = [
         { id: "be-one", stack: "backend", paths: ["src/app/one/"], depends_on: [] },
         { id: "be-two", stack: "backend", paths: ["src/app/two/"], depends_on: [] },
+        { id: "be-dependent", stack: "backend", paths: ["src/app/dependent/"], depends_on: ["be-two"] },
       ];
       writeFileSync(planFile, JSON.stringify({ slices }, null, 2));
       const unapproved = factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]);
@@ -618,11 +712,27 @@ describe("end to end — a merge is refused through the real CLI", () => {
 
       const first = mergeOne("be-one", 10);
       assert.equal(first.ok, true, `first merge of a wave: ${first.stderr}`);
+      assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "x");
+      const preserved = Object.fromEntries(["be-two"].flatMap((id) => [
+        [`evidence/${id}.json`, readFileSync(join(p.runDir, "evidence", `${id}.json`), "utf8")],
+        [`reviews/${id}.json`, readFileSync(join(p.runDir, "reviews", `${id}.json`), "utf8")],
+      ]));
 
       // The second slice reviewed a tree without be-one in it; the merged tree has both.
       const second = mergeOne("be-two", 11);
-      assert.equal(second.ok, true, `second merge of the same wave must succeed: ${second.stderr}`);
-      assert.deepEqual(runJson(p.runDir).slices.map((slice) => slice.status), ["merged", "merged"]);
+      const secondMerge = git(p.repo, "rev-parse", "HEAD");
+      assert.equal(second.ok, false, "the repository verify must detect the cross-slice defect");
+      assert.equal(second.stderr.trim(), `factory config entry 'verify' failed after recorded merge ${secondMerge} with exit status 23; merged slice remains recorded; stop before advancing.`);
+      assert.deepEqual(runJson(p.runDir).slices.map((slice) => slice.status), ["merged", "merged", "pending"]);
+      for (const [ref, bytes] of Object.entries(preserved)) assert.equal(readFileSync(join(p.runDir, ref), "utf8"), bytes);
+      const failedEvidence = JSON.parse(readFileSync(join(p.runDir, "evidence", "test-verifier.json"), "utf8"));
+      assert.equal(failedEvidence.commit, secondMerge);
+      assert.equal(failedEvidence.tests.cmd, verify);
+      assert.equal(failedEvidence.tests.exit, 23);
+      const replay = factory(p.repo, ["slice", RUN, "be-two", "merged", "--merge-commit", secondMerge, "--now", NOW(12)]);
+      assert.equal(replay.ok, false);
+      assert.equal(replay.stderr.trim(), second.stderr.trim(), "known failure replay must reproduce the refusal without re-execution");
+      assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "xx", "failed replay must reuse canonical evidence");
     } finally { cleanupProject(p); }
   });
 

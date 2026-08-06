@@ -945,8 +945,8 @@ const CLAIMS = [
     act(repo) {
       const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
       const configured = /#### Configured resolver path\n\n([\s\S]*?)\n\n#### Absence means no repository resolver/u.exec(prose)?.[1] ?? "";
-      const absence = /#### Absence means no repository resolver\n\n([\s\S]*?)\n\n#### Resolver boundaries and deferred entries/u.exec(prose)?.[1] ?? "";
-      const boundaries = /#### Resolver boundaries and deferred entries\n\n([\s\S]*?)\n\n#### Remaining intake classification/u.exec(prose)?.[1] ?? "";
+      const absence = /#### Absence means no repository resolver\n\n([\s\S]*?)\n\n#### Resolver and repository verification boundaries/u.exec(prose)?.[1] ?? "";
+      const boundaries = /#### Resolver and repository verification boundaries\n\n([\s\S]*?)\n\n#### Remaining intake classification/u.exec(prose)?.[1] ?? "";
       assert.match(prose, /root must be a JSON object with exactly those four own properties/u);
       assert.match(prose, /`resolve`, `verify`, and\n`publish` are the only commands/u);
       assert.match(prose, /`publishing_identity` is\na static non-empty publishing account name in the file itself, not a command, token, credential, or\ncommand result/u);
@@ -993,22 +993,74 @@ const CLAIMS = [
       // makes that vendor the factory's default again, which is what this change exists to end.
       assert.doesNotMatch(prose, /\bgh\s+(?:repo|issue)\b/u);
       assert.doesNotMatch(prose, /https:\/\/github\.com\/<owner>\/<repo>\/issues/u);
-      assert.match(boundaries, /Add no helper module,\ncommand runner, parser service, repository-config execution in the integration package, plugin bridge,\ntransport, protocol, or new CLI command/u);
+      assert.match(boundaries, /repository-config execution in the integration package except the exact\n`verify` consumer below/u);
       assert.match(boundaries, /Add no resolver cache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
       assert.match(boundaries, /Add no stderr redirection or suppression rule, separate capture\npolicy, output channel, buffering, truncation, redaction, output-size limit, timeout, retry, or fallback\nafter any configured result or failure/u);
-      assert.match(boundaries, /Only `resolve` is consumed now\. The other entries are declared but not migrated/u);
-      assert.ok(boundaries.includes("| `verify` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means success; non-zero means repository verification failed | Not invoked. Existing `test-verifier` and the factory's `observe --test-cmd` behavior remains unchanged. |"));
+      assert.match(boundaries, /`resolve` and `verify` are consumed now\. `publish` and `publishing_identity` remain deferred/u);
+      assert.ok(boundaries.includes("| `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed | Invoked once after each newly recorded merge through `observe --repository-verify`; ordinary slice and Gate 3 `--test-cmd` argv behavior remains unchanged. |"));
       assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |"));
       assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; the static config value itself | Non-empty account-name string in the config | Missing, non-string, or empty makes the config malformed | Not read for identity enforcement; consumption is deferred to #216. |"));
       assert.match(prose, /Foreground, background primary, and background `run-orchestrator`\nderivation use the following same configured-or-absent policy/u);
       assert.match(prose, /background primary does not forward or persist its\npayload/u);
       assert.match(prose, /uses its own non-empty resolver stdout unchanged as `ISSUE_PAYLOAD` and requires exact\nequality between its derived `R` and the control part's expected canonical ID before its first `factory`\ncommand/u);
       assert.match(prose, /configured exit-zero, zero-byte result may therefore classify a bare integer as ordinary prose/u);
+      for (const postMergeClaim of [
+        "production source is never repaired on the integration branch",
+        "Never rerun unchanged bytes when the outcome is unknown",
+        "merged-slice evidence and review\nremain preserved",
+        "A configured command may run again only after a committed test-only repair changes\nHEAD",
+        "include every attempt under\n`## Post-merge test-only repairs`",
+      ]) assert.ok(prose.includes(postMergeClaim), `post-merge policy is missing: ${postMergeClaim}`);
       const initialized = initFresh(repo, ["205", "--now", NOW]);
       const status = factory(initialized.repository, ["status", "205", "--json"]);
       assert.equal(status.ok, true, status.out);
       assert.equal(JSON.parse(status.out).run_id, "205");
       return status;
+    },
+  },
+  ...[
+    {
+      id: "repository-verify-integration-worktree",
+      fragment: "runs that unchanged ordinary shell command once in `INTEGRATION_WORKTREE` with inherited\n   environment and stdio",
+    },
+    {
+      id: "post-merge-unknown-does-not-reexecute",
+      fragment: "Never rerun unchanged bytes when the outcome is unknown.",
+    },
+    {
+      id: "post-merge-repair-disclosure",
+      fragment: "include every attempt under\n`## Post-merge test-only repairs`",
+    },
+  ].map(({ id, fragment }) => ({
+    id, file: "skills/feature/SKILL.md", fragment, expect: "allowed", matches: /"run_id": "app-1"/u,
+    act(repo) {
+      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      return factory(initialized.repository, ["status", RUN, "--json"]);
+    },
+  })),
+  {
+    id: "post-merge-production-defect-terminalizes",
+    file: "skills/feature/SKILL.md",
+    fragment: "A production defect terminalizes\n`needs-human`; production source is never repaired on the integration branch.",
+    expect: "allowed",
+    matches: /"status": "needs-human"[\s\S]*factory config entry 'verify'[\s\S]*\.factory\.json verify suite/u,
+    act(repo) {
+      const skill = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const stepFour = skill.slice(skill.indexOf("## Step 4 — Build slices"), skill.indexOf("## Step 5 — Integrate"));
+      assert.match(stepFour,
+        /The reason names the full `INTRODUCING_MERGE`, “factory config entry 'verify'”, the numeric\s+or unavailable status, and an independently established failing-test identifier when one exists;\s+otherwise name the truthful `\.factory\.json verify suite`\./u,
+        "production-defect terminalization must name the full introducing merge, status, and established test or truthful suite fallback");
+      assert.match(stepFour, /State that merged-slice evidence and review\s+remain preserved\./u,
+        "production-defect terminalization must preserve the merged slice's evidence and review");
+      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const introducingMerge = "a".repeat(40);
+      const reason = `${introducingMerge} factory config entry 'verify' failed with exit status 23 in .factory.json verify suite; merged-slice evidence and review remain preserved`;
+      assert.equal(factory(initialized.repository, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW]).ok, true);
+      const result = factory(initialized.repository, ["status", RUN, "--json"]);
+      const terminal = JSON.parse(result.out).terminal_result;
+      assert.equal(terminal.reason, reason);
+      assert.ok(terminal.reason.startsWith(introducingMerge));
+      return result;
     },
   },
   {

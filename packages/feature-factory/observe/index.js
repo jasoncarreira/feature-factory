@@ -84,16 +84,18 @@ export function observeAncestry(worktree, ancestor, descendant, options = {}) {
 // Attack 1: the test command is run here, by us, and its exit code is recorded
 // from the process rather than from anybody's report. `observed: false` means we
 // could not run it, which is not the same as a pass.
-export function runTests(worktree, command, { runner = spawnSync, skipReason = null } = {}) {
+export function runTests(worktree, command, { runner = spawnSync, skipReason = null, shellCommand = false } = {}) {
   if (!command) {
     // Finding 1: defaulting a skip reason let omission manufacture review readiness.
     // Tests must be observed green or explicitly skipped with a caller-declared reason;
     // omission alone is neither.
     return { cmd: null, exit: null, observed: false, skipped_reason: skipReason };
   }
-  const result = runner(command[0], command.slice(1), { cwd: worktree, encoding: "utf8", shell: false });
+  const result = shellCommand
+    ? runner(command, [], { cwd: worktree, shell: true, stdio: "inherit", env: process.env })
+    : runner(command[0], command.slice(1), { cwd: worktree, encoding: "utf8", shell: false });
   const exit = Number.isInteger(result?.status) ? result.status : null;
-  return { cmd: command.join(" "), exit, observed: exit !== null, skipped_reason: null };
+  return { cmd: shellCommand ? command : command.join(" "), exit, observed: exit !== null, skipped_reason: null };
 }
 
 // Readiness requires completed, clean, changed, observed-diff evidence and tests
@@ -168,7 +170,7 @@ export function privilegedPaths(filesChanged) {
     || PRIVILEGED_EXACT.includes(file));
 }
 
-export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, options = {} }) {
+export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, options = {} }) {
   // Cleanliness is established before anything else is observed, because every later
   // fact - the diff, the commit, and above all the test result - is only about the
   // recorded commit if the tree has nothing uncommitted in it.
@@ -177,8 +179,8 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   // Tests are not run at all against a dirty tree: running them would produce a
   // result about bytes that are not going to merge.
   const tests = cleanliness.clean
-    ? runTests(worktree, testCommand, { ...options, skipReason })
-    : { cmd: testCommand ? testCommand.join(" ") : null, exit: null, observed: false, skipped_reason: null };
+    ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand })
+    : { cmd: testCommand ? (shellCommand ? testCommand : testCommand.join(" ")) : null, exit: null, observed: false, skipped_reason: null };
 
   // Third round, finding 1: cleanliness was a pre-test snapshot, so a test that wrote
   // tracked files left the tree dirty while the evidence still claimed a clean HEAD -

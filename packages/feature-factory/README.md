@@ -34,12 +34,11 @@ resolved Git top level:
 The root has exactly these four properties. `resolve`, `verify`, and `publish` are non-empty command
 strings. `publishing_identity` is a static non-empty account name, not a command, token, credential, or
 command result. All four entries are validated before use; a present invalid, unreadable, incomplete,
-wrong-type, whitespace-only, or unknown-property config refuses closed. An absent file means no resolver
-is declared, and no reference is recognized or fetched: there is no built-in tracker grammar and no
-built-in fetch command. The factory never creates, writes, merges, archives, or packages this
-operator-owned live file.
+wrong-type, whitespace-only, or unknown-property config refuses closed. The file is operator-owned,
+committed, and protected as a privileged path: a run cannot create, write, merge, archive, package, or
+repair it.
 
-Only `resolve` is consumed now. It runs as one ordinary shell step with the configured string submitted
+`resolve` and `verify` are consumed now. `resolve` runs as one ordinary shell step with the configured string submitted
 unchanged, repository-root cwd, inherited environment plus the exact admitted request in
 `FACTORY_INPUT`, and no positional argument or structured stdin. Empty stdout means the input was not
 recognized. Non-empty stdout is the direct,
@@ -60,21 +59,36 @@ factory config entry 'resolve' failed for reference <reference> with exit status
 factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.
 ```
 
-Diagnostics name `resolve`, the status classification, and the admitted reference bounded to 200
+Resolver diagnostics name `resolve`, the status classification, and the admitted reference bounded to 200
 characters; neither the configured or expanded
 command line, shell diagnostics, nor credentials are printed, logged, or persisted. Credential values
 stay in inherited environment variables and never in the config. The contract adds no bridge, parser
 service, command runner, capture or stderr policy, output channel or size policy, buffering, truncation,
 redaction, timeout, retry, cache, payload transport, or session behavior.
 
-`verify` and `publish` are declarations for future ordinary shell steps in repository-root cwd. Their
-exit status will be authoritative and stdout informational and unparsed. Zero means success; non-zero
-means repository verification failed for `verify` and reported publication failure for `publish`.
-Neither is invoked today. Existing verification and publication remain unchanged, with push-target
-publication deferred to #224. Static `publishing_identity` has no runtime input and returns the
-non-empty account-name value itself; a missing, non-string, or empty identity makes the config malformed.
-It is not yet consumed, and identity enforcement is deferred to #216. The live config is not part of
-this package and no generated config or resolver asset is shipped. See the repository's
+After a slice merge is successfully and atomically recorded, `verify` runs once in the exact recorded
+integration worktree. Its configured string is submitted unchanged as one ordinary shell command with
+that worktree as cwd and inherited environment and stdio. Stdout and stderr are visible, informational,
+and unparsed; they are not captured or persisted. Numeric child exit status is authoritative: zero
+succeeds and non-zero fails repository verification. The observation uses the existing canonical
+`evidence/test-verifier.json` schema, bound to the current merged head and the immutable root base.
+
+If `.factory.json` is absent, intake declares no resolver and after a recorded merge the factory silently
+returns its previous response with no repository command, evidence write, or new output. A post-record
+failure leaves the merged row and its slice evidence and review unchanged and stops before the next wave.
+Production and unresolved findings terminalize `needs-human`; only a confirmed test-only finding can use
+the bounded test-file-only repair path, with a separate commit and fresh repository verification. The
+merged slice is never reopened, re-seeded, or re-dispatched.
+
+Gate 3 always runs a separate fresh integrated `test-verifier` observation at the current head. It
+overwrites canonical evidence through the existing command mode and never shares, substitutes, or
+optimizes from post-merge evidence, even when the head is unchanged.
+
+`publish` remains a deferred future ordinary shell step; existing push and PR behavior is unchanged and
+push-target publication is deferred to #224. Static `publishing_identity` has no runtime input and
+returns the non-empty account-name value itself; a missing, non-string, or empty identity makes the
+config malformed. It is not yet consumed, and identity enforcement is deferred to #216. The live config
+is not part of this package and no generated config or resolver asset is shipped. See the repository's
 [operator guide](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/OPERATING.md) for
 the complete operating contract.
 
