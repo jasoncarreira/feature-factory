@@ -234,7 +234,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "stop before branch handling",
   ], "push refusal effects");
   required(fresh, "stop before branch handling,\nlock claim or steal, dispatch, transition, push, forge command, or further publication.", "push refusal effects");
-  required(gateThree, "Production source: <landed count> / 3000", "Gate 3 source accounting");
+  required(gateThree, "Production source: <landed count> / 3600", "Gate 3 source accounting");
   ordered(publication, [
     'factory status "$R" --json --repo "$RUN_REPO"',
     'git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"',
@@ -245,8 +245,13 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"',
     'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"',
     'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
-    "Production source ceiling: <landed count> / 3000",
+    "Production source ceiling: <landed count> / 3600",
   ], "Step 6 compare/publication");
+  for (const fragment of [
+    "## Post-merge test-only repairs",
+    "include every attempt",
+    "latest-failed, exhausted, or `needs-human` records",
+  ]) required(publication, fragment, "post-merge repair disclosure");
   assert.equal(occurrences(publication, "config --replace-all remote.origin.pushurl"), 0);
   assert.doesNotMatch(publication, /git -C "\$RUN_REPO" config/u);
   required(summary, "guarded sandbox-removal", "Step 7 exclusion");

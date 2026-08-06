@@ -89,6 +89,13 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "Neither value comes from status, current\nHEAD, a branch name, or an unpersisted variable",
     "validates it and returns its exact\n`sandbox_path`",
     "status reports `dead_lock: true` only for\na stale lock on a nonterminal run",
+    "Before consulting `status.next`, computing or activating a wave",
+    "walk first\nparents from the current integration HEAD, nearest to oldest",
+    "not\na base-movement-only guard",
+    "Never rerun unchanged bytes when the outcome is unknown",
+    "artifacts/post-merge-repairs.md",
+    "planned → committed|needs-human",
+    "--repository-verify --repo \"$RUN_REPO\"",
   ]) assert.ok(skill.includes(fragment), `state-relocation contract is missing: ${fragment}`);
 
   const commands = documentedFactoryCommands(skill);
@@ -150,10 +157,10 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const branchProbes = [...stepFour.matchAll(/CHECKED_OUT_FEATURE_BRANCH="\$\(git -C "\$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD\)"/gu)]
     .map((match) => match.index);
   const sliceActivation = stepFour.indexOf('$ factory slice "$R" "$SLICE_ID" running');
-  assert.equal(branchProbes.length, 3, "feature branch must be reverified for activation, observation, and merge");
+  assert.equal(branchProbes.length, 4, "feature branch must be reverified before waves, activation, observation, and merge");
   assert.ok(recordedFeatureDefinition >= 0 && recordedFeatureDefinition < integrationDefinition && integrationDefinition < branchProbes[0]);
-  assert.ok(branchProbes[0] < sliceActivation && sliceActivation < branchProbes[1] && branchProbes[1] < sliceObservation);
-  assert.ok(sliceObservation < branchProbes[2] && branchProbes[2] < integrationMerge,
+  assert.ok(branchProbes[0] < branchProbes[1] && branchProbes[1] < sliceActivation && sliceActivation < branchProbes[2] && branchProbes[2] < sliceObservation);
+  assert.ok(sliceObservation < branchProbes[3] && branchProbes[3] < integrationMerge,
     "recorded feature branch verification must immediately precede each slice operation");
 
   const stepFive = skill.slice(skill.indexOf("## Step 5 — Integrate"), skill.indexOf("## Step 6 — Draft PR"));
