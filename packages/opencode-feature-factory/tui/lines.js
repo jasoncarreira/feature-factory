@@ -38,9 +38,17 @@ export function renderLines(snapshot) {
 }
 
 function secondaryLines(run) {
+  if (run.parked) {
+    return [
+      `${run.run_id}${run.issue_key ? `  ${run.issue_key}` : ""}  needs-human (parked)`,
+      `reason: ${run.terminal_result.reason}`,
+      `next: ${run.next}`,
+      ...(run.sandbox_path ? [`sandbox: ${run.sandbox_path}`] : []),
+    ];
+  }
   if (run.deadLock && run.sandbox_path) {
     return [
-      `${run.run_id}  lock: stale (dead; sandbox retained)`,
+      `${run.run_id}${run.issue_key ? `  ${run.issue_key}` : ""}  lock: stale (dead; sandbox retained)`,
       `sandbox: ${run.sandbox_path}`,
       `next: ${run.next}`,
     ];
@@ -53,6 +61,16 @@ function secondaryLines(run) {
 
 function primaryLines(run) {
   if (!run.valid) return invalidLines(run);
+
+  if (run.parked) {
+    return [
+      `${run.run_id}${run.issue_key ? `  ${run.issue_key}` : ""}`,
+      `needs-human (parked)  ${run.mode}  ${run.branch}`,
+      `reason: ${run.terminal_result.reason}`,
+      `next: ${run.next}`,
+      ...(run.sandbox_path ? [`sandbox: ${run.sandbox_path}`] : []),
+    ];
+  }
 
   // A finished run is reported, not featured. `selectActiveRun` prefers a live run and falls back to
   // the newest, so with nothing running the newest dead one became the headline — four lines of
@@ -85,7 +103,6 @@ function primaryLines(run) {
   }
   if (run.validator) lines.push(`validator ${run.validator}`);
   if (run.pr_url) lines.push(`pr ${run.pr_url}`);
-  if (run.terminal_result) lines.push(`${run.terminal_result.status}: ${run.terminal_result.reason}`);
   lines.push(`${run.awaiting_gate ? ">> " : ""}next: ${run.next}`);
   if (run.sandbox_path) {
     lines.push(`sandbox: ${run.sandbox_path}`);
