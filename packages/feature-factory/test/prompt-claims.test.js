@@ -1045,10 +1045,22 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"status": "needs-human"[\s\S]*factory config entry 'verify'[\s\S]*\.factory\.json verify suite/u,
     act(repo) {
+      const skill = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const stepFour = skill.slice(skill.indexOf("## Step 4 — Build slices"), skill.indexOf("## Step 5 — Integrate"));
+      assert.match(stepFour,
+        /The reason names the full `INTRODUCING_MERGE`, “factory config entry 'verify'”, the numeric\s+or unavailable status, and an independently established failing-test identifier when one exists;\s+otherwise name the truthful `\.factory\.json verify suite`\./u,
+        "production-defect terminalization must name the full introducing merge, status, and established test or truthful suite fallback");
+      assert.match(stepFour, /State that merged-slice evidence and review\s+remain preserved\./u,
+        "production-defect terminalization must preserve the merged slice's evidence and review");
       const initialized = initFresh(repo, [RUN, "--now", NOW]);
-      const reason = `${"a".repeat(40)} factory config entry 'verify' failed with exit status 23 in .factory.json verify suite; merged-slice evidence and review remain preserved`;
+      const introducingMerge = "a".repeat(40);
+      const reason = `${introducingMerge} factory config entry 'verify' failed with exit status 23 in .factory.json verify suite; merged-slice evidence and review remain preserved`;
       assert.equal(factory(initialized.repository, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW]).ok, true);
-      return factory(initialized.repository, ["status", RUN, "--json"]);
+      const result = factory(initialized.repository, ["status", RUN, "--json"]);
+      const terminal = JSON.parse(result.out).terminal_result;
+      assert.equal(terminal.reason, reason);
+      assert.ok(terminal.reason.startsWith(introducingMerge));
+      return result;
     },
   },
   {
