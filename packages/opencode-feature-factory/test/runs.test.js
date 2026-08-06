@@ -962,6 +962,10 @@ describe("the host registration contract", () => {
     const originalNow = Date.now;
     const now = Date.parse("2026-07-30T12:30:00.000Z");
     try {
+      const resolvedFactory = realpathSync(new URL(import.meta.resolve("feature-factory")));
+      const sourceFactory = realpathSync(new URL("../../feature-factory/state/index.js", import.meta.url));
+      assert.equal(resolvedFactory, sourceFactory,
+        "the bare feature-factory dependency must resolve inside this source workspace, not a parent checkout");
       Date.now = () => now;
       const dir = seedRun(root, "app-1", RUN());
       // A host-issued id, because that is what a lock now holds and the only thing the sidebar will
