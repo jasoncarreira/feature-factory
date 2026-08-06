@@ -1010,8 +1010,12 @@ const CLAIMS = [
       for (const postMergeClaim of [
         "production source is never repaired on the integration branch",
         "`unavailable` is the only replay-eligible class",
+        "exact run, subject, current head, and unchanged `verify` command binding",
+        "canonical `observed: false`, `exit: null`, and\n  `skipped_reason: null`",
         "Only matching `unavailable` evidence, no active\nrepair record",
-        "do not replay again from that driver invocation after\nthe CLI has exhausted its two attempts",
+        "freshly verified exact integration worktree on the recorded feature branch",
+        "do not replay again from that driver invocation after the CLI has\nexhausted its two attempts",
+        "evidence never execute and durably terminalize `needs-human`",
         "merged-slice evidence and review\nremain preserved",
         "Apart from the safe matching-unavailable replay above, a configured command may run again\nonly after a committed test-only repair changes HEAD",
         "include every attempt under\n`## Post-merge test-only repairs`",

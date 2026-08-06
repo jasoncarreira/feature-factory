@@ -109,21 +109,30 @@ the driver before it consults or activates the next wave. It never reopens, re-s
 the merged slice.
 
 Production defects are not repaired on the integration branch and terminalize `needs-human`.
-Unclassifiable, interrupted-unknown, invalid-config, unobservable, and exhausted outcomes do the same. A
-confirmed test-only finding may change test files only, never production or privileged paths; it uses a
-separate commit, preserves the tested property or records its loss, is bounded by `max_retries`, and is
-disclosed in the PR body. Only changed bytes from such a committed repair authorize another repository
-verification. Canonical matching evidence has exactly four classifications: `green`, `failed`,
-`unavailable`, and `unknown`. Only `unavailable` may execute again; failed and unknown evidence never
-does.
+Repair-journal exhaustion, dirty or moved replay safety failures, invalid config, unobservable state, and
+malformed, stale, foreign, wrong-command, missing-field, or internally inconsistent evidence do the same.
+Clean, unchanged second-unavailable repository verification is explicitly excluded: it follows the
+nonterminal exhausted/release contract below. A confirmed test-only finding may change test files only,
+never production or privileged paths; it uses a separate commit, preserves the tested property or
+records its loss, is bounded by `max_retries`, and is disclosed in the PR body. Only changed bytes from
+such a committed repair authorize another repository verification.
 
-On a first unavailable merge result, the CLI freshly proves the exact worktree and branch, unchanged
-recorded merge SHA at `HEAD`, and a clean tree before one retry. Dirty, moved, unobservable, malformed,
-stale, or foreign state never executes. Each attempt receives the full timeout; there is no aggregate
-timer, third attempt, output capture, fallback, partial suite, or persistent counter. The timeout and
-retry are verify-only: resolver, slice observation, and Gate 3 remain unchanged. The same configured
-timeout applies to the one direct repository observation after a committed test-only repair without
-changing repair-journal retry policy.
+Canonical evidence has exactly four classifications. `green` has exact run, `test-verifier` subject,
+current merged head, and unchanged `verify` command binding, observed integer exit zero, and
+`review_ready: true`. `failed` has that exact binding with observed nonzero integer exit, or observed zero
+that is not review-ready. `unavailable` has that exact binding and canonical `observed: false`,
+`exit: null`, and `skipped_reason: null`. Missing, unreadable, malformed, foreign, stale-head,
+wrong-command, missing-field, or internally inconsistent evidence is `unknown`. Only `unavailable` may
+execute again; failed and unknown evidence never does.
+
+On a first unavailable merge result, replay requires no active repair and the CLI freshly proves the
+exact integration worktree on the recorded feature branch, unchanged recorded merge SHA at `HEAD`, and a
+clean tree before one retry. Dirty, moved, unobservable, malformed, stale, foreign, wrong-command, or
+inconsistent state never executes. Each attempt receives the full timeout; there is no aggregate timer,
+third attempt, output capture, fallback, partial suite, or persistent counter. The timeout and retry are
+verify-only: resolver, slice observation, and Gate 3 remain unchanged. The same configured timeout
+applies to the one direct repository observation after a committed test-only repair without changing
+repair-journal retry policy.
 
 After two clean, unchanged unavailable executions, the current merge/replay CLI invocation and enclosing
 driver invocation terminate, but the irreversible `factory terminal` transition does not run. Durable

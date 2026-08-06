@@ -934,10 +934,14 @@ closed schema and derived `review_ready` rules as the CLI. Classify it into exac
 
 Never rerun unchanged bytes for `failed` or `unknown`. On each fresh Step 4 driver invocation, reconcile
 the latest merged row before consulting `status.next`. Only matching `unavailable` evidence, no active
-repair record, current integration `HEAD` equal to that row's immutable merge SHA, and a freshly
-observable clean tree authorize replay of the exact same-SHA `factory slice … merged` command. The
-CLI owns the invocation-local execution budget; do not replay again from that driver invocation after
-the CLI has exhausted its two attempts.
+repair record, a freshly verified exact integration worktree on the recorded feature branch, current
+integration `HEAD` equal to that row's immutable merge SHA, and a freshly observable clean tree authorize
+replay of the exact same-SHA `factory slice … merged` command. Dirty, moved, or unobservable replay
+safety state and malformed, foreign, stale-head, wrong-command, missing-field, or internally inconsistent
+evidence never execute and durably terminalize `needs-human`. Clean, unchanged second-unavailable
+exhaustion is the sole nonterminal exception and follows the orderly release contract below. The CLI owns
+the invocation-local execution budget; do not replay again from that driver invocation after the CLI has
+exhausted its two attempts.
 
 Determine `INTRODUCING_MERGE` before routing. A validated active repair record supplies it only after it
 equals exactly one merged row and is an ancestor of that record's Starting head. Otherwise walk first

@@ -83,13 +83,22 @@ bound to the current merged head and the immutable root base.
 If `.factory.json` is absent, intake declares no resolver and after a recorded merge the factory silently
 returns its previous response with no repository command, evidence write, or new output. A post-record
 failure leaves the merged row and its slice evidence and review unchanged and stops before the next wave.
-Production and unresolved findings terminalize `needs-human`; only a confirmed test-only finding can use
-the bounded test-file-only repair path, with a separate commit and fresh repository verification.
-Canonical matching evidence is classified as `green`, `failed`, `unavailable`, or `unknown`, and only
-`unavailable` is replay-eligible. A later invocation may replay the exact same-SHA merge only after fresh
-cleanliness and immutable-head safety checks and with no active repair. Green and failed evidence is
-reused; unknown, malformed, stale, or foreign evidence never executes. The merged slice is never
-reopened, re-seeded, re-observed, remerged, or re-dispatched.
+Production defects, repair exhaustion, dirty or moved safety failures, invalid config, and malformed,
+stale, foreign, wrong-command, missing-field, or inconsistent evidence terminalize `needs-human`; clean,
+unchanged second-unavailable repository verification instead follows the nonterminal exhausted/release
+contract below. Only a confirmed test-only finding can use the bounded test-file-only repair path, with a
+separate commit and fresh repository verification.
+
+Canonical evidence has exactly four classifications. `green` has exact run, `test-verifier` subject,
+current merged head, and unchanged `verify` command binding, observed integer exit zero, and
+`review_ready: true`. `failed` has that exact binding with an observed nonzero integer exit, or observed
+zero that is not review-ready. `unavailable` has that exact binding and `observed: false`, `exit: null`,
+and `skipped_reason: null`. Missing, unreadable, malformed, foreign, stale-head, wrong-command,
+missing-field, or internally inconsistent evidence is `unknown`. Only `unavailable` is replay-eligible.
+A later invocation may replay the exact same-SHA merge only with no active repair, a freshly verified
+exact integration worktree on the recorded feature branch, the immutable merge SHA still at `HEAD`, and
+a freshly observed clean tree. Green and failed evidence is reused; unknown evidence never executes. The
+merged slice is never reopened, re-seeded, re-observed, remerged, or re-dispatched.
 
 Two clean, unchanged unavailable executions terminate the current CLI and driver invocations, not the
 durable run. The driver quiesces all tasks and heartbeats, releases exactly its owning session, and uses

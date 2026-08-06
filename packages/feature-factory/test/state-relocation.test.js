@@ -92,10 +92,6 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "Before consulting `status.next`, computing or activating a wave",
     "walk first\nparents from the current integration HEAD, nearest to oldest",
     "not\na base-movement-only guard",
-    "`unavailable` is the only replay-eligible class",
-    "Only matching `unavailable` evidence, no active\nrepair record",
-    "current integration `HEAD` equal to that row's immutable merge SHA",
-    "do not replay again from that driver invocation after\nthe CLI has exhausted its two attempts",
     "terminalize means terminate the current `factory slice … merged` CLI invocation",
     "it does not mean the irreversible\nfactory terminal transition",
     "Await every in-flight specialist task",
@@ -153,6 +149,13 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const stepFour = skill.slice(skill.indexOf("## Step 4 — Build slices"), skill.indexOf("## Step 5 — Integrate"));
   assert.doesNotMatch(stepFour, /(?:--repo|git -C) "\$(?:S|O)"/u);
   assert.doesNotMatch(stepFour, /\$W\//u);
+  const classificationPolicy = stepFour.slice(stepFour.indexOf("Classify it into exactly four outcomes:"), stepFour.indexOf("Determine `INTRODUCING_MERGE`"));
+  assert.match(classificationPolicy, /- `green`: exact run, subject, current head, and unchanged `verify` command binding, observed integer\s+exit zero, and `review_ready: true`\.[\s\S]*- `failed`: the same exact binding with an observed nonzero integer exit, or observed zero that is not\s+review-ready[\s\S]*- `unavailable`: the same exact binding with canonical `observed: false`, `exit: null`, and\s+`skipped_reason: null`\.[\s\S]*- `unknown`: missing, unreadable, malformed, foreign, stale-head, wrong-command, missing-field, or\s+internally inconsistent evidence[\s\S]*`unavailable` is the only replay-eligible class/u,
+    "the closed classifier must bind all four outcomes, including exact provenance and the canonical unavailable tuple");
+  assert.match(classificationPolicy, /Only matching `unavailable` evidence, no active\s+repair record, a freshly verified exact integration worktree on the recorded feature branch, current\s+integration `HEAD` equal to that row's immutable merge SHA, and a freshly observable clean tree authorize\s+replay/u,
+    "same-SHA replay must require every fresh safety proof");
+  assert.match(classificationPolicy, /Dirty, moved, or unobservable replay\s+safety state and malformed, foreign, stale-head, wrong-command, missing-field, or internally inconsistent\s+evidence never execute and durably terminalize `needs-human`[\s\S]*Clean, unchanged second-unavailable\s+exhaustion is the sole nonterminal exception/u,
+    "unsafe and untrusted outcomes must remain durably terminal while clean exhaustion stays nonterminal");
   const repairPolicy = stepFour.slice(stepFour.indexOf("### Post-merge finding routing and repair journal"), stepFour.indexOf("**Ownership disclosure.**"));
   const exhaustionPolicy = stepFour.slice(stepFour.indexOf("### Orderly repository-verification exhaustion"), stepFour.indexOf("### Post-merge finding routing and repair journal"));
   const exhausted = exhaustionPolicy.indexOf("Outcome: repository-verify-exhausted");
