@@ -103,7 +103,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "actual host-exported\n`FACTORY_SESSION_ID`",
     "never require session-ID inequality",
     "artifacts/post-merge-repairs.md",
-    "A repair-record needs-human remains unresolved after envelope resume",
+    "Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`",
     "--repository-verify --repo \"$RUN_REPO\"",
   ]) assert.ok(skill.includes(fragment), `state-relocation contract is missing: ${fragment}`);
 
@@ -182,9 +182,9 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   ], "the repair journal must retain every exact field");
   const statusSentence = /Status is exactly ([^.]+)\./u.exec(repairPolicy)?.[1] ?? "";
   assert.deepEqual([...statusSentence.matchAll(/`([^`]+)`/gu)].map((match) => match[1]), [
-    "planned", "committed", "verified", "failed", "exhausted",
+    "planned", "committed", "verified", "failed", "exhausted", "needs-human",
   ]);
-  assert.ok(repairPolicy.includes("This repair-record needs-human is not the run envelope, and envelope resume does not clear it."));
+  assert.ok(repairPolicy.includes("This repair record is not the run envelope, and envelope resume does not clear that status."));
   for (const fragment of [
     "attempts are ordered, contiguous, duplicate- and gap-free `1..N`",
     "`N <= max_retries`; globally at most one record is active (`planned` or `committed`)",
@@ -193,15 +193,20 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "separate single-parent commit whose parent is Starting head",
     "nonempty diff is exactly the sorted test paths, which changes tests only, and which is current\nHEAD when recorded",
   ]) assert.ok(repairPolicy.includes(fragment), `repair invariant is missing: ${fragment}`);
-  assert.ok(repairPolicy.includes("A repair-record needs-human remains unresolved after envelope resume; only its existing repair transition clears it."));
+  const transitionSentence = /Allowed transitions are ([\s\S]*?)\nFinal records/u.exec(repairPolicy)?.[1] ?? "";
+  assert.deepEqual([...transitionSentence.matchAll(/`([^`]+ → [^`]+)`/gu)].map((match) => match[1]), [
+    "planned → committed|needs-human",
+    "committed → verified|failed|exhausted|needs-human",
+    "failed → exhausted",
+  ], "the repair journal must admit only the approved transitions");
+  assert.ok(repairPolicy.includes("Envelope resume does not clear or alter these repair transitions."));
   assert.ok(repairPolicy.includes("This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication."));
-  assert.ok(repairPolicy.includes("`failed → exhausted`"));
   for (const [state, outcomes] of [
     ["planned", ["tree is clean", "`HEAD === Starting head`", "same known trigger", "resume edits without rerunning verify", "Otherwise terminalize"]],
     ["committed", ["valid repair head and diff plus green evidence becomes `verified`", "known failed evidence becomes\n`failed` or `exhausted`", "unknown evidence or any mismatch terminalizes"]],
     ["failed", ["matching\nrepair head and known failed evidence creates the next contiguous attempt when allowed", "otherwise it\nbecomes `exhausted`", "mismatch, green, or unknown terminalizes"]],
     ["verified", ["permits progression only when\nit is latest for that introducing merge and canonical evidence is green at current HEAD", "reconcile any\nnearer recorded merge independently"]],
-    ["exhausted", ["`exhausted` always blocks", "An unresolved repair-record needs-human remains a blocker"]],
+    ["exhausted", ["`exhausted` and every unresolved repair record always block", "envelope resume does not clear either"]],
   ]) {
     for (const outcome of outcomes) assert.ok(repairPolicy.includes(outcome), `${state} resume outcome is missing: ${outcome}`);
   }

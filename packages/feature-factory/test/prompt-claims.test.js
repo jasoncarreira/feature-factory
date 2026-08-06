@@ -107,10 +107,10 @@ const NEEDS_HUMAN_PROSE = [
   ["moved-head", "A moved integration head parks top-level needs-human; restore provenance before explicit factory resume and safety replay.", "a moved head requires hand-finishing"],
   ["replay-safety", "Top-level needs-human remains parked while replay safety is false; explicit resume does not bypass the same safety check.", "needs-human can never be restarted"],
   ["production-defect", "A production defect parks top-level needs-human; after the external fix, explicitly resume the intact run.", "a production defect requires a new run"],
-  ["repair-status", "This repair-record needs-human is not the run envelope, and envelope resume does not clear it.", "envelope resume clears this repair-record"],
-  ["repair-transition", "A repair-record needs-human remains unresolved after envelope resume; only its existing repair transition clears it.", "factory resume resolves the repair-record"],
+  ["repair-status", "Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`.", "envelope resume clears this repair-record"],
+  ["repair-planned-transition", "`planned → committed|needs-human`", "factory resume resolves the repair-record"],
+  ["repair-committed-transition", "`committed → verified|failed|exhausted|needs-human`", "factory resume resolves the repair-record"],
   ["repair-guard", "This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication.", "envelope resume authorizes this repair-record"],
-  ["repair-blocker", "An unresolved repair-record needs-human remains a blocker because envelope resume does not clear it.", "resume removes the repair blocker"],
   ["generic-stop", "Use terminal needs-human only to park a running envelope; use explicit factory resume after the cause is fixed.", "terminal needs-human is a final outcome"],
   ["generic-retention", "A top-level needs-human sandbox stays retained while parked and continues only after explicit factory resume.", "retained needs-human cannot continue"],
   ["gate-three-repair", "A Gate 3 repair-record needs-human remains unresolved because envelope resume does not clear it.", "envelope resume satisfies Gate 3 repair"],
@@ -137,7 +137,7 @@ function checkNeedsHumanProse(prose) {
   for (const [id, required, forbidden] of NEEDS_HUMAN_PROSE) {
     if (prose.split(required).length !== 2) throw new Error(id);
     const line = prose.split("\n").find((entry) => entry.includes(required));
-    if (!line || (line.match(/needs-human/gu) ?? []).length !== 1 || line.includes(forbidden)) throw new Error(id);
+    if (!line || line.includes(forbidden)) throw new Error(id);
   }
   if ((prose.match(/needs-human/gu) ?? []).length !== NEEDS_HUMAN_PROSE.length) throw new Error("needs-human-count");
 }

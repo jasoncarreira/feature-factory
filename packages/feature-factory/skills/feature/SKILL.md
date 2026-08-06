@@ -1195,16 +1195,15 @@ journal as untrusted input on every read.
 
 Each record contains `Introducing merge`, per-merge `Attempt`, `Starting head`, `Trigger result`, sorted
 `Test paths`, concrete `Cause`, `Property outcome`, `Repair commit`, `Post-repair result`, and `Status`.
-Status is exactly `planned`, `committed`, `verified`, `failed`, or `exhausted`. This repair-record needs-human is not the run envelope, and envelope resume does not clear it.
+Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`. This repair record is not the run envelope, and envelope resume does not clear that status.
 For each
 introducing merge attempts are ordered, contiguous, duplicate- and gap-free `1..N`, with
 `N <= max_retries`; globally at most one record is active (`planned` or `committed`). Immutable fields
 are introducing merge, attempt, Starting head, trigger result, paths, and cause. Starting head is exact
 HEAD at planning and must descend from the introducing merge.
 
-Allowed repair transitions preserve the existing states. A repair-record needs-human remains unresolved after envelope resume; only its existing repair transition clears it.
+Allowed transitions are `planned → committed|needs-human`, `committed → verified|failed|exhausted|needs-human`, and `failed → exhausted` when no attempt remains. Envelope resume does not clear or alter these repair transitions.
 This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication.
-The existing transitions from `planned` and `committed`, plus `failed → exhausted` when no attempt remains, remain authoritative.
 Final records are never deleted. A later attempt is a new record starting at the prior failed repair
 commit, which must equal current HEAD; prior failed records remain complete history. Write `planned`
 before edits. The repair commit must be a separate single-parent commit whose parent is Starting head,
@@ -1227,7 +1226,7 @@ valid repair head and diff plus green evidence becomes `verified`; known failed 
 repair head and known failed evidence creates the next contiguous attempt when allowed, otherwise it
 becomes `exhausted`; mismatch, green, or unknown terminalizes. `verified` permits progression only when
 it is latest for that introducing merge and canonical evidence is green at current HEAD; reconcile any
-nearer recorded merge independently. `exhausted` always blocks. An unresolved repair-record needs-human remains a blocker because envelope resume does not clear it.
+nearer recorded merge independently. `exhausted` and every unresolved repair record always block; envelope resume does not clear either.
 
 **Ownership disclosure.** A builder that must touch a path outside its declared set finishes the
 required work and discloses every concrete out-of-lane path with a rationale, so the reviewer decides
