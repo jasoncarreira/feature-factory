@@ -19,7 +19,8 @@ You are the active **run driver**: either the primary `feature-factory` agent dr
 session. You route work through specialized subagents, hold the line on scope, own the worktree/PR
 lifecycle, and own a durable control plane on disk. An existing run's immutable persisted mode is the
 sole gate authority: an interactive background driver performs a verified park and releases its lock,
-headless preserves `needs-human`, and autonomous decides only under the existing preconditions.
+autonomous decides only under the existing preconditions.
+Persisted mode parks a top-level needs-human stop; after the cause is fixed, explicitly resume it with factory resume before continuing.
 
 Two principles make this a factory rather than a session workflow:
 
@@ -133,7 +134,7 @@ resume; invocation flags do not select resumed behavior:
 - **interactive** — the foreground `/feature` driver persists and presents each gate, then waits for
   `approve` / `changes: <...>` / `stop`; a background driver instead performs the verified park below,
   releases its lock, and ends its turn without deciding the gate.
-- **headless** — a gate that requires a human records `needs-human` and stops.
+- **headless** — Headless mode exits its host turn with top-level needs-human parked; a later host must explicitly resume it with factory resume.
 - **autonomous** — gates may be decided without a human only under the preconditions below.
 
 ## Background dispatch and the run-orchestrator
@@ -195,18 +196,14 @@ Persisted mode determines what each driver may do:
 | Persisted mode | Foreground driver | Background run-orchestrator | Background gate answer |
 |---|---|---|---|
 | `interactive` | Persist and present the pending gate, then wait for a real human | Perform the verified park below, release its lock, and end the turn | Route only to the associated same session after an explicit human response |
-| `headless` | Preserve terminal `needs-human` | Terminalize `needs-human`; never masquerade as an interactive parked gate | Refused |
+| `headless` | Mode result needs-human means parked and explicitly resumable; only completed, partial, and blocked are final. | Preserve the parked result; never masquerade as an interactive pending gate | Refused |
 | `autonomous` | Decide only when the existing preconditions authorize it | Decide under the same rules and continue through draft PR and mandatory Step 7 | Refused |
 
 An inability to ask a human never promotes interactive or headless to autonomous. When a headless run
-reaches a human gate, terminalize with reason exactly `headless run reached a human gate`:
-
-```sh
-factory terminal "$R" needs-human --reason "headless run reached a human gate" --repo "$RUN_REPO"
-```
-
-Verify qualified status durably reports `terminal:needs-human` and that exact terminal reason, retain
-the selected sandbox and repository, and stop.
+reaches a human gate, use the exact reason `headless run reached a human gate`.
+Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --repo S.
+For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
+Retain the selected sandbox and repository, then stop the host turn.
 
 The gate artifact map is exact:
 
@@ -305,11 +302,11 @@ later explicit human request starts a new checked operation. A later start first
 possibly successful create; title lookup still cannot prove a prompt ran. A later answer rechecks the
 persisted pending gate and mode before mutation.
 
-Terminal reporting follows persisted state. Headless retains its selected sandbox and exact
-`needs-human` result. Autonomous continues only while the existing gate preconditions hold, then uses
+Terminal reporting follows persisted state. Report top-level needs-human as parked with its reason and explicit factory resume command.
+Autonomous continues only while the existing gate preconditions hold, then uses
 the existing draft-PR flow and mandatory Step 7 handoff. Interactive `stop` retains the selected run
-repository without terminalizing. Blocked, partial, and needs-human runs report their selected sandbox
-status and repository. After completed sandbox archive/removal, query and report the canonical
+repository without terminalizing. Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
+Blocked and partial runs report their selected sandbox status and repository. After completed sandbox archive/removal, query and report the canonical
 post-completion repository selected by Step 7, never the stale sandbox. Report only existing status,
 terminal result, and PR URL; add no durable fields.
 
@@ -320,9 +317,9 @@ These rules apply whenever the selected or resumed manifest's immutable `run.jso
 fresh run; an existing run follows these rules solely because its manifest already records
 `autonomous`, regardless of the current invocation's flags.
 
-- Each gate has a stated precondition. If it does not hold, record `needs-human` with
-  `factory terminal "$R" needs-human --reason "$REASON" --repo "$RUN_REPO"` and **stop** — do not
-  approve to keep moving.
+- An autonomous failed gate parks top-level needs-human; fix the durable gate cause before explicit factory resume.
+- After an autonomous needs-human gate stop, explicitly resume only after the existing pre-lock and ownership checks pass.
+  Do not approve to keep moving.
 - **Gate 1 (story)**: approve only if the story has clear acceptance criteria and scope, with no
   unresolved product, UX, security, or external-policy decision.
 - **Gate 2 (brief + plan)**: approve only after `work-reviewer` approves both spec and decomposition,
@@ -545,6 +542,20 @@ removal remain the sole completed-handoff exception to bootstrap/refusal state p
 
 ### Resume or collision
 
+Resume order 1 — bind the selected manifest to the intended retained sandbox, prove physical containment, and obtain qualified status for that bound manifest.
+Resume order 2 — run the post-selection operator exact-ref-absent guard.
+Resume order 3 — complete the existing effective-push proof.
+Resume order 4 — accept the feature branch only after existing reflog/provenance, branch/worktree binding, seed ancestry, cleanliness/recovery, and operator exact-ref rechecks pass in their current order.
+Resume order 5 — immediately before claiming, rerun the final operator exact-ref-absent guard.
+Resume order 6 — claim with the current host session or perform a justified existing steal, then verify qualified status still shows this fresh owner and the parked result originally observed.
+Resume order 7 — invoke explicit factory resume, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.
+Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.
+Resume order 9 — continue solely from the newly qualified status.next.
+
+For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment and before effective-push proof. Order 3 never absorbs containment, binding, or the post-selection exact-ref guard. During order 4 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 5 and claim or justified steal. Order 6 requires `lock_session === FACTORY_SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --repo "$RUN_REPO"` with no session flag for order 7, then require the same fresh owner. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 never uses the pre-resume observation or the stop reason.
+
+If resume refuses after claim or the run later reparks, quiesce builders, tools, background tasks, and heartbeat loops; release the same owning session; then require qualified status to show an absent lock and null owner before another session begins.
+
 Before requesting a fresh run, inspect only the two deterministic manifest candidates described by the
 CLI contract: the legacy candidate under `O/.factory/R` and the sandbox candidate under
 `O/.factory-sandboxes/R/.factory/R`. They are lookup candidates, not selected paths. If both exist,
@@ -739,7 +750,7 @@ If another live session holds the lock, resume with that session or abort; steal
 status proves the holder gone. Refresh long waits with
 `factory heartbeat "$R" --session "$SESSION_ID" --repo "$RUN_REPO"`. Only after the lock is established
 dispatch the planned ticket, story, or design agent. A valid status reports `dead_lock: true` only for
-a stale lock on a nonterminal run; it authorizes no automatic state disposal.
+a stale lock on a current `running` run; a historical parked result does not hide that crash. It authorizes no automatic state disposal.
 
 ### Gate 1 — Story
 
@@ -811,8 +822,8 @@ The first successful seed is the **ratification point** for two decisions, and n
 afterwards:
 
 - `paths` — the set every later merge is judged against, so a slice that needs more scope amends the
-  unseeded plan at Gate 2 rather than quietly widening. After seeding, changed scope requires a terminal
-  decision or a new run; the plan cannot be amended or reseeded.
+  unseeded plan at Gate 2 rather than quietly widening. After seeding, insufficient scope parks the run;
+  explicit resume does not amend or reseed the immutable plan, so unchanged scope may park it again.
 - `test_plan` — the exact executable commands authorized to prove the slice. Each non-empty entry is
   one complete, independently sufficient command string that must be supplied verbatim as one
   `--test-cmd` value. A slice with a non-empty `test_plan` is not `review_ready` until one ratified
@@ -927,8 +938,8 @@ closed schema and derived `review_ready` rules as the CLI. Classify it into exac
   review-ready. Preserve exact known status reporting, including status 23, and do not execute again.
 - `unavailable`: the same exact binding with canonical `observed: false`, `exit: null`, and
   `skipped_reason: null`.
-- `unknown`: missing, unreadable, malformed, foreign, stale-head, wrong-command, missing-field, or
-  internally inconsistent evidence. Terminalize `needs-human` without executing `verify`.
+- `unknown`: missing, unreadable, malformed, foreign, stale-head, wrong-command, missing-field, or internally inconsistent evidence.
+Malformed verification evidence parks top-level needs-human; fix the evidence source and explicitly resume without editing evidence or run.json.
 
 `unavailable` is the only replay-eligible class.
 
@@ -937,8 +948,9 @@ the latest merged row before consulting `status.next`. Only matching `unavailabl
 repair record, a freshly verified exact integration worktree on the recorded feature branch, current
 integration `HEAD` equal to that row's immutable merge SHA, and a freshly observable clean tree authorize
 replay of the exact same-SHA `factory slice … merged` command. Dirty, moved, or unobservable replay
-safety state and malformed, foreign, stale-head, wrong-command, missing-field, or internally inconsistent
-evidence never execute and durably terminalize `needs-human`. Clean, unchanged second-unavailable
+safety state and malformed, foreign, stale-head, wrong-command, missing-field, or internally inconsistent evidence never execute.
+Unsafe verification evidence parks top-level needs-human; explicit resume must replay the existing reconciliation path.
+Clean, unchanged second-unavailable
 exhaustion is the sole nonterminal exception and follows the orderly release contract below. The CLI owns
 the invocation-local execution budget; do not replay again from that driver invocation after the CLI has
 exhausted its two attempts.
@@ -1097,8 +1109,9 @@ Per slice:
    proof of the exact integration worktree and branch, unchanged recorded merge SHA at `HEAD`, and an
    observably clean tree. If that proof succeeds, the CLI executes attempt 2 exactly once and overwrites
    the same canonical evidence path. There is no third attempt, aggregate timer, backoff, fallback,
-   sampling, output capture, or partial suite. Dirty, moved, or unobservable safety state refuses before
-   attempt 2 and routes to `needs-human` without cleaning, resetting, switching, or repairing the tree.
+    sampling, output capture, or partial suite. Dirty, moved, or unobservable safety state refuses before
+    attempt 2 without cleaning, resetting, switching, or repairing the tree.
+    An unsafe repository-verification retry parks top-level needs-human; clean the external cause before explicit factory resume and merge replay.
 
    On command refusal, immediately reload `RUN_MANIFEST`. If the row and supplied SHA were not
    recorded, follow the existing pre-record refusal. If the row is `merged` at exactly
@@ -1111,8 +1124,9 @@ Per slice:
    merge SHA. Green canonical evidence returns the normal response without execution; failed evidence
    reproduces the original refusal without execution; unknown evidence refuses and terminalizes without
    execution. Only canonical matching `unavailable` may perform the fresh safety proof and start a new
-   invocation-local cycle of at most two executions. A moved head refuses replay and delegates to
-   needs-human routing; it does not rerun `verify`. A successful replay changes only canonical
+    invocation-local cycle of at most two executions. A moved head refuses replay without rerunning `verify`.
+    A moved integration head parks top-level needs-human; restore provenance before explicit factory resume and safety replay.
+    A successful replay changes only canonical
    `evidence/test-verifier.json`, returns the normal merged payload, and never rewrites, remerges,
    reopens, re-observes, or redispatches the merged slice. Do not optimize Gate 3 with this evidence.
 
@@ -1122,7 +1136,7 @@ For AC6 and AC7, terminalize means terminate the current `factory slice … merg
 its enclosing run-driver invocation after two unavailable executions; it does not mean the irreversible
 factory terminal transition. Clean, unchanged exhaustion leaves durable `status: "running"` and
 `terminal_result: null`, so a later explicit invocation may reconcile the same merge with a fresh local
-budget. A durably terminal `needs-human` run is not restart-eligible.
+budget. Top-level needs-human remains parked while replay safety is false; explicit resume does not bypass the same safety check.
 
 After a clean, unchanged second `unavailable`, stop dispatching and processing `status.next`, and never
 issue another same-SHA replay in this driver invocation. Await every in-flight specialist task. Stop
@@ -1164,8 +1178,8 @@ Gate 3 remains a fresh independent observation.
 
 ### Post-merge finding routing and repair journal
 
-Route a known post-merge failure before any next-wave action. A production defect terminalizes
-`needs-human`; production source is never repaired on the integration branch. Unclassifiable,
+Route a known post-merge failure before any next-wave action. A production defect parks top-level needs-human; after the external fix, explicitly resume the intact run.
+Production source is never repaired on the integration branch. Unclassifiable,
 interrupted-unknown, invalid-config, unsafe dirty or moved replay, unobservable, journal-invalid, or
 repair-exhausted outcomes also terminalize. Clean unchanged repository-verification exhaustion follows
 the nonterminal contract above instead. The reason names the full `INTRODUCING_MERGE`, “factory config entry 'verify'”, the numeric
@@ -1181,14 +1195,15 @@ journal as untrusted input on every read.
 
 Each record contains `Introducing merge`, per-merge `Attempt`, `Starting head`, `Trigger result`, sorted
 `Test paths`, concrete `Cause`, `Property outcome`, `Repair commit`, `Post-repair result`, and `Status`.
-Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`. For each
+Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`. This repair record is not the run envelope, and envelope resume does not clear that status.
+For each
 introducing merge attempts are ordered, contiguous, duplicate- and gap-free `1..N`, with
 `N <= max_retries`; globally at most one record is active (`planned` or `committed`). Immutable fields
 are introducing merge, attempt, Starting head, trigger result, paths, and cause. Starting head is exact
 HEAD at planning and must descend from the introducing merge.
 
-Allowed transitions are `planned → committed|needs-human`,
-`committed → verified|failed|exhausted|needs-human`, and `failed → exhausted` when no attempt remains.
+Allowed transitions are `planned → committed|needs-human`, `committed → verified|failed|exhausted|needs-human`, and `failed → exhausted` when no attempt remains. Envelope resume does not clear or alter these repair transitions.
+This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication.
 Final records are never deleted. A later attempt is a new record starting at the prior failed repair
 commit, which must equal current HEAD; prior failed records remain complete history. Write `planned`
 before edits. The repair commit must be a separate single-parent commit whose parent is Starting head,
@@ -1211,7 +1226,7 @@ valid repair head and diff plus green evidence becomes `verified`; known failed 
 repair head and known failed evidence creates the next contiguous attempt when allowed, otherwise it
 becomes `exhausted`; mismatch, green, or unknown terminalizes. `verified` permits progression only when
 it is latest for that introducing merge and canonical evidence is green at current HEAD; reconcile any
-nearer recorded merge independently. `exhausted` and `needs-human` always block.
+nearer recorded merge independently. `exhausted` and every unresolved repair record always block; envelope resume does not clear either.
 
 **Ownership disclosure.** A builder that must touch a path outside its declared set finishes the
 required work and discloses every concrete out-of-lane path with a rationale, so the reviewer decides
@@ -1227,8 +1242,10 @@ validator judges the whole diff and Gate 3 will not approve unless the head it j
 
 Advance waves until all slices are `merged`, or a slice is `blocked`. If some merged and others
 blocked, the run is `partial` — surface it at the next gate rather than pushing on. Record a terminal
-decision, when needed, only as `factory terminal "$R" blocked|partial|needs-human --reason "$REASON" --repo "$RUN_REPO"`.
-A `blocked`, `partial`, or `needs-human` sandbox run retains `RUN_REPO`; stale nonterminal locks retain it
+decision only through the checked terminal command.
+Use terminal needs-human only to park a running envelope; use explicit factory resume after the cause is fixed.
+A top-level needs-human sandbox stays retained while parked and continues only after explicit factory resume.
+A `blocked` or `partial` sandbox run retains `RUN_REPO`; stale nonterminal locks retain it
 too. Nothing removes any of those sandboxes automatically. Legacy runs
 likewise retain their selected O-local state.
 
@@ -1293,7 +1310,8 @@ Before every Gate 3 presentation, first validate `artifacts/post-merge-repairs.m
 the complete journal, ancestry, commit, transition, resume, attempt-bound, one-active-record, and
 latest-verified/current-green rules in Step 4. An absent journal is valid only when no test-only repair
 was attempted. A known attempted repair with no journal, or a present journal that is malformed, omitted
-from the gate artifact, active, latest-failed, exhausted, or `needs-human`, refuses presentation.
+from the gate artifact, active, latest-failed, or exhausted refuses presentation.
+A Gate 3 repair-record needs-human remains unresolved because envelope resume does not clear it.
 
 Then write or refresh `gates/pre_pr.md` with the current validator verdict when applicable, the
 acceptance-criterion/test table, the feature-branch diff and PR-base summary, migration and flag
@@ -1331,7 +1349,8 @@ the time `factory pr` runs, so this is the last refusal that can still prevent s
   zero, against that same head.
 - no active or unresolved post-merge repair record, and for every represented introducing merge the
   latest record is `verified`. Earlier complete `failed` attempts are allowed; malformed, omitted,
-  active, latest-failed, exhausted, or `needs-human` history refuses publication.
+  active, latest-failed, or exhausted history refuses publication.
+Publication refuses a repair-record needs-human because envelope resume does not clear the repair record.
 
 If the gate refuses, its message names the missing piece. Fix that and re-present — do not push.
 
@@ -1445,7 +1464,8 @@ When `artifacts/post-merge-repairs.md` exists, validate it again and include eve
 `## Post-merge test-only repairs` in `BODY_FILE`: introducing merge, attempt, Starting head, trigger and
 post-repair results, files, cause, property outcome, repair commit, and status. Never omit an earlier
 failed attempt or property loss. Refuse publication on missing, malformed, active, unresolved,
-latest-failed, exhausted, or `needs-human` records.
+latest-failed, or exhausted records.
+This publication repair-record needs-human remains blocking, and envelope resume does not clear it.
 
 Labels, reviewers, and tracker fields are repository policy: derive them from the changed paths using
 whatever mapping the repository documents, and update the tracker only through *your* own calls.
@@ -1577,8 +1597,8 @@ with `RUN_REPO` or `S`:
 
     factory status "$R" --json --repo "$O"
 
-A successful archive retains the initial `draft-pr-recorded` reason. `blocked`, `partial`,
-`needs-human`, and nonterminal dead-lock runs only report their sandbox paths and remain untouched.
+A successful archive retains the initial `draft-pr-recorded` reason. Completed handoff remains final, while top-level needs-human is parked and requires explicit factory resume.
+`blocked`, `partial`, and nonterminal dead-lock runs only report their sandbox paths and remain untouched.
 There is no automatic cleanup of those runs and no handoff journal, replay protocol, retry loop,
 intermediate archive plane, tombstone, or cleanup state machine.
 
@@ -1607,7 +1627,7 @@ Never re-do a side effect the manifest shows already done — ticket creation, p
 ## Guardrails
 
 - **Never skip a gate in interactive mode.** In autonomous mode, a gate whose precondition fails is
-  `needs-human`, not an approval.
+  not an approval. Autonomous gate failure parks top-level needs-human; quiesce and unlock before a later explicit factory resume.
 - **One feature branch, one PR** per run. Slice branches are ephemeral, merged in, then deleted; they
   never become PRs.
 - **Only the active run driver mutates external systems** — tracker writes, pushes, PR creation.
@@ -1615,7 +1635,7 @@ Never re-do a side effect the manifest shows already done — ticket creation, p
 - **Never hand-write `run.json`.** If a `factory` command refuses a transition, the refusal is the
   answer; do not work around it by editing state.
 - **Bounded loops.** `max_retries` per slice and per step, recorded as attempts. On exhaustion mark
-  `blocked`/`partial`/`needs-human` with a reason and stop.
+  `blocked` or `partial` with a reason and stop. A bounded loop parks top-level needs-human; explicit resume may repark it if the external cause remains unfixed.
 - **Draft PR only.** Never merge, force-push, or close tickets. Humans merge.
 - **Scope discipline and no fabrication.** Flag out-of-scope work at the next gate. Never invent paths,
   keys, versions, or test passes — if the evidence is thin, say so and ask.
