@@ -5,13 +5,13 @@
 // guard removed is documentation, not evidence.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  buildEvidence, deriveReviewReady, observeAncestry, observeWorktree,
-  privilegedPaths, reconcileClaim, unownedPaths,
+  buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, observeAncestry,
+  observeWorktree, privilegedPaths, reconcileClaim, runTests, unownedPaths,
 } from "../observe/index.js";
 
 const run = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -57,15 +57,63 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       assert.ok(fields.includes("tests.exit"), `the claim/observation disagreement must be recorded, got ${JSON.stringify(fields)}`);
 
       const shellCommand = "FACTORY_VALUE='two words' && test \"$FACTORY_VALUE\" = 'two words' && test -f src/app/thing.ts && exit 23";
+      const shellCalls = [];
       const shellEvidence = buildEvidence({
         subject: "test-verifier", runId: "app-1", attempt: 1, branch: "slice", baseRef: f.base,
         worktree: f.root, status: "completed", testCommand: shellCommand, shellCommand: true,
+        options: { runner(command, args, options) {
+          if (command === shellCommand) shellCalls.push({ args, options });
+          return spawnSync(command, args, options);
+        } },
       });
+      assert.equal(DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, 900000);
+      assert.equal(shellCalls.length, 1);
+      assert.deepEqual(shellCalls[0].args, []);
+      assert.equal(shellCalls[0].options.cwd, f.root);
+      assert.equal(shellCalls[0].options.shell, true);
+      assert.equal(shellCalls[0].options.stdio, "inherit");
+      assert.equal(shellCalls[0].options.env, process.env);
+      assert.equal(shellCalls[0].options.timeout, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS);
       assert.deepEqual(Object.keys(shellEvidence.tests).sort(), ["cmd", "exit", "observed", "skipped_reason"]);
       assert.equal(shellEvidence.tests.cmd, shellCommand);
       assert.equal(shellEvidence.tests.exit, 23);
       assert.equal(shellEvidence.tests.observed, true);
       assert.equal(shellEvidence.review_ready, false);
+
+      const explicitTimeoutMs = 180001;
+      const unavailableCommand = "exit 0";
+      const unavailableCalls = [];
+      const unavailableEvidence = buildEvidence({
+        subject: "test-verifier", runId: "app-1", attempt: 2, branch: "slice", baseRef: f.base,
+        worktree: f.root, status: "completed", testCommand: unavailableCommand, shellCommand: true,
+        testTimeoutMs: explicitTimeoutMs,
+        options: { runner(command, args, options) {
+          if (command === unavailableCommand) {
+            unavailableCalls.push({ args, options });
+            return { status: null };
+          }
+          return spawnSync(command, args, options);
+        } },
+      });
+      assert.equal(unavailableCalls.length, 1);
+      assert.equal(unavailableCalls[0].options.timeout, explicitTimeoutMs);
+      assert.deepEqual(unavailableEvidence.tests, {
+        cmd: unavailableCommand, exit: null, observed: false, skipped_reason: null,
+      });
+
+      const argvCalls = [];
+      const argvResult = runTests(f.root, ["node", "--version"], {
+        timeoutMs: explicitTimeoutMs,
+        runner(command, args, options) {
+          argvCalls.push({ command, args, options });
+          return { status: 0 };
+        },
+      });
+      assert.equal(argvCalls.length, 1);
+      assert.equal(Object.hasOwn(argvCalls[0].options, "timeout"), false);
+      assert.deepEqual(argvResult, {
+        cmd: "node --version", exit: 0, observed: true, skipped_reason: null,
+      });
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
