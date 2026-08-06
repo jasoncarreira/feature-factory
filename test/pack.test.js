@@ -52,18 +52,57 @@ const SKILL_CONTRACTS = [
   ["an unavailable status is reported without fallback, naming the reference", (text) => text.includes("factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.")],
   ["commands and credentials are never disclosed", (text) => /Never print,\s+quote, reproduce, log, or persist the configured command string, an expanded or resolved command line,\s+credentials, or shell\/tool diagnostics/u.test(text)],
   ["no bridge, parser, capture, session, or output mechanism is added", (text) => /Add no helper module,\s+command runner, parser service[\s\S]*plugin bridge,[\s\S]*Use the ordinary shell result directly\. Add no stderr redirection or suppression rule, separate capture\s+policy, output channel, buffering, truncation, redaction, output-size limit[\s\S]*session/u.test(text)],
+  ["resolve and verify are the only consumed entries", (text) => /`resolve` and `verify` are consumed now\. `publish` and `publishing_identity` remain deferred/u.test(text)],
+  ["verify uses the exact integration worktree and inherited process context", (text) => /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*stdout and stderr are inherited, informational, and unparsed[\s\S]*Exit status is authoritative/u.test(text)],
+  ["verify runs after the atomic merge record and writes canonical evidence", (text) => /After\s+the atomic merged transition[\s\S]*runs that unchanged ordinary shell command once in `INTEGRATION_WORKTREE` with inherited\s+environment and stdio and writes canonical `evidence\/test-verifier\.json`/u.test(text)],
+  ["absent config preserves merge behavior silently", (text) => /An absent config preserves\s+the old response and emits nothing new/u.test(text)],
+  ["a post-record failure preserves the merged slice and blocks advancement", (text) => /If the row is `merged` at exactly\s+`MERGE_COMMIT`, preserve its evidence, review, refs, attempts, paths, test plan, and merge commit;[\s\S]*stop before `status\.next`/u.test(text)],
+  ["Gate 3 is a fresh independent observation", (text) => /Gate 3 observation is always fresh and independent[\s\S]*never shares, substitutes,\s+or optimizes from a post-merge repository verification result/u.test(text)],
+  ["operator ownership and privileged protection remain in force", (text) => /It remains operator-owned:[\s\S]*refused by the privileged-path policy/u.test(text)],
   ["publication and identity remain deferred", (text) => /push-target migration is deferred to #224[\s\S]*consumption is deferred to #216/u.test(text)],
 ];
 const README_CONTRACTS = [
   ["the exact four-entry schema", (text) => text.includes(CONFIG_SCHEMA)],
   ["three commands and one static identity", (text) => /`resolve`, `verify`, and `publish` are non-empty command\s+strings[\s\S]*`publishing_identity` is a static non-empty account name/u.test(text)],
-  ["only resolve is consumed", (text) => /Only `resolve` is consumed now/u.test(text)],
+  ["resolve and verify are consumed", (text) => /`resolve` and `verify` are consumed now/u.test(text)],
   ["ordinary shell, repository-root cwd, and FACTORY_INPUT", (text) => /ordinary shell step[\s\S]*repository-root cwd[\s\S]*`FACTORY_INPUT`/u.test(text)],
   ["empty and non-empty stdout have the direct contract", (text) => /Empty stdout means the input was not\s+recognized[\s\S]*Non-empty stdout is the direct,\s+unchanged `ISSUE_PAYLOAD`[\s\S]*top-level string `run_id`/u.test(text)],
-  ["present invalid config refuses and absence declares no resolver", (text) => /present invalid,[\s\S]*config refuses closed\. An absent file means no resolver\s+is declared/u.test(text)],
+  ["present invalid config refuses and absence declares no resolver", (text) => /present invalid,[\s\S]*config refuses closed[\s\S]*If `\.factory\.json` is absent, intake declares no resolver/u.test(text)],
   ["commands and credentials are not disclosed", (text) => /neither the configured or expanded\s+command line, shell diagnostics, nor credentials are printed, logged, or persisted/u.test(text)],
-  ["deferred consumers are named", (text) => /push-target\s+publication deferred to\s+#224[\s\S]*identity enforcement is deferred to #216/u.test(text)],
-  ["the live config is not packaged", (text) => /live config is not part of\s+this package[\s\S]*no generated config or resolver asset is shipped/u.test(text)],
+  ["verify follows the atomic merge record in the integration worktree", (text) => /After a slice merge is successfully and atomically recorded, `verify` runs once in the exact recorded\s+integration worktree/u.test(text)],
+  ["verify inherits environment and stdio without parsing output", (text) => /configured string is submitted unchanged as one ordinary shell command[\s\S]*inherited environment and stdio[\s\S]*Stdout and stderr are visible, informational,\s+and unparsed; they are not captured or persisted/u.test(text)],
+  ["verify exit and canonical evidence are authoritative", (text) => /Numeric child exit status is authoritative[\s\S]*canonical\s+`evidence\/test-verifier\.json` schema[\s\S]*current merged head/u.test(text)],
+  ["absence is silent after merge", (text) => /after a recorded merge the factory silently\s+returns its previous response with no repository command, evidence write, or new output/u.test(text)],
+  ["failure preserves the merge and routes before the next wave", (text) => /post-record\s+failure leaves the merged row and its slice evidence and review unchanged and stops before the next wave[\s\S]*test-file-only repair path/u.test(text)],
+  ["Gate 3 is fresh and does not share evidence", (text) => /Gate 3 always runs a separate fresh integrated `test-verifier` observation[\s\S]*never shares, substitutes, or\s+optimizes from post-merge evidence/u.test(text)],
+  ["the config remains operator-owned and privileged", (text) => /file is operator-owned,\s+committed, and protected as a privileged path/u.test(text)],
+  ["deferred consumers are named", (text) => /push-target publication is deferred to #224[\s\S]*identity enforcement is deferred to #216/u.test(text)],
+  ["the live config is not packaged", (text) => /live config\s+is not part of this package[\s\S]*no generated config or resolver asset is shipped/u.test(text)],
+];
+const ROOT_README_CONTRACTS = [
+  ["the exact four-entry schema", (text) => text.includes(CONFIG_SCHEMA)],
+  ["resolve and verify are consumed", (text) => /`resolve` and `verify` are consumed now/u.test(text)],
+  ["verify runs after an atomic record in the integration worktree", (text) => /After a slice merge is successfully and atomically recorded, `verify` runs once in the exact recorded\s+integration worktree/u.test(text)],
+  ["verify inherits environment and stdio and leaves output unparsed", (text) => /ordinary shell command[\s\S]*process environment and stdio inherited[\s\S]*Stdout and stderr remain visible,\s+informational, and unparsed/u.test(text)],
+  ["verify status and canonical evidence are authoritative", (text) => /numeric child exit status is\s+authoritative[\s\S]*canonical `evidence\/test-verifier\.json` schema/u.test(text)],
+  ["absent config silently preserves merge behavior", (text) => /absence silently preserves the previous merge response and progression, with no\s+repository command, evidence write, or new output/u.test(text)],
+  ["post-record failure preserves merged-slice records and routes before the next wave", (text) => /post-record verification failure does not roll back\s+or rewrite the merged row or its slice evidence and review[\s\S]*stops before the next wave/u.test(text)],
+  ["Gate 3 is separately fresh without evidence sharing", (text) => /Gate 3 always performs its own fresh integrated `test-verifier` observation[\s\S]*never shares,\s+substitutes, or optimizes from post-merge evidence/u.test(text)],
+  ["operator ownership and privileged protection remain in force", (text) => /file is operator-owned,\s+committed, and protected as a privileged path/u.test(text)],
+  ["publish and identity remain deferred", (text) => /push-target publication is deferred to #224[\s\S]*identity enforcement is deferred to #216/u.test(text)],
+];
+const OPERATING_CONTRACTS = [
+  ["the exact four-entry schema", (text) => text.includes(CONFIG_SCHEMA)],
+  ["verify runs unchanged in the integration worktree with inherited process context", (text) => /unchanged string runs once as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio/u.test(text)],
+  ["verify output is inherited and unparsed", (text) => /Stdout and stderr are visible, informational, and unparsed rather than captured or persisted/u.test(text)],
+  ["verify status is authoritative", (text) => /Numeric child exit status is authoritative/u.test(text)],
+  ["post-record evidence is canonical", (text) => /merge record commits before `verify` begins[\s\S]*canonical `evidence\/test-verifier\.json` schema/u.test(text)],
+  ["failure preserves merged-slice records and blocks the next wave", (text) => /leaves the merged slice, its merge commit, its evidence, and its review unchanged and stops\s+the driver before it consults or activates the next wave/u.test(text)],
+  ["failure routing keeps production source out of repair", (text) => /Production defects are not repaired on the integration branch and terminalize `needs-human`[\s\S]*confirmed test-only finding may change test files only/u.test(text)],
+  ["absent config silently preserves prior behavior", (text) => /An absent `\.factory\.json` remains silent compatibility behavior[\s\S]*returns the same merge result as before this consumer existed/u.test(text)],
+  ["Gate 3 remains fresh and independent", (text) => /Gate 3 always runs a fresh, independent integrated\s+`test-verifier` observation[\s\S]*without sharing or optimizing from the post-merge result/u.test(text)],
+  ["operator ownership and privileged protection remain in force", (text) => /live file is operator-owned[\s\S]*protected by the\s+privileged-path policy/u.test(text)],
+  ["publish and identity remain deferred", (text) => /Push-target publication is deferred to #224[\s\S]*deferred to #216/u.test(text)],
 ];
 
 function assertContracts(text, contracts, artifact) {
@@ -153,6 +192,9 @@ describe("what actually ships", () => {
       }
 
       const readme = readFileSync(join(root, "README.md"), "utf8");
+      const operating = readFileSync(join(root, "OPERATING.md"), "utf8");
+      assertContracts(readme, ROOT_README_CONTRACTS, "root README");
+      assertContracts(operating, OPERATING_CONTRACTS, "operator guide");
       assert.deepEqual(readme.split(/\r?\n/u).filter((line) => line.startsWith("factory init <run-id>")), [
         "factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]",
       ]);
