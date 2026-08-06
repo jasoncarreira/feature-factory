@@ -287,6 +287,10 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const defaultTrace = repositoryVerifyTrace(defaultTimeout.operator, defaultCommand);
       const merged = factory(defaultTimeout.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)], { env: defaultTrace.env });
       assert.equal(merged.ok, true, merged.stderr);
+      assert.deepEqual(merged.out, {
+        run_id: RUN, slice: "be-thing", status: "merged", attempts: 1,
+        base_ref: defaultTimeout.basePoint, merge_commit: mergeCommit,
+      }, "omitting verify_timeout_ms must preserve the existing merged response shape");
       assert.deepEqual(JSON.parse(readFileSync(defaultTrace.trace, "utf8")), {
         command: defaultCommand, args: [], timeout: 900000,
       }, "an omitted timeout must reach the repository shell spawn as exactly 900000");
