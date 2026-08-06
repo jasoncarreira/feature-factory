@@ -34,12 +34,12 @@ export const COMMANDS = Object.freeze({
   slice: Object.freeze(["--repo", "--attempts", "--worktree", "--branch", "--evidence-ref", "--review-ref", "--merge-commit", "--now", "--json"]),
   // No --skip-tests-reason: whether a slice needs tests is ratified in its test_plan at
   // seeding, not asserted at observation time by the party being observed.
-  observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
+  observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--repository-verify", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
   validator: Object.freeze(["--repo", "--report", "--now", "--json"]),
   pr: Object.freeze(["--repo", "--url", "--now", "--json"]),
 });
 
-const BOOLEAN_FLAGS = new Set(["--json"]);
+const BOOLEAN_FLAGS = new Set(["--json", "--repository-verify"]);
 const INIT_OPERATIONS = Object.freeze({
   cwd: () => process.cwd(), resolvePath: resolve, joinPath: join,
   realpath: realpathSync, lstat: lstatSync, mkdir: mkdirSync, readdir: readdirSync,
@@ -136,6 +136,142 @@ function integrationHead(repo, run) {
   const worktree = resolveWorktree(repo, run.worktree);
   if (!worktree) throw new CliError(`integration worktree '${run.worktree}' is not observable`);
   return { worktree, commit: observeWorktree(worktree, run.branch, { ref: run.branch }).commit };
+}
+
+class RepositoryConfigError extends Error {}
+
+function requireIntegrationWorktree(repo, run, suppliedWorktree) {
+  let repository;
+  let committed;
+  let supplied;
+  try {
+    repository = realpathSync(resolve(repo));
+    const committedPath = resolveWorktree(repository, run.worktree);
+    const suppliedPath = resolveWorktree(repository, suppliedWorktree);
+    committed = committedPath ? realpathSync(committedPath) : null;
+    supplied = suppliedPath ? realpathSync(suppliedPath) : null;
+  } catch {
+    committed = null;
+    supplied = null;
+  }
+  if (!repository || !committed || !supplied || committed !== supplied
+    || resolveWorktree(repository, committed) !== committed || resolveWorktree(repository, supplied) !== supplied) {
+    throw new CliError(`integration worktree mismatch: committed '${run.worktree}' resolves to '${committed ?? "unobservable"}', supplied '${suppliedWorktree}' resolves to '${supplied ?? "unobservable"}'`);
+  }
+  const branch = git(committed, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const observedBranch = branch.ok && branch.stdout.trim() ? branch.stdout.trim() : "detached HEAD";
+  if (observedBranch !== run.branch) {
+    throw new CliError(`integration worktree must have branch '${run.branch}' checked out; observed ${observedBranch}`);
+  }
+  const head = git(committed, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  const tip = git(committed, ["rev-parse", "--verify", `refs/heads/${run.branch}^{commit}`]);
+  const headSha = head.ok ? head.stdout.trim() : "";
+  const tipSha = tip.ok ? tip.stdout.trim() : "";
+  if (!/^[0-9a-f]{40}$/u.test(headSha) || !/^[0-9a-f]{40}$/u.test(tipSha) || headSha !== tipSha) {
+    throw new CliError(`integration HEAD must equal the current recorded branch tip for '${run.branch}'`);
+  }
+  return { worktree: committed, head: headSha };
+}
+
+function readRepositoryVerify(worktree, { optional = false } = {}) {
+  let bytes;
+  try {
+    bytes = readFileSync(join(worktree, ".factory.json"), "utf8");
+  } catch (error) {
+    if (optional && error?.code === "ENOENT") return null;
+    throw new RepositoryConfigError("invalid .factory.json");
+  }
+  let config;
+  try {
+    config = JSON.parse(bytes);
+  } catch {
+    throw new RepositoryConfigError("invalid .factory.json");
+  }
+  const keys = ["publish", "publishing_identity", "resolve", "verify"];
+  if (!config || typeof config !== "object" || Array.isArray(config)
+    || JSON.stringify(Object.keys(config).sort()) !== JSON.stringify(keys)
+    || keys.some((keyName) => typeof config[keyName] !== "string" || !config[keyName].trim())) {
+    throw new RepositoryConfigError("invalid .factory.json");
+  }
+  return config.verify;
+}
+
+function branchPoint(run) {
+  const base = run.slices.find((slice) => Array.isArray(slice.depends_on) && slice.depends_on.length === 0)?.base_ref;
+  if (!/^[0-9a-f]{40}$/u.test(base ?? "")) throw new CliError("first seeded root slice has no immutable 40-character base_ref");
+  return base;
+}
+
+async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand }) {
+  const evidence = buildEvidence({
+    subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, runId,
+    testCommand, skipReason, shellCommand,
+  });
+  const ancestry = observeAncestry(worktree, baseRef, "HEAD");
+  if (ancestry !== "ancestor") {
+    evidence.review_ready = false;
+    evidence.blocked_reason = evidence.blocked_reason ?? `base ${baseRef} is ${ancestry} of HEAD`;
+  }
+  await writeProtectedJsonAtomic(runDir, evidenceRef(subject), evidence);
+  return { evidence, ancestry };
+}
+
+function classifyRepositoryVerifyEvidence(runDir, runId, head, verifyCommand) {
+  let evidence;
+  try {
+    evidence = readEvidence(runDir, evidenceRef("test-verifier"), { runId });
+  } catch {
+    return { kind: "unknown", evidence: null };
+  }
+  if (evidence.subject !== "test-verifier" || evidence.run_id !== runId
+    || evidence.commit !== head || evidence.tests?.cmd !== verifyCommand) {
+    return { kind: "unknown", evidence };
+  }
+  if (evidence.tests.observed === true && evidence.tests.exit === 0 && evidence.review_ready === true) {
+    return { kind: "green", evidence };
+  }
+  return { kind: "failed", evidence };
+}
+
+function repositoryVerifyRefusal(mergeCommit, evidence) {
+  if (evidence.tests?.observed === true && Number.isInteger(evidence.tests.exit) && evidence.tests.exit !== 0) {
+    return `factory config entry 'verify' failed after recorded merge ${mergeCommit} with exit status ${evidence.tests.exit}; merged slice remains recorded; stop before advancing.`;
+  }
+  if (evidence.tests?.exit === null || evidence.tests?.observed !== true) {
+    return `factory config entry 'verify' failed after recorded merge ${mergeCommit}; exit status unavailable; merged slice remains recorded; stop before advancing.`;
+  }
+  return `factory config entry 'verify' was not review_ready after recorded merge ${mergeCommit}: ${evidence.blocked_reason ?? "review readiness was not established"}; merged slice remains recorded; stop before advancing.`;
+}
+
+function mergedPayload(runId, sliceId, row) {
+  return { run_id: runId, slice: sliceId, status: row.status, attempts: row.attempts, base_ref: row.base_ref, merge_commit: row.merge_commit };
+}
+
+async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit }) {
+  const run = readRun(runDir);
+  const integration = requireIntegrationWorktree(repo, run, run.worktree);
+  if (integration.head !== mergeCommit) {
+    throw new CliError(`integration HEAD must equal recorded merge ${mergeCommit} before repository verification`);
+  }
+  const baseRef = branchPoint(run);
+  let verifyCommand;
+  try {
+    verifyCommand = readRepositoryVerify(integration.worktree, { optional: true });
+  } catch (error) {
+    if (error instanceof RepositoryConfigError) {
+      throw new CliError(`factory config entry 'verify' unavailable after recorded merge ${mergeCommit}: invalid .factory.json; merged slice remains recorded; stop before advancing.`);
+    }
+    throw error;
+  }
+  if (verifyCommand === null) return null;
+  const { evidence } = await writeObservedEvidence({
+    runDir, runId, subject: "test-verifier", attempt: 1, branch: run.branch,
+    baseRef, worktree: integration.worktree, status: "completed",
+    blockedReason: null, claim: null, testCommand: verifyCommand, skipReason: null, shellCommand: true,
+  });
+  const classified = classifyRepositoryVerifyEvidence(runDir, runId, integration.head, verifyCommand);
+  if (classified.kind !== "green") throw new CliError(repositoryVerifyRefusal(mergeCommit, evidence));
+  return evidence;
 }
 
 const HANDLERS = {
@@ -289,6 +425,38 @@ const HANDLERS = {
     }
     if (status === "merged" && !flags.mergeCommit) throw new CliError("recording a merge requires --merge-commit");
 
+    if (status === "merged") {
+      const current = readRun(runDir);
+      const existing = current.slices.find((slice) => slice.id === sliceId);
+      if (!existing) throw new CliError(`unknown slice '${sliceId}'`);
+      if (existing.status === "merged") {
+        if (flags.mergeCommit !== existing.merge_commit) {
+          throw new CliError(`slice '${sliceId}' is already recorded at immutable merge_commit ${existing.merge_commit}`);
+        }
+        const integration = requireIntegrationWorktree(repo, current, current.worktree);
+        if (integration.head !== existing.merge_commit) {
+          throw new CliError(`recorded merge ${existing.merge_commit} replay cannot reconcile the current integration head; do not re-execute factory config entry 'verify'.`);
+        }
+        let verifyCommand;
+        try {
+          verifyCommand = readRepositoryVerify(integration.worktree, { optional: true });
+        } catch (error) {
+          if (error instanceof RepositoryConfigError) {
+            throw new CliError(`factory config entry 'verify' unavailable after recorded merge ${existing.merge_commit}: invalid .factory.json; merged slice remains recorded; stop before advancing.`);
+          }
+          throw error;
+        }
+        if (verifyCommand !== null) {
+          const classified = classifyRepositoryVerifyEvidence(runDir, runId, integration.head, verifyCommand);
+          if (classified.kind === "failed") throw new CliError(repositoryVerifyRefusal(existing.merge_commit, classified.evidence));
+          if (classified.kind === "unknown") {
+            throw new CliError(`post-merge verify outcome is unknown for recorded merge ${existing.merge_commit}; merged slice remains recorded; terminalize needs-human without re-executing factory config entry 'verify'.`);
+          }
+        }
+        return emit(flags, mergedPayload(runId, sliceId, existing));
+      }
+    }
+
     // For a merge, the contract's reobserve hook demands freshly observed paths.
     // The observer is supplied here and runs inside the transition.
     const reobservers = new Map();
@@ -391,16 +559,37 @@ const HANDLERS = {
     // step needs it: `observe --base` is compared for exact equality against this value at
     // merge time. The skill previously said to read it from `factory status`, which does not
     // expose it — so the documented path could not be followed at all.
-    return emit(flags, { run_id: runId, slice: sliceId, status: row.status, attempts: row.attempts, base_ref: row.base_ref, merge_commit: row.merge_commit });
+    if (status === "merged") await verifyRecordedMerge({ repo, runDir, runId, mergeCommit: row.merge_commit });
+    return emit(flags, mergedPayload(runId, sliceId, row));
   },
 
   async observe([runId, subject], flags) {
     if (!subject) throw new CliError("factory observe requires <subject>");
     if (!flags.worktree || !flags.base) throw new CliError("factory observe requires --worktree and --base");
+    if (flags.repositoryVerify && flags.testCmd !== undefined) {
+      throw new CliError("--repository-verify is mutually exclusive with --test-cmd");
+    }
+    if (flags.repositoryVerify && subject !== "test-verifier") {
+      throw new CliError("--repository-verify is valid only for test-verifier");
+    }
     const runDir = runDirFor(flags, runId);
     const repo = resolve(flags.repo ?? process.cwd());
-    const worktree = resolveWorktree(repo, flags.worktree);
+    const run = readRun(runDir);
+    const integration = flags.repositoryVerify ? requireIntegrationWorktree(repo, run, flags.worktree) : null;
+    const worktree = integration?.worktree ?? resolveWorktree(repo, flags.worktree);
     if (!worktree) throw new CliError(`worktree '${flags.worktree}' is not inside the repository`);
+
+    let repositoryVerifyCommand = null;
+    if (flags.repositoryVerify) {
+      const expectedBase = branchPoint(run);
+      if (flags.base !== expectedBase) throw new CliError(`--base must equal the first seeded root slice base_ref ${expectedBase}`);
+      try {
+        repositoryVerifyCommand = readRepositoryVerify(worktree);
+      } catch (error) {
+        if (error instanceof RepositoryConfigError) throw new CliError("invalid .factory.json");
+        throw error;
+      }
+    }
 
     let claim = null;
     if (flags.claim) {
@@ -420,7 +609,7 @@ const HANDLERS = {
     //
     // A subject with no slice row - test-verifier, an agent step - has no ratified
     // waiver and so has none: its tests must be observed.
-    const slice = readRun(runDir).slices.find((entry) => entry.id === subject);
+    const slice = run.slices.find((entry) => entry.id === subject);
     if (slice && flags.testCmd !== undefined
       && !slice.test_plan.some((entry) => entry === flags.testCmd)) {
       throw new CliError(
@@ -432,29 +621,15 @@ const HANDLERS = {
       ? `test_plan for '${subject}' was approved empty at slices-seed`
       : null;
 
-    const evidence = buildEvidence({
-      subject,
+    const { evidence, ancestry } = await writeObservedEvidence({
+      runDir, runId, subject,
       attempt: flags.attempt === undefined ? 1 : integer(flags.attempt, 1, "--attempt"),
-      branch: flags.branch ?? null,
-      baseRef: flags.base,
-      worktree,
-      status: flags.status ?? "completed",
-      blockedReason: flags.blockedReason ?? null,
-      claim,
-      runId,
-      testCommand: flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
-      skipReason,
+      branch: flags.repositoryVerify ? run.branch : flags.branch ?? null,
+      baseRef: flags.base, worktree, status: flags.status ?? "completed",
+      blockedReason: flags.blockedReason ?? null, claim,
+      testCommand: flags.repositoryVerify ? repositoryVerifyCommand : flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
+      skipReason, shellCommand: flags.repositoryVerify === true,
     });
-
-    // Attack 7: a base that is not an ancestor of HEAD makes the diff meaningless,
-    // so the evidence is not review-ready regardless of what the tests said.
-    const ancestry = observeAncestry(worktree, flags.base, "HEAD");
-    if (ancestry !== "ancestor") {
-      evidence.review_ready = false;
-      evidence.blocked_reason = evidence.blocked_reason ?? `base ${flags.base} is ${ancestry} of HEAD`;
-    }
-
-    await writeProtectedJsonAtomic(runDir, evidenceRef(subject), evidence);
     return emit(flags, {
       run_id: runId, subject, evidence_ref: evidenceRef(subject),
       review_ready: evidence.review_ready, files_changed: evidence.files_changed.length,
