@@ -22,9 +22,9 @@ const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" 
 
 // Runs the CLI out of process so the assertion is against the real entry point,
 // including argument parsing, rather than against an imported handler.
-function factory(repo, args) {
+function factory(repo, args, { env = process.env } = {}) {
   try {
-    const stdout = execFileSync("node", [CLI, ...args, "--repo", repo, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const stdout = execFileSync("node", [CLI, ...args, "--repo", repo, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env });
     return { ok: true, out: JSON.parse(stdout) };
   } catch (error) {
     return { ok: false, stderr: String(error.stderr ?? error.message) };
@@ -36,6 +36,36 @@ const NOW = (minute) => `2026-07-30T12:${String(minute).padStart(2, "0")}:00Z`;
 const PASSING_TEST_COMMAND = "git --no-pager log -1 --format=%H";
 const FAILING_TEST_COMMAND = "git --no-pager grep --quiet THIS_STRING_IS_ABSENT";
 const DIRTYING_TEST_COMMAND = "node -e require('fs').writeFileSync('src/app/thing.ts','mutated')";
+
+// This is a test-only process seam. The real CLI still parses the repository config,
+// reaches buildEvidence(), and starts its shell child; the preloaded hook records the
+// actual spawn options at that final boundary without exposing a production injection.
+function repositoryVerifyTrace(operator, command) {
+  const trace = join(operator, "repository-verify-spawn.jsonl");
+  const preload = join(operator, "repository-verify-spawn-hook.cjs");
+  writeFileSync(preload, [
+    'const fs = require("node:fs");',
+    'const childProcess = require("node:child_process");',
+    'const { syncBuiltinESMExports } = require("node:module");',
+    'const original = childProcess.spawnSync;',
+    'childProcess.spawnSync = function(command, args, options) {',
+    '  if (command === process.env.FACTORY_VERIFY_TRACE_COMMAND && options?.shell === true) {',
+    '    fs.appendFileSync(process.env.FACTORY_VERIFY_TRACE_PATH, `${JSON.stringify({ command, args, timeout: options.timeout })}\\n`);',
+    '  }',
+    '  return original.apply(this, arguments);',
+    '};',
+    'syncBuiltinESMExports();',
+  ].join("\n"));
+  return {
+    trace,
+    env: {
+      ...process.env,
+      FACTORY_VERIFY_TRACE_COMMAND: command,
+      FACTORY_VERIFY_TRACE_PATH: trace,
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preload}`].filter(Boolean).join(" "),
+    },
+  };
+}
 
 // A repository with an integration branch and one slice branched from its head.
 function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], verify = null, verifyTimeout = undefined, configBytes = null } = {}) {
@@ -185,8 +215,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
     });
     try {
       const mergeCommit = mergeIntoFeature(green.repo);
-      const merged = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      const configuredCommand = JSON.parse(readFileSync(join(green.repo, ".factory.json"), "utf8")).verify;
+      const configuredTrace = repositoryVerifyTrace(green.operator, configuredCommand);
+      const merged = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)], { env: configuredTrace.env });
       assert.equal(merged.ok, true, merged.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(configuredTrace.trace, "utf8")), {
+        command: configuredCommand, args: [], timeout: 120001,
+      }, "the parsed explicit timeout must reach the repository shell spawn unchanged");
       const evidence = JSON.parse(readFileSync(join(green.runDir, "evidence", "test-verifier.json"), "utf8"));
       assert.equal(evidence.subject, "test-verifier");
       assert.equal(evidence.commit, mergeCommit);
@@ -243,6 +278,20 @@ describe("end to end — a merge is refused through the real CLI", () => {
       }
     } finally { cleanupProject(green); }
 
+    const defaultTimeout = upToReview("default-verify-timeout", undefined, {
+      verify: "node -e \"process.exit(0)\"",
+    });
+    try {
+      const mergeCommit = mergeIntoFeature(defaultTimeout.repo);
+      const defaultCommand = JSON.parse(readFileSync(join(defaultTimeout.repo, ".factory.json"), "utf8")).verify;
+      const defaultTrace = repositoryVerifyTrace(defaultTimeout.operator, defaultCommand);
+      const merged = factory(defaultTimeout.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)], { env: defaultTrace.env });
+      assert.equal(merged.ok, true, merged.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(defaultTrace.trace, "utf8")), {
+        command: defaultCommand, args: [], timeout: 900000,
+      }, "an omitted timeout must reach the repository shell spawn as exactly 900000");
+    } finally { cleanupProject(defaultTimeout); }
+
     const malformed = upToReview("malformed-config", undefined, { configBytes: "{\"resolve\":\"true\"}\n" });
     try {
       const mergeCommit = mergeIntoFeature(malformed.repo);
@@ -251,6 +300,19 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(merged.stderr.trim(), `factory config entry 'verify' unavailable after recorded merge ${mergeCommit}: invalid .factory.json; merged slice remains recorded; stop before advancing.`);
       assert.equal(runJson(malformed.runDir).slices[0].status, "merged");
     } finally { cleanupProject(malformed); }
+
+    const unexpected = upToReview("unexpected-config-entry", undefined, { configBytes: `${JSON.stringify({
+      resolve: "true", verify: "node -e \"require('fs').writeFileSync('unexpected-verify-ran','x')\"",
+      publish: "true", publishing_identity: "factory-test", unexpected: true,
+    }, null, 2)}\n` });
+    try {
+      const mergeCommit = mergeIntoFeature(unexpected.repo);
+      const merged = factory(unexpected.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, false);
+      assert.equal(merged.stderr.trim(), `factory config entry 'verify' unavailable after recorded merge ${mergeCommit}: invalid .factory.json; merged slice remains recorded; stop before advancing.`);
+      assert.equal(existsSync(join(unexpected.repo, "unexpected-verify-ran")), false, "malformed config must not execute repository verify");
+      assert.equal(existsSync(join(unexpected.runDir, "evidence", "test-verifier.json")), false, "malformed config must not write repository evidence");
+    } finally { cleanupProject(unexpected); }
 
     const invalidTimeouts = [0, -1, 1.5, "900000", null, Number.MAX_SAFE_INTEGER + 1];
     for (const [index, value] of invalidTimeouts.entries()) {
