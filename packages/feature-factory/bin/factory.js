@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
-import { buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, evidenceRef, git, observeAncestry, observeCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, unownedPaths } from "../observe/index.js";
+import { buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { dispatchInitPublication } from "./init-publication.js";
@@ -189,6 +189,7 @@ function readRepositoryVerify(worktree, { optional = false } = {}) {
   }
   const requiredKeys = ["publish", "publishing_identity", "resolve", "verify"];
   const allowedKeys = [...requiredKeys, "verify_timeout_ms"];
+  // False-green enforcement: config must not silently select a different repository proof.
   if (!config || typeof config !== "object" || Array.isArray(config)
     || Object.keys(config).some((keyName) => !allowedKeys.includes(keyName))) {
     throw new RepositoryConfigError("invalid .factory.json");
@@ -223,15 +224,54 @@ async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, 
   return { evidence, ancestry };
 }
 
-function classifyRepositoryVerifyEvidence(runDir, runId, head, verifyCommand) {
+function canonicalRepositoryVerifyEvidence(evidence, { runId, run, integration, verifyCommand }) {
+  const baseRef = branchPoint(run);
+  const keys = Object.keys(evidence).sort();
+  const commandNames = [
+    "git rev-parse HEAD",
+    `git --literal-pathspecs diff --name-only -z ${baseRef}...HEAD`,
+    `git diff --stat ${baseRef}...HEAD`,
+  ];
+  const commandsAreCanonical = Array.isArray(evidence.commands)
+    && evidence.commands.length === commandNames.length
+    && evidence.commands.every((command, index) => command && typeof command === "object" && !Array.isArray(command)
+      && JSON.stringify(Object.keys(command).sort()) === JSON.stringify(["cmd", "exit", "summary"])
+      && command.cmd === commandNames[index] && command.exit === 0 && typeof command.summary === "string");
+  const tests = evidence.tests;
+  const testsAreCanonical = tests && typeof tests === "object" && !Array.isArray(tests)
+    && JSON.stringify(Object.keys(tests).sort()) === JSON.stringify(["cmd", "exit", "observed", "skipped_reason"])
+    && tests.cmd === verifyCommand && typeof tests.observed === "boolean" && tests.skipped_reason === null
+    && ((tests.observed === true && Number.isInteger(tests.exit))
+      || (tests.observed === false && tests.exit === null));
+  const reconciliation = evidence.claim_reconciliation;
+  return JSON.stringify(keys) === JSON.stringify([...EVIDENCE_KEYS].sort())
+    && evidence.subject === "test-verifier" && evidence.run_id === runId
+    && Number.isSafeInteger(evidence.attempt) && evidence.attempt >= 1
+    && evidence.branch === run.branch && evidence.base_ref === baseRef
+    && evidence.worktree === integration.worktree && evidence.status === "completed"
+    && typeof evidence.worktree_clean === "boolean"
+    && ((evidence.worktree_clean && evidence.blocked_reason === null)
+      || (!evidence.worktree_clean && typeof evidence.blocked_reason === "string" && Boolean(evidence.blocked_reason.trim())))
+    && Array.isArray(evidence.files_changed) && evidence.files_changed.length > 0
+    && evidence.files_changed.every((path) => typeof path === "string" && Boolean(path))
+    && typeof evidence.diff_stat === "string" && evidence.diff_observed === true
+    && commandsAreCanonical && testsAreCanonical && evidence.commit === integration.head
+    && evidence.observed_by === "orchestrator" && typeof evidence.review_ready === "boolean"
+    && reconciliation && typeof reconciliation === "object" && !Array.isArray(reconciliation)
+    && JSON.stringify(Object.keys(reconciliation).sort()) === JSON.stringify(["claimed", "mismatches"])
+    && reconciliation.claimed === false && Array.isArray(reconciliation.mismatches)
+    && reconciliation.mismatches.length === 0;
+}
+
+function classifyRepositoryVerifyEvidence(runDir, context) {
   let evidence;
   try {
-    evidence = readEvidence(runDir, evidenceRef("test-verifier"), { runId });
+    evidence = readEvidence(runDir, evidenceRef("test-verifier"), { runId: context.runId });
   } catch {
     return { kind: "unknown", evidence: null };
   }
-  if (evidence.subject !== "test-verifier" || evidence.run_id !== runId
-    || evidence.commit !== head || evidence.tests?.cmd !== verifyCommand) {
+  // False-green enforcement: only complete canonical evidence bound to this merge may be reused or retried.
+  if (!canonicalRepositoryVerifyEvidence(evidence, context)) {
     return { kind: "unknown", evidence };
   }
   if (evidence.tests.observed === true && evidence.tests.exit === 0 && evidence.review_ready === true) {
@@ -265,6 +305,7 @@ function repositoryVerifyUnknownRefusal(mergeCommit) {
 }
 
 function repositoryVerifyRetrySafety(repo, run, mergeCommit) {
+  // False-green enforcement: retries may test only the unchanged, clean bytes recorded by the merge.
   let integration;
   try {
     integration = requireIntegrationWorktree(repo, run, run.worktree);
@@ -284,6 +325,7 @@ function repositoryVerifyRetrySafety(repo, run, mergeCommit) {
 async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration }) {
   const baseRef = branchPoint(run);
   let attemptIntegration = integration;
+  // False-green enforcement: one invocation gets at most two executions, never an unbounded recovery loop.
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const { evidence } = await writeObservedEvidence({
       runDir, runId, subject: "test-verifier", attempt, branch: run.branch,
@@ -291,7 +333,9 @@ async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeComm
       claim: null, testCommand: verify.command, skipReason: null, shellCommand: true,
       testTimeoutMs: verify.timeoutMs,
     });
-    const classified = classifyRepositoryVerifyEvidence(runDir, runId, mergeCommit, verify.command);
+    const classified = classifyRepositoryVerifyEvidence(runDir, {
+      runId, run, integration: attemptIntegration, verifyCommand: verify.command,
+    });
     if (classified.kind === "green") return evidence;
     if (classified.kind === "failed") throw new CliError(repositoryVerifyRefusal(mergeCommit, classified.evidence));
     if (classified.kind === "unknown") throw new CliError(repositoryVerifyUnknownRefusal(mergeCommit));
@@ -493,7 +537,9 @@ const HANDLERS = {
           throw error;
         }
         if (verify !== null) {
-          const classified = classifyRepositoryVerifyEvidence(runDir, runId, integration.head, verify.command);
+          const classified = classifyRepositoryVerifyEvidence(runDir, {
+            runId, run: current, integration, verifyCommand: verify.command,
+          });
           if (classified.kind === "failed") throw new CliError(repositoryVerifyRefusal(existing.merge_commit, classified.evidence));
           if (classified.kind === "unknown") {
             throw new CliError(repositoryVerifyUnknownRefusal(existing.merge_commit));

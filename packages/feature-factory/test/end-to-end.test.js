@@ -210,15 +210,27 @@ describe("end to end — a merge is refused through the real CLI", () => {
       git(green.repo, "reset", "--hard", mergeCommit);
       const evidencePath = join(green.runDir, "evidence", "test-verifier.json");
       const canonical = readFileSync(evidencePath, "utf8");
+      const canonicalRecord = JSON.parse(canonical);
+      const missingCanonicalFields = ["branch", "base_ref", "worktree", "commands", "claim_reconciliation"]
+        .map((field) => {
+          const record = structuredClone(canonicalRecord);
+          delete record[field];
+          return record;
+        });
       const unknownRecords = [
         null,
         "{not json\n",
-        { ...JSON.parse(canonical), run_id: "foreign-run" },
-        { ...JSON.parse(canonical), commit: "0".repeat(40) },
-        { ...JSON.parse(canonical), tests: { ...JSON.parse(canonical).tests, cmd: "foreign command" } },
+        ...missingCanonicalFields,
+        { ...canonicalRecord, run_id: "foreign-run" },
+        { ...canonicalRecord, commit: "0".repeat(40) },
+        { ...canonicalRecord, base_ref: "0".repeat(40) },
+        { ...canonicalRecord, worktree: `${canonicalRecord.worktree}-foreign` },
+        { ...canonicalRecord, commands: canonicalRecord.commands.slice(0, 2) },
+        { ...canonicalRecord, claim_reconciliation: { claimed: true, mismatches: [] } },
+        { ...canonicalRecord, tests: { ...canonicalRecord.tests, cmd: "foreign command" } },
         {
-          ...JSON.parse(canonical), review_ready: true,
-          tests: { ...JSON.parse(canonical).tests, observed: false, exit: null, skipped_reason: "not canonical" },
+          ...canonicalRecord, review_ready: true,
+          tests: { ...canonicalRecord.tests, observed: false, exit: null, skipped_reason: "not canonical" },
         },
       ];
       for (const record of unknownRecords) {
