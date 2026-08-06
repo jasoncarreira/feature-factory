@@ -334,16 +334,29 @@ describe("run projection", () => {
           session: "ses_dead", pid: 7, run_id: "dead", branch: null,
           claimed_at: "2026-07-30T00:00:00.000Z", heartbeat_at: "2026-07-30T00:00:00.000Z",
         }));
-        seedRun(tierRoot, "final", RUN({
-          run_id: "final", status: "completed", updated_at: "2026-07-30T22:00:00.000Z",
-        }));
+        const finalRows = [
+          ["final-completed", "completed", "2026-07-30T22:00:00.000Z"],
+          ["final-partial", "partial", "2026-07-30T23:00:00.000Z"],
+          ["final-blocked", "blocked", "2026-07-31T00:00:00.000Z"],
+        ];
+        for (const [runId, status, updated_at] of finalRows) {
+          const finalDir = seedRun(tierRoot, runId, RUN({
+            run_id: runId, status, updated_at,
+            terminal_result: status === "completed" ? null : { status, reason: `${status} result` },
+          }));
+          writeFileSync(join(finalDir, "factory.lock"), JSON.stringify({
+            session: `ses_${status}`, pid: 8, run_id: runId, branch: null,
+            claimed_at: "2026-07-30T00:00:00.000Z", heartbeat_at: "2026-07-30T00:00:00.000Z",
+          }));
+        }
         seedRun(tierRoot, "invalid", RUN({
           run_id: "invalid", updated_at: "2026-07-30T23:00:00.000Z", unexpected: true,
         }));
 
         const tiered = pollRuns(tierRoot);
         assert.deepEqual(tiered.runs.map((run) => run.run_id), [
-          "gate-old", "healthy-new", "healthy-a", "healthy-z", "parked", "dead", "final", "invalid",
+          "gate-old", "healthy-new", "healthy-a", "healthy-z", "parked", "dead",
+          "final-blocked", "final-partial", "final-completed", "invalid",
         ], "selection and sort use gate, healthy, parked, dead, final, invalid tiers with time then ID ties");
         assert.equal(tiered.active, tiered.runs[0], "selection takes the first eligible sorted record");
         assert.deepEqual(tiered.runs.map((run) => [run.run_id, run.terminal, run.parked, run.deadLock]), [
@@ -353,9 +366,18 @@ describe("run projection", () => {
           ["healthy-z", false, false, false],
           ["parked", false, true, false],
           ["dead", false, false, true],
-          ["final", true, false, false],
+          ["final-blocked", true, false, false],
+          ["final-partial", true, false, false],
+          ["final-completed", true, false, false],
           ["invalid", false, false, false],
         ], "projection derives final, parked, and dead only from current status plus stale running lock");
+        for (const [runId, status] of finalRows) {
+          const final = tiered.runs.find((run) => run.run_id === runId);
+          assert.deepEqual({ terminal: final.terminal, parked: final.parked, deadLock: final.deadLock },
+            { terminal: true, parked: false, deadLock: false }, `${status} is final history even with a stale lock`);
+          assert.deepEqual(renderLines({ active: final, runs: [final], searched: [] }), [`${runId}  ${status}`],
+            `${status} uses compact final-history rendering`);
+        }
       } finally { rmSync(tierRoot, { recursive: true, force: true }); }
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
@@ -1000,6 +1022,26 @@ describe("the host registration contract", () => {
         parked: staleResumed.parked,
         deadLock: staleResumed.deadLock,
       }, { terminal: false, parked: false, deadLock: true }, "resumed stale running is dead despite historical result");
+      assert.deepEqual(renderLines({ active: staleResumed, runs: [staleResumed], searched: [] }), [
+        "app-1",
+        "running  interactive  feature/app-1",
+        "next: gate:story",
+        "lock: stale (dead)",
+      ], "a local resumed stale run renders dead in primary position without its historical reason");
+
+      seedRun(root, "healthy", RUN({ run_id: "healthy", updated_at: "2026-07-30T13:00:00.000Z" }));
+      const withLocalSecondary = pollRuns(root);
+      assert.equal(withLocalSecondary.active.run_id, "healthy");
+      assert.deepEqual(renderLines(withLocalSecondary), [
+        "healthy",
+        "running  interactive  feature/app-1",
+        "next: gate:story",
+        "app-1  lock: stale (dead)",
+        "next: gate:story",
+      ], "a local resumed stale run renders dead in secondary position without its historical reason");
+      assert.equal(renderLines(withLocalSecondary).some((line) => line.includes(historical.reason)), false,
+        "local stale rendering hides the resumed historical reason");
+      rmSync(join(root, CONTROL_PLANE, "healthy"), { recursive: true, force: true });
 
       writeFileSync(join(dir, "run.json"), `${JSON.stringify(RUN({ status: "completed" }), null, 2)}\n`);
       writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T11:59:59.999Z")));

@@ -46,10 +46,10 @@ function secondaryLines(run) {
       ...(run.sandbox_path ? [`sandbox: ${run.sandbox_path}`] : []),
     ];
   }
-  if (run.deadLock && run.sandbox_path) {
+  if (run.deadLock) {
     return [
-      `${run.run_id}${run.issue_key ? `  ${run.issue_key}` : ""}  lock: stale (dead; sandbox retained)`,
-      `sandbox: ${run.sandbox_path}`,
+      `${run.run_id}${run.issue_key ? `  ${run.issue_key}` : ""}  lock: stale (${run.sandbox_path ? "dead; sandbox retained" : "dead"})`,
+      ...(run.sandbox_path ? [`sandbox: ${run.sandbox_path}`] : []),
       `next: ${run.next}`,
     ];
   }
@@ -107,7 +107,7 @@ function primaryLines(run) {
   if (run.sandbox_path) {
     lines.push(`sandbox: ${run.sandbox_path}`);
     if (run.deadLock) lines.push("lock: stale (dead; sandbox retained)");
-  }
+  } else if (run.deadLock) lines.push("lock: stale (dead)");
   return lines;
 }
 
