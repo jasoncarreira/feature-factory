@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
-import { buildEvidence, evidenceRef, git, observeAncestry, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, unownedPaths } from "../observe/index.js";
+import { buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, evidenceRef, git, observeAncestry, observeCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { dispatchInitPublication } from "./init-publication.js";
@@ -187,13 +187,20 @@ function readRepositoryVerify(worktree, { optional = false } = {}) {
   } catch {
     throw new RepositoryConfigError("invalid .factory.json");
   }
-  const keys = ["publish", "publishing_identity", "resolve", "verify"];
+  const requiredKeys = ["publish", "publishing_identity", "resolve", "verify"];
+  const allowedKeys = [...requiredKeys, "verify_timeout_ms"];
   if (!config || typeof config !== "object" || Array.isArray(config)
-    || JSON.stringify(Object.keys(config).sort()) !== JSON.stringify(keys)
-    || keys.some((keyName) => typeof config[keyName] !== "string" || !config[keyName].trim())) {
+    || Object.keys(config).some((keyName) => !allowedKeys.includes(keyName))) {
     throw new RepositoryConfigError("invalid .factory.json");
   }
-  return config.verify;
+  if (Object.hasOwn(config, "verify_timeout_ms")
+    && (!Number.isSafeInteger(config.verify_timeout_ms) || config.verify_timeout_ms <= 0)) {
+    throw new RepositoryConfigError("invalid .factory.json: entry 'verify_timeout_ms' must be a positive integer");
+  }
+  if (requiredKeys.some((keyName) => typeof config[keyName] !== "string" || !config[keyName].trim())) {
+    throw new RepositoryConfigError("invalid .factory.json");
+  }
+  return { command: config.verify, timeoutMs: config.verify_timeout_ms ?? DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS };
 }
 
 function branchPoint(run) {
@@ -202,10 +209,10 @@ function branchPoint(run) {
   return base;
 }
 
-async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand }) {
+async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs }) {
   const evidence = buildEvidence({
     subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, runId,
-    testCommand, skipReason, shellCommand,
+    testCommand, skipReason, shellCommand, testTimeoutMs,
   });
   const ancestry = observeAncestry(worktree, baseRef, "HEAD");
   if (ancestry !== "ancestor") {
@@ -230,7 +237,13 @@ function classifyRepositoryVerifyEvidence(runDir, runId, head, verifyCommand) {
   if (evidence.tests.observed === true && evidence.tests.exit === 0 && evidence.review_ready === true) {
     return { kind: "green", evidence };
   }
-  return { kind: "failed", evidence };
+  if (evidence.tests.observed === true && Number.isInteger(evidence.tests.exit)) {
+    return { kind: "failed", evidence };
+  }
+  if (evidence.tests.observed === false && evidence.tests.exit === null && evidence.tests.skipped_reason === null) {
+    return { kind: "unavailable", evidence };
+  }
+  return { kind: "unknown", evidence };
 }
 
 function repositoryVerifyRefusal(mergeCommit, evidence) {
@@ -247,31 +260,64 @@ function mergedPayload(runId, sliceId, row) {
   return { run_id: runId, slice: sliceId, status: row.status, attempts: row.attempts, base_ref: row.base_ref, merge_commit: row.merge_commit };
 }
 
+function repositoryVerifyUnknownRefusal(mergeCommit) {
+  return `post-merge verify outcome is unknown for recorded merge ${mergeCommit}; merged slice remains recorded; terminalize needs-human without re-executing factory config entry 'verify'.`;
+}
+
+function repositoryVerifyRetrySafety(repo, run, mergeCommit) {
+  let integration;
+  try {
+    integration = requireIntegrationWorktree(repo, run, run.worktree);
+  } catch (error) {
+    throw new CliError(`repository verification retry is unsafe after recorded merge ${mergeCommit}: ${error.message}; merged slice remains recorded; stop before advancing.`);
+  }
+  if (integration.head !== mergeCommit) {
+    throw new CliError(`repository verification retry is unsafe after recorded merge ${mergeCommit}: integration HEAD moved to ${integration.head}; merged slice remains recorded; stop before advancing.`);
+  }
+  const cleanliness = observeCleanliness(integration.worktree);
+  if (!cleanliness.clean) {
+    throw new CliError(`repository verification retry is unsafe after recorded merge ${mergeCommit}: ${cleanliness.reason}; merged slice remains recorded; stop before advancing.`);
+  }
+  return integration;
+}
+
+async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration }) {
+  const baseRef = branchPoint(run);
+  let attemptIntegration = integration;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const { evidence } = await writeObservedEvidence({
+      runDir, runId, subject: "test-verifier", attempt, branch: run.branch,
+      baseRef, worktree: attemptIntegration.worktree, status: "completed", blockedReason: null,
+      claim: null, testCommand: verify.command, skipReason: null, shellCommand: true,
+      testTimeoutMs: verify.timeoutMs,
+    });
+    const classified = classifyRepositoryVerifyEvidence(runDir, runId, mergeCommit, verify.command);
+    if (classified.kind === "green") return evidence;
+    if (classified.kind === "failed") throw new CliError(repositoryVerifyRefusal(mergeCommit, classified.evidence));
+    if (classified.kind === "unknown") throw new CliError(repositoryVerifyUnknownRefusal(mergeCommit));
+    if (attempt === 2) throw new CliError(repositoryVerifyRefusal(mergeCommit, evidence));
+    attemptIntegration = repositoryVerifyRetrySafety(repo, run, mergeCommit);
+  }
+  return null;
+}
+
 async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit }) {
   const run = readRun(runDir);
   const integration = requireIntegrationWorktree(repo, run, run.worktree);
   if (integration.head !== mergeCommit) {
     throw new CliError(`integration HEAD must equal recorded merge ${mergeCommit} before repository verification`);
   }
-  const baseRef = branchPoint(run);
-  let verifyCommand;
+  let verify;
   try {
-    verifyCommand = readRepositoryVerify(integration.worktree, { optional: true });
+    verify = readRepositoryVerify(integration.worktree, { optional: true });
   } catch (error) {
     if (error instanceof RepositoryConfigError) {
-      throw new CliError(`factory config entry 'verify' unavailable after recorded merge ${mergeCommit}: invalid .factory.json; merged slice remains recorded; stop before advancing.`);
+      throw new CliError(`factory config entry 'verify' unavailable after recorded merge ${mergeCommit}: ${error.message}; merged slice remains recorded; stop before advancing.`);
     }
     throw error;
   }
-  if (verifyCommand === null) return null;
-  const { evidence } = await writeObservedEvidence({
-    runDir, runId, subject: "test-verifier", attempt: 1, branch: run.branch,
-    baseRef, worktree: integration.worktree, status: "completed",
-    blockedReason: null, claim: null, testCommand: verifyCommand, skipReason: null, shellCommand: true,
-  });
-  const classified = classifyRepositoryVerifyEvidence(runDir, runId, integration.head, verifyCommand);
-  if (classified.kind !== "green") throw new CliError(repositoryVerifyRefusal(mergeCommit, evidence));
-  return evidence;
+  if (verify === null) return null;
+  return runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration });
 }
 
 const HANDLERS = {
@@ -437,20 +483,27 @@ const HANDLERS = {
         if (integration.head !== existing.merge_commit) {
           throw new CliError(`recorded merge ${existing.merge_commit} replay cannot reconcile the current integration head; do not re-execute factory config entry 'verify'.`);
         }
-        let verifyCommand;
+        let verify;
         try {
-          verifyCommand = readRepositoryVerify(integration.worktree, { optional: true });
+          verify = readRepositoryVerify(integration.worktree, { optional: true });
         } catch (error) {
           if (error instanceof RepositoryConfigError) {
-            throw new CliError(`factory config entry 'verify' unavailable after recorded merge ${existing.merge_commit}: invalid .factory.json; merged slice remains recorded; stop before advancing.`);
+            throw new CliError(`factory config entry 'verify' unavailable after recorded merge ${existing.merge_commit}: ${error.message}; merged slice remains recorded; stop before advancing.`);
           }
           throw error;
         }
-        if (verifyCommand !== null) {
-          const classified = classifyRepositoryVerifyEvidence(runDir, runId, integration.head, verifyCommand);
+        if (verify !== null) {
+          const classified = classifyRepositoryVerifyEvidence(runDir, runId, integration.head, verify.command);
           if (classified.kind === "failed") throw new CliError(repositoryVerifyRefusal(existing.merge_commit, classified.evidence));
           if (classified.kind === "unknown") {
-            throw new CliError(`post-merge verify outcome is unknown for recorded merge ${existing.merge_commit}; merged slice remains recorded; terminalize needs-human without re-executing factory config entry 'verify'.`);
+            throw new CliError(repositoryVerifyUnknownRefusal(existing.merge_commit));
+          }
+          if (classified.kind === "unavailable") {
+            const safeIntegration = repositoryVerifyRetrySafety(repo, current, existing.merge_commit);
+            await runRepositoryVerifyAttempts({
+              repo, runDir, runId, run: current, mergeCommit: existing.merge_commit, verify,
+              integration: safeIntegration,
+            });
           }
         }
         return emit(flags, mergedPayload(runId, sliceId, existing));
@@ -579,14 +632,14 @@ const HANDLERS = {
     const worktree = integration?.worktree ?? resolveWorktree(repo, flags.worktree);
     if (!worktree) throw new CliError(`worktree '${flags.worktree}' is not inside the repository`);
 
-    let repositoryVerifyCommand = null;
+    let repositoryVerify = null;
     if (flags.repositoryVerify) {
       const expectedBase = branchPoint(run);
       if (flags.base !== expectedBase) throw new CliError(`--base must equal the first seeded root slice base_ref ${expectedBase}`);
       try {
-        repositoryVerifyCommand = readRepositoryVerify(worktree);
+        repositoryVerify = readRepositoryVerify(worktree);
       } catch (error) {
-        if (error instanceof RepositoryConfigError) throw new CliError("invalid .factory.json");
+        if (error instanceof RepositoryConfigError) throw new CliError(error.message);
         throw error;
       }
     }
@@ -627,8 +680,9 @@ const HANDLERS = {
       branch: flags.repositoryVerify ? run.branch : flags.branch ?? null,
       baseRef: flags.base, worktree, status: flags.status ?? "completed",
       blockedReason: flags.blockedReason ?? null, claim,
-      testCommand: flags.repositoryVerify ? repositoryVerifyCommand : flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
+      testCommand: flags.repositoryVerify ? repositoryVerify.command : flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
       skipReason, shellCommand: flags.repositoryVerify === true,
+      testTimeoutMs: flags.repositoryVerify ? repositoryVerify.timeoutMs : undefined,
     });
     return emit(flags, {
       run_id: runId, subject, evidence_ref: evidenceRef(subject),

@@ -558,11 +558,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // #234 lands at 3009 by authorizing slice test commands against the persisted ratified test_plan.
     // 3009 -> 3186 (#237). The narrowly scoped repository-verify shell path, central post-record merge
     // hook, and shared canonical evidence writer/classifier detect cross-slice failures before Gate 3.
+    // 3188 -> 3242 (#240). Repository-configured verify timeouts, closed unavailable classification,
+    // fresh retry safety, and a two-attempt same-SHA replay recover interrupted verification safely.
     //
     // The tripwire moves 3000 -> 3600, which is the maximum Jason authorized for this batch (#213) and
     // not a number this run chose. The landed count is the assertion above; this is the bound the work
     // may not cross without a new authorization. Raise it only with one, and record the reason here.
-    assert.equal(total, 3186, "issue #237 landed at 3186 production lines");
+    assert.equal(total, 3242, "issue #240 landed at 3242 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 
