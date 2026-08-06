@@ -74,16 +74,19 @@ resolved Git top level:
   "resolve": "<non-empty shell command>",
   "verify": "<non-empty shell command>",
   "publish": "<non-empty shell command>",
-  "publishing_identity": "<non-empty account name>"
+  "publishing_identity": "<non-empty account name>",
+  "verify_timeout_ms": 900000
 }
 ```
 
-The root has exactly these four properties. `resolve`, `verify`, and `publish` are non-empty command
-strings. `publishing_identity` is a static non-empty account name, not a command, token, credential, or
-command result. All four entries are validated before use; a present invalid, unreadable, incomplete,
-wrong-type, whitespace-only, or unknown-property config refuses closed. The file is operator-owned,
-committed, and protected as a privileged path: a run cannot create, write, merge, archive, package, or
-repair it.
+The root has four required properties and only one optional property, `verify_timeout_ms`. `resolve`,
+`verify`, and `publish` are non-empty command strings. `publishing_identity` is a static non-empty account
+name, not a command, token, credential, or command result. When present, `verify_timeout_ms` must be a
+positive safe integer; omission silently defaults it to `900000`. Every required entry and the optional
+timeout are validated before use; a present invalid, unreadable, incomplete, wrong-type, whitespace-only,
+or unknown-property config refuses closed. An invalid timeout is reported as `.factory.json entry
+'verify_timeout_ms' must be a positive integer`. The file is operator-owned, committed, and protected as
+a privileged path: a run cannot create, write, merge, archive, package, or repair it.
 
 `resolve` and `verify` are consumed now. `resolve` runs as one ordinary shell step with the configured string submitted
 unchanged, repository-root cwd, inherited environment plus the exact admitted request in
@@ -101,25 +104,53 @@ run effect and never falls back. Resolver diagnostics name `resolve`, the status
 characters; neither
 the configured or expanded command line, shell diagnostics, nor credentials are printed, logged, or
 persisted. Credential values stay in inherited environment variables and never in the config. The
-contract adds no bridge, parser service, command runner, capture or stderr policy, output channel or
-size policy, buffering, truncation, redaction, timeout, retry, cache, payload transport, or session
-behavior.
+resolver contract adds no bridge, parser service, command runner, capture or stderr policy, output
+channel or size policy, buffering, truncation, redaction, timeout, retry, cache, payload transport, or
+session behavior.
 
-After a slice merge is successfully and atomically recorded, `verify` runs once in the exact recorded
+After a slice merge is successfully and atomically recorded, `verify` starts in the exact recorded
 integration worktree. The configured string is submitted unchanged as one ordinary shell command with
 that worktree as cwd and the process environment and stdio inherited. Stdout and stderr remain visible,
 informational, and unparsed; they are not captured or persisted. The numeric child exit status is
-authoritative: zero succeeds and non-zero fails repository verification. The result uses the existing
+authoritative: zero succeeds and non-zero fails repository verification. No numeric status is canonical
+unavailable evidence. Each repository shell attempt receives the full configured timeout, and one merge
+or replay invocation executes at most twice: only a first unavailable result may retry, after a fresh
+proof that the integration worktree, immutable merge SHA at `HEAD`, and clean tree are unchanged. The
+timeout and retry do not apply to resolver, slice, or Gate 3 commands. The result uses the existing
 canonical `evidence/test-verifier.json` schema, bound to the current merged head and the run's immutable
 root base.
 
 If `.factory.json` is absent, intake still declares no resolver and recognizes or fetches no reference;
 after a recorded merge, absence silently preserves the previous merge response and progression, with no
 repository command, evidence write, or new output. A post-record verification failure does not roll back
-or rewrite the merged row or its slice evidence and review. It stops before the next wave: production,
-unclassifiable, interrupted, invalid-config, unobservable, or exhausted findings route to
-`needs-human`; a test-only finding may use only the bounded test-file repair path, a separate commit, and
-a fresh repository verification. The merged slice is never reopened, re-seeded, or re-dispatched.
+or rewrite the merged row or its slice evidence and review. It stops before the next wave. Production
+defects, repair-journal exhaustion, dirty or moved replay safety failures, invalid config, unobservable
+state, and malformed, stale, foreign, wrong-command, missing-field, or internally inconsistent evidence
+route to durable `needs-human`. Clean, unchanged second-unavailable repository verification does not: it
+uses the nonterminal exhausted/release contract below. A confirmed test-only finding may use only the
+bounded test-file repair path, a separate commit, and a fresh repository verification.
+
+Canonical evidence has four closed classifications. `green` has exact run, `test-verifier` subject,
+current merged head, and unchanged `verify` command binding, observed integer exit zero, and
+`review_ready: true`. `failed` has that exact binding with observed nonzero integer exit, or observed zero
+that is not review-ready. `unavailable` has that exact binding and canonical `observed: false`,
+`exit: null`, and `skipped_reason: null`. Everything missing, unreadable, malformed, foreign, stale-head,
+wrong-command, missing-field, or internally inconsistent is `unknown`. Only `unavailable` may execute
+again. A later driver invocation may replay the exact same-SHA merge command only with no active repair,
+a freshly verified exact integration worktree on the recorded feature branch, the immutable merge SHA
+still at `HEAD`, and a freshly observed clean tree. Green and failed results are reused, while unknown
+evidence remains non-executing and routes to `needs-human`. The merged slice is never reopened,
+re-seeded, re-observed, remerged, or re-dispatched.
+
+Two clean, unchanged unavailable executions end only the current merge/replay CLI invocation and its
+enclosing driver invocation; they do not invoke the irreversible `factory terminal` transition. The
+driver awaits all specialist tasks, stops and awaits heartbeats, releases its owning session, and uses
+qualified status to prove `status: "running"`, `terminal_result: null`, and no remaining ownership before
+reporting `repository-verify-exhausted`. A failed release or unverified ownership reports
+`retained-lock-error` without claiming resumability. A later invocation repeats every normal selection,
+manifest, provenance, branch, worktree, push-target, and operator-ref guard, claims with its actual
+host-exported session ID, verifies ownership, and only then reconciles the same SHA. The new session value
+may equal the old one; verified release and a new verified claim establish freshness.
 
 Gate 3 always performs its own fresh integrated `test-verifier` observation at the current head using
 the existing command mode. It overwrites the canonical evidence independently and never shares,

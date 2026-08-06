@@ -22,9 +22,9 @@ const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" 
 
 // Runs the CLI out of process so the assertion is against the real entry point,
 // including argument parsing, rather than against an imported handler.
-function factory(repo, args) {
+function factory(repo, args, { env = process.env } = {}) {
   try {
-    const stdout = execFileSync("node", [CLI, ...args, "--repo", repo, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const stdout = execFileSync("node", [CLI, ...args, "--repo", repo, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env });
     return { ok: true, out: JSON.parse(stdout) };
   } catch (error) {
     return { ok: false, stderr: String(error.stderr ?? error.message) };
@@ -37,8 +37,38 @@ const PASSING_TEST_COMMAND = "git --no-pager log -1 --format=%H";
 const FAILING_TEST_COMMAND = "git --no-pager grep --quiet THIS_STRING_IS_ABSENT";
 const DIRTYING_TEST_COMMAND = "node -e require('fs').writeFileSync('src/app/thing.ts','mutated')";
 
+// This is a test-only process seam. The real CLI still parses the repository config,
+// reaches buildEvidence(), and starts its shell child; the preloaded hook records the
+// actual spawn options at that final boundary without exposing a production injection.
+function repositoryVerifyTrace(operator, command) {
+  const trace = join(operator, "repository-verify-spawn.jsonl");
+  const preload = join(operator, "repository-verify-spawn-hook.cjs");
+  writeFileSync(preload, [
+    'const fs = require("node:fs");',
+    'const childProcess = require("node:child_process");',
+    'const { syncBuiltinESMExports } = require("node:module");',
+    'const original = childProcess.spawnSync;',
+    'childProcess.spawnSync = function(command, args, options) {',
+    '  if (command === process.env.FACTORY_VERIFY_TRACE_COMMAND && options?.shell === true) {',
+    '    fs.appendFileSync(process.env.FACTORY_VERIFY_TRACE_PATH, `${JSON.stringify({ command, args, timeout: options.timeout })}\\n`);',
+    '  }',
+    '  return original.apply(this, arguments);',
+    '};',
+    'syncBuiltinESMExports();',
+  ].join("\n"));
+  return {
+    trace,
+    env: {
+      ...process.env,
+      FACTORY_VERIFY_TRACE_COMMAND: command,
+      FACTORY_VERIFY_TRACE_PATH: trace,
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preload}`].filter(Boolean).join(" "),
+    },
+  };
+}
+
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], verify = null, configBytes = null } = {}) {
+function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], verify = null, verifyTimeout = undefined, configBytes = null } = {}) {
   const operator = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(operator, "init", "-q", "-b", "main");
   git(operator, "config", "user.email", "t@example.com");
@@ -51,10 +81,14 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
   // a test detail.
   writeFileSync(join(operator, ".gitignore"), ".factory/\n.factory-sandboxes/\n");
   if (configBytes !== null) writeFileSync(join(operator, ".factory.json"), configBytes);
-  else if (verify !== null) writeFileSync(join(operator, ".factory.json"), `${JSON.stringify({
-    resolve: "true", verify: typeof verify === "function" ? verify(operator) : verify,
-    publish: "true", publishing_identity: "factory-test",
-  }, null, 2)}\n`);
+  else if (verify !== null) {
+    const config = {
+      resolve: "true", verify: typeof verify === "function" ? verify(operator) : verify,
+      publish: "true", publishing_identity: "factory-test",
+    };
+    if (verifyTimeout !== undefined) config.verify_timeout_ms = verifyTimeout;
+    writeFileSync(join(operator, ".factory.json"), `${JSON.stringify(config, null, 2)}\n`);
+  }
   git(operator, "add", "-A");
   git(operator, "commit", "-q", "-m", "base");
   git(operator, "remote", "add", "origin", operator);
@@ -175,16 +209,26 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(existsSync(join(p.runDir, "evidence", "test-verifier.json")), false);
     } finally { cleanupProject(p); }
 
-    const green = upToReview("clean-config", undefined, { verify: (operator) => `node -e "require('fs').appendFileSync('${join(operator, "verify-count")}','x')"` });
+    const green = upToReview("clean-config", undefined, {
+      verify: (operator) => `node -e "require('fs').appendFileSync('${join(operator, "verify-count")}','x')"`,
+      verifyTimeout: 120001,
+    });
     try {
       const mergeCommit = mergeIntoFeature(green.repo);
-      const merged = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      const configuredCommand = JSON.parse(readFileSync(join(green.repo, ".factory.json"), "utf8")).verify;
+      const configuredTrace = repositoryVerifyTrace(green.operator, configuredCommand);
+      const merged = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)], { env: configuredTrace.env });
       assert.equal(merged.ok, true, merged.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(configuredTrace.trace, "utf8")), {
+        command: configuredCommand, args: [], timeout: 120001,
+      }, "the parsed explicit timeout must reach the repository shell spawn unchanged");
       const evidence = JSON.parse(readFileSync(join(green.runDir, "evidence", "test-verifier.json"), "utf8"));
       assert.equal(evidence.subject, "test-verifier");
       assert.equal(evidence.commit, mergeCommit);
       assert.equal(evidence.tests.exit, 0);
       assert.equal(evidence.review_ready, true);
+      assert.equal(Object.hasOwn(evidence, "verify_timeout_ms"), false);
+      assert.equal(Object.hasOwn(runJson(green.runDir), "verify_timeout_ms"), false);
       assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x");
       const before = readFileSync(join(green.runDir, "run.json"), "utf8");
       const replay = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(5)]);
@@ -199,12 +243,64 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(moved.stderr.trim(), `recorded merge ${mergeCommit} replay cannot reconcile the current integration head; do not re-execute factory config entry 'verify'.`);
       assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x");
       git(green.repo, "reset", "--hard", mergeCommit);
-      rmSync(join(green.runDir, "evidence", "test-verifier.json"));
-      const unknown = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(7)]);
-      assert.equal(unknown.ok, false);
-      assert.match(unknown.stderr, new RegExp(`post-merge verify outcome is unknown for recorded merge ${mergeCommit}`, "u"));
-      assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x", "unknown replay must not execute verify");
+      const evidencePath = join(green.runDir, "evidence", "test-verifier.json");
+      const canonical = readFileSync(evidencePath, "utf8");
+      const canonicalRecord = JSON.parse(canonical);
+      const missingCanonicalFields = ["branch", "base_ref", "worktree", "commands", "claim_reconciliation"]
+        .map((field) => {
+          const record = structuredClone(canonicalRecord);
+          delete record[field];
+          return record;
+        });
+      const unknownRecords = [
+        null,
+        "{not json\n",
+        ...missingCanonicalFields,
+        { ...canonicalRecord, run_id: "foreign-run" },
+        { ...canonicalRecord, commit: "0".repeat(40) },
+        { ...canonicalRecord, base_ref: "0".repeat(40) },
+        { ...canonicalRecord, worktree: `${canonicalRecord.worktree}-foreign` },
+        { ...canonicalRecord, commands: canonicalRecord.commands.slice(0, 2) },
+        { ...canonicalRecord, claim_reconciliation: { claimed: true, mismatches: [] } },
+        { ...canonicalRecord, tests: { ...canonicalRecord.tests, cmd: "foreign command" } },
+        {
+          ...canonicalRecord, review_ready: true,
+          tests: { ...canonicalRecord.tests, observed: false, exit: null, skipped_reason: "not canonical" },
+        },
+        // Canonical tests tuple with a contradicting review_ready. Pinned as a shape that must
+        // stay unknown; `readEvidence` is what refuses it, before the canonical check runs.
+        {
+          ...canonicalRecord, review_ready: true,
+          tests: { ...canonicalRecord.tests, observed: false, exit: null, skipped_reason: null },
+        },
+      ];
+      for (const record of unknownRecords) {
+        if (record === null) rmSync(evidencePath, { force: true });
+        else writeFileSync(evidencePath, typeof record === "string" ? record : `${JSON.stringify(record, null, 2)}\n`);
+        const unknown = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(7)]);
+        assert.equal(unknown.ok, false);
+        assert.match(unknown.stderr, new RegExp(`post-merge verify outcome is unknown for recorded merge ${mergeCommit}`, "u"));
+        assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x", "untrusted replay must not execute verify");
+      }
     } finally { cleanupProject(green); }
+
+    const defaultTimeout = upToReview("default-verify-timeout", undefined, {
+      verify: "node -e \"process.exit(0)\"",
+    });
+    try {
+      const mergeCommit = mergeIntoFeature(defaultTimeout.repo);
+      const defaultCommand = JSON.parse(readFileSync(join(defaultTimeout.repo, ".factory.json"), "utf8")).verify;
+      const defaultTrace = repositoryVerifyTrace(defaultTimeout.operator, defaultCommand);
+      const merged = factory(defaultTimeout.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)], { env: defaultTrace.env });
+      assert.equal(merged.ok, true, merged.stderr);
+      assert.deepEqual(merged.out, {
+        run_id: RUN, slice: "be-thing", status: "merged", attempts: 1,
+        base_ref: defaultTimeout.basePoint, merge_commit: mergeCommit,
+      }, "omitting verify_timeout_ms must preserve the existing merged response shape");
+      assert.deepEqual(JSON.parse(readFileSync(defaultTrace.trace, "utf8")), {
+        command: defaultCommand, args: [], timeout: 900000,
+      }, "an omitted timeout must reach the repository shell spawn as exactly 900000");
+    } finally { cleanupProject(defaultTimeout); }
 
     const malformed = upToReview("malformed-config", undefined, { configBytes: "{\"resolve\":\"true\"}\n" });
     try {
@@ -214,6 +310,156 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(merged.stderr.trim(), `factory config entry 'verify' unavailable after recorded merge ${mergeCommit}: invalid .factory.json; merged slice remains recorded; stop before advancing.`);
       assert.equal(runJson(malformed.runDir).slices[0].status, "merged");
     } finally { cleanupProject(malformed); }
+
+    const unexpected = upToReview("unexpected-config-entry", undefined, { configBytes: `${JSON.stringify({
+      resolve: "true", verify: "node -e \"require('fs').writeFileSync('unexpected-verify-ran','x')\"",
+      publish: "true", publishing_identity: "factory-test", unexpected: true,
+    }, null, 2)}\n` });
+    try {
+      const mergeCommit = mergeIntoFeature(unexpected.repo);
+      const merged = factory(unexpected.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, false);
+      assert.equal(merged.stderr.trim(), `factory config entry 'verify' unavailable after recorded merge ${mergeCommit}: invalid .factory.json; merged slice remains recorded; stop before advancing.`);
+      assert.equal(existsSync(join(unexpected.repo, "unexpected-verify-ran")), false, "malformed config must not execute repository verify");
+      assert.equal(existsSync(join(unexpected.runDir, "evidence", "test-verifier.json")), false, "malformed config must not write repository evidence");
+    } finally { cleanupProject(unexpected); }
+
+    const invalidTimeouts = [0, -1, 1.5, "900000", null, Number.MAX_SAFE_INTEGER + 1];
+    for (const [index, value] of invalidTimeouts.entries()) {
+      const configBytes = `${JSON.stringify({
+        resolve: "true", verify: "true", publish: "true", publishing_identity: "factory-test",
+        verify_timeout_ms: value,
+      }, null, 2)}\n`;
+      const invalid = index === 0
+        ? upToReview(`invalid-timeout-${index}`, undefined, { configBytes })
+        : project(`invalid-timeout-${index}`, { configBytes });
+      try {
+        if (index !== 0) {
+          buildSlice(invalid.repo);
+          factory(invalid.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
+        }
+        git(invalid.repo, "checkout", "-q", "feature");
+        const rootBase = runJson(invalid.runDir).slices[0].base_ref;
+        const direct = factory(invalid.repo, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", rootBase,
+          "--repository-verify", "--now", NOW(3)]);
+        assert.equal(direct.ok, false);
+        assert.equal(direct.stderr.trim(), "invalid .factory.json: entry 'verify_timeout_ms' must be a positive integer");
+        assert.equal(existsSync(join(invalid.runDir, "evidence", "test-verifier.json")), false);
+        if (index === 0) {
+          const mergeCommit = mergeIntoFeature(invalid.repo);
+          const merged = factory(invalid.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+          assert.equal(merged.ok, false);
+          assert.equal(merged.stderr.trim(), `factory config entry 'verify' unavailable after recorded merge ${mergeCommit}: invalid .factory.json: entry 'verify_timeout_ms' must be a positive integer; merged slice remains recorded; stop before advancing.`);
+          assert.equal(runJson(invalid.runDir).slices[0].status, "merged");
+        }
+      } finally { cleanupProject(invalid); }
+    }
+
+    const retry = upToReview("verify-retry", undefined, {
+      verify: (operator) => `node -e "const f=require('fs'),p='${join(operator, "verify-count")}';f.appendFileSync(p,'x');if(f.readFileSync(p,'utf8').length<2)setTimeout(()=>{},10000)"`,
+      verifyTimeout: 1000,
+    });
+    try {
+      const mergeCommit = mergeIntoFeature(retry.repo);
+      const review = readFileSync(join(retry.runDir, "reviews", "be-thing.json"), "utf8");
+      const sliceEvidence = readFileSync(join(retry.runDir, "evidence", "be-thing.json"), "utf8");
+      const merged = factory(retry.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, true, merged.stderr);
+      assert.equal(readFileSync(join(retry.operator, "verify-count"), "utf8"), "xx");
+      assert.equal(JSON.parse(readFileSync(join(retry.runDir, "evidence", "test-verifier.json"), "utf8")).attempt, 2);
+      assert.equal(readFileSync(join(retry.runDir, "reviews", "be-thing.json"), "utf8"), review);
+      assert.equal(readFileSync(join(retry.runDir, "evidence", "be-thing.json"), "utf8"), sliceEvidence);
+    } finally { cleanupProject(retry); }
+
+    const dirty = upToReview("verify-dirty", undefined, {
+      verify: (operator) => `node -e "const f=require('fs');f.appendFileSync('${join(operator, "verify-count")}','x');f.writeFileSync('src/app/thing.ts','dirty');setTimeout(()=>{},10000)"`,
+      verifyTimeout: 1000,
+    });
+    try {
+      const mergeCommit = mergeIntoFeature(dirty.repo);
+      const beforeReview = readFileSync(join(dirty.runDir, "reviews", "be-thing.json"), "utf8");
+      const beforeEvidence = readFileSync(join(dirty.runDir, "evidence", "be-thing.json"), "utf8");
+      const merged = factory(dirty.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, false);
+      assert.match(merged.stderr, /repository verification retry is unsafe.*worktree has uncommitted changes/u);
+      assert.equal(readFileSync(join(dirty.operator, "verify-count"), "utf8"), "x");
+      assert.equal(runJson(dirty.runDir).slices[0].status, "merged");
+      assert.equal(readFileSync(join(dirty.runDir, "reviews", "be-thing.json"), "utf8"), beforeReview);
+      assert.equal(readFileSync(join(dirty.runDir, "evidence", "be-thing.json"), "utf8"), beforeEvidence);
+    } finally { cleanupProject(dirty); }
+
+    const moved = upToReview("verify-moved", undefined, {
+      verify: (operator) => `node -e "const f=require('fs'),c=require('child_process');f.appendFileSync('${join(operator, "verify-count")}','x');f.writeFileSync('src/app/moved.ts','moved');c.execFileSync('git',['add','src/app/moved.ts']);c.execFileSync('git',['commit','-m','verify-moved']);setTimeout(()=>{},10000)"`,
+      verifyTimeout: 1000,
+    });
+    try {
+      const mergeCommit = mergeIntoFeature(moved.repo);
+      const beforeReview = readFileSync(join(moved.runDir, "reviews", "be-thing.json"), "utf8");
+      const beforeEvidence = readFileSync(join(moved.runDir, "evidence", "be-thing.json"), "utf8");
+      const merged = factory(moved.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(merged.ok, false);
+      assert.match(merged.stderr, new RegExp(`repository verification retry is unsafe after recorded merge ${mergeCommit}: integration HEAD moved`, "u"));
+      assert.equal(readFileSync(join(moved.operator, "verify-count"), "utf8"), "x");
+      assert.equal(runJson(moved.runDir).slices[0].merge_commit, mergeCommit);
+      assert.equal(readFileSync(join(moved.runDir, "reviews", "be-thing.json"), "utf8"), beforeReview);
+      assert.equal(readFileSync(join(moved.runDir, "evidence", "be-thing.json"), "utf8"), beforeEvidence);
+    } finally { cleanupProject(moved); }
+
+    const resumed = upToReview("verify-resume", undefined, {
+      verify: (operator) => `node -e "const f=require('fs');f.appendFileSync('${join(operator, "verify-count")}','x');if(!f.existsSync('${join(operator, "verify-ready")}'))setTimeout(()=>{},10000)"`,
+      verifyTimeout: 1000,
+    });
+    try {
+      assert.equal(factory(resumed.repo, ["lock", RUN, "claim", "--session", "session-one", "--branch", "feature"]).ok, true);
+      const mergeCommit = mergeIntoFeature(resumed.repo);
+      const beforeReview = readFileSync(join(resumed.runDir, "reviews", "be-thing.json"), "utf8");
+      const beforeEvidence = readFileSync(join(resumed.runDir, "evidence", "be-thing.json"), "utf8");
+      const exhausted = factory(resumed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(exhausted.ok, false);
+      assert.match(exhausted.stderr, /exit status unavailable/u);
+      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "xx");
+      const exhaustedRun = readFileSync(join(resumed.runDir, "run.json"), "utf8");
+      assert.equal(runJson(resumed.runDir).status, "running");
+      assert.equal(runJson(resumed.runDir).terminal_result, null);
+      assert.equal(JSON.parse(readFileSync(join(resumed.runDir, "evidence", "test-verifier.json"), "utf8")).attempt, 2);
+      assert.equal(factory(resumed.repo, ["heartbeat", RUN, "--session", "session-one"]).ok, true);
+      assert.equal(factory(resumed.repo, ["lock", RUN, "release", "--session", "other-session"]).ok, false);
+      let status = factory(resumed.repo, ["status", RUN]);
+      assert.equal(status.out.lock, "fresh");
+      assert.equal(status.out.lock_session, "session-one");
+      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "xx");
+      assert.equal(factory(resumed.repo, ["lock", RUN, "release", "--session", "session-one"]).ok, true);
+      status = factory(resumed.repo, ["status", RUN]);
+      assert.equal(status.out.status, "running");
+      assert.equal(status.out.terminal_result, null);
+      assert.equal(status.out.lock, "absent");
+      assert.equal(factory(resumed.repo, ["heartbeat", RUN, "--session", "session-one"]).ok, false);
+      assert.equal(factory(resumed.repo, ["lock", RUN, "claim", "--session", "session-one", "--branch", "feature"]).ok, true);
+      status = factory(resumed.repo, ["status", RUN]);
+      assert.equal(status.out.lock, "fresh");
+      assert.equal(status.out.lock_session, "session-one");
+      writeFileSync(join(resumed.operator, "verify-ready"), "ready\n");
+      const replay = factory(resumed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(6)]);
+      assert.equal(replay.ok, true, replay.stderr);
+      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "xxx");
+      assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), exhaustedRun);
+      assert.equal(readFileSync(join(resumed.runDir, "reviews", "be-thing.json"), "utf8"), beforeReview);
+      assert.equal(readFileSync(join(resumed.runDir, "evidence", "be-thing.json"), "utf8"), beforeEvidence);
+      const replayEvidence = JSON.parse(readFileSync(join(resumed.runDir, "evidence", "test-verifier.json"), "utf8"));
+      assert.equal(replayEvidence.attempt, 1);
+      assert.equal(replayEvidence.commit, mergeCommit);
+      const independent = factory(resumed.repo, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", resumed.basePoint,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(7)]);
+      assert.equal(independent.ok, true, independent.stderr);
+      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "xxx");
+      assert.equal(JSON.parse(readFileSync(join(resumed.runDir, "evidence", "test-verifier.json"), "utf8")).tests.cmd, PASSING_TEST_COMMAND);
+      assert.equal(recordValidator(resumed.repo, resumed.runDir, mergeCommit, "GO", NOW(7)).ok, true);
+      assert.equal(approveGate(resumed.repo, "pre_pr", NOW(7)).ok, true);
+      const pr = factory(resumed.repo, ["pr", RUN, "--url", "https://example.test/pr/resumed", "--now", NOW(8)]);
+      assert.equal(pr.ok, true, pr.stderr);
+      assert.equal(runJson(resumed.runDir).pr_url, "https://example.test/pr/resumed");
+      assert.equal(factory(resumed.repo, ["lock", RUN, "release", "--session", "session-one"]).ok, true);
+    } finally { cleanupProject(resumed); }
   });
 
   it("refuses a slice that changed a path it does not own", () => {
