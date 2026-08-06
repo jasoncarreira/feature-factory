@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
-import { buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, unownedPaths } from "../observe/index.js";
+import { buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { dispatchInitPublication } from "./init-publication.js";
@@ -256,7 +256,12 @@ function canonicalRepositoryVerifyEvidence(evidence, { runId, run, integration, 
     && evidence.files_changed.every((path) => typeof path === "string" && Boolean(path))
     && typeof evidence.diff_stat === "string" && evidence.diff_observed === true
     && commandsAreCanonical && testsAreCanonical && evidence.commit === integration.head
-    && evidence.observed_by === "orchestrator" && typeof evidence.review_ready === "boolean"
+    && evidence.observed_by === "orchestrator"
+    // The value, not the type. `readEvidence` above already refuses a record whose stored
+    // review_ready disagrees with its contents, so no such record reaches here today; this
+    // keeps the predicate that decides replay-eligibility from being correct only by virtue
+    // of its caller.
+    && evidence.review_ready === deriveReviewReady(evidence)
     && reconciliation && typeof reconciliation === "object" && !Array.isArray(reconciliation)
     && JSON.stringify(Object.keys(reconciliation).sort()) === JSON.stringify(["claimed", "mismatches"])
     && reconciliation.claimed === false && Array.isArray(reconciliation.mismatches)

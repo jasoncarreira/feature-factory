@@ -564,7 +564,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // The tripwire moves 3000 -> 3600, which is the maximum Jason authorized for this batch (#213) and
     // not a number this run chose. The landed count is the assertion above; this is the bound the work
     // may not cross without a new authorization. Raise it only with one, and record the reason here.
-    assert.equal(total, 3288, "issue #240 landed at 3288 production lines");
+    // 3288 -> 3293 on review: the replay-eligibility predicate recomputes review_ready rather
+    // than checking its type. `readEvidence` already refuses a self-contradicting record, so
+    // this closes no reachable false green -- it keeps the predicate that authorizes another
+    // execution from being correct only by virtue of its caller. Four of the five lines are
+    // that reasoning.
+    assert.equal(total, 3293, "issue #240 landed at 3293 production lines, 3293 after review");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 

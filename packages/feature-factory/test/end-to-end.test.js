@@ -267,6 +267,12 @@ describe("end to end — a merge is refused through the real CLI", () => {
           ...canonicalRecord, review_ready: true,
           tests: { ...canonicalRecord.tests, observed: false, exit: null, skipped_reason: "not canonical" },
         },
+        // Canonical tests tuple with a contradicting review_ready. Pinned as a shape that must
+        // stay unknown; `readEvidence` is what refuses it, before the canonical check runs.
+        {
+          ...canonicalRecord, review_ready: true,
+          tests: { ...canonicalRecord.tests, observed: false, exit: null, skipped_reason: null },
+        },
       ];
       for (const record of unknownRecords) {
         if (record === null) rmSync(evidencePath, { force: true });
