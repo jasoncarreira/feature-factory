@@ -104,7 +104,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode",
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
-    assert.deepEqual(COMMANDS.resume, ["--repo", "--now", "--json"]);
+    assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
     // The skill is the authoritative instruction set, and nothing checked it against the CLI
@@ -572,7 +572,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // that reasoning.
     // 3293 -> 3356 for issue #243: an explicit resume transition, parked pre-effect command guards,
     // historical-result validation, real continuation projection, and current-status health checks.
-    assert.equal(total, 3356, "issue #243 landed at 3356 production lines");
+    // 3356 -> 3372 on review: resume proves ownership before un-parking. It is the handoff -- the one
+    // command where a new driver takes over a run nobody is driving -- so two drivers could otherwise
+    // both resume the same parked run and both believe they own it. Twelve of the sixteen lines are the
+    // three refusals and the reasoning.
+    assert.equal(total, 3372, "issue #243 landed at 3372 production lines, 3372 after review");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 

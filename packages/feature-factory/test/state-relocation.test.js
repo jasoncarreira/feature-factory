@@ -321,7 +321,8 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
 
     const resumed = seedLegacyRun(repository, "resumed-stale", { branch: "feature/resumed-stale", pr_base: "main" });
     factory(repository, "terminal", "resumed-stale", "needs-human", "--reason", "external cause", "--now", "2026-08-05T00:00:00Z");
-    factory(repository, "resume", "resumed-stale", "--now", "2026-08-05T00:01:00Z");
+    factory(repository, "lock", "resumed-stale", "claim", "--session", "resumed-session", "--branch", "feature/resumed-stale");
+    factory(repository, "resume", "resumed-stale", "--session", "resumed-session", "--now", "2026-08-05T00:01:00Z");
     writeFileSync(join(resumed.runDir, "factory.lock"), `${JSON.stringify({
       session: "dead-resumed-session", pid: 1234, run_id: "resumed-stale", branch: "feature/resumed-stale",
       claimed_at: "2020-01-01T00:00:00.000Z", heartbeat_at: "2020-01-01T00:00:00.000Z",

@@ -23,7 +23,7 @@ import {
 export const COMMANDS = Object.freeze({
   init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
-  resume: Object.freeze(["--repo", "--now", "--json"]),
+  resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
   // No --force: `lock <id> steal` is the same operation with a name that says what it
   // does, and two spellings of "take someone else's lock" is one too many.
   lock: Object.freeze(["--repo", "--session", "--branch", "--ttl-ms", "--now", "--json"]),
@@ -930,6 +930,22 @@ const HANDLERS = {
     if (current.status !== "needs-human") {
       throw new CliError(`factory resume requires current status needs-human; found '${current.status}'`);
     }
+    // Ownership is proven here and nowhere else in this command's family. Every other mutating
+    // command advances a run whose driver already holds the lock; resume is the handoff itself --
+    // the moment a new driver picks up a run nobody is driving. Two drivers resuming the same
+    // parked run would both believe they own it, which is the single-writer invariant the lock
+    // exists for. So the caller must already hold a fresh lock: claim, then verify, then resume.
+    if (!flags.session) throw new CliError("factory resume requires --session <session-id>");
+    const held = inspectSessionLock(runDir);
+    if (held.state === "absent") {
+      throw new CliError(`factory resume requires a held session lock for run '${runId}'; claim it with 'lock ${runId} claim --session ${flags.session}'`);
+    }
+    if (held.state === "stale") {
+      throw new CliError(`factory resume refuses a stale session lock for run '${runId}' (owner ${held.owner.session}, heartbeat ${held.owner.heartbeat_at}); take it with 'lock ${runId} steal --session ${flags.session}'`);
+    }
+    if (held.owner.session !== flags.session) {
+      throw new CliError(`run '${runId}' is held by session ${held.owner.session}, not ${flags.session}; take it with 'lock ${runId} steal --session ${flags.session}'`);
+    }
     const at = stamp(flags);
     const next = await transition(runDir, {
       participants: [{ familyId: "envelope", mode: "resume-needs-human" }],
@@ -1153,7 +1169,7 @@ function usage() {
 
   factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
-  factory resume <run-id> [--now ISO]
+  factory resume <run-id> --session ID [--now ISO]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID
   factory gate <run-id> <${GATE_NAMES.join("|")}> <${GATE_STATUSES.join("|")}> [--artifact REF]

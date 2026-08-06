@@ -474,14 +474,40 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const badArity = factory(resumed.repo, ["resume", RUN, "extra"]);
       assert.equal(badArity.ok, false);
       assert.equal(badArity.stderr.trim(), "factory resume requires exactly one <run-id>");
-      const badFlag = factory(resumed.repo, ["resume", RUN, "--session", "session-b"]);
+      const badFlag = factory(resumed.repo, ["resume", RUN, "--branch", "feature"]);
       assert.equal(badFlag.ok, false);
-      assert.match(badFlag.stderr, /unknown option '--session' for 'resume'/u);
-      const staleTime = factory(resumed.repo, ["resume", RUN, "--now", NOW(5)]);
+      assert.match(badFlag.stderr, /unknown option '--branch' for 'resume'/u);
+
+      // Ownership, proven at the handoff. Every other mutating command advances a run whose driver
+      // already claimed the lock; resume is where a new driver takes over a run nobody is driving,
+      // so two drivers could otherwise both believe they own the same parked run. Each refusal
+      // below leaves the manifest byte-identical.
+      const noSession = factory(resumed.repo, ["resume", RUN, "--now", NOW(7)]);
+      assert.equal(noSession.ok, false);
+      assert.equal(noSession.stderr.trim(), "factory resume requires --session <session-id>");
+      const wrongSession = factory(resumed.repo, ["resume", RUN, "--session", "session-zzz", "--now", NOW(7)]);
+      assert.equal(wrongSession.ok, false);
+      assert.match(wrongSession.stderr, /is held by session session-b, not session-zzz/u);
+      assert.equal(factory(resumed.repo, ["lock", RUN, "release", "--session", "session-b"]).ok, true);
+      const unlocked = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
+      assert.equal(unlocked.ok, false);
+      assert.match(unlocked.stderr, /requires a held session lock/u);
+      writeFileSync(join(resumed.runDir, "factory.lock"), `${JSON.stringify({
+        session: "session-b", pid: process.pid, run_id: RUN, branch: "feature",
+        claimed_at: "2020-01-01T00:00:00.000Z", heartbeat_at: "2020-01-01T00:00:00.000Z",
+      }, null, 2)}\n`);
+      const staleLock = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
+      assert.equal(staleLock.ok, false);
+      assert.match(staleLock.stderr, /refuses a stale session lock/u);
+      assert.equal(factory(resumed.repo, ["lock", RUN, "steal", "--session", "session-b", "--branch", "feature"]).ok, true);
+      assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes,
+        "every ownership refusal must leave the manifest untouched");
+
+      const staleTime = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(5)]);
       assert.equal(staleTime.ok, false);
       assert.match(staleTime.stderr, /resume-needs-human must move updated_at forwards/u);
       assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes);
-      const resume = factory(resumed.repo, ["resume", RUN, "--now", NOW(7)]);
+      const resume = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
       assert.equal(resume.ok, true, resume.stderr);
       assert.deepEqual(resume.out, {
         run_id: RUN, status: "running", terminal_result: { status: "needs-human", reason }, next: "gate:pre_pr",
@@ -527,7 +553,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(factory(unfixed.repo, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW(5)]).ok, true);
       assert.equal(factory(unfixed.repo, ["lock", RUN, "release", "--session", "session-a"]).ok, true);
       assert.equal(factory(unfixed.repo, ["lock", RUN, "claim", "--session", "session-b", "--branch", "feature"]).ok, true);
-      assert.equal(factory(unfixed.repo, ["resume", RUN, "--now", NOW(6)]).ok, true);
+      assert.equal(factory(unfixed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(6)]).ok, true);
       const replay = factory(unfixed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(7)]);
       assert.equal(replay.ok, false);
       assert.equal(replay.stderr.trim(), reason);

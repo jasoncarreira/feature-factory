@@ -95,7 +95,7 @@ const NEEDS_HUMAN_PROSE = [
   ["persisted-mode", "Persisted mode parks a top-level needs-human stop; after the cause is fixed, explicitly resume it with factory resume before continuing.", "needs-human is final"],
   ["headless", "Headless mode exits its host turn with top-level needs-human parked; a later host must explicitly resume it with factory resume.", "headless needs-human is terminal"],
   ["mode-result", "Mode result needs-human means parked and explicitly resumable; only completed, partial, and blocked are final.", "needs-human is a final result"],
-  ["stop-command", "Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --repo S.", "terminal needs-human ends the run permanently"],
+  ["stop-command", "Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --session $SESSION_ID --repo S, which refuses unless that session already holds a fresh lock: claim, then verify, then resume.", "terminal needs-human ends the run permanently"],
   ["parked-status", "For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.", "terminal:needs-human"],
   ["report", "Report top-level needs-human as parked with its reason and explicit factory resume command.", "report needs-human as final"],
   ["retention", "Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.", "the retained sandbox cannot resume"],

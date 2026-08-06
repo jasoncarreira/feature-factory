@@ -201,7 +201,7 @@ Persisted mode determines what each driver may do:
 
 An inability to ask a human never promotes interactive or headless to autonomous. When a headless run
 reaches a human gate, use the exact reason `headless run reached a human gate`.
-Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --repo S.
+Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --session $SESSION_ID --repo S, which refuses unless that session already holds a fresh lock: claim, then verify, then resume.
 For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
 Retain the selected sandbox and repository, then stop the host turn.
 
