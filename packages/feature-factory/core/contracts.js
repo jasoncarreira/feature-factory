@@ -7,6 +7,7 @@
 //
 // `mode` is a static, code-owned string declared by the transition descriptor. It
 // is never persisted, never produced by an agent, and never hashed.
+import { isDeepStrictEqual } from "node:util";
 import { GATE_NAMES, GATE_STATUSES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
 
 const TERMINAL_MODES = new Set(["terminalize"]);
@@ -48,7 +49,25 @@ const envelope = contract({
     updated_at: state.updated_at,
     terminal_result: state.terminal_result ?? null,
   }),
-  validateTransition: ({ mode, before, after }) => {
+  validateTransition: ({ mode, before, after, current, candidate }) => {
+    if (before.status === "needs-human") {
+      if (mode !== "resume-needs-human") throw new Error("a needs-human run must be resumed before any transition");
+      if (after.status !== "running") throw new Error("resume-needs-human must change status to running");
+      if (!isDeepStrictEqual(after.terminal_result, before.terminal_result)) {
+        throw new Error("resume-needs-human must preserve terminal_result");
+      }
+      if (Date.parse(after.updated_at) <= Date.parse(before.updated_at)) {
+        throw new Error("resume-needs-human must move updated_at forwards");
+      }
+      for (const key of Object.keys(before).filter((key) => !["status", "updated_at"].includes(key))) {
+        if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`resume-needs-human cannot change envelope.${key}`);
+      }
+      for (const key of Object.keys(current).filter((key) => !Object.hasOwn(before, key))) {
+        if (!isDeepStrictEqual(current[key], candidate[key])) throw new Error(`resume-needs-human cannot change run.${key}`);
+      }
+      return;
+    }
+    if (mode === "resume-needs-human") throw new Error(`resume-needs-human requires current status needs-human; found '${before.status}'`);
     // Identity is immutable for the life of a run. Nothing legitimate renames a
     // run, and allowing it would let a transition retarget another run's record.
     for (const key of ["run_id", "created_at", "pr_base", "mode"]) {

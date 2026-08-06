@@ -49,9 +49,10 @@ granted after the fact.
 
 There is no amend-and-reseed path — `factory slices-seed` refuses a second seed and both fields are
 immutable once written, by design. If a slice turns out to need scope the plan did not give it, the
-run ends (`factory terminal <run-id> needs-human --reason "<what the plan got wrong>"`) and a new run
-starts from a corrected plan. That is expensive, which is the point: get the boundaries right here,
-where it costs a re-read rather than a run.
+run parks with `factory terminal <run-id> needs-human --reason "<what the plan got wrong>"`. Explicit
+resume does not amend or reseed the immutable plan. If the scope has not become sufficient through an
+external correction, the same check parks the intact run again with the same reason. That is expensive,
+which is the point: get the boundaries right here, where it costs a re-read rather than a run.
 - **`depends_on`** — the slice ids whose output this slice genuinely consumes.
 
 ## Rules (the reviewer checks these before Gate 2)

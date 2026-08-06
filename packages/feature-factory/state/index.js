@@ -7,7 +7,7 @@
 // exported from package.json and is imported only by bin/factory.js.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GATE_NAMES, TERMINAL_STATUSES, validateRun } from "./schema.js";
+import { GATE_NAMES, validateRun } from "./schema.js";
 
 export { CONTROL_PLANE, validateRun, SchemaError, RUN_KEYS, SCHEMA_VERSION, RUN_STATUSES, TERMINAL_STATUSES, MODES,
   GATE_NAMES, GATE_STATUSES, STEP_STATUSES, SLICE_STATUSES, VALIDATOR_VERDICTS } from "./schema.js";
@@ -43,7 +43,7 @@ function nextSliceAction(slices) {
 // rules: a pending gate re-presents, a running slice re-observes, an
 // unaccepted step re-runs.
 export function nextAction(run) {
-  if (TERMINAL_STATUSES.includes(run.status)) return `terminal:${run.status}`;
+  if (["completed", "partial", "blocked"].includes(run.status)) return `terminal:${run.status}`;
   const openStep = run.steps.find((step) => step.status !== "accepted");
   const sliceAction = nextSliceAction(run.slices);
   for (const name of GATE_NAMES) {

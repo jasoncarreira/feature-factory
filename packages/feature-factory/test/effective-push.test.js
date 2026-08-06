@@ -262,7 +262,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   for (const fragment of [
     "## Post-merge test-only repairs",
     "include every attempt",
-    "latest-failed, exhausted, or `needs-human` records",
+    "This publication repair-record needs-human remains blocking, and envelope resume does not clear it.",
   ]) required(publication, fragment, "post-merge repair disclosure");
   assert.equal(occurrences(publication, "config --replace-all remote.origin.pushurl"), 0);
   assert.doesNotMatch(publication, /git -C "\$RUN_REPO" config/u);

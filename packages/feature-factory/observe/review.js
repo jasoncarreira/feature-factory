@@ -227,6 +227,9 @@ function pathsChanged(worktree, from, to, options) {
 export function assertPublicationReady({ runDir, state, runId, observeHead }) {
   const refuse = (message) => { throw new Error(`this run is not publishable: ${message}`); };
 
+  if (state.status === "needs-human") {
+    refuse("a needs-human run is parked; run factory resume before publication");
+  }
   if (TERMINAL_STATUSES.includes(state.status)) {
     refuse(`a ${state.status} run must be surfaced, not published`);
   }

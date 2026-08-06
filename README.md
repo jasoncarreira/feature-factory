@@ -165,12 +165,13 @@ guidance.
 
 ## The CLI
 
-Twelve commands. Every one that changes state is a single checked transition, and an unknown flag is
+Thirteen commands. Every one that changes state is a single checked transition, and an unknown flag is
 an error rather than a silently ignored typo.
 
 ```
 factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
 factory status <run-id> [--json]
+factory resume <run-id> [--now ISO]
 factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
 factory heartbeat <run-id> --session ID
 factory gate <run-id> <story|brief|pre_pr> <pending|approved|changes|stop> [--artifact REF]
@@ -225,6 +226,25 @@ Initialization and manifest publication are create-only. If `run.json` already e
 status against the selected repository and resume instead of running init again. Existing sandbox and
 legacy manifests are never overwritten or backfilled. A scaffold-only or partially created `S` without
 `run.json` is a retained collision, not a retryable destination.
+
+A current `needs-human` run is parked and explicitly resumable; only `completed`, `partial`, and
+`blocked` are final. Fix the external cause and retain the original result. Resume in this order:
+
+1. Bind the intended retained sandbox, validate the selected manifest, and prove physical containment.
+2. Run the post-selection operator exact-ref-absent guard.
+3. Complete the existing effective-push proof.
+4. Accept the feature branch only after provenance, worktree binding, seed ancestry, cleanliness or recovery, and every existing operator-ref recheck passes in order.
+5. Immediately before claiming, rerun the final operator exact-ref-absent guard.
+6. Claim with the current host session or perform a justified steal, then verify fresh ownership, parked status, and the deeply unchanged result.
+7. Run `factory resume <run-id> --repo S`, then verify running status, unchanged historical result, the real next action, and the same fresh owner.
+8. Run only existing post-lock reconciliation for any already-recorded merge, including its evidence and repository verification.
+9. Continue solely from the newly qualified `status.next`, never from the pre-resume read or reason text.
+
+While parked, status and lock qualification remain available, but every effectful gate, step, seed,
+slice, observe, validator, terminal-rewrite, and PR command refuses before effects. Resume changes only
+`status` and `updated_at`; no manifest key is added. A resumed recorded merge replays the existing
+clean-head and retry-safety checks before progression, and unresolved repair-journal records remain
+publication blockers. An unfixed cause may park the run again with the same reason.
 
 The orchestrator creates the external draft PR with the recorded values before recording its URL:
 
