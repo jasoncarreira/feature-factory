@@ -1112,7 +1112,7 @@ const CLAIMS = [
   {
     id: "post-merge-production-defect-terminalizes",
     file: "WORKFLOW.md",
-    fragment: "A production defect terminalizes\n`needs-human`; production source is never repaired on the integration branch.",
+    fragment: "A production defect parks top-level needs-human; after the external fix, explicitly resume the intact run.",
     expect: "allowed",
     matches: /"status": "needs-human"[\s\S]*factory config entry 'verify'[\s\S]*\.factory\.json verify suite[\s\S]*"next": "gate:story"/u,
     act(repo) {
@@ -1187,7 +1187,7 @@ const CLAIMS = [
   {
     id: "headless-mode-persists",
     file: "WORKFLOW.md",
-    fragment: "terminalize with reason exactly `headless run reached a human gate`:",
+    fragment: "Headless mode exits its host turn with top-level needs-human parked; a later host must explicitly resume it with factory resume.",
     expect: "allowed",
     matches: /"status": "needs-human"[\s\S]*"mode": "headless"[\s\S]*"terminal_result": \{\s*"status": "needs-human",\s*"reason": "headless run reached a human gate"\s*\}[\s\S]*"next": "gate:story"/u,
     act(repo) {
@@ -1207,12 +1207,12 @@ const CLAIMS = [
   },
   {
     id: "needs-human-prose-and-resume-order",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: RESUME_ORDER[0],
     expect: "allowed",
     matches: /"next": "gate:story"/u,
     act(repo) {
-      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const prose = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
       checkNeedsHumanProse(prose);
       checkResumeOrder(prose);
       for (const [id, required] of NEEDS_HUMAN_PROSE) {
@@ -1223,7 +1223,7 @@ const CLAIMS = [
       // control against the skill confirmed the one surface that was covered -- so removing
       // --session from either README still left CI green.
       for (const [label, surfacePath] of [
-        ["skill", join(pkg, "skills", "feature", "SKILL.md")],
+        ["workflow", join(pkg, "WORKFLOW.md")],
         ["package README", join(pkg, "README.md")],
         ["root README", join(pkg, "..", "..", "README.md")],
       ]) {

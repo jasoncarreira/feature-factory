@@ -11,7 +11,7 @@ Ships three things:
 
 | | |
 | --- | --- |
-| `bin/factory.js` | the `factory` CLI — twelve commands, each state change one checked transition |
+| `bin/factory.js` | the `factory` CLI — thirteen commands, each state change one checked transition |
 | `WORKFLOW.md` | the canonical, host-agnostic workflow contract |
 | `agents/` | eleven specialist definitions dispatched by a host adapter |
 

@@ -10,7 +10,7 @@ every `factory` transition. The adapter must supply a stable, nonempty `SESSION_
 request bytes, restrict dispatch to the eleven named specialists, support parallel fan-out where this
 workflow calls for it, await every dispatched result, and never treat dispatch admission as completion.
 Every existing run resumes from qualified status JSON and its immutable persisted mode.
-
+Persisted mode parks a top-level needs-human stop; after the cause is fixed, explicitly resume it with factory resume before continuing.
 
 The only specialized task targets a run driver may dispatch are exactly:
 
@@ -126,16 +126,16 @@ its immutable persisted `run.json.mode` controls gate handling on that invocatio
 resume; invocation flags do not select resumed behavior:
 
 - **interactive** — persist and present each gate, then wait for a real human response.
-- **headless** — a gate that requires a human records `needs-human` and stops.
+- **headless** — Headless mode exits its host turn with top-level needs-human parked; a later host must explicitly resume it with factory resume.
 - **autonomous** — gates may be decided without a human only under the preconditions below.
 
 An inability to ask a human never promotes interactive or headless to autonomous.
 
-When a headless run reaches a human gate, terminalize with reason exactly `headless run reached a human gate`:
-
-```sh
-factory terminal "$R" needs-human --reason "headless run reached a human gate" --repo "$RUN_REPO"
-```
+Mode result needs-human means parked and explicitly resumable; only completed, partial, and blocked are final.
+Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --session $SESSION_ID --repo S, which refuses unless that session already holds a fresh lock: claim, then verify, then resume.
+For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
+Report top-level needs-human as parked with its reason and explicit factory resume command.
+Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
 
 Every platform uses this exact gate artifact map:
 
@@ -390,9 +390,9 @@ Resume order 7 — invoke explicit factory resume with the verified owning sessi
 Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.
 Resume order 9 — continue solely from the newly qualified status.next.
 
-For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment and before effective-push proof. Order 3 never absorbs containment, binding, or the post-selection exact-ref guard. During order 4 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 5 and claim or justified steal. Order 6 requires `lock_session === FACTORY_SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --session "$FACTORY_SESSION_ID" --repo "$RUN_REPO"` for order 7 — the same session order 6 just verified as the fresh owner — then require that owner unchanged. Resume refuses without it, and refuses a lock that is absent, stale, or held by anyone else. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 never uses the pre-resume observation or the stop reason.
+For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment and before effective-push proof. Order 3 never absorbs containment, binding, or the post-selection exact-ref guard. During order 4 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 5 and claim or justified steal. Order 6 requires `lock_session === SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --session "$SESSION_ID" --repo "$RUN_REPO"` for order 7 — the same session order 6 just verified as the fresh owner — then require that owner unchanged. Resume refuses without it, and refuses a lock that is absent, stale, or held by anyone else. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 never uses the pre-resume observation or the stop reason.
 
-If resume refuses after claim or the run later reparks, quiesce builders, tools, background tasks, and heartbeat loops; release the same owning session; then require qualified status to show an absent lock and null owner before another session begins.
+If resume refuses after claim or the run later reparks, quiesce builders, tools, specialist tasks, and heartbeat loops; release the same owning session; then require qualified status to show an absent lock and null owner before another session begins.
 
 Before requesting a fresh run, inspect only the two deterministic manifest candidates described by the
 CLI contract: the legacy candidate under `O/.factory/R` and the sandbox candidate under
