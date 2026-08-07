@@ -24,6 +24,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   const fresh = skill.slice(freshStart, gateOneStart);
   const gateThree = skill.slice(gateThreeStart, publicationStart);
   const publication = skill.slice(publicationStart, summaryStart);
+  const effectiveProof = fresh.slice(fresh.indexOf("### Effective push proof"), fresh.indexOf("### Feature branch provenance and crash recovery"));
   const summary = skill.slice(summaryStart);
   const required = (section, fragment, trace) => {
     const index = section.indexOf(fragment);
@@ -437,6 +438,25 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
     "Production source ceiling: <landed count> / 3600",
   ], "Step 6 compare/publication");
+  const stepSixEquality = required(publication, 'factory effective-push check "$O" "$RUN_REPO"', "Step 6 success sequence");
+  const stepSixFirstIdentity = required(publication, identityCommand, "Step 6 success sequence");
+  const stepSixPush = required(publication, 'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"', "Step 6 success sequence");
+  assert.deepEqual([stepSixEquality, stepSixFirstIdentity, stepSixPush],
+    [...[stepSixEquality, stepSixFirstIdentity, stepSixPush]].sort((left, right) => left - right),
+    "Step 6 success must keep equality, the first identity guard, and push adjacent in that order");
+  const equalityToPush = publication.slice(stepSixEquality + 'factory effective-push check "$O" "$RUN_REPO"'.length, stepSixPush);
+  assert.deepEqual(fencedShBlocks(equalityToPush).flatMap(({ operations }) => operations), [identityCommand],
+    "Step 6 equality-to-push interval must contain only the first identity guard");
+  const distinctRefusal = "Step 6 effective-push refusal parks differently from Step 0: Step 0 remains status-only with an unchanged manifest; Step 6 follows the procedure below.";
+  required(publication, distinctRefusal, "Step 6 refusal lifecycle");
+  assert.match(publication, /nonzero result from the command below[\s\S]*stdout is empty and stderr\s+is exactly one fixed Step 0 refusal followed by exactly one LF[\s\S]*bind\s+`PRE_QUOTING_REASON` to the resulting already-redacted ASCII refusal/u);
+  assert.match(publication, /quiesce every builder, tool,\s+background task, and heartbeat call[\s\S]*surrounding\s+the complete reason with single quotes and replacing every literal `'` with the exact shell sequence\s+`'\\''`/u);
+  assert.match(publication, /exact parked top-level status produced by that command[\s\S]*reason byte-for-byte equal to `PRE_QUOTING_REASON`[\s\S]*same verified `SESSION_ID` owner[\s\S]*Release only that owner[\s\S]*lock absent with null owner/u);
+  assert.match(publication, /Perform no publishing-identity observation, push, `gh` command, `factory pr`, Step 7 handoff, cleanup, or\s+other effect/u);
+  assert.match(effectiveProof, /permit only `factory status "\$R" --json --repo "\$RUN_REPO"`[\s\S]*stop before branch handling/u);
+  assert.doesNotMatch(effectiveProof, /factory terminal|factory lock|needs-human/u);
+  assert.throws(() => required(publication.replace(distinctRefusal, ""), distinctRefusal, "Step 6 refusal lifecycle"),
+    /Step 6 refusal lifecycle contract is missing/u);
   for (const fragment of [
     "## Post-merge test-only repairs",
     "include every attempt",
@@ -777,6 +797,11 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
       ],
       reason: null,
     });
+    assert.deepEqual(allMatching.events.slice(2, 5), [
+      "effective-push-targets-exactly-equal",
+      "identity:pre-push",
+      'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"',
+    ]);
     assert.equal(markerLines().length, 3);
     assert.equal(markerLines().every((line) => line === JSON.stringify(["api", "--method", "GET", "/user", "--jq", ".login"])), true);
     const beforeAbsentConfig = markerLines();
@@ -940,7 +965,7 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
 
     git(operator, "config", "--replace-all", "remote.origin.pushurl", secretOne);
     const crashBranch = "feature/crash-recovery";
-    const crash = initFresh(operator, ["crash-recovery", "--branch", crashBranch, "--pr-base", "main", "--now", "2026-08-04T12:01:00.000Z"]);
+    const crash = initFresh(operator, ["crash-recovery", "--branch", crashBranch, "--pr-base", "main", "--mode", "autonomous", "--now", "2026-08-04T12:01:00.000Z"]);
     assert.equal(gitResult(crash.repository, "config", "--get-all", "remote.origin.pushurl").status, 1);
     const crashRun = JSON.parse(readFileSync(join(crash.runDir, "run.json"), "utf8"));
     const crashStatus = factory("status", "crash-recovery", "--repo", crash.repository);
@@ -1003,12 +1028,67 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
     assert.notEqual(publicationRef, `refs/heads/${staleIntakeBranch}`);
     assert.equal(gitResult(bare, "show-ref", "--verify", "--quiet", publicationRef).status, 1);
     const activePushBefore = git(crash.repository, "config", "--get-all", "remote.origin.pushurl");
+    const stepSixSession = "step-six-owner";
+    factory("lock", "crash-recovery", "claim", "--session", stepSixSession, "--repo", crash.repository);
+    const beforeStepSixStatus = factory("status", "crash-recovery", "--repo", crash.repository);
+    assert.equal(beforeStepSixStatus.status, "running");
+    assert.equal(beforeStepSixStatus.mode, "autonomous");
+    assert.equal(beforeStepSixStatus.lock_session, stepSixSession);
+    const beforeStepSixRun = JSON.parse(readFileSync(join(crash.runDir, "run.json"), "utf8"));
+    const progressState = ({ status: _status, updated_at: _updatedAt, terminal_result: _terminalResult, ...progress }) => progress;
+    rmSync(invocationMarker, { force: true });
     git(operator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
-    assert.throws(() => enforceEffectivePushTarget(["check", operator, crash.repository]),
-      new RegExp(`sandbox effective push target does not match operator target; sandbox retained at ${crash.repository}`, "u"));
+    const stepSixEvents = ["effective-push:check"];
+    const stepSixRefusal = effectivePushProgram("check", operator, crash.repository);
+    const stepSixReason = `factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${crash.repository}`;
+    assert.equal(stepSixRefusal.status, 1);
+    assert.equal(stepSixRefusal.stdout, "");
+    assert.equal(stepSixRefusal.stderr, `${stepSixReason}\n`);
+    assert.match(stepSixReason, /^[\x20-\x7e]+$/u);
+    stepSixEvents.push("quiesce:builders-tools-background-heartbeats");
+    const parkedStepSix = terminalThroughShell(crash.repository, "crash-recovery", stepSixReason);
+    stepSixEvents.push("terminal:needs-human");
+    assert.equal(parkedStepSix.result.status, 0, parkedStepSix.result.stderr);
+    assert.equal(parkedStepSix.reasonToken, shellQuote(stepSixReason));
+    assert.equal((parkedStepSix.commandString.match(/--reason/gu) ?? []).length, 1);
+    assert.ok(parkedStepSix.commandString.includes(`--reason ${parkedStepSix.reasonToken} --repo`));
+    assert.equal(parkedStepSix.commandString.includes('--reason "'), false);
+    const parkedStepSixStatus = factory("status", "crash-recovery", "--repo", crash.repository);
+    stepSixEvents.push("status:parked-owner-and-reason");
+    assert.equal(parkedStepSixStatus.status, "needs-human");
+    assert.deepEqual(parkedStepSixStatus.terminal_result, { status: "needs-human", reason: stepSixReason });
+    assert.equal(parkedStepSixStatus.lock_session, stepSixSession);
+    const parkedStepSixRun = JSON.parse(readFileSync(join(crash.runDir, "run.json"), "utf8"));
+    assert.deepEqual(progressState(parkedStepSixRun), progressState(beforeStepSixRun));
+    assert.equal(parkedStepSixRun.terminal_result.reason, stepSixReason);
+    factory("lock", "crash-recovery", "release", "--session", stepSixSession, "--repo", crash.repository);
+    stepSixEvents.push("lock:release");
+    const unlockedStepSix = factory("status", "crash-recovery", "--repo", crash.repository);
+    stepSixEvents.push("status:unlocked");
+    assert.equal(unlockedStepSix.status, "needs-human");
+    assert.deepEqual(unlockedStepSix.terminal_result, parkedStepSixStatus.terminal_result);
+    assert.equal(unlockedStepSix.lock, "absent");
+    assert.equal(unlockedStepSix.lock_session, null);
+    assert.deepEqual(stepSixEvents, [
+      "effective-push:check",
+      "quiesce:builders-tools-background-heartbeats",
+      "terminal:needs-human",
+      "status:parked-owner-and-reason",
+      "lock:release",
+      "status:unlocked",
+    ]);
+    assert.equal(stepSixEvents.some((event) => /identity|push origin|gh pr|factory pr|cleanup/u.test(event)), false);
+    assert.equal(existsSync(invocationMarker), false);
+    assert.equal(gitResult(bare, "show-ref", "--verify", "--quiet", publicationRef).status, 1);
+    assert.equal(parkedStepSixRun.pr_url, null);
+    assert.equal(existsSync(join(crash.repository, "progressed.txt")), true);
+    assert.equal(existsSync(crash.repository), true);
+    for (const hidden of [secretOne, secretTwo, "operator-user", "credential-token", "other-user", "other-token"]) {
+      assert.equal(stepSixReason.includes(hidden), false);
+      assert.equal(JSON.stringify(parkedStepSixRun).includes(hidden), false);
+    }
     assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), activePushBefore);
     git(operator, "config", "--replace-all", "remote.origin.pushurl", activePushBefore);
-    assert.doesNotThrow(() => enforceEffectivePushTarget(["check", operator, crash.repository]));
     assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), activePushBefore);
 
     const recreatedBranch = "feature/recreated";

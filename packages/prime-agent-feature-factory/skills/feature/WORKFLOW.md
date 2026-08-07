@@ -1354,13 +1354,34 @@ factory status "$R" --json --repo "$RUN_REPO"
 git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"
 ```
 
+Step 6 effective-push refusal parks differently from Step 0: Step 0 remains status-only with an unchanged manifest; Step 6 follows the procedure below.
+
+Treat a nonzero result from the command below as an effective-push refusal only when stdout is empty and stderr
+is exactly one fixed Step 0 refusal followed by exactly one LF. Remove only that LF and bind
+`PRE_QUOTING_REASON` to the resulting already-redacted ASCII refusal; never include child diagnostics,
+subprocess output, a target, or an error cause. Before any other operation, quiesce every builder, tool,
+background task, and heartbeat call. For a running autonomous envelope, and identically for every other
+mode at this boundary, encode `PRE_QUOTING_REASON` as one deterministic POSIX shell token by surrounding
+the complete reason with single quotes and replacing every literal `'` with the exact shell sequence
+`'\''`. Submit the encoded token as the sole `--reason` argument to the exact terminal parking command
+defined in Publishing identity enforcement above.
+
+The token is transport only: never persist it, place the reason in double quotes, interpolate it as
+unquoted shell syntax, use command substitution, `eval`, a temporary file, or environment indirection.
+Require qualified status to show the exact parked top-level status produced by that command, a terminal
+reason byte-for-byte equal to `PRE_QUOTING_REASON`, and the same verified `SESSION_ID` owner. Release only that owner with
+`factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"`, then require final qualified
+status to prove the lock absent with null owner. Apart from the required envelope status, timestamp, and
+terminal result, retain every prior state field, the sandbox, and repository.
+Perform no publishing-identity observation, push, `gh` command, `factory pr`, Step 7 handoff, cleanup, or
+other effect. If parking, reason or owner verification, release, or unlock verification fails, report
+only `Outcome: retained-lock-error` with no parked-success or resumability claim.
+
     factory effective-push check "$O" "$RUN_REPO"
 
 Both lookups must succeed and return nonempty output, and their captured strings must be exactly equal.
 Step 6 only compares and never reconfigures a remote. Never persist, log, echo, interpolate into a cause,
-or expose either target. Use the same three exact redacted
-refusal messages from Step 0. A lookup failure or mismatch leaves `RUN_REPO` intact, permits status only,
-and blocks every publication effect.
+or expose either target. Use the same three exact redacted refusal messages from Step 0.
 
 With `DECLARED_PUBLISHING_IDENTITY`, immediately after exact target equality and before the unchanged
 push, run the same ordinary host observation under its exact cwd, environment, no-stdin, direct-result,
