@@ -27,7 +27,7 @@ Do not delegate to another agent. Start from the story, the supplied scope roots
 
 ## Inputs
 
-You receive a feature description, user story, or change request from the orchestrator. If a Jira key or design brief is included, use it for context but your job is the **code**, not the requirements.
+You receive a feature description, user story, or change request from the orchestrator. If an issue reference or design brief is included, use it for context but your job is the **code**, not the requirements.
 
 ## What to produce
 

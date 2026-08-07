@@ -55,9 +55,9 @@ build fails, fix it before reporting; never hand back code that does not compile
 Stage only the files you changed and commit to the worktree branch:
 ```
 git -C $WT add <specific files>
-git -C $WT commit -m "<JIRA_KEY>: <imperative backend summary>"
+git -C $WT commit -m "<issue_key>: <imperative backend summary>"
 ```
-(If no Jira key yet, use a short imperative subject; the orchestrator reconciles the final message.) Do **not** push or open a PR — the orchestrator owns delivery.
+(If no issue key yet, use a short imperative subject; the orchestrator reconciles the final message.) Do **not** push or open a PR — the orchestrator owns delivery.
 
 ## Output contract
 
