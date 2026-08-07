@@ -23,9 +23,17 @@ export class SessionLockHeldError extends Error {
 }
 
 export function readSessionLock(runDir) {
+  return readLock(runDir, isValidLock);
+}
+
+function readInspectionLock(runDir) {
+  return readLock(runDir, isInspectionLock);
+}
+
+function readLock(runDir, validate) {
   try {
     const value = JSON.parse(readFileSync(join(runDir, SESSION_LOCK_FILE), "utf8"));
-    return isValidLock(value) ? value : null;
+    return validate(value) ? value : null;
   } catch {
     return null;
   }
@@ -33,13 +41,23 @@ export function readSessionLock(runDir) {
 
 // "fresh" | "stale" | "absent". The caller routes on this; it is the only
 // question the lock answers.
-export function inspectSessionLock(runDir, { now = Date.now(), ttlMs = DEFAULT_SESSION_TTL_MS } = {}) {
-  const owner = readSessionLock(runDir);
-  if (!owner) return { state: "absent", owner: null };
-  const ageMs = now - Date.parse(owner.heartbeat_at);
-  // A future heartbeat is not evidence of staleness, so it counts as fresh.
-  if (!Number.isFinite(ageMs) || ageMs <= ttlMs) return { state: "fresh", owner };
-  return { state: "stale", owner };
+export function inspectSessionLock(runDir, {
+  now = Date.now(),
+  ttlMs = DEFAULT_SESSION_TTL_MS,
+  kill = (pid, signal) => process.kill(pid, signal),
+} = {}) {
+  const owner = readInspectionLock(runDir);
+  if (!owner) return { state: "absent", owner: null, liveness: null };
+  let probeFailed = false;
+  let probeError;
+  try { kill(owner.pid, 0); } catch (error) { probeFailed = true; probeError = error; }
+  let liveness = "indeterminate";
+  if (Number.isInteger(owner.pid) && owner.pid > 0) {
+    if (!probeFailed || probeError?.code === "EPERM") liveness = "live";
+    else if (probeError?.code === "ESRCH") liveness = "dead";
+  }
+  const expired = now - Date.parse(owner.heartbeat_at) > ttlMs;
+  return { state: expired || liveness === "dead" ? "stale" : "fresh", owner, liveness };
 }
 
 export async function claimSessionLock(runDir, { session, runId, branch, now, ttlMs, force = false } = {}) {
@@ -51,7 +69,8 @@ export async function claimSessionLock(runDir, { session, runId, branch, now, tt
   }
   const owner = {
     session,
-    pid: process.pid,
+    // The long-lived direct CLI invoker owns the session; PID liveness is correct only when owner and inspector run on the same machine.
+    pid: process.ppid,
     run_id: runId,
     branch: branch ?? null,
     // Re-claiming your own lock preserves when you first took it.
@@ -67,7 +86,7 @@ export async function refreshSessionLock(runDir, { session, now } = {}) {
   if (!owner) throw new Error("no factory.lock to refresh");
   // Refreshing someone else's lock would silently extend a run you do not own.
   if (session && owner.session !== session) throw new SessionLockHeldError(owner);
-  const next = { ...owner, heartbeat_at: new Date(now ?? Date.now()).toISOString() };
+  const next = { ...owner, pid: process.ppid, heartbeat_at: new Date(now ?? Date.now()).toISOString() };
   await writeProtectedJsonAtomic(runDir, SESSION_LOCK_FILE, next);
   return next;
 }
@@ -81,12 +100,16 @@ export async function releaseSessionLock(runDir, { session } = {}) {
 }
 
 function isValidLock(value) {
+  return isInspectionLock(value) && Number.isInteger(value.pid);
+}
+
+function isInspectionLock(value) {
   return Boolean(value)
     && typeof value === "object"
     && !Array.isArray(value)
     && Object.keys(value).every((key) => SESSION_LOCK_KEYS.includes(key))
     && typeof value.session === "string" && value.session.trim().length > 0
-    && Number.isInteger(value.pid)
+    && Object.hasOwn(value, "pid")
     && typeof value.run_id === "string" && value.run_id.trim().length > 0
     && Number.isFinite(Date.parse(value.claimed_at || ""))
     && Number.isFinite(Date.parse(value.heartbeat_at || ""));

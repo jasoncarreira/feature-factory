@@ -782,6 +782,7 @@ const HANDLERS = {
       branch: run.branch,
       pr_base: run.pr_base ?? null,
       lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
+      lock_liveness: lock.liveness,
       lock_session: lock.owner?.session ?? null,
       gates: Object.fromEntries(GATE_NAMES.filter((name) => run.gates[name]).map((name) => [name, run.gates[name].status])),
       steps: run.steps.map((step) => `${step.agent}:${step.status}(${step.attempts})`),

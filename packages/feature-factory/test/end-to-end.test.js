@@ -7,13 +7,14 @@
 // below is driven through the real CLI against a real repository.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as cli } from "../bin/factory.js";
 import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
+import { inspectSessionLock } from "../state/session-lock.js";
 import { assertPublicationReady } from "../observe/review.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
@@ -160,6 +161,79 @@ function mergeIntoFeature(repo) {
 }
 
 const runJson = (runDir) => JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+
+function assertSessionLockInspection() {
+  const runDir = mkdtempSync(join(tmpdir(), "ff-session-lock-"));
+  const lockFile = join(runDir, "factory.lock");
+  const now = Date.parse("2026-08-07T12:00:00.000Z");
+  const ttlMs = 1000;
+  const coded = (code) => Object.assign(new Error(code), { code });
+  const rows = [
+    { name: "live", pid: 101, liveness: "live" },
+    { name: "dead", pid: 102, error: coded("ESRCH"), liveness: "dead" },
+    { name: "permission denied", pid: 103, error: coded("EPERM"), liveness: "live" },
+    { name: "unexpected code", pid: 104, error: coded("EACCES"), liveness: "indeterminate" },
+    { name: "code-less error", pid: 105, error: new Error("unknown"), liveness: "indeterminate" },
+    { name: "non-integer", pid: "106", error: coded("ESRCH"), liveness: "indeterminate" },
+    { name: "zero", pid: 0, error: coded("ESRCH"), liveness: "indeterminate" },
+    { name: "negative", pid: -107, error: coded("EPERM"), liveness: "indeterminate" },
+    { name: "branchless", pid: 108, liveness: "live", branchless: true },
+  ];
+  try {
+    for (const expired of [false, true]) {
+      for (const row of rows) {
+        const owner = {
+          session: `inspection-${row.name}`, pid: row.pid, run_id: RUN,
+          claimed_at: new Date(now - ttlMs).toISOString(),
+          heartbeat_at: new Date(now - ttlMs - (expired ? 1 : 0)).toISOString(),
+        };
+        if (!row.branchless) owner.branch = "feature";
+        writeFileSync(lockFile, `${JSON.stringify(owner, null, 2)}\n`);
+        const calls = [];
+        const inspected = inspectSessionLock(runDir, {
+          now, ttlMs,
+          kill: (pid, signal) => {
+            calls.push([pid, signal]);
+            if (row.error) throw row.error;
+          },
+        });
+        assert.deepEqual(calls, [[row.pid, 0]], `${row.name} ${expired ? "expired" : "fresh"} probe`);
+        assert.deepEqual(inspected, {
+          state: expired || row.liveness === "dead" ? "stale" : "fresh",
+          owner,
+          liveness: row.liveness,
+        }, `${row.name} ${expired ? "expired" : "fresh"}`);
+      }
+    }
+
+    const valid = {
+      session: "inspection", pid: 109, run_id: RUN, branch: "feature",
+      claimed_at: new Date(now).toISOString(), heartbeat_at: new Date(now).toISOString(),
+    };
+    const unreadable = [
+      { name: "absent" },
+      { name: "invalid JSON", bytes: "{not json\n" },
+      { name: "missing PID", value: (({ pid, ...owner }) => owner)(valid) },
+      { name: "unknown key", value: { ...valid, unexpected: true } },
+      { name: "invalid session", value: { ...valid, session: "" } },
+      { name: "invalid run", value: { ...valid, run_id: "" } },
+      { name: "invalid claim", value: { ...valid, claimed_at: "not-a-date" } },
+      { name: "invalid heartbeat", value: { ...valid, heartbeat_at: "not-a-date" } },
+      { name: "unreadable file", directory: true },
+    ];
+    for (const row of unreadable) {
+      rmSync(lockFile, { recursive: true, force: true });
+      if (row.directory) mkdirSync(lockFile);
+      else if (row.bytes) writeFileSync(lockFile, row.bytes);
+      else if (row.value) writeFileSync(lockFile, `${JSON.stringify(row.value)}\n`);
+      const calls = [];
+      assert.deepEqual(inspectSessionLock(runDir, { now, ttlMs, kill: (...args) => calls.push(args) }), {
+        state: "absent", owner: null, liveness: null,
+      }, row.name);
+      assert.deepEqual(calls, [], `${row.name} probe`);
+    }
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+}
 
 // Every publication check now asks for all three gates, so a fixture probing one specific
 // refusal has to be otherwise-complete or the earlier gates explain the failure instead of
@@ -1136,14 +1210,115 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
   }
 
   it("records a PR against the validated head, and is idempotent on replay", () => {
+    assertSessionLockInspection();
     const p = readyForPr("pr-ok", { legacy: true });
     try {
       const status = factory(p.repo, ["status", RUN]);
       assert.equal(status.ok, true, status.stderr);
       assert.equal(status.out.pr_base, null);
-      assert.equal(factory(p.repo, ["lock", RUN, "claim", "--session", "legacy", "--branch", "feature", "--now", NOW(5)]).ok, true);
-      assert.equal(factory(p.repo, ["heartbeat", RUN, "--session", "legacy", "--now", NOW(5)]).ok, true);
-      assert.equal(factory(p.repo, ["lock", RUN, "release", "--session", "legacy", "--now", NOW(5)]).ok, true);
+      assert.equal(status.out.lock_liveness, null);
+      assert.equal(factory(p.repo, ["lock", RUN, "claim", "--session", "legacy", "--branch", "feature"]).ok, true);
+      let owner = JSON.parse(readFileSync(join(p.runDir, "factory.lock"), "utf8"));
+      assert.equal(owner.pid, process.pid);
+      let lockStatus = factory(p.repo, ["status", RUN]);
+      assert.equal(lockStatus.ok, true, lockStatus.stderr);
+      assert.equal(lockStatus.out.lock, "fresh");
+      assert.equal(lockStatus.out.lock_liveness, "live");
+      assert.equal(lockStatus.out.dead_lock, false);
+      assert.equal(lockStatus.out.lock_session, "legacy");
+      assert.equal(Object.hasOwn(runJson(p.runDir), "lock_liveness"), false);
+      assert.equal(Object.hasOwn(runJson(p.runDir), "dead_lock"), false);
+
+      const exited = spawnSync(process.execPath, ["-e", ""], { stdio: "ignore" });
+      assert.equal(exited.status, 0);
+      assert.equal(Number.isInteger(exited.pid), true);
+      assert.throws(() => process.kill(exited.pid, 0), (error) => error.code === "ESRCH");
+      const freshAt = new Date().toISOString();
+      const departed = {
+        session: "departed", pid: exited.pid, run_id: RUN, branch: "feature",
+        claimed_at: freshAt, heartbeat_at: freshAt,
+      };
+      writeFileSync(join(p.runDir, "factory.lock"), `${JSON.stringify(departed, null, 2)}\n`);
+      lockStatus = factory(p.repo, ["status", RUN]);
+      assert.equal(lockStatus.out.lock, "stale");
+      assert.equal(lockStatus.out.lock_liveness, "dead");
+      assert.equal(lockStatus.out.dead_lock, true);
+      assert.equal(lockStatus.out.lock_session, "departed");
+
+      const strictOwner = { ...departed, session: "legacy" };
+      writeFileSync(join(p.runDir, "factory.lock"), `${JSON.stringify(strictOwner, null, 2)}\n`);
+      assert.equal(factory(p.repo, ["heartbeat", RUN, "--session", "legacy"]).ok, true);
+      owner = JSON.parse(readFileSync(join(p.runDir, "factory.lock"), "utf8"));
+      assert.equal(owner.pid, process.pid);
+      lockStatus = factory(p.repo, ["status", RUN]);
+      assert.equal(lockStatus.out.lock, "fresh");
+      assert.equal(lockStatus.out.lock_liveness, "live");
+
+      const nonInteger = { ...departed, session: "foreign", pid: "not-an-integer" };
+      writeFileSync(join(p.runDir, "factory.lock"), `${JSON.stringify(nonInteger, null, 2)}\n`);
+      lockStatus = factory(p.repo, ["status", RUN]);
+      assert.equal(lockStatus.out.lock, "fresh");
+      assert.equal(lockStatus.out.lock_liveness, "indeterminate");
+      assert.equal(lockStatus.out.dead_lock, false);
+      const blockedClaim = factory(p.repo, ["lock", RUN, "claim", "--session", "legacy", "--branch", "feature"]);
+      assert.equal(blockedClaim.ok, false);
+      assert.match(blockedClaim.stderr, /held by session foreign/u);
+      const beforeStrictMutations = readFileSync(join(p.runDir, "factory.lock"), "utf8");
+      const invalidHeartbeat = factory(p.repo, ["heartbeat", RUN, "--session", "foreign"]);
+      assert.equal(invalidHeartbeat.ok, false);
+      assert.match(invalidHeartbeat.stderr, /no factory\.lock to refresh/u);
+      const invalidRelease = factory(p.repo, ["lock", RUN, "release", "--session", "foreign"]);
+      assert.equal(invalidRelease.ok, true, invalidRelease.stderr);
+      assert.deepEqual(invalidRelease.out, { run_id: RUN, action: "release", released: false, reason: "absent" });
+      assert.equal(readFileSync(join(p.runDir, "factory.lock"), "utf8"), beforeStrictMutations);
+      writeFileSync(join(p.runDir, "factory.lock"), `${JSON.stringify({
+        ...nonInteger, claimed_at: "2020-01-01T00:00:00.000Z", heartbeat_at: "2020-01-01T00:00:00.000Z",
+      }, null, 2)}\n`);
+      lockStatus = factory(p.repo, ["status", RUN]);
+      assert.equal(lockStatus.out.lock, "stale");
+      assert.equal(lockStatus.out.lock_liveness, "indeterminate");
+      assert.equal(lockStatus.out.dead_lock, true);
+      assert.equal(factory(p.repo, ["lock", RUN, "claim", "--session", "legacy", "--branch", "feature"]).ok, true);
+      assert.equal(JSON.parse(readFileSync(join(p.runDir, "factory.lock"), "utf8")).pid, process.pid);
+
+      for (const pid of [0, -1]) {
+        const integerOwner = { ...departed, session: `integer-${pid}`, pid };
+        writeFileSync(join(p.runDir, "factory.lock"), `${JSON.stringify(integerOwner, null, 2)}\n`);
+        lockStatus = factory(p.repo, ["status", RUN]);
+        assert.equal(lockStatus.out.lock, "fresh");
+        assert.equal(lockStatus.out.lock_liveness, "indeterminate");
+        assert.equal(factory(p.repo, ["heartbeat", RUN, "--session", integerOwner.session]).ok, true);
+        assert.equal(JSON.parse(readFileSync(join(p.runDir, "factory.lock"), "utf8")).pid, process.pid);
+        writeFileSync(join(p.runDir, "factory.lock"), `${JSON.stringify(integerOwner, null, 2)}\n`);
+        const released = factory(p.repo, ["lock", RUN, "release", "--session", integerOwner.session]);
+        assert.equal(released.ok, true, released.stderr);
+        assert.equal(released.out.released, true);
+      }
+
+      const branchless = {
+        session: "branchless", pid: process.pid, run_id: RUN,
+        claimed_at: freshAt, heartbeat_at: freshAt,
+      };
+      writeFileSync(join(p.runDir, "factory.lock"), `${JSON.stringify(branchless, null, 2)}\n`);
+      lockStatus = factory(p.repo, ["status", RUN]);
+      assert.equal(lockStatus.out.lock, "fresh");
+      assert.equal(lockStatus.out.lock_liveness, "live");
+      assert.equal(lockStatus.out.lock_session, "branchless");
+      assert.equal(factory(p.repo, ["heartbeat", RUN, "--session", "branchless"]).ok, true);
+      owner = JSON.parse(readFileSync(join(p.runDir, "factory.lock"), "utf8"));
+      assert.equal(Object.hasOwn(owner, "branch"), false);
+      assert.equal(owner.pid, process.pid);
+      assert.equal(factory(p.repo, ["lock", RUN, "release", "--session", "branchless"]).out.released, true);
+
+      writeFileSync(join(p.runDir, "factory.lock"), `${JSON.stringify({ ...branchless, unexpected: true })}\n`);
+      lockStatus = factory(p.repo, ["status", RUN]);
+      assert.equal(lockStatus.out.lock, "absent");
+      assert.equal(lockStatus.out.lock_liveness, null);
+      assert.equal(lockStatus.out.lock_session, null);
+      rmSync(join(p.runDir, "factory.lock"));
+      lockStatus = factory(p.repo, ["status", RUN]);
+      assert.equal(lockStatus.out.lock, "absent");
+      assert.equal(lockStatus.out.lock_liveness, null);
       assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--now", NOW(5)]).ok, true);
       assert.equal(Object.hasOwn(runJson(p.runDir), "pr_base"), false);
       // Gate 3 is the last transition before the skill pushes and opens the PR, so the
