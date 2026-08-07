@@ -648,7 +648,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // 3376 -> 3376 for issue #216. The publishing-identity guard lives in the skill, the docs and
     // the tests rather than in production JavaScript, so it adds no counted production source
     // while its acceptance checks still bind the early and the pre-publication boundaries.
-    assert.equal(total, 3376, "issue #216 landed at 3376 production lines, unchanged");
+    // 3376 -> 3433 retaining each attempt's review verdict. A review record lives at one path per
+    // subject, so attempt 3 destroys what attempts 1 and 2 said. That is fatal exactly where it
+    // matters: attempts are budgeted, exhausting the budget blocks a run, and `blocked` is final --
+    // so the artifact an operator most needs to understand a blocked run is the one the final
+    // attempt overwrites. Run 216's test-verifier was rejected twice and approved on the third,
+    // and both reasons had to be inferred from commit subjects. Roughly half of these lines are the
+    // reasoning for why an archive is create-only and why a failed archive must not fail the step.
+    assert.equal(total, 3433, "retaining review attempts landed at 3433 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 

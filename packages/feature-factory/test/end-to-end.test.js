@@ -201,10 +201,18 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const mergeCommit = mergeIntoFeature(p.repo);
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, true, merged.stderr);
+      // review_archive names where this verdict was preserved before a later attempt could
+      // overwrite it. It is reported rather than kept silent so that a null -- meaning the
+      // reasoning behind a verdict was NOT retained -- is visible when it happens.
       assert.deepEqual(merged.out, {
         run_id: RUN, slice: "be-thing", status: "merged", attempts: 1,
         base_ref: p.basePoint, merge_commit: mergeCommit,
+        review_archive: "reviews/be-thing.attempt-1.json",
       });
+      assert.deepEqual(
+        JSON.parse(readFileSync(join(p.runDir, "reviews", "be-thing.attempt-1.json"), "utf8")),
+        JSON.parse(readFileSync(join(p.runDir, "reviews", "be-thing.json"), "utf8")),
+        "an archive must be a faithful copy of the record it preserves");
       assert.equal(runJson(p.runDir).slices[0].status, "merged");
       assert.equal(existsSync(join(p.runDir, "evidence", "test-verifier.json")), false);
     } finally { cleanupProject(p); }
@@ -296,6 +304,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.deepEqual(merged.out, {
         run_id: RUN, slice: "be-thing", status: "merged", attempts: 1,
         base_ref: defaultTimeout.basePoint, merge_commit: mergeCommit,
+        review_archive: "reviews/be-thing.attempt-1.json",
       }, "omitting verify_timeout_ms must preserve the existing merged response shape");
       assert.deepEqual(JSON.parse(readFileSync(defaultTrace.trace, "utf8")), {
         command: defaultCommand, args: [], timeout: 900000,
