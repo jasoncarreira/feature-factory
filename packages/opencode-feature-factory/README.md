@@ -1,8 +1,8 @@
 # opencode-feature-factory
 
-The [opencode](https://opencode.ai) integration for
-[`feature-factory`](https://www.npmjs.com/package/feature-factory): a sidebar that renders run state,
-and a server plugin. It reads run state and cannot write it.
+The [OpenCode](https://opencode.ai) adapter for
+[`feature-factory`](https://www.npmjs.com/package/feature-factory). It provides the OpenCode-specific
+`/feature` skill, server plugin, and sidebar. The integration reads run state and cannot write it.
 
 ## Install
 
@@ -20,6 +20,11 @@ npm install opencode-feature-factory
 
 The host reads the sidebar entry from `exports["./tui"]`. The package root is the server plugin and
 has no `tui` hook, so it is never mistaken for the sidebar.
+
+The `feature-factory` dependency owns the canonical `WORKFLOW.md`. This adapter owns
+`skills/feature/SKILL.md`, which contains only the OpenCode binding and loads the complete
+`WORKFLOW.md` shipped beside it. `prepack` refreshes that adjacent file as an exact build-time copy;
+never maintain a divergent workflow in this package.
 
 Requires `solid-js` and `@opentui/solid`, declared as peer dependencies — the sidebar must use the
 copies your host installed rather than its own, or its reactive graph runs in isolation and never

@@ -1,12 +1,22 @@
 # Changelog
 
-Repository-only change record. Both packages are pre-1.0 and version independently.
+Repository-only change record. All three packages are pre-1.0 and version independently.
 
-## Unreleased — the rebuild
+## Unreleased — three-package architecture
 
-The implementation was replaced rather than refactored. The previous tree was 43,013 lines of
-production source with 2,322 tests; the two packages together are ~2,900 lines with 99 tests, and
-the deleted code remains in git history.
+- **`feature-factory` owns the host-agnostic contract.** It now ships the `factory` CLI, specialist
+  definitions, and canonical `WORKFLOW.md`, but no platform `SKILL.md`.
+- **Each adapter owns its host binding.** `opencode-feature-factory` and
+  `prime-agent-feature-factory` each ship their own `skills/feature/SKILL.md` plus an exact build-time
+  copy of the factory workflow beside it.
+- **Prime Agent is now a distinct adapter.** Install it with
+  `prime-agent package install npm:prime-agent-feature-factory`. It currently supports foreground
+  runs only and refuses `--background` before creating or changing a run.
+
+### Earlier rebuild baseline
+
+The implementation had previously been replaced rather than refactored. The predecessor tree was
+43,013 lines of production source with 2,322 tests; the deleted code remains in git history.
 
 - **`feature-factory` 0.1.0** (new, replaces `opencode-feature-factory` 0.2.1's CLI): twelve
   commands, each state change one checked transition. Ships the `/feature` skill and eleven agent
@@ -18,7 +28,7 @@ the deleted code remains in git history.
   claim/closure, nonces and hash chains, the reviewer panel, the security-reviewer stage. The
   ceiling test fails if any reappears, including as prose in an agent prompt.
 - **Breaking:** the repository root no longer publishes. Install `feature-factory` for the CLI and
-  skill, `opencode-feature-factory` for the opencode integration. Release tags now name their
+  canonical workflow, or install the adapter for the target host. Release tags now name their
   package.
 
 ## feature-factory 0.2.2 / opencode-feature-factory 0.4.2

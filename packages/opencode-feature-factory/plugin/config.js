@@ -12,6 +12,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const RUN_ID = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u;
 const BACKGROUND_CALLER_AGENTS = Object.freeze(["build", "feature-factory"]);
@@ -210,6 +211,10 @@ export function createBackgroundTool(input = {}) {
 function factoryRoot() {
   const resolved = createRequire(import.meta.url).resolve("feature-factory");
   return dirname(dirname(resolved));
+}
+
+function integrationRoot() {
+  return dirname(dirname(fileURLToPath(import.meta.url)));
 }
 
 // Enough YAML for the frontmatter these files actually use: scalars and folded `>` blocks. A real
@@ -424,7 +429,7 @@ export function registerAgents(cfg, { root = factoryRoot(), ...options } = {}) {
 // `<skill-name>/SKILL.md`. So the package ships `skills/feature/SKILL.md` and this points at it,
 // which means an upgrade of the package upgrades the skill with no install step and nothing stale
 // left behind in a config directory.
-export function registerSkill(cfg, { root = factoryRoot() } = {}) {
+export function registerSkill(cfg, { root = integrationRoot() } = {}) {
   cfg.skills ??= {};
   cfg.skills.paths ??= [];
   const path = join(root, "skills");
@@ -456,7 +461,7 @@ export function registerCommand(cfg) {
 export function registerWorkflow(cfg, options = {}) {
   const root = options.root ?? factoryRoot();
   registerCommand(cfg);
-  const skill = registerSkill(cfg, { root });
+  const skill = registerSkill(cfg, { root: options.skillRoot ?? integrationRoot() });
   const agents = registerAgents(cfg, { root, ...options });
   return { root, skill, agents };
 }

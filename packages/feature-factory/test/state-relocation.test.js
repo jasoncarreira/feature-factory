@@ -40,7 +40,7 @@ function documentedFactoryCommands(markdown) {
 }
 
 test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proof contracts", () => {
-  const skill = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+  const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
   for (const fragment of [
     "RUN_REPO=\"<exact response sandbox_path>\"",
     "RUN_DIR=\"<exact init response run_dir, or $RUN_REPO/.factory/$R after status resume>\"",
@@ -100,7 +100,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "Outcome: repository-verify-exhausted",
     "Outcome: retained-lock-error",
     "status: \"running\"`, `terminal_result: null`",
-    "actual host-exported\n`FACTORY_SESSION_ID`",
+    "binds `SESSION_ID` to the actual stable host-adapter identity",
     "never require session-ID inequality",
     "artifacts/post-merge-repairs.md",
     "Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`",

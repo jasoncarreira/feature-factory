@@ -11,7 +11,7 @@ import { initFresh } from "./init-fixture.js";
 test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", () => {
   const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const cli = resolve(pkg, "bin", "factory.js");
-  const skill = readFileSync(resolve(pkg, "skills", "feature", "SKILL.md"), "utf8");
+  const skill = readFileSync(resolve(pkg, "WORKFLOW.md"), "utf8");
   const resumeStart = skill.indexOf("### Resume or collision");
   const freshStart = skill.indexOf("### Fresh sandbox request");
   const gateOneStart = skill.indexOf("### Gate 1 — Story");
@@ -314,10 +314,10 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
       assert.equal(occurrences(source, fragment), 1, `identity seam ${id} must appear exactly once`);
       return required(source, fragment, `identity seam ${id}`);
     };
-    const freshLock = seam("fresh-verified-lock", "immediately obtain qualified status and require a fresh lock owned by this driver's exact\n`FACTORY_SESSION_ID`.");
+    const freshLock = seam("fresh-verified-lock", "immediately obtain qualified status and require a fresh lock owned by this driver's exact\n`SESSION_ID`.");
     const freshNext = seam("fresh-next-operation", "With a declared identity, the very next operation is the guard below.");
     const freshNoWork = seam("fresh-no-work-before-success", "Only after\nownership and any required guard succeed may the driver reconcile or consult `status.next`. Only then\ndispatch the planned ticket, story, or design agent or transition state.");
-    const freshPolicy = seam("fresh-probe-policy", "For a fresh run with `DECLARED_PUBLISHING_IDENTITY`, immediately after qualified status verifies fresh\nlock ownership by this driver's `FACTORY_SESSION_ID`, run the identity observation below before\nreconciliation, reading `status.next`, dispatch, or any transition.");
+    const freshPolicy = seam("fresh-probe-policy", "For a fresh run with `DECLARED_PUBLISHING_IDENTITY`, immediately after qualified status verifies fresh\nlock ownership by this driver's `SESSION_ID`, run the identity observation below before\nreconciliation, reading `status.next`, dispatch, or any transition.");
     const firstProbe = seam("fresh-first-probe", "After that preflight succeeds, submit exactly this command as one ordinary host shell step with cwd\nexactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin:\n\n```sh\ngh api --method GET /user --jq .login\n```");
     assert.deepEqual([freshLock, freshNext, freshNoWork, freshPolicy, firstProbe],
       [freshLock, freshNext, freshNoWork, freshPolicy, firstProbe].sort((left, right) => left - right),
@@ -398,7 +398,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     assert.match(policy, /surrounding the complete reason with single quotes and replacing every literal\s+`'` inside it with the exact shell sequence `'\\''`[\s\S]*encoded token as the sole `--reason`\s+argument in the host shell command string/u);
     assert.match(policy, /Do not put the raw or rendered reason inside double quotes, interpolate it as unquoted shell syntax,\s+`eval` it, use command substitution, a temporary file, or environment indirection/u);
     assert.match(policy, /quoting form is\s+transport only and is never persisted[\s\S]*reason\s+byte-for-byte equal to `PRE_QUOTING_REASON`, not the encoded token[\s\S]*Release only that owner[\s\S]*prove the lock absent with null owner/u);
-    assert.match(policy, /new driver's own `FACTORY_SESSION_ID`[\s\S]*factory resume "\$R" --session "\$FACTORY_SESSION_ID" --repo "\$RUN_REPO"[\s\S]*continue from the newly qualified `status\.next`[\s\S]*Never reuse the\s+released session/u);
+    assert.match(policy, /new driver's own `SESSION_ID`[\s\S]*factory resume "\$R" --session "\$SESSION_ID" --repo "\$RUN_REPO"[\s\S]*continue from the newly qualified `status\.next`[\s\S]*Never reuse the\s+released session/u);
     assert.match(policy, /report only `Outcome: retained-lock-error`[\s\S]*no parked-success or resumability claim/u);
     assert.match(source, /exact\s+boundary between completion of resume order 7 and the first operation in resume order 8/u);
     assert.match(source, /There is no\s+separate identity guard before `factory pr`/u);
@@ -412,10 +412,10 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   };
   checkIdentityPolicy(skill);
   for (const [id, fragment] of [
-    ["fresh-verified-lock", "immediately obtain qualified status and require a fresh lock owned by this driver's exact\n`FACTORY_SESSION_ID`."],
+    ["fresh-verified-lock", "immediately obtain qualified status and require a fresh lock owned by this driver's exact\n`SESSION_ID`."],
     ["fresh-next-operation", "With a declared identity, the very next operation is the guard below."],
     ["fresh-no-work-before-success", "Only after\nownership and any required guard succeed may the driver reconcile or consult `status.next`. Only then\ndispatch the planned ticket, story, or design agent or transition state."],
-    ["fresh-probe-policy", "For a fresh run with `DECLARED_PUBLISHING_IDENTITY`, immediately after qualified status verifies fresh\nlock ownership by this driver's `FACTORY_SESSION_ID`, run the identity observation below before\nreconciliation, reading `status.next`, dispatch, or any transition."],
+    ["fresh-probe-policy", "For a fresh run with `DECLARED_PUBLISHING_IDENTITY`, immediately after qualified status verifies fresh\nlock ownership by this driver's `SESSION_ID`, run the identity observation below before\nreconciliation, reading `status.next`, dispatch, or any transition."],
     ["fresh-first-probe", "After that preflight succeeds, submit exactly this command as one ordinary host shell step with cwd\nexactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin:\n\n```sh\ngh api --method GET /user --jq .login\n```"],
     ["resume-order-seven", "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner."],
     ["resume-order-eight-reconciliation", "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification."],
@@ -434,7 +434,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     return moved;
   };
   const freshNoWorkFragment = "Only after\nownership and any required guard succeed may the driver reconcile or consult `status.next`. Only then\ndispatch the planned ticket, story, or design agent or transition state.";
-  const freshLockFragment = "immediately obtain qualified status and require a fresh lock owned by this driver's exact\n`FACTORY_SESSION_ID`.";
+  const freshLockFragment = "immediately obtain qualified status and require a fresh lock owned by this driver's exact\n`SESSION_ID`.";
   assert.throws(() => checkIdentityPolicy(moveUnique(skill, freshNoWorkFragment, freshLockFragment, "before")),
     /identity seam fresh ordering/u, "moving the fresh no-work boundary before verified ownership must fail");
   const resumeBoundaryFragment = "When a validated present config declares `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may\nintervene between the verified running/same-owner result and that guard, or between a successful guard\nand reconciliation.";
@@ -446,7 +446,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     'factory terminal "$R" needs-human --reason <REASON_TOKEN> --repo "$RUN_REPO"',
     'factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"',
     'factory status "$R" --json --repo "$RUN_REPO"',
-    'factory resume "$R" --session "$FACTORY_SESSION_ID" --repo "$RUN_REPO"',
+    'factory resume "$R" --session "$SESSION_ID" --repo "$RUN_REPO"',
   ]) assert.doesNotThrow(() => inspectIdentityOperation(transition), `identity instrumentation must allow ${transition}`);
   for (const [id, operation, expected] of [
     ["gh-auth", "gh auth status", /forbidden gh auth/u],

@@ -678,7 +678,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       // Pinned inside this site rather than at a new one: the budget in ceiling.test.js constrains call
       // sites, and binding existing prose to existing behaviour is meant to arrive as data at a site
       // that already exists.
-      const skillPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "skills", "feature", "SKILL.md");
+      const skillPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "WORKFLOW.md");
       const build = readFileSync(skillPath, "utf8");
       const step4 = build.slice(build.indexOf("## Step 4 — Build slices"), build.indexOf("## Step 5 — Integrate"));
       for (const required of [

@@ -1,28 +1,34 @@
 # Contributing
 
-Repository-only guide; not included in either published package.
+Repository-only guide; not included in any published package.
 
 ## Setup
 
 Node.js `>=22`. `.tool-versions` pins the version used locally; CI runs 22 and 24.
 
 ```sh
-npm ci          # installs both workspaces
+npm ci          # installs all three workspaces
 ```
 
 ## Checks
 
 ```sh
-npm test                    # both packages
+npm test                    # all packages and pack checks
 npm run test:factory        # packages/feature-factory alone
 npm run test:opencode       # packages/opencode-feature-factory alone
+npm run test:prime          # packages/prime-agent-feature-factory alone
 ```
 
 No lint or typecheck script. `feature-factory` is not bundled or transpiled at all.
 
-`opencode-feature-factory` has one build step: the sidebar is authored as JSX and bundled to
-`tui/dist` by `npm run build` (also run by `prepack`, and by `npm test` before the pack check). The
-output is generated and gitignored — do not edit or commit it.
+`feature-factory/WORKFLOW.md` is the canonical workflow. Each adapter owns its platform
+`skills/feature/SKILL.md`; `scripts/sync-workflows.js` copies the canonical workflow beside each skill,
+and adapter `prepack` hooks refresh that exact build-time copy. Edit the factory workflow, never an
+adapter's generated `WORKFLOW.md`.
+
+`opencode-feature-factory` also bundles its JSX sidebar to `tui/dist` with `npm run build` (run by
+`prepack` and by `npm test` before the pack check). The bundle is generated and gitignored — do not
+edit or commit it.
 
 `solid-js` and `@opentui/solid` are **peer** dependencies and are externalized from that bundle. The
 contract is module *identity*: the sidebar has to use the copies the host installed, or its reactive
@@ -30,16 +36,16 @@ graph runs in isolation and repaints nothing. Bundling them produces a sidebar t
 then never updates, which looks identical to having no reactivity at all.
 
 **Run `npm run test:factory` before submitting.** The factory package declares zero dependencies and
-claims to work with no opencode present. That claim is only true if its suite passes on its own, and
-CI runs it separately for the same reason.
+claims to work with no host adapter present. That claim is only true if its suite passes on its own,
+and CI runs it separately for the same reason.
 
 ## Two tests you will meet
 
 **`packages/feature-factory/test/ceiling.test.js`** is the scope lock. It asserts the exact CLI
 command set, the exact `run.json` key set, the family list, the absence of every dropped subsystem
-under any spelling — including in agent prose — that the skill invokes only commands and flags the
-CLI accepts, that every agent the skill dispatches ships, and a hard line budget on production
-source.
+under any spelling — including in agent prose — that the canonical workflow invokes only commands
+and flags the CLI accepts, that every specialist it dispatches ships, and a hard line budget on
+production source.
 
 If it fails, that is usually the correct answer rather than an obstacle. Widening it means editing
 that file, so the decision appears in a diff instead of arriving as a reasonable-sounding addition.
@@ -65,9 +71,10 @@ Two conventions this codebase holds to, both learned the hard way:
   (`ENOEXEC`, a thrown exception) looks like a dead guard to a grep. And **probe one thing at a
   time**: two mutations at once means the first failure masks the second, and you record a live guard
   as dead.
-- **Prose is part of the contract.** `skills/feature/SKILL.md` and `agents/*.md` are executable instructions.
-  The ceiling test checks their commands and flags against the CLI, and
-  `test/prompt-claims.test.js` executes the claims they make about what the CLI permits. Add a row
+- **Prose is part of the contract.** `packages/feature-factory/WORKFLOW.md`, adapter
+  `skills/feature/SKILL.md` files, and `agents/*.md` are executable instructions. The ceiling test
+  checks their commands and flags against the CLI, and `test/prompt-claims.test.js` executes the
+  claims they make about what the CLI permits. Add a row
   there when prose starts asserting what will or will not be allowed — three separate times a fix
   shipped carrying a false claim of exactly that kind.
 

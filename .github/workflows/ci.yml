@@ -16,7 +16,7 @@ jobs:
         node-version: [22, 24]
     runs-on: ubuntu-latest
     # No sharding. The 4-way size-balanced shard runner existed because the old suite was
-    # 2,322 tests across 116k lines and child-process heavy. Both packages together are now
+    # 2,322 tests across 116k lines and child-process heavy. All packages together are now
     # 99 tests and run in well under a minute, so a shard matrix would be four times the
     # setup cost to parallelise something that is no longer slow.
     timeout-minutes: 5
@@ -27,9 +27,9 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
-      # Runs both workspaces. The factory package must also pass on its own, with no opencode
+      # Runs all workspaces. The factory package must also pass on its own, with no host adapter
       # present, because that is the standalone claim its zero-dependency manifest makes.
-      # `npm test` is both workspaces plus the packed-tarball check. The last one matters most on
+      # `npm test` is all workspaces plus the packed-tarball check. The last one matters most on
       # CI: three release blockers once shipped past 99 green unit tests because nothing looked at
       # what `npm pack` actually produces.
       - run: npm test

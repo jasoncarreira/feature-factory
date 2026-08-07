@@ -1,0 +1,38 @@
+{
+  "name": "prime-agent-feature-factory",
+  "version": "0.1.0",
+  "description": "Prime Agent integration for feature-factory: /feature command and Prime delegation adapter.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "prime-agent",
+    "feature-factory"
+  ],
+  "files": [
+    "extensions",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "feature-factory": "0.3.6"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "sync:workflow": "node ../../scripts/sync-workflows.js prime-agent-feature-factory",
+    "pretest": "npm run sync:workflow",
+    "test": "node --test test/*.test.js",
+    "prepack": "npm run sync:workflow"
+  }
+}
