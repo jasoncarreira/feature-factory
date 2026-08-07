@@ -330,9 +330,14 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     assert.ok(resumeOrderSeven < resumeOrderEight && resumeOrderEight < resumeBoundary && resumeBoundary < resumePolicy,
       "identity seam resume ordering must bind verified order 7 to the guard before order-8 reconciliation");
   };
-  const executableIdentityOperations = (policy) => [...policy.matchAll(/```sh\n([\s\S]*?)```/gu)]
-    .flatMap(([, body]) => body.split("\n").map((line) => line.trim()).filter(Boolean));
-  const inspectIdentityOperation = (operation) => {
+  const fencedShBlocks = (source) => [...source.matchAll(/```sh\n([\s\S]*?)```/gu)].map((match) => ({
+    index: match.index,
+    body: match[1],
+    operations: match[1].split("\n").map((line) => line.trim()).filter(Boolean),
+  }));
+  const identityGuardSites = (source) => fencedShBlocks(source)
+    .filter(({ operations }) => operations.includes(identityCommand));
+  const inspectIdentityOperation = (operation, allowed = []) => {
     if (/\bgh\s+auth\b/u.test(operation)) throw new Error("identity operation: forbidden gh auth");
     if (/\bgit\s+credential\b/u.test(operation)) throw new Error("identity operation: forbidden Git credential query");
     if (/\bgit\s+config\b[\s\S]*\bcredential[._-]?helper\b/iu.test(operation)) throw new Error("identity operation: forbidden credential helper mutation");
@@ -343,20 +348,38 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     if (/\b(?:mktemp|tee)\b|(?:^|\s)(?:\/tmp\/|[^\s]+\.(?:tmp|out|log))\b/u.test(operation)) throw new Error("identity operation: forbidden temporary or persistent output");
     if (/(^|[^|])\|(?!\|)/u.test(operation)) throw new Error("identity operation: forbidden pipe");
     if (/(^|\s)(?:>>?|<)\s*/u.test(operation.replace(/<[A-Z_][A-Z0-9_]*>/gu, ""))) throw new Error("identity operation: forbidden redirection");
-    if (operation === identityCommand || /^factory (?:terminal|lock|status|resume)\b/u.test(operation)) return;
+    if (operation === identityCommand || allowed.includes(operation) || /^factory (?:terminal|lock|status|resume)\b/u.test(operation)) return;
     throw new Error("identity operation: alternate identity command");
   };
-  const checkExecutableIdentityPolicy = (policy) => {
-    const operations = executableIdentityOperations(policy);
-    for (const operation of operations) inspectIdentityOperation(operation);
-    assert.deepEqual(operations.filter((operation) => operation === identityCommand), [identityCommand],
-      "identity policy must execute only its one exact early gh api probe");
+  const checkIdentityGuardSites = (source) => {
+    const push = 'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"';
+    const pr = 'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"';
+    const record = 'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"';
+    const expectedSites = [
+      [identityCommand],
+      [identityCommand],
+      [push, identityCommand, "(", 'cd "$O"', pr, ")", record],
+    ];
+    const sites = identityGuardSites(source);
+    assert.equal(sites.length, 3, "identity guard sites must be exactly early, pre-push, and pre-PR");
+    for (const [index, site] of sites.entries()) {
+      assert.equal(site.operations.filter((operation) => operation === identityCommand).length, 1,
+        `identity guard site ${index + 1} must contain one exact probe`);
+      for (const operation of site.operations) inspectIdentityOperation(operation, expectedSites[index]);
+      assert.deepEqual(site.operations, expectedSites[index],
+        `identity guard site ${index + 1} must preserve its complete allowed operation sequence`);
+    }
+    const targetCaptures = fencedShBlocks(source)
+      .filter(({ operations }) => operations.includes('CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"'));
+    assert.ok(targetCaptures.length >= 1, "target capture remains a non-identity block outside all guard sites");
+    assert.equal(targetCaptures.every(({ operations }) => !operations.includes(identityCommand)), true,
+      "target capture blocks must not become identity guard sites");
   };
   const checkIdentityPolicy = (source) => {
     checkIdentitySeams(source);
     const policy = identityPolicySection(source);
     const policyEnd = source.indexOf("#### Story presentation");
-    checkExecutableIdentityPolicy(policy);
+    checkIdentityGuardSites(source);
     assert.match(policy, /verification is enforcement under AGENTS\.md and CLAUDE\.md because it prevents a false-green\s+publication/u);
     assert.match(policy, /Provisioning `GH_TOKEN` and\s+configuring credential helpers are instruction only/u);
     assert.match(policy, /At every one of the three guards, before submitting a host shell step, inspect only the inherited\s+environment value and require `GH_TOKEN` to exist and contain at least one character/u);
@@ -400,6 +423,24 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     ["resume-verified-running-guard", "For a parked resume, run it instead\nimmediately after explicit resume has been verified `running` with unchanged historical result, real\nnext action, and the same fresh owner. No operation may intervene on either side of this guard."],
   ]) assert.throws(() => checkIdentityPolicy(skill.replace(fragment, "")), new RegExp(`identity seam ${id}`, "u"),
     `removing ${id} must break the load-bearing identity seam`);
+  const moveUnique = (source, fragment, anchor, placement) => {
+    assert.equal(occurrences(source, fragment), 1, "movement control fragment must be unique before removal");
+    assert.equal(occurrences(source, anchor), 1, "movement control anchor must be unique before insertion");
+    const without = source.replace(fragment, "");
+    const anchorIndex = required(without, anchor, "movement control anchor");
+    const insertion = placement === "before" ? anchorIndex : anchorIndex + anchor.length;
+    const moved = `${without.slice(0, insertion)}${fragment}\n${without.slice(insertion)}`;
+    assert.equal(occurrences(moved, fragment), 1, "movement control must reinsert exactly one fragment");
+    return moved;
+  };
+  const freshNoWorkFragment = "Only after\nownership and any required guard succeed may the driver reconcile or consult `status.next`. Only then\ndispatch the planned ticket, story, or design agent or transition state.";
+  const freshLockFragment = "immediately obtain qualified status and require a fresh lock owned by this driver's exact\n`FACTORY_SESSION_ID`.";
+  assert.throws(() => checkIdentityPolicy(moveUnique(skill, freshNoWorkFragment, freshLockFragment, "before")),
+    /identity seam fresh ordering/u, "moving the fresh no-work boundary before verified ownership must fail");
+  const resumeBoundaryFragment = "When a validated present config declares `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may\nintervene between the verified running/same-owner result and that guard, or between a successful guard\nand reconciliation.";
+  const resumeOrderSevenFragment = "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.";
+  assert.throws(() => checkIdentityPolicy(moveUnique(skill, resumeBoundaryFragment, resumeOrderSevenFragment, "before")),
+    /identity seam resume ordering/u, "moving the resume guard boundary outside order 7 to order 8 must fail");
   for (const transition of [
     identityCommand,
     'factory terminal "$R" needs-human --reason <REASON_TOKEN> --repo "$RUN_REPO"',
@@ -421,10 +462,16 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     ["retry-fallback", `${identityCommand} || retry ${identityCommand}`, /forbidden retry or fallback/u],
     ["alternate-command", "whoami", /alternate identity command/u],
   ]) {
-    const probeBlock = ["```sh", identityCommand, "```"].join("\n");
-    const injected = identityPolicySection(skill).replace(probeBlock, ["```sh", identityCommand, operation, "```"].join("\n"));
-    assert.throws(() => checkExecutableIdentityPolicy(injected), expected,
-      `identity instrumentation must reject ${id} in executable policy`);
+    for (const [siteIndex, site] of identityGuardSites(skill).entries()) {
+      assert.equal(site.operations.filter((entry) => entry === identityCommand).length, 1,
+        `identity guard site ${siteIndex + 1} has one probe before ${id} injection`);
+      const probeIndex = skill.indexOf(identityCommand, site.index);
+      assert.ok(probeIndex >= site.index && probeIndex < site.index + site.body.length,
+        `identity guard site ${siteIndex + 1} locates its probe before ${id} injection`);
+      const injected = `${skill.slice(0, probeIndex + identityCommand.length)}\n${operation}${skill.slice(probeIndex + identityCommand.length)}`;
+      assert.throws(() => checkIdentityGuardSites(injected), expected,
+        `identity instrumentation must reject ${id} beside probe in guard site ${siteIndex + 1}`);
+    }
   }
   for (const marker of [
     "#### Publishing identity enforcement",
