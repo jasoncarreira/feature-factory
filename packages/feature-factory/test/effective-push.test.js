@@ -304,10 +304,59 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   required(summary, "guarded sandbox-removal", "Step 7 exclusion");
   required(summary, "Only after all ref and archive verification succeeds", "Step 7 guard");
 
-  const checkIdentityPolicy = (source) => {
+  const identityPolicySection = (source) => {
     const start = required(source, "#### Publishing identity enforcement", "identity enforcement");
     const end = required(source, "#### Story presentation", "identity enforcement boundary");
-    const policy = source.slice(start, end);
+    return source.slice(start, end);
+  };
+  const checkIdentitySeams = (source) => {
+    const seam = (id, fragment) => {
+      assert.equal(occurrences(source, fragment), 1, `identity seam ${id} must appear exactly once`);
+      return required(source, fragment, `identity seam ${id}`);
+    };
+    const freshLock = seam("fresh-verified-lock", "immediately obtain qualified status and require a fresh lock owned by this driver's exact\n`FACTORY_SESSION_ID`.");
+    const freshNext = seam("fresh-next-operation", "With a declared identity, the very next operation is the guard below.");
+    const freshNoWork = seam("fresh-no-work-before-success", "Only after\nownership and any required guard succeed may the driver reconcile or consult `status.next`. Only then\ndispatch the planned ticket, story, or design agent or transition state.");
+    const freshPolicy = seam("fresh-probe-policy", "For a fresh run with `DECLARED_PUBLISHING_IDENTITY`, immediately after qualified status verifies fresh\nlock ownership by this driver's `FACTORY_SESSION_ID`, run the identity observation below before\nreconciliation, reading `status.next`, dispatch, or any transition.");
+    const firstProbe = seam("fresh-first-probe", "After that preflight succeeds, submit exactly this command as one ordinary host shell step with cwd\nexactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin:\n\n```sh\ngh api --method GET /user --jq .login\n```");
+    assert.deepEqual([freshLock, freshNext, freshNoWork, freshPolicy, firstProbe],
+      [freshLock, freshNext, freshNoWork, freshPolicy, firstProbe].sort((left, right) => left - right),
+      "identity seam fresh ordering must keep the verified owner, immediate guard, no-work rule, and probe together");
+
+    const resumeOrderSeven = seam("resume-order-seven", "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.");
+    const resumeOrderEight = seam("resume-order-eight-reconciliation", "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.");
+    const resumeBoundary = seam("resume-identity-boundary", "When a validated present config declares `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may\nintervene between the verified running/same-owner result and that guard, or between a successful guard\nand reconciliation.");
+    const resumePolicy = seam("resume-verified-running-guard", "For a parked resume, run it instead\nimmediately after explicit resume has been verified `running` with unchanged historical result, real\nnext action, and the same fresh owner. No operation may intervene on either side of this guard.");
+    assert.ok(resumeOrderSeven < resumeOrderEight && resumeOrderEight < resumeBoundary && resumeBoundary < resumePolicy,
+      "identity seam resume ordering must bind verified order 7 to the guard before order-8 reconciliation");
+  };
+  const executableIdentityOperations = (policy) => [...policy.matchAll(/```sh\n([\s\S]*?)```/gu)]
+    .flatMap(([, body]) => body.split("\n").map((line) => line.trim()).filter(Boolean));
+  const inspectIdentityOperation = (operation) => {
+    if (/\bgh\s+auth\b/u.test(operation)) throw new Error("identity operation: forbidden gh auth");
+    if (/\bgit\s+credential\b/u.test(operation)) throw new Error("identity operation: forbidden Git credential query");
+    if (/\bgit\s+config\b[\s\S]*\bcredential[._-]?helper\b/iu.test(operation)) throw new Error("identity operation: forbidden credential helper mutation");
+    if (/\bgit\s+config\b/u.test(operation)) throw new Error("identity operation: forbidden Git configuration");
+    if (/(?:^|\s)--(?:token|auth-token)\b|\bGH_TOKEN=/u.test(operation)) throw new Error("identity operation: forbidden token argv");
+    if (/\$\(|`[^`]+`/u.test(operation)) throw new Error("identity operation: forbidden command substitution");
+    if (/\b(?:retry|fallback)\b|\|\|/iu.test(operation)) throw new Error("identity operation: forbidden retry or fallback");
+    if (/\b(?:mktemp|tee)\b|(?:^|\s)(?:\/tmp\/|[^\s]+\.(?:tmp|out|log))\b/u.test(operation)) throw new Error("identity operation: forbidden temporary or persistent output");
+    if (/(^|[^|])\|(?!\|)/u.test(operation)) throw new Error("identity operation: forbidden pipe");
+    if (/(^|\s)(?:>>?|<)\s*/u.test(operation.replace(/<[A-Z_][A-Z0-9_]*>/gu, ""))) throw new Error("identity operation: forbidden redirection");
+    if (operation === identityCommand || /^factory (?:terminal|lock|status|resume)\b/u.test(operation)) return;
+    throw new Error("identity operation: alternate identity command");
+  };
+  const checkExecutableIdentityPolicy = (policy) => {
+    const operations = executableIdentityOperations(policy);
+    for (const operation of operations) inspectIdentityOperation(operation);
+    assert.deepEqual(operations.filter((operation) => operation === identityCommand), [identityCommand],
+      "identity policy must execute only its one exact early gh api probe");
+  };
+  const checkIdentityPolicy = (source) => {
+    checkIdentitySeams(source);
+    const policy = identityPolicySection(source);
+    const policyEnd = source.indexOf("#### Story presentation");
+    checkExecutableIdentityPolicy(policy);
     assert.match(policy, /verification is enforcement under AGENTS\.md and CLAUDE\.md because it prevents a false-green\s+publication/u);
     assert.match(policy, /Provisioning `GH_TOKEN` and\s+configuring credential helpers are instruction only/u);
     assert.match(policy, /At every one of the three guards, before submitting a host shell step, inspect only the inherited\s+environment value and require `GH_TOKEN` to exist and contain at least one character/u);
@@ -334,11 +383,49 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     assert.equal(positions.length, 3);
     const push = required(source, 'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"', "identity push order");
     const pr = required(source, 'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"', "identity PR order");
-    assert.ok(positions[0] > gateOneStart && positions[0] < end);
+    assert.ok(positions[0] > gateOneStart && positions[0] < policyEnd);
     assert.ok(positions[1] > source.indexOf("Both lookups must succeed and return nonempty output") && positions[1] < push);
     assert.ok(positions[2] > push && positions[2] < pr);
   };
   checkIdentityPolicy(skill);
+  for (const [id, fragment] of [
+    ["fresh-verified-lock", "immediately obtain qualified status and require a fresh lock owned by this driver's exact\n`FACTORY_SESSION_ID`."],
+    ["fresh-next-operation", "With a declared identity, the very next operation is the guard below."],
+    ["fresh-no-work-before-success", "Only after\nownership and any required guard succeed may the driver reconcile or consult `status.next`. Only then\ndispatch the planned ticket, story, or design agent or transition state."],
+    ["fresh-probe-policy", "For a fresh run with `DECLARED_PUBLISHING_IDENTITY`, immediately after qualified status verifies fresh\nlock ownership by this driver's `FACTORY_SESSION_ID`, run the identity observation below before\nreconciliation, reading `status.next`, dispatch, or any transition."],
+    ["fresh-first-probe", "After that preflight succeeds, submit exactly this command as one ordinary host shell step with cwd\nexactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin:\n\n```sh\ngh api --method GET /user --jq .login\n```"],
+    ["resume-order-seven", "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner."],
+    ["resume-order-eight-reconciliation", "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification."],
+    ["resume-identity-boundary", "When a validated present config declares `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may\nintervene between the verified running/same-owner result and that guard, or between a successful guard\nand reconciliation."],
+    ["resume-verified-running-guard", "For a parked resume, run it instead\nimmediately after explicit resume has been verified `running` with unchanged historical result, real\nnext action, and the same fresh owner. No operation may intervene on either side of this guard."],
+  ]) assert.throws(() => checkIdentityPolicy(skill.replace(fragment, "")), new RegExp(`identity seam ${id}`, "u"),
+    `removing ${id} must break the load-bearing identity seam`);
+  for (const transition of [
+    identityCommand,
+    'factory terminal "$R" needs-human --reason <REASON_TOKEN> --repo "$RUN_REPO"',
+    'factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"',
+    'factory status "$R" --json --repo "$RUN_REPO"',
+    'factory resume "$R" --session "$FACTORY_SESSION_ID" --repo "$RUN_REPO"',
+  ]) assert.doesNotThrow(() => inspectIdentityOperation(transition), `identity instrumentation must allow ${transition}`);
+  for (const [id, operation, expected] of [
+    ["gh-auth", "gh auth status", /forbidden gh auth/u],
+    ["credential-query", "git credential fill", /forbidden Git credential query/u],
+    ["git-config", "git config --global user.name wrong-account", /forbidden Git configuration/u],
+    ["helper-mutation", "git config --global credential.helper store", /forbidden credential helper mutation/u],
+    ["token-argv", `${identityCommand} --token secret`, /forbidden token argv/u],
+    ["command-substitution", `IDENTITY=$( ${identityCommand} )`, /forbidden command substitution/u],
+    ["pipe", `${identityCommand} | cat`, /forbidden pipe/u],
+    ["redirection", `${identityCommand} > /dev/null`, /forbidden redirection/u],
+    ["temp-file", "mktemp identity", /forbidden temporary or persistent output/u],
+    ["persistent-output", "tee identity.log", /forbidden temporary or persistent output/u],
+    ["retry-fallback", `${identityCommand} || retry ${identityCommand}`, /forbidden retry or fallback/u],
+    ["alternate-command", "whoami", /alternate identity command/u],
+  ]) {
+    const probeBlock = ["```sh", identityCommand, "```"].join("\n");
+    const injected = identityPolicySection(skill).replace(probeBlock, ["```sh", identityCommand, operation, "```"].join("\n"));
+    assert.throws(() => checkExecutableIdentityPolicy(injected), expected,
+      `identity instrumentation must reject ${id} in executable policy`);
+  }
   for (const marker of [
     "#### Publishing identity enforcement",
     "At every one of the three guards, before submitting a host shell step",

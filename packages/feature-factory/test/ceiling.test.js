@@ -645,7 +645,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // before this still validate, and deleting it from that list would read every one of them as
     // absent and let a second session claim a run being worked. Net growth for a deletion is the
     // honest count, so it is recorded rather than trimmed away.
-    assert.equal(total, 3376, "issue #194 closure landed at 3376 production lines");
+    // 3376 -> 3376 for issue #216. The publishing-identity guard lives in the skill, the docs and
+    // the tests rather than in production JavaScript, so it adds no counted production source
+    // while its acceptance checks still bind the early and the pre-publication boundaries.
+    assert.equal(total, 3376, "issue #216 landed at 3376 production lines, unchanged");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 
