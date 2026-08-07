@@ -253,17 +253,36 @@ factory resume <run-id> --session "$SESSION_ID" --repo <sandbox>
 Resume proves ownership: it refuses without a session, with no lock, with a stale one, or with a lock held
 by anyone else. Claim first, then resume. The original reason stays recorded after the stop is cleared.
 
-**One caveat that will catch you.** A sandbox executes *its own* copy of the CLI, the skill, and
-`.factory.json` — it is a clone, not a view. A fix installed on the host or committed to the operator
-checkout reaches nothing already cloned, so a run parked before the fix cannot use it. That cost an hour
-three separate ways today: a stale `.factory.json` verify command, a missing `.gitignore` entry, and a
-sandbox CLI with no `resume` command at all. **When a fix must reach a parked run, the run needs a fresh
-sandbox — resumability only helps runs cloned after it landed.**
+**Where the cause lives decides whether resume can help**, and only one of the two has a supported path.
+
+*Outside the sandbox* — a host timeout, a service outage, missing credentials, an unclean worktree, a
+file the operator can commit — fix it and resume the retained sandbox. That is the path above, and it is
+the reason `needs-human` stopped being terminal.
+
+*Inside the sandbox* — its `bin/factory.js`, its skill, or its `.factory.json` predates the fix — and
+there is **no** supported recovery. A sandbox executes its own copy of all three; it is a clone, not a
+view, so a fix installed on the host or committed to the operator checkout never reaches it. Nor can the
+run acquire a fresh one: resume binds the retained sandbox, and `factory init` refuses outright while
+that manifest exists (`run '<id>' already exists at '<sandbox manifest>'`).
+
+The only route is to **abandon the run and start a new one**:
+
+```sh
+rm -rf .factory-sandboxes/<run-id>     # takes the manifest with it -- the control plane lives inside
+# then launch the issue again as a fresh run
+```
+
+**That discards everything held only in that sandbox**, including merged slices whose branches were
+never pushed. Confirm nothing is alive on the run first, then check what the sandbox still holds and push
+anything worth keeping. Confirm merge state by asking "is this PR merged?" — **not** by comparing commits,
+because squash merges make the originals unrecognisable. One run lost two merged prose slices this way,
+cheaply; a run further along would not be.
+
+This distinction cost an hour three separate ways: a stale `.factory.json` verify command, a missing
+`.gitignore` entry, and a sandbox CLI with no `resume` command at all. In each case the fix was already
+on the host and could not reach the run.
 
 `completed`, `partial` and `blocked` remain final; only `needs-human` re-enters.
-
-The manifest carries the run, so nothing is lost by relaunching. Confirm merge state with "is this PR
-merged?" — **not** by comparing commits, because squash merges make the originals unrecognisable.
 
 ## 5. Failure modes to expect
 
