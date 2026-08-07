@@ -25,6 +25,11 @@ So everything a run needs must be in the issue *before launch*:
   reviewer will reasonably demand in-repository proof of something no repository test can establish —
   and the run will go looking for it outside the tree, which hangs (§5).
 - **Corrections belong in the body, never a comment.** `gh issue view` returns the body.
+- **Say "read only inside the tree" — and say what to do when it isn't there.** The bare prohibition is
+  wrong often enough to be dangerous: a dependency's source genuinely may not be in the repository. The
+  form that works is *if the API you need is not in the tree, the dependency is not declared yet: declare
+  it, install it, and read it there.* A run given only the prohibition went looking anyway and wedged for
+  65 minutes on an unscoped search; a run given neither read the host's installed CLI and ended its turn.
 
 ## 2. Launching
 
@@ -204,7 +209,9 @@ Three details, each of which cost something:
 | `grep "message=asking id=per_"` | reliable: a real permission request |
 | `pgrep -f "opencode run"` | **matches your own monitor script** |
 | `pgrep -f "bin/opencode run"` | real processes only |
-| non-terminal manifest + no process | a genuine orphan; needs a lock release |
+| `running` + no process | a genuine orphan; needs a lock release |
+| `needs-human` + no process | **parked, not crashed** — a person is being waited on; resumable |
+| `pgrep -f "bin/opencode run"` for a TUI-driven run | **finds nothing** — its driver is the TUI process |
 | matching package versions | **proves nothing** — see §7 |
 | `duplicate skill name" name=feature` | the run may be following a different skill entirely — see §7 |
 
@@ -214,7 +221,18 @@ startup, and it is the only notice you get that the run is not executing the ski
 The reliable health check is: a live process, a debug log that has moved within ~20 minutes, and zero
 real permission requests.
 
+**Distinguish parked from crashed before touching anything.** They look identical to a process check and
+call for opposite responses: an orphan needs its lock released and a relaunch, a parked run needs its
+*cause* fixed and then a resume. Read the status, not the absence of a process.
+
+**A run started in the TUI is invisible to the run-command pattern**, because its driver is the TUI
+itself. Checking `pgrep -f "bin/opencode run"` for such a run reports zero and reads exactly like a
+crash — that nearly got a healthy run declared dead. For a TUI-driven run, check the lock's session and
+its child processes instead.
+
 ## 4. Recovery
+
+**A crashed run** — `running`, nothing alive:
 
 ```sh
 kill <pid>                                    # by PID; never pattern-kill
@@ -222,8 +240,49 @@ factory lock <run-id> release --session <session-from-the-lock-file>
 rm -rf .factory-sandboxes/<run-id>            # only after confirming the work is merged or worthless
 ```
 
-The manifest carries the run, so nothing is lost by relaunching. Confirm merge state with "is this PR
-merged?" — **not** by comparing commits, because squash merges make the originals unrecognisable.
+**A parked run** — `needs-human` — is different, and this changed recently. It used to be terminal, which
+meant a human who fixed the cause had nowhere to put the fix: every park became hand-finishing, and three
+runs were finished by hand for causes as small as a wrong number in an issue. `needs-human` is now a
+*resumable stop*. Fix the external cause, then resume:
+
+```sh
+factory lock <run-id> claim --session "$SESSION_ID" --branch <branch> --repo <sandbox>
+factory resume <run-id> --session "$SESSION_ID" --repo <sandbox>
+```
+
+Resume proves ownership: it refuses without a session, with no lock, with a stale one, or with a lock held
+by anyone else. Claim first, then resume. The original reason stays recorded after the stop is cleared.
+
+**Where the cause lives decides whether resume can help**, and only one of the two has a supported path.
+
+*Outside the sandbox* — a host timeout, a service outage, missing credentials, an unclean worktree, a
+file the operator can commit — fix it and resume the retained sandbox. That is the path above, and it is
+the reason `needs-human` stopped being terminal.
+
+*Inside the sandbox* — its `bin/factory.js`, its skill, or its `.factory.json` predates the fix — and
+there is **no** supported recovery. A sandbox executes its own copy of all three; it is a clone, not a
+view, so a fix installed on the host or committed to the operator checkout never reaches it. Nor can the
+run acquire a fresh one: resume binds the retained sandbox, and `factory init` refuses outright while
+that manifest exists (`run '<id>' already exists at '<sandbox manifest>'`).
+
+The only route is to **abandon the run and start a new one**:
+
+```sh
+rm -rf .factory-sandboxes/<run-id>     # takes the manifest with it -- the control plane lives inside
+# then launch the issue again as a fresh run
+```
+
+**That discards everything held only in that sandbox**, including merged slices whose branches were
+never pushed. Confirm nothing is alive on the run first, then check what the sandbox still holds and push
+anything worth keeping. Confirm merge state by asking "is this PR merged?" — **not** by comparing commits,
+because squash merges make the originals unrecognisable. One run lost two merged prose slices this way,
+cheaply; a run further along would not be.
+
+This distinction cost an hour three separate ways: a stale `.factory.json` verify command, a missing
+`.gitignore` entry, and a sandbox CLI with no `resume` command at all. In each case the fix was already
+on the host and could not reach the run.
+
+`completed`, `partial` and `blocked` remain final; only `needs-human` re-enters.
 
 ## 5. Failure modes to expect
 
@@ -238,6 +297,12 @@ that treats the refusal as fatal will end its turn, which is the next item.
 
 **A run can end its turn without terminalizing**, leaving `status: running`, a step marked in flight,
 and nothing alive. Two clean reproductions. Recovery is §4.
+
+**A command that outruns the shell default is killed at 120000 ms**, and the message says so plainly if
+you read far enough into the log. A repository test suite is the one command in a run whose duration the
+repository sets, not the factory: 129s here, 5m40s in a larger repo. Both exceed the default. Declare
+`verify_timeout_ms` when a suite needs longer. Three runs stalled on this before the number was found,
+2,486 lines into a debug log.
 
 **Publication can fail after all the work succeeds.** Gates approved, slices merged, then HTTP 403. The
 run records the reason accurately rather than claiming success; the branch is pushable by hand.
@@ -286,6 +351,11 @@ Then look at what else that copy shipped. The stale one carried its own `assets/
 reviewer that does not exist in the current lineage — so every stage would have run against agent
 definitions from a dead lineage, not merely a stale skill. Prefer packages that ship no skill or agent
 assets at all: nothing to shadow with is better than shadowing detected.
+
+**Installing a fix does not reach a run already in flight.** A sandbox is a `git clone --local` taken at
+bootstrap, and the run uses what is inside it: its own `bin/factory.js`, its own skill, its own
+`.factory.json`. So "I installed the fix and resumed" is not a recovery — the resumed run re-executes the
+old code. A fix reaches only runs whose sandbox was cloned after it landed.
 
 **Never reinstall while a run is live.** Swapping CLI flags under an orchestrator that is following the
 previously installed skill breaks it mid-flight.
