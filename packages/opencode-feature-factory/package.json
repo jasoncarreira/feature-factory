@@ -25,7 +25,7 @@
   "scripts": {
     "build": "rm -rf tui/dist && esbuild tui/index.jsx --bundle --platform=node --format=esm --jsx=automatic --jsx-import-source=@opentui/solid --packages=external --outfile=tui/dist/index.js",
     "prepack": "npm run build",
-    "test": "npm run build && node --test test/*.test.js"
+    "test": "npm run build && node --import ../../tools/resolve-guard.mjs --test test/*.test.js"
   },
   "peerDependencies": {
     "solid-js": "^1.9.0",
