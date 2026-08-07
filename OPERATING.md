@@ -57,7 +57,8 @@ required values, and invalid timeout values make a present file malformed. All r
 optional timeout are validated before an entry is used. A command may name credentials supplied through
 its inherited environment, but credential values must not appear in the file.
 
-`resolve` and `verify` are consumed today. After mode admission, `resolve` runs as one ordinary shell step with its
+`resolve`, `verify`, and `publishing_identity` are consumed today;
+only `publish` remains deferred to #224. After mode admission, `resolve` runs as one ordinary shell step with its
 configured string submitted unchanged, exact cwd `O`, the inherited environment plus `FACTORY_INPUT`,
 and no positional argument or structured stdin. `FACTORY_INPUT` is the exact admitted request remainder,
 including its original whitespace and bytes. Exit zero with no stdout means the input was not recognized;
@@ -104,7 +105,59 @@ The entries have these execution contracts:
 | --- | --- | --- | --- |
 | `verify` | The unchanged string runs as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio; no structured stdin or factory payload. Each attempt gets the full configured timeout. Stdout and stderr are visible, informational, and unparsed rather than captured or persisted. | Numeric child exit status is authoritative. Zero succeeds; non-zero means repository verification failed; no numeric status is unavailable. | Invoked after each newly recorded merge with at most two executions per merge or replay invocation. Direct committed test-only repair observation remains one execution. |
 | `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked; existing push and PR behavior remains unchanged. Push-target publication is deferred to #224. |
-| `publishing_identity` | No runtime input; the static non-empty account-name string is the return value. | A missing, non-string, or empty identity makes the config malformed. | Not consumed for identity enforcement; deferred to #216. |
+| `publishing_identity` | No runtime input; retain the raw validated string exactly as parsed, without trimming, normalization, case-folding, or reserialization. | A missing, non-string, or whitespace-only identity makes the config malformed; the observed login is compared exactly and case-sensitively. | Active in every mode at exactly three guards; absent config preserves existing behavior. |
+
+Publishing identity is checked immediately after verified post-lock ownership, or immediately after an
+explicit resume is verified running with the same fresh owner and before reconciliation or other work;
+immediately before `git push`, after effective push-target equality; and immediately before
+`gh pr create`, after the push is known successful. No operation may intervene across any guard
+boundary. There is no separate guard before `factory pr`. This adds no config key or syntax, run status,
+or factory command, and existing push, `gh pr create`, `factory pr`, Gate 3, merge, and approval semantics
+remain unchanged.
+
+Before each guard, inherited `GH_TOKEN` must exist and contain at least one character. Missing or empty
+parks identity as unobservable without invoking `gh`, the network, stored authentication, credential
+queries, or any fallback. A prepared environment submits exactly this read-only network probe as one
+ordinary host shell step with cwd exactly `RUN_REPO`, inherited environment, and no stdin:
+
+```sh
+gh api --method GET /user --jq .login
+```
+
+Use the host result directly as exact stdout bytes, exact stderr bytes, and numeric status. Identity is
+observable only for numeric zero, exactly zero stderr bytes, and exactly one ASCII login matching
+`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$` followed by exactly one LF byte. Remove only that LF,
+then compare the raw declared and observed strings exactly and case-sensitively. Do not trim, normalize,
+retry, capture through shell indirection, or use `gh auth status`; machine-active authentication is not
+proof of the publishing identity.
+
+The refusal reasons are:
+
+```text
+publishing identity mismatch: declared <declared-ascii-json>, observed <observed-ascii-json>; authenticate as <declared-ascii-json> and retry.
+publishing identity unobservable: declared <declared-ascii-json>; launch with inherited GH_TOKEN for <declared-ascii-json> as documented in OPERATING.md and retry.
+```
+
+Values use deterministic ASCII-only JSON-string rendering, including lowercase `\uXXXX` escapes for
+code units outside printable ASCII. The complete rendered reason is transported as one shell-safe argv
+token and the sole `--reason` value. Never expose the token, raw stdout or stderr, diagnostics, status,
+targets, helper output, or environment, and never manage credentials or transport.
+
+On either refusal, quiesce outstanding work, park through existing `needs-human`, verify the persisted
+reason byte-for-byte and the owner, release only that owner, verify the lock absent with null owner, and
+retain the sandbox. After fixing the environment, a later driver must bind the retained sandbox; repeat
+all selection, manifest, containment, config, effective-push, provenance, branch, worktree, cleanliness
+or recovery, and exact-ref prechecks; claim with that driver's own `FACTORY_SESSION_ID`; verify the fresh
+owner and the unchanged parked state; and run exactly:
+
+```sh
+factory resume "$R" --session "$FACTORY_SESSION_ID" --repo "$RUN_REPO"
+```
+
+After resume it verifies running status, unchanged historical result, the real next action, and the same
+fresh owner; performs only existing post-resume reconciliation; and continues from the newly qualified
+`status.next`. Never reuse the released session. A parking, durable-reason, owner, release, or unlock
+verification failure reports retained-lock error rather than claiming safe resumability.
 
 The merge record commits before `verify` begins. A successful observation is written through the existing
 canonical `evidence/test-verifier.json` schema against the current merged head and the immutable base of
@@ -172,8 +225,15 @@ does not create, write, merge, archive, or package it.
 
 ### Launch command
 
+The parent shell, launcher, or supervisor must inject and export a nonempty `GH_TOKEN` for the declared
+account before this recipe begins. Do not derive it from the machine-active account. On another machine,
+apply the same ephemeral helper configuration so Git and `gh` consume the one inherited token:
+
 ```sh
-export GH_TOKEN=$(gh auth token -u <account>)
+if [ -z "${GH_TOKEN:-}" ]; then
+  printf '%s\n' 'GH_TOKEN must be inherited and nonempty' >&2
+  exit 1
+fi
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper \
   GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
 
@@ -181,13 +241,23 @@ opencode run --log-level DEBUG --print-logs --dir <repo> \
   --command feature " --autonomous <issue-number>"
 ```
 
+The Git credential helper reads the inherited `GH_TOKEN` as its password, while `gh` reads that same
+inherited variable directly. The real identity probe is a read-only network request, so a locally active
+machine account, cached login, or successful `gh auth status` is not a prepared environment. Credential
+acquisition, storage, installation, and repair remain operator responsibilities outside this recipe; the
+factory does none of them.
+
+Publishing-identity verification is enforcement because it prevents false-green or wrong-account
+publication. Supplying the token and installing this helper recipe are instruction only, not factory
+credential provisioning or a helper-setup guard.
+
 Three details, each of which cost something:
 
 - **The leading space** before `--autonomous`. The launcher's argument parser consumes the flag
   otherwise, and `--` makes the host crash. The skill's mode admission tolerates the space.
 - **The credential pin.** The machine-active `gh` account flips as a side effect of unrelated work. Two
-  runs built correct code, passed every gate, and terminalized without a PR on HTTP 403. The pin makes
-  publication independent of machine state.
+  runs built correct code, passed every gate, and terminalized without a PR on HTTP 403. The inherited
+  token and shared helper make Git publication and the forge command independent of machine state.
 - **`--log-level DEBUG --print-logs`.** The only instrument that distinguishes a stalled run from a slow
   one. Attach it always.
 - **Keep the host awake.** A batch queued overnight ran one issue and then sat idle until the machine woke
