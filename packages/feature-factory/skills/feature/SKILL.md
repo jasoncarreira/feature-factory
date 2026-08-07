@@ -490,7 +490,7 @@ behavior. `story-reader` remains lookup-free and capability-free beyond its exis
 | Entry | Declared input | Return shape | Failure meaning | Current behavior |
 |---|---|---|---|---|
 | `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status means unavailable | Invoked after each newly recorded merge through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
-| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |
+| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Sanitized push, `gh pr create`, and `factory pr` remain the publication path. |
 | `publishing_identity` | No runtime input; the static config value itself | Non-empty account-name string in the config | Missing, non-string, or empty makes the config malformed | Not read for identity enforcement; consumption is deferred to #216. |
 
 #### Remaining intake classification
@@ -544,15 +544,15 @@ removal remain the sole completed-handoff exception to bootstrap/refusal state p
 
 Resume order 1 — bind the selected manifest to the intended retained sandbox, prove physical containment, and obtain qualified status for that bound manifest.
 Resume order 2 — run the post-selection operator exact-ref-absent guard.
-Resume order 3 — complete the existing effective-push proof.
-Resume order 4 — accept the feature branch only after existing reflog/provenance, branch/worktree binding, seed ancestry, cleanliness/recovery, and operator exact-ref rechecks pass in their current order.
-Resume order 5 — immediately before claiming, rerun the final operator exact-ref-absent guard.
-Resume order 6 — claim with the current host session or perform a justified existing steal, then verify qualified status still shows this fresh owner and the parked result originally observed.
-Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.
+Resume order 3 — accept the feature branch only after existing reflog/provenance, branch/worktree binding, seed ancestry, cleanliness/recovery, and operator exact-ref rechecks pass in their current order.
+Resume order 4 — immediately before claiming, rerun the final operator exact-ref-absent guard.
+Resume order 5 — claim with the current host session or perform a justified existing steal; that qualified command compares the two current effective push targets before lock creation.
+Resume order 6 — verify qualified status still shows this fresh owner and the parked result originally observed.
+Resume order 7 — invoke explicit factory resume with the verified owning session; it compares again before lock inspection and transition, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.
 Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.
 Resume order 9 — continue solely from the newly qualified status.next.
 
-For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment and before effective-push proof. Order 3 never absorbs containment, binding, or the post-selection exact-ref guard. During order 4 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 5 and claim or justified steal. Order 6 requires `lock_session === FACTORY_SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --session "$FACTORY_SESSION_ID" --repo "$RUN_REPO"` for order 7 — the same session order 6 just verified as the fresh owner — then require that owner unchanged. Resume refuses without it, and refuses a lock that is absent, stale, or held by anyone else. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 never uses the pre-resume observation or the stop reason.
+For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment. During order 3 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 4 and claim or justified steal. Order 6 requires `lock_session === FACTORY_SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --session "$FACTORY_SESSION_ID" --repo "$RUN_REPO"` for order 7 — the same session order 6 just verified as the fresh owner — then require that owner unchanged. Resume refuses without it, and refuses a lock that is absent, stale, or held by anyone else. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 never uses the pre-resume observation or the stop reason.
 
 If resume refuses after claim or the run later reparks, quiesce builders, tools, background tasks, and heartbeat loops; release the same owning session; then require qualified status to show an absent lock and null owner before another session begins.
 
@@ -598,7 +598,7 @@ post-selection operator exact-ref-absent guard against `FEATURE_REF`:
 git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
 ```
 
-Only after that guard passes may resume enter the effective-push proof. No intake or previously bound
+Only after that guard passes may resume continue toward the qualified lock command. No intake or previously bound
 branch or worktree value may participate in operator-ref, provenance, lock, dispatch, transition, or
 publication checks; recorded state always wins.
 
@@ -607,9 +607,8 @@ into every shell call; read it there and never build one from the run id and dat
 run operable without the integration but deliberately cannot masquerade as a real session link.
 
 A legacy `RUN_REPO="$O"` resume keeps its existing local flow. Every sandbox selection must pass the
-effective-push and branch-provenance gate below before a lock is claimed or stolen, an agent is
-dispatched, a gate/step/slice is transitioned, or anything is published. An active sandbox resume only
-recaptures and compares targets; it never changes remote configuration.
+branch-provenance gate below before the qualified lock claim or steal performs its code-owned target
+comparison. An active sandbox is never reconfigured or migrated.
 
 ### Fresh sandbox request
 
@@ -630,8 +629,9 @@ INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORK
 ```
 
 The init request pre-reserves the deterministic sandbox, performs exactly one
-`git clone --local -- O S`, completes the physical containment proof, and only then publishes
-`run.json`. The skill does not construct or prove the sandbox. A refused or uncertain init retains its
+`git clone --local -- O S`, completes the physical containment proof, captures and configures the
+effective push target in code, recaptures both current values, compares their exact bytes, and only then
+publishes `run.json`. The skill does not construct or prove the sandbox. A refused or uncertain init retains its
 reported state and path for inspection; do not substitute another destination or repeat init. Only a
 successful JSON response selects paths. Bind `RUN_REPO` from its exact canonical `sandbox_path`,
 `RUN_DIR` from its exact absolute `run_dir`, `FEATURE_BRANCH` from its exact `branch`, the integration
@@ -640,8 +640,7 @@ Then bind `RUN_MANIFEST` and `SLICE_ROOT` from those returned roots as above. Re
 relative, escaping, mismatched, or unobservable response value.
 
 Immediately after fresh selection, and immediately after every sandbox resume selection, recheck
-`FEATURE_REF` in `O` with the same exact ref-absent requirement. This post-selection guard runs before
-effective-push capture or configuration and closes a precheck-to-clone race, including an operator ref
+`FEATURE_REF` in `O` with the same exact ref-absent requirement. This post-selection guard closes a precheck-to-clone race, including an operator ref
 created without checkout or inherited because it became operator HEAD.
 
 ```sh
@@ -650,27 +649,16 @@ git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
 
 ### Effective push proof
 
-Disable command tracing before any effective-target operation and do not restore it until both captured
-values are out of scope. Capture through exactly
-`LC_ALL=C git -C <repository> remote get-url --push origin`; never read raw `remote.origin.url`.
-Never persist, log, echo, normalize, interpolate into a cause, or otherwise expose a captured target.
+`factory init` owns the fresh capture, private mode-0600 configuration fragment, both current lookups,
+and exact Buffer equality. Target bytes never enter shell text, argv, environment overrides, output,
+factory state, logs, evidence, or error causes. Existing sandbox commands compare only: qualified
+`lock` claim or steal, `resume`, and Gate 3 approval validate the manifest first and
+then recapture the current operator and sandbox values in code. Status, heartbeat, lock release, and
+post-publication recording remain available without comparison.
 
-Classify bootstrap-pending only by directly validated state: run status `running`; `created_at` exactly
-equals `updated_at`; gates, steps, and slices are empty; validator, terminal result, PR URL, and plan
-digest are null; and qualified status reports lock state exactly `absent`. Only that class may
-idempotently apply the operator's captured effective target to the sandbox remote before recapturing
-both sides:
-
-```sh
-set +x
-OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-git -C "$RUN_REPO" config --replace-all remote.origin.pushurl "$OPERATOR_PUSH"
-CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"
-```
-
-An active resume skips the configuration command and only performs the two current lookups. Every
-lookup must succeed with nonempty output, and the two current shell strings must be exactly equal.
+Only absolute `http://`, `https://`, `ssh://`, or `git://` network targets with an authority, and
+non-drive SCP-style targets, are accepted. Relative, local, tilde, drive, `file://`, remote-helper, and
+unsupported targets refuse because equal cwd-sensitive strings do not prove one destination.
 Use only these refusal messages:
 
 ```text
@@ -680,11 +668,12 @@ factory sandbox: sandbox effective push target does not match operator target; s
 ```
 
 The failure names only the side or mismatch class and exact `RUN_REPO`; it never contains either target.
-Suppress target-operation stdout, stderr, and argv from operator-visible errors as well as logs; map a
-configuration failure to the sandbox-unavailable refusal without attaching its cause.
-On any capture, configuration, recapture, or equality failure, retain all repository and control-plane
-state, permit only `factory status "$R" --json --repo "$RUN_REPO"`, and stop before branch handling,
-lock claim or steal, dispatch, transition, push, forge command, or further publication.
+Target-operation stdout, stderr, argv, traces, and causes stay suppressed. A fresh refusal retains the
+deterministic clone before `run.json`, so it is a non-resumable inspection state: status cannot select
+it and repeated init refuses the occupied destination. Do not retry, clean, repair, delete, or select a
+different destination; after inspection the operator manually removes it when appropriate. An active
+refusal leaves the manifest, configuration, and lock unchanged and permits status, heartbeat, and lock
+release as applicable.
 
 ### Feature branch provenance and crash recovery
 
@@ -1336,6 +1325,8 @@ factory gate "$R" pre_pr pending --artifact gates/pre_pr.md --repo "$RUN_REPO"
 approval shown below re-checks the whole publication story and *refuses the approval* if any of it is
 missing. This is deliberate: everything after this point — the push, the PR — has already happened by
 the time `factory pr` runs, so this is the last refusal that can still prevent something. It requires:
+- the validated selected manifest's current operator and sandbox effective push targets compare equal
+  in code before transition construction or any transition temporary file;
 
 - the run is not terminal, and every slice is `merged` (a partial run is surfaced, not published);
 - **all three gates currently approved** — not just this one, and not "was approved once". In practice
@@ -1406,41 +1397,67 @@ The publication command's recorded-value signature remains `gh pr create --draft
 Immediately before any publication effect, read the delivery intent from the selected run repository,
 then, for a sandbox-selected run, repeat the operator exact-ref-absent and sandbox
 branch-provenance/ancestry gate from Step 0. Use the status response's exact recorded branch for that
-gate. A collision or provenance failure stops
-before push, `gh`, or `factory pr` and retains all state. After those checks, disable command tracing and
-recapture the operator and selected-run effective push targets without changing either remote:
+gate. A collision or provenance failure stops before push, `gh`, or `factory pr` and retains all state.
+Gate 3 approval already performed the final code-owned target comparison. Step 6 performs no target
+lookup or remote mutation, and allows no mutating or publishing effect between these final read-only
+branch/ref/provenance checks and push:
 
 ```sh
 factory status "$R" --json --repo "$RUN_REPO"
 git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"
-set +x
-CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"
 ```
-
-Both lookups must succeed and return nonempty output, and their shell strings must be exactly equal.
-Step 6 only compares and never runs `git config` or otherwise reconfigures a remote. Never persist, log,
-echo, normalize, interpolate into a cause, or expose either target. Use the same three exact redacted
-refusal messages from Step 0. A lookup failure or mismatch leaves `RUN_REPO` intact, permits status only,
-and blocks every publication effect.
 
 Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as
 `PR_BASE`; never infer, shorten, normalize, or substitute either value. Publish the fully qualified
 recorded feature ref from `RUN_REPO`, run `gh` from `O` with that exact head and base, require a draft,
 and record the returned URL under `RUN_REPO`. Thus sandbox runs use `S` and legacy local runs use `O`
-through the selection already made in Step 0:
+through the selection already made in Step 0. Disable shell tracing before defining or invoking the
+publication wrapper and do not restore it until child output and credential-bearing shell values are
+out of scope. The wrapper preserves authentication inputs but removes every target-boundary debug and
+trace variable, fixes the locale, and disables terminal prompts:
 
 ```sh
-git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"
-(
-  cd "$O"
-  gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"
-)
+set +x
+publication_child() {
+  env -u DEBUG -u GH_DEBUG -u CURL_VERBOSE -u GIT_TRACE -u GIT_TRACE_PACKET \
+    -u GIT_TRACE_PACK_ACCESS -u GIT_TRACE_PERFORMANCE -u GIT_TRACE_SETUP -u GIT_TRACE_SHALLOW \
+    -u GIT_TRACE_FSMONITOR -u GIT_TRACE_CURL -u GIT_TRACE_CURL_NO_DATA -u GIT_CURL_VERBOSE \
+    -u GIT_TRACE2 -u GIT_TRACE2_EVENT -u GIT_TRACE2_PERF -u GIT_TRACE2_BRIEF \
+    -u GIT_TRACE2_CONFIG_PARAMS -u GIT_TRACE2_ENV_VARS -u GIT_TRACE2_PARENT_SID \
+    -u GIT_TRACE_REDACT -u GIT_REDIRECT_STDOUT -u GIT_REDIRECT_STDERR -u GCM_TRACE \
+    -u GCM_TRACE2 -u GCM_DEBUG -u GIT_CONFIG_PARAMETERS \
+    LC_ALL=C GIT_TERMINAL_PROMPT=0 "$@"
+}
+if ! publication_child git -C "$RUN_REPO" push --no-verify origin \
+  "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH" >/dev/null 2>&1; then
+  printf '%s\n' "factory publication: git push failed; selected repository retained at $RUN_REPO"
+  exit 1
+fi
+if ! PR_RESULT="$(cd "$O" && publication_child gh pr create --draft --base "$PR_BASE" \
+  --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE" 2>/dev/null)"; then
+  PR_RESULT=
+  printf '%s\n' "factory publication: draft PR creation failed or returned unsafe output; selected repository retained at $RUN_REPO"
+  exit 1
+fi
+if ! PR_URL="$(printf '%s' "$PR_RESULT" | node -e 'const fs=require("node:fs");const s=fs.readFileSync(0,"utf8");let u;try{if(!s||/[\r\n]/u.test(s))throw 0;u=new URL(s);if(u.protocol!=="https:"||u.username||u.password||u.search||u.hash||u.toString()!==u.origin+u.pathname)throw 0;process.stdout.write(u.toString())}catch{process.exit(1)}' 2>/dev/null)"; then
+  PR_RESULT=
+  printf '%s\n' "factory publication: draft PR creation failed or returned unsafe output; selected repository retained at $RUN_REPO"
+  exit 1
+fi
+PR_RESULT=
 factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"
 ```
 
-The `gh` call is the orchestrator's external effect; the package makes no forge call and `factory pr`
-does not verify the forge's base. For a legacy manifest where `pr_base` is absent or null, stop and
+Push always names configured `origin`, includes mandatory `--no-verify`, and suppresses all child output;
+never use a URL, `tee`, output or trace file, debug echo, expanded dump, or raw child error. This prevents
+a pre-push hook from receiving or recording the configured target. Git's transport-helper descendant
+may transiently receive it on the trusted local host; process-table state is the explicit exclusion.
+The `gh` call is the orchestrator's external effect and runs in `O` through the same sanitized wrapper.
+Only a single userinfo-free absolute HTTPS URL with no query or fragment is accepted; that validated URL
+is legitimate publication identity and may be emitted as `PR_URL` and persisted as `pr_url`. The package
+makes no push or forge call and `factory pr` does not verify the forge's base. `.factory.json.publish`
+remains uninvoked and publishing-identity enforcement remains deferred to #216.
+For a legacy manifest where `pr_base` is absent or null, stop and
 require a human/operator to choose or confirm the exact target, then pass that value through
 `gh pr create --base`. Never infer it from HEAD, the feature branch, repository or forge defaults, and
 never backfill the legacy manifest.

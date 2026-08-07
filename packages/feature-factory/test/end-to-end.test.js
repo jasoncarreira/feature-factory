@@ -92,6 +92,7 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
   git(operator, "add", "-A");
   git(operator, "commit", "-q", "-m", "base");
   git(operator, "remote", "add", "origin", operator);
+  git(operator, "config", "--replace-all", "remote.origin.pushurl", "https://fixture.invalid/feature-factory.git");
 
   let selected;
   if (legacy) {
@@ -99,9 +100,7 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
     selected = seedLegacyRun(operator, RUN, { branch: "feature", pr_base: undefined, created_at: NOW(0) });
   } else {
     const fresh = initFresh(operator, [RUN, "--branch", "feature", "--worktree", ".", "--pr-base", "main", "--now", NOW(0)]);
-    const operatorPush = git(operator, "remote", "get-url", "--push", "origin");
-    git(fresh.repository, "config", "--replace-all", "remote.origin.pushurl", operatorPush);
-    assert.equal(git(fresh.repository, "remote", "get-url", "--push", "origin"), operatorPush);
+    assert.equal(git(fresh.repository, "remote", "get-url", "--push", "origin"), git(operator, "remote", "get-url", "--push", "origin"));
     git(fresh.repository, "config", "user.email", "t@example.com");
     git(fresh.repository, "config", "user.name", "T");
     git(fresh.repository, "switch", "-q", "--no-track", "-c", "feature", git(fresh.repository, "rev-parse", "HEAD^{commit}"));

@@ -1,425 +1,608 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
+  rmSync, symlinkSync, writeFileSync, writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { validateRun } from "../state/schema.js";
-import { initFresh } from "./init-fixture.js";
+import {
+  compareSelectedRunPushTarget, configureSandboxPushTarget, SENSITIVE_CHILD_ENV_DENYLIST,
+} from "../core/effective-push.js";
+import { describeError } from "../bin/factory.js";
 
 test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", () => {
   const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const cli = resolve(pkg, "bin", "factory.js");
   const skill = readFileSync(resolve(pkg, "skills", "feature", "SKILL.md"), "utf8");
-  const resumeStart = skill.indexOf("### Resume or collision");
-  const freshStart = skill.indexOf("### Fresh sandbox request");
-  const gateOneStart = skill.indexOf("### Gate 1 — Story");
-  const gateThreeStart = skill.indexOf("### Gate 3 — Pre-PR");
-  const publicationStart = skill.indexOf("## Step 6 — Draft PR");
-  const summaryStart = skill.indexOf("## Step 7 — Summary");
-  const resume = skill.slice(resumeStart, freshStart);
-  const fresh = skill.slice(freshStart, gateOneStart);
-  const gateThree = skill.slice(gateThreeStart, publicationStart);
-  const publication = skill.slice(publicationStart, summaryStart);
-  const summary = skill.slice(summaryStart);
-  const required = (section, fragment, trace) => {
-    const index = section.indexOf(fragment);
-    assert.notEqual(index, -1, `${trace} contract is missing: ${fragment}`);
-    return index;
+  const secret = "https://user224unique:token224unique@push.invalid/org/target224.git";
+  const secretTwo = "https://user225unique:token225unique@push.invalid/org/target225.git";
+  const specialSecret = 'https://user224unique:token224unique@push.invalid/org/a"b\\c-é.git';
+  const components = [
+    secret, secretTwo, specialSecret, "user224unique:token224unique", "user224unique:token224unique@",
+    "user225unique:token225unique", "user225unique:token225unique@", "user224unique", "token224unique",
+    "user225unique", "token225unique",
+  ];
+  const representations = (value) => {
+    const bytes = Buffer.from(value);
+    const percent = [...bytes].map((byte) => `%${byte.toString(16).padStart(2, "0")}`).join("");
+    return [value, encodeURIComponent(value), percent.toUpperCase(), percent.toLowerCase(), bytes.toString("base64"),
+      bytes.toString("base64url"), bytes.toString("hex"), bytes.toString("hex").toUpperCase()];
   };
-  const ordered = (section, fragments, trace) => {
-    const positions = fragments.map((fragment) => required(section, fragment, trace));
-    assert.deepEqual(positions, [...positions].sort((left, right) => left - right), `${trace} operations are out of order`);
+  const forbidden = [...new Set(components.flatMap(representations))];
+  const providerNames = ["GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_COUNT"];
+  const hash = (value) => createHash("sha256").update(Buffer.isBuffer(value) ? value : Buffer.from(typeof value === "string" ? value : JSON.stringify(value))).digest("hex");
+  const opaque = (actual, expected, label) => assert.equal(hash(actual), hash(expected), label);
+  const yes = (condition, label) => assert.equal(Boolean(condition), true, label);
+  const noLeaks = (values, label) => yes(!values.some((value) => forbidden.some((entry) => String(value).includes(entry))), label);
+  const fixed = {
+    operator: (sandbox) => `factory sandbox: operator effective push target unavailable; sandbox retained at ${sandbox}`,
+    sandbox: (sandbox) => `factory sandbox: sandbox effective push target unavailable at ${sandbox}`,
+    mismatch: (sandbox) => `factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${sandbox}`,
+    context: (path) => `factory sandbox: selected repository unavailable at ${path}; selected run unchanged`,
+    push: (path) => `factory publication: git push failed; selected repository retained at ${path}\n`,
+    gh: (path) => `factory publication: draft PR creation failed or returned unsafe output; selected repository retained at ${path}\n`,
   };
-  const occurrences = (section, fragment) => section.split(fragment).length - 1;
-  const command = (name, args, options = {}) => spawnSync(name, args, {
-    encoding: "utf8",
-    env: { ...process.env, LC_ALL: "C", ...options.env },
-    cwd: options.cwd,
-    stdio: ["ignore", "pipe", "pipe"],
+  const failureSurface = (error) => {
+    const causes = [];
+    for (let current = error; current; current = current.cause) causes.push(current);
+    return [error?.name, error?.message, error?.stack, describeError(error), JSON.stringify(error),
+      ...Reflect.ownKeys(error ?? {}).map((key) => String(error[key])),
+      ...causes.flatMap((entry) => [entry.message, entry.stack, JSON.stringify(entry)]),
+    ];
+  };
+  const caught = (action) => {
+    try { return { value: action(), error: null }; } catch (error) { return { value: null, error }; }
+  };
+  const refusal = (action, expected, label) => {
+    const observed = caught(action);
+    yes(observed.error instanceof Error, `${label}-e`);
+    opaque(observed.error?.message ?? "", expected, `${label}-m`);
+    yes(observed.error?.cause === undefined, `${label}-c`);
+    noLeaks(failureSurface(observed.error), `${label}-r`);
+    return observed.error;
+  };
+  const result = (stdout = Buffer.alloc(0), overrides = {}) => ({
+    status: 0, signal: null, stdout, stderr: Buffer.alloc(0), ...overrides,
   });
-  const gitResult = (repository, ...args) => command("git", ["-C", repository, ...args]);
-  const git = (repository, ...args) => {
-    const result = gitResult(repository, ...args);
-    assert.equal(result.status, 0, `git ${args.join(" ")} failed: ${result.stderr}`);
-    return result.stdout.trim();
+  const framed = (value) => Buffer.concat([Buffer.isBuffer(value) ? value : Buffer.from(value), Buffer.from("\n")]);
+  const foreign = (id) => {
+    const error = new Error(`factory sandbox:${secret}:${id}`, { cause: new Error(secretTwo) });
+    error.argv = [secret];
+    error.stderr = Buffer.from(secretTwo);
+    error.private = { target: specialSecret };
+    return error;
   };
-  const factory = (...args) => JSON.parse(execFileSync(process.execPath, [cli, ...args, "--json"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }));
-  const snapshot = (root) => {
-    const visit = (path, name, entries) => {
+  const fakeOperations = (responses, overrides = {}) => {
+    const calls = [];
+    const writes = [];
+    const opened = [];
+    return {
+      calls, writes, opened,
+      operations: {
+        env: Object.fromEntries([...SENSITIVE_CHILD_ENV_DENYLIST, ...providerNames].map((name) => [name, `v-${name}`])),
+        realpath: (path) => path,
+        spawn(command, args, options) {
+          calls.push({ command, args, options });
+          const next = responses.shift();
+          if (next instanceof Error) throw next;
+          return next;
+        },
+        open(path, flags, mode) { opened.push({ path, flags, mode }); return 7; },
+        write(_fd, bytes, offset, length) { writes.push(Buffer.from(bytes.subarray(offset, offset + length))); return length; },
+        fsync: () => {}, close: () => {},
+        ...overrides,
+      },
+    };
+  };
+  const invokeConfigure = (responses, overrides) => {
+    const fake = fakeOperations(responses, overrides);
+    return {
+      fake,
+      invoke: () => configureSandboxPushTarget({ operatorRoot: "/operator", sandboxRoot: "/operator/.factory-sandboxes/r01" }, fake.operations),
+    };
+  };
+  const targetResponses = (initial = secret, currentOperator = initial, currentSandbox = currentOperator) => [
+    result(framed(initial)), result(), result(framed(currentOperator)), result(framed(currentSandbox)),
+  ];
+  const failureVariants = () => [
+    ["m0", result(Buffer.alloc(0))],
+    ["m1", result(Buffer.from("\n"))],
+    ["m2", result(Buffer.from(secret))],
+    ["m3", result(Buffer.from(`${secret}\n\n`))],
+    ["m4", result(Buffer.concat([Buffer.from(secret), Buffer.from([0]), Buffer.from("\n")]))],
+    ["m5", result(Buffer.concat([Buffer.from(secret), Buffer.from([0x7f]), Buffer.from("\n")]))],
+    ["m6", result("not-buffer")],
+    ["m7", result(framed(secret), { stderr: "not-buffer" })],
+    ["re", result(framed(secret), { error: foreign("re"), status: null })],
+    ["sg", result(framed(secret), { signal: "SIGTERM", status: null })],
+    ["th", foreign("th")],
+    ["se", result(framed(secret), { stderr: Buffer.from(secretTwo) })],
+    ["nz", result(framed(secret), { status: 9 })],
+    ["tr", result(framed(`/tmp/user224unique-token224unique-${secret.length}`))],
+  ];
+  const activeRoot = "/operator/.factory-sandboxes/r-active";
+  const activeFake = (operatorResult = result(framed(secret)), sandboxResult = result(framed(secret)), overrides = {}) => fakeOperations([
+    result(framed(activeRoot)), result(framed("/operator")), operatorResult, sandboxResult,
+  ], {
+    lstat: () => ({ isDirectory: () => true, isSymbolicLink: () => false }),
+    ...overrides,
+  });
+  const inventory = (root) => {
+    const rows = [];
+    const visit = (path, name) => {
       const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) rows.push([name, "link", stat.mode & 0o7777]);
+      else if (stat.isDirectory()) {
+        rows.push([name, "dir", stat.mode & 0o7777]);
+        for (const entry of readdirSync(path).sort()) visit(join(path, entry), name === "." ? entry : `${name}/${entry}`);
+      } else rows.push([name, "file", stat.mode & 0o7777, stat.size, hash(readFileSync(path))]);
+    };
+    visit(root, ".");
+    return rows;
+  };
+  const scanTree = (root, excluded, label) => {
+    let row = 0;
+    const visit = (path) => {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) return;
       if (stat.isDirectory()) {
-        entries.push([name, "directory"]);
-        for (const child of readdirSync(path).sort()) visit(join(path, child), name ? `${name}/${child}` : child, entries);
-      } else if (stat.isSymbolicLink()) {
-        entries.push([name, "symlink"]);
-      } else {
-        entries.push([name, "file", readFileSync(path).toString("base64")]);
+        for (const entry of readdirSync(path)) visit(join(path, entry));
+      } else if (!excluded.has(path)) {
+        noLeaks([readFileSync(path)], `${label}-${row}`);
+        row += 1;
       }
     };
-    const entries = [];
-    visit(root, ".", entries);
-    return entries;
-  };
-  const effectiveTarget = (repository) => {
-    const result = gitResult(repository, "remote", "get-url", "--push", "origin");
-    return result.status === 0 && result.stdout.trim() ? { ok: true, value: result.stdout.trim() } : { ok: false };
-  };
-  const compareOnly = (operator, sandbox) => {
-    const operatorTarget = effectiveTarget(operator);
-    if (!operatorTarget.ok) return { ok: false, message: `factory sandbox: operator effective push target unavailable; sandbox retained at ${sandbox}` };
-    const sandboxTarget = effectiveTarget(sandbox);
-    if (!sandboxTarget.ok) return { ok: false, message: `factory sandbox: sandbox effective push target unavailable at ${sandbox}` };
-    if (sandboxTarget.value !== operatorTarget.value) {
-      return { ok: false, message: `factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${sandbox}` };
-    }
-    return { ok: true };
-  };
-  const configureAndCompare = (operator, sandbox, afterConfigure = () => {}) => {
-    const events = [];
-    const operatorTarget = effectiveTarget(operator);
-    events.push("operator-capture");
-    if (!operatorTarget.ok) return { ...compareOnly(operator, sandbox), events };
-    const configured = gitResult(sandbox, "config", "--replace-all", "remote.origin.pushurl", operatorTarget.value);
-    events.push("sandbox-configure");
-    if (configured.status !== 0) {
-      return { ok: false, message: `factory sandbox: sandbox effective push target unavailable at ${sandbox}`, events };
-    }
-    afterConfigure();
-    const compared = compareOnly(operator, sandbox);
-    events.push("operator-recapture", "sandbox-recapture", "compare");
-    return { ...compared, events };
-  };
-  const featureLog = (repository, branch) => {
-    const raw = git(repository, "rev-parse", "--git-path", `logs/refs/heads/${branch}`);
-    const path = isAbsolute(raw) ? raw : resolve(repository, raw);
-    const root = realpathSync(join(repository, ".git", "logs", "refs", "heads"));
-    const fromRoot = relative(root, path);
-    assert.ok(fromRoot && !fromRoot.startsWith("..") && !isAbsolute(fromRoot));
-    return path;
-  };
-  const provenance = (repository, branch, bootstrapPending) => {
-    const path = featureLog(repository, branch);
-    if (!existsSync(path)) return { ok: false, reason: "reflog absent" };
-    const lines = readFileSync(path, "utf8").trimEnd().split("\n");
-    if (bootstrapPending && lines.length !== 1) return { ok: false, reason: "bootstrap reflog count" };
-    const match = /^([0-9a-f]{40}) ([0-9a-f]{40}) .+\tbranch: Created from ([0-9a-f]{40})$/u.exec(lines[0]);
-    if (!match || match[1] !== "0".repeat(40) || match[2] !== match[3]) return { ok: false, reason: "raw creation provenance" };
-    const ancestry = gitResult(repository, "merge-base", "--is-ancestor", match[2], `refs/heads/${branch}`);
-    return ancestry.status === 0 ? { ok: true, seed: match[2], lines } : { ok: false, reason: "seed ancestry" };
-  };
-  const operatorRefAbsent = (operator, branch) => gitResult(operator, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`).status === 1;
-  const createBranch = (sandbox, branch) => {
-    assert.equal(gitResult(sandbox, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`).status, 1);
-    const log = git(sandbox, "rev-parse", "--git-path", `logs/refs/heads/${branch}`);
-    assert.equal(existsSync(isAbsolute(log) ? log : resolve(sandbox, log)), false);
-    assert.equal(gitResult(sandbox, "diff", "--quiet").status, 0);
-    assert.equal(gitResult(sandbox, "diff", "--cached", "--quiet").status, 0);
-    const seed = git(sandbox, "rev-parse", "--verify", "HEAD^{commit}");
-    git(sandbox, "switch", "--no-track", "-c", branch, seed);
-    const proof = provenance(sandbox, branch, true);
-    assert.equal(proof.ok, true, proof.reason);
-    assert.equal(proof.seed, seed);
-    assert.equal(git(sandbox, "symbolic-ref", "--quiet", "--short", "HEAD"), branch);
-    assert.equal(git(sandbox, "rev-parse", "HEAD"), seed);
-    return { seed, log: featureLog(sandbox, branch) };
-  };
-  const bootstrapPending = (run, status) => run.status === "running"
-    && run.created_at === run.updated_at
-    && Object.keys(run.gates).length === 0
-    && run.steps.length === 0
-    && run.slices.length === 0
-    && run.validator === null
-    && run.terminal_result === null
-    && run.pr_url === null
-    && run.plan_digest === null
-    && status.lock === "absent";
-  const selectResume = (runDir, repository, intakeBranch) => {
-    const events = ["intake-branch"];
-    const parsedRun = validateRun(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")));
-    events.push("manifest-validated");
-    const featureBranch = parsedRun.branch;
-    events.push("feature-branch-bound");
-    const featureRef = `refs/heads/${featureBranch}`;
-    events.push("feature-ref-bound");
-    const recordedWorktree = parsedRun.worktree;
-    const lexicalWorktree = isAbsolute(recordedWorktree) ? recordedWorktree : resolve(repository, recordedWorktree);
-    const integrationWorktree = realpathSync(lexicalWorktree);
-    const fromRepository = relative(realpathSync(repository), integrationWorktree);
-    assert.equal(fromRepository.startsWith("..") || isAbsolute(fromRepository), false);
-    events.push("integration-worktree-bound");
-    const operatorGuard = operatorRefAbsent;
-    events.push("operator-guard-ready");
-    return {
-      events,
-      intakeBranch,
-      featureBranch,
-      featureRef,
-      integrationWorktree,
-      operatorGuard,
-      preLockFeatureRef: featureRef,
-    };
+    visit(root);
   };
 
-  assert.ok(resumeStart >= 0 && freshStart > resumeStart && gateOneStart > freshStart);
-  assert.ok(gateThreeStart >= 0 && publicationStart > gateThreeStart && summaryStart > publicationStart);
-  ordered(fresh, [
-    'git -C "$O" show-ref --verify --quiet "$FEATURE_REF"',
-    'factory init "$R" --branch "$FEATURE_BRANCH"',
-    "successful JSON response selects paths",
-    "Immediately after fresh selection",
-    "### Effective push proof",
-    'git -C "$RUN_REPO" config --replace-all remote.origin.pushurl "$OPERATOR_PUSH"',
-    "the two current shell strings must be exactly equal",
-    "### Feature branch provenance and crash recovery",
-    'git -C "$INTEGRATION_WORKTREE" switch --no-track -c "$FEATURE_BRANCH" "$SEED_HEAD"',
-    "Immediately before claiming or stealing a lock",
-    'factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"',
-    "dispatch the planned ticket",
-  ], "fresh request/push/branch/lock");
-  for (const fragment of [
-    "exact canonical `sandbox_path`",
-    "exact absolute `run_dir`",
-    "exact `branch`",
-    "exact `worktree`",
-    "exact `pr_base`",
-    "pre-reserves the deterministic sandbox",
-    "performs exactly one\n`git clone --local -- O S`",
-    "completes the physical containment proof, and only then publishes\n`run.json`",
-    "The skill does not construct or prove the sandbox.",
-    "created_at` exactly\nequals `updated_at`",
-    "qualified status reports lock state exactly `absent`",
-    "An active resume skips the configuration command",
-    "Never persist, log, echo, normalize, interpolate into a cause",
-    "Suppress target-operation stdout, stderr, and argv",
-    "oldest raw line",
-    "forty-zero old OID",
-    "branch: Created from <seed-oid>",
-    "merge-base --is-ancestor",
-    "Non-bootstrap, sandbox branch absent",
-    "Never recreate a progressed run's branch.",
-  ]) required(fresh, fragment, "ratified skill policy");
-  assert.equal(occurrences(fresh, 'git -C "$O" show-ref --verify --quiet "$FEATURE_REF"'), 4);
-  assert.equal(occurrences(fresh, "config --replace-all remote.origin.pushurl"), 1);
-  assert.doesNotMatch(fresh, /git clone --local "\$O"|--no-hardlinks|hardlink clone|\bfallback\b|copy-mode|\bstaging\b|\bretry(?:ing)?\b|alternate destination|attempt-numbered|quarantine|ownership (?:evidence|record)|rm -|rmSync|recursive removal|mkdir|pwd -P|rev-parse --absolute-git-dir/iu);
-  for (const fragment of [
-    "derive later paths only from the successful command response",
-    'RUN_REPO="<exact response sandbox_path>"',
-    "An active sandbox resume only\nrecaptures and compares targets; it never changes remote configuration.",
-  ]) required(resume, fragment, "resume selection");
-  ordered(resume, [
-    "bind it as `parsedRun`,\nand validate it",
-    "discard every intake or stale feature-branch",
-    "FEATURE_BRANCH = parsedRun.branch",
-    "FEATURE_REF = refs/heads/<exact FEATURE_BRANCH>",
-    "RECORDED_RUN_WORKTREE = parsedRun.worktree",
-    "INTEGRATION_WORKTREE = physical normalized resolution",
-    "Immediately after these bindings",
-    'git -C "$O" show-ref --verify --quiet "$FEATURE_REF"',
-    "Only after that guard passes may resume enter the effective-push proof",
-  ], "resume recorded-branch binding");
-  required(resume, "No intake or previously bound\nbranch or worktree value may participate in operator-ref, provenance, lock, dispatch, transition, or\npublication checks", "resume stale-value exclusion");
-  for (const message of [
+  for (const [index, fragment] of [
+    "effective push target in code, recaptures both current values",
+    "private mode-0600 configuration fragment",
+    "repeated init refuses the occupied destination",
     "factory sandbox: operator effective push target unavailable; sandbox retained at <S>",
     "factory sandbox: sandbox effective push target unavailable at <S>",
     "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>",
-  ]) required(fresh, message, "redacted refusal");
-  ordered(fresh, [
-    "On any capture, configuration, recapture, or equality failure",
-    "permit only `factory status",
-    "stop before branch handling",
-  ], "push refusal effects");
-  required(fresh, "stop before branch handling,\nlock claim or steal, dispatch, transition, push, forge command, or further publication.", "push refusal effects");
-  required(gateThree, "Production source: <landed count> / 3600", "Gate 3 source accounting");
-  ordered(gateThree, [
-    "Before every Gate 3 presentation",
-    "first validate `artifacts/post-merge-repairs.md`",
-    "Then write or refresh `gates/pre_pr.md`",
-    "`## Post-merge test-only repairs` section",
-    'factory gate "$R" pre_pr pending --artifact gates/pre_pr.md',
-  ], "Gate 3 repair validation and summary");
-  for (const fragment of [
-    "summarizes every journal record in order",
-    "introducing\nmerge, attempt, Starting head, trigger result, sorted test paths, cause, property outcome and every\nproperty loss, repair commit, post-repair result, and final or active status",
-    "No attempt, outcome, or\nproperty loss may be omitted or collapsed into only the latest result",
-  ]) required(gateThree, fragment, "Gate 3 repair attempt/property-loss summary");
-  ordered(publication, [
-    'factory status "$R" --json --repo "$RUN_REPO"',
-    'git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"',
-    "set +x",
-    'CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"',
-    'CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"',
-    "Step 6 only compares and never runs `git config`",
-    'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"',
-    'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"',
-    'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
-    "Production source ceiling: <landed count> / 3600",
-  ], "Step 6 compare/publication");
-  for (const fragment of [
-    "## Post-merge test-only repairs",
-    "include every attempt",
-    "This publication repair-record needs-human remains blocking, and envelope resume does not clear it.",
-  ]) required(publication, fragment, "post-merge repair disclosure");
-  assert.equal(occurrences(publication, "config --replace-all remote.origin.pushurl"), 0);
-  assert.doesNotMatch(publication, /git -C "\$RUN_REPO" config/u);
-  required(summary, "guarded sandbox-removal", "Step 7 exclusion");
-  required(summary, "Only after all ref and archive verification succeeds", "Step 7 guard");
+    "publication_child()", "push --no-verify origin",
+    "factory publication: git push failed; selected repository retained at $RUN_REPO",
+    "factory publication: draft PR creation failed or returned unsafe output; selected repository retained at $RUN_REPO",
+    "Only a single userinfo-free absolute HTTPS URL", "makes no push or forge call",
+  ].entries()) yes(skill.includes(fragment), `r-s${index}`);
+  yes(!skill.includes("remote get-url --push origin"), "r-s20");
+  yes(!skill.includes("remote.origin.pushurl"), "r-s21");
+  yes(!skill.includes("CURRENT_OPERATOR_PUSH"), "r-s22");
+  for (const [index, name] of SENSITIVE_CHILD_ENV_DENYLIST.entries()) yes(skill.includes(`-u ${name}`), `r-d${index}`);
+  yes(/factory gate "\$R" pre_pr approved --repo "\$RUN_REPO"/u.test(skill), "r-s23");
+  yes(/git -C "\$RUN_REPO" push --no-verify origin/u.test(skill), "r-s24");
+  const validatorCode = /node -e '([^']+)' 2>\/dev\/null/u.exec(skill)?.[1];
+  yes(typeof validatorCode === "string", "r-s25");
+  const unsafePr = spawnSync(process.execPath, ["-e", validatorCode], { input: secret, encoding: "utf8" });
+  yes(unsafePr.status === 1, "r-v0");
+  opaque([unsafePr.stdout, unsafePr.stderr], ["", ""], "r-v1");
+  noLeaks([unsafePr.stdout, unsafePr.stderr], "r-v2");
+  const allowedUrl = "https://forge.invalid/org/repo/pull/1";
+  const safePr = spawnSync(process.execPath, ["-e", validatorCode], { input: allowedUrl, encoding: "utf8" });
+  opaque({ status: safePr.status, stdout: safePr.stdout, stderr: safePr.stderr }, { status: 0, stdout: allowedUrl, stderr: "" }, "r-v3");
+
+  const cliSource = readFileSync(cli, "utf8");
+  const orderedSource = (start, end, fragments, label) => {
+    const section = cliSource.slice(cliSource.indexOf(start), cliSource.indexOf(end));
+    const positions = fragments.map((fragment) => section.indexOf(fragment));
+    yes(positions.every((position) => position >= 0), `${label}-p`);
+    opaque(positions, [...positions].sort((left, right) => left - right), `${label}-o`);
+  };
+  orderedSource("async lock", "async heartbeat", ["readRun(runDir)", "compareSelectedRunPushTarget", "claimSessionLock"], "r-w0");
+  orderedSource("async gate", "async step", ["assertRunNotParked", "compareSelectedRunPushTarget", "const reobservers", "transition(runDir"], "r-w1");
+  orderedSource("async resume", "export async function dispatchInit", ["readRun(runDir)", "current.status", "compareSelectedRunPushTarget", "inspectSessionLock", "transition(runDir"], "r-w2");
+  orderedSource("export async function dispatchInit", "function preflightInit", ["proof = prove", "configurePushTarget({", "let prBase", "await dispatchInitPublication"], "r-w3");
+
+  const accepted = [
+    secret, "http://host.invalid/r.git", "ssh://host.invalid/r.git", "git://host.invalid/r.git",
+    "git@host.invalid:org/r.git", "host.invalid:org/r.git",
+  ];
+  const expectedTargetArgv = [
+    ["remote", "get-url", "--push", "origin"],
+    ["config", "--local", "--add", "include.path", "./factory-push-target.config"],
+    ["remote", "get-url", "--push", "origin"],
+    ["remote", "get-url", "--push", "origin"],
+  ];
+  for (const [index, target] of accepted.entries()) {
+    const { fake, invoke } = invokeConfigure(targetResponses(target));
+    opaque(invoke(), "verified", `r-a${index}`);
+    opaque(fake.calls.map(({ args }) => args), expectedTargetArgv, `r-aa${index}`);
+    noLeaks(fake.calls.flatMap((call) => [call.command, ...call.args, ...Object.keys(call.options.env)]), `r-al${index}`);
+    for (const [callIndex, call] of fake.calls.entries()) {
+      yes(call.options.shell === false && !Object.hasOwn(call.options, "encoding"), `r-ao${index}-${callIndex}`);
+      opaque(call.options.stdio, ["ignore", "pipe", "pipe"], `r-as${index}-${callIndex}`);
+      yes(call.options.env.LC_ALL === "C" && call.options.env.GIT_TERMINAL_PROMPT === "0", `r-ae${index}-${callIndex}`);
+      for (const [denyIndex, name] of SENSITIVE_CHILD_ENV_DENYLIST.entries()) {
+        yes(!Object.hasOwn(call.options.env, name), `r-ad${index}-${callIndex}-${denyIndex}`);
+      }
+      for (const [providerIndex, name] of providerNames.entries()) {
+        opaque(call.options.env[name], `v-${name}`, `r-ap${index}-${callIndex}-${providerIndex}`);
+      }
+    }
+  }
+
+  const escapedTarget = Buffer.from('https://host.invalid/a"b\\c-é.git');
+  const escaped = invokeConfigure(targetResponses(escapedTarget));
+  opaque(escaped.invoke(), "verified", "r-x0");
+  yes(Buffer.concat(escaped.fake.writes).equals(Buffer.concat([
+    Buffer.from("[remote \"origin\"]\n\tpushurl = \"https://host.invalid/a\\\"b\\\\c-"), Buffer.from("é"), Buffer.from(".git\"\n"),
+  ])), "r-x1");
+  const crlf = (value) => Buffer.concat([Buffer.from(value), Buffer.from("\r\n")]);
+  opaque(invokeConfigure([result(crlf(secret)), result(), result(crlf(secret)), result(crlf(secret))]).invoke(), "verified", "r-crlf");
+  for (const [index, byte] of [...Array.from({ length: 0x20 }, (_entry, value) => value), 0x7f].entries()) {
+    const controlled = Buffer.concat([Buffer.from("https://host.invalid/a"), Buffer.from([byte]), Buffer.from("z.git\n")]);
+    refusal(invokeConfigure([result(controlled)]).invoke, fixed.operator("/operator/.factory-sandboxes/r01"), `r-control-${index}`);
+  }
+  refusal(invokeConfigure([result(Buffer.from("https://host.invalid/a\r\r\n"))]).invoke,
+    fixed.operator("/operator/.factory-sandboxes/r01"), "r-remaining-cr");
+
+  for (const [index, target] of ["relative/path", "/absolute/path", "~/target", "C:\\target", "file:///target", "helper::address", "ftp://host/r", "https:///missing", "x:y"].entries()) {
+    refusal(invokeConfigure([result(framed(target))]).invoke, fixed.operator("/operator/.factory-sandboxes/r01"), `r-t${index}`);
+  }
+
+  for (const [phaseIndex, [phase, expected]] of [[0, "operator"], [2, "operator"], [3, "sandbox"]].entries()) {
+    for (const [variantIndex, [, injected]] of failureVariants().entries()) {
+      const responses = targetResponses();
+      responses[phase] = injected;
+      refusal(invokeConfigure(responses).invoke, fixed[expected]("/operator/.factory-sandboxes/r01"), `r-f${phaseIndex}-${variantIndex}`);
+    }
+  }
+
+  for (const [index, injected] of [
+    result(Buffer.alloc(0), { status: 8, stderr: Buffer.from(secret) }),
+    result(Buffer.alloc(0), { error: foreign("cr"), status: null }),
+    result(Buffer.alloc(0), { signal: "SIGTERM", status: null }), foreign("ct"),
+  ].entries()) {
+    const invocation = invokeConfigure([result(framed(secret)), injected]);
+    refusal(invocation.invoke, fixed.sandbox("/operator/.factory-sandboxes/r01"), `r-c${index}`);
+    yes(invocation.fake.opened.length === 0 && invocation.fake.calls.length === 2, `r-cs${index}`);
+  }
+
+  for (const [index, [currentOperator, currentSandbox]] of [
+    [secret, secretTwo], [secret, `${secret}/`], [secret, secret.replace("target224", "Target224")],
+    [secret, secret.replace("target224", "target%3224")], [specialSecret, secret],
+  ].entries()) {
+    refusal(invokeConfigure(targetResponses(secret, currentOperator, currentSandbox)).invoke,
+      fixed.mismatch("/operator/.factory-sandboxes/r01"), `r-mm${index}`);
+  }
+  opaque(invokeConfigure(targetResponses(secret, specialSecret, specialSecret)).invoke(), "verified", "r-current-equality");
+
+  for (const [index, name] of ["open", "write", "fsync", "close"].entries()) {
+    const invocation = invokeConfigure(targetResponses(), { [name]: () => { throw foreign(`fs-${name}`); } });
+    refusal(invocation.invoke, fixed.sandbox("/operator/.factory-sandboxes/r01"), `r-z${index}`);
+    yes(invocation.fake.calls.length === 2, `r-zs${index}`);
+  }
+
+  for (const [sideIndex, [responseIndex, expected]] of [[2, "operator"], [3, "sandbox"]].entries()) {
+    for (const [variantIndex, [, injected]] of failureVariants().entries()) {
+      const responses = [result(framed(activeRoot)), result(framed("/operator")), result(framed(secret)), result(framed(secret))];
+      responses[responseIndex] = injected;
+      const fake = fakeOperations(responses, { lstat: () => ({ isDirectory: () => true, isSymbolicLink: () => false }) });
+      refusal(() => compareSelectedRunPushTarget({ selectedRoot: activeRoot, runId: "r-active" }, fake.operations),
+        fixed[expected](activeRoot), `r-q${sideIndex}-${variantIndex}`);
+    }
+  }
+  for (const [index, [operatorTarget, sandboxTarget]] of [
+    [secret, secretTwo], [secret, `${secret}/`], [secret, secret.replace("224", "225")],
+    [specialSecret, secret], [secret, secret.replace(".git", "%2egit")],
+  ].entries()) {
+    const fake = activeFake(result(framed(operatorTarget)), result(framed(sandboxTarget)));
+    refusal(() => compareSelectedRunPushTarget({ selectedRoot: activeRoot, runId: "r-active" }, fake.operations),
+      fixed.mismatch(activeRoot), `r-am${index}`);
+  }
+  const contextVariants = (probe) => [
+    result(Buffer.alloc(0)),
+    result(framed(probe === 0 ? activeRoot : "/operator"), { status: 7 }),
+    result(framed(probe === 0 ? activeRoot : "/operator"), { signal: "SIGTERM", status: null }),
+    result(framed(probe === 0 ? activeRoot : "/operator"), { error: foreign(`context-result-${probe}`), status: null }),
+    result(framed(probe === 0 ? activeRoot : "/operator"), { stderr: Buffer.from(secret) }),
+    foreign(`context-throw-${probe}`),
+    result(framed("/relationship-mismatch")),
+  ];
+  for (const probe of [0, 1]) {
+    for (const [index, injected] of contextVariants(probe).entries()) {
+      const responses = [result(framed(activeRoot)), result(framed("/operator")), result(framed(secret)), result(framed(secret))];
+      responses[probe] = injected;
+      const fake = fakeOperations(responses, { lstat: () => ({ isDirectory: () => true, isSymbolicLink: () => false }) });
+      refusal(() => compareSelectedRunPushTarget({ selectedRoot: activeRoot, runId: "r-active" }, fake.operations),
+        fixed.operator(activeRoot), `r-context-${probe}-${index}`);
+    }
+  }
+  const forged = activeFake(undefined, undefined, { basename: () => { throw foreign("forged"); } });
+  refusal(() => compareSelectedRunPushTarget({ selectedRoot: activeRoot, runId: "r-active" }, forged.operations),
+    fixed.operator(activeRoot), "r-forged");
 
   const root = mkdtempSync(join(tmpdir(), "factory-effective-push-"));
   try {
+    const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
     const operator = join(root, "operator");
-    const bare = join(root, "published.git");
-    const secretOne = "https://operator-user:credential-token@example.invalid/org/fetch-target.git";
-    const secretTwo = "https://other-user:other-token@example.invalid/org/push-target.git";
+    const container = join(operator, ".factory-sandboxes");
+    const sandbox = join(container, "r-real");
     mkdirSync(operator);
-    command("git", ["init", "--bare", "--initial-branch=main", bare]);
-    git(operator, "init", "--initial-branch=main");
+    git(operator, "init", "--quiet", "--initial-branch=main");
     git(operator, "config", "user.name", "Factory Test");
     git(operator, "config", "user.email", "factory@example.test");
-    writeFileSync(join(operator, "fixture.txt"), "effective push\n");
-    git(operator, "add", "fixture.txt");
-    git(operator, "commit", "-m", "fixture");
-    git(operator, "remote", "add", "origin", bare);
-    git(operator, "config", "--replace-all", "remote.origin.pushurl", secretOne);
+    writeFileSync(join(operator, ".gitignore"), ".factory-sandboxes/\n");
+    writeFileSync(join(operator, "tracked"), "tracked\n");
+    git(operator, "add", ".");
+    git(operator, "commit", "--quiet", "-m", "seed");
+    git(operator, "config", "--replace-all", "remote.origin.pushurl", specialSecret);
+    mkdirSync(container);
 
-    const mismatchBranch = "feature/push-mismatch";
-    assert.equal(operatorRefAbsent(operator, mismatchBranch), true);
-    const mismatch = initFresh(operator, ["push-mismatch", "--branch", mismatchBranch, "--pr-base", "main", "--now", "2026-08-04T12:00:00.000Z"]);
-    assert.equal(mismatch.response.sandbox_path, mismatch.repository);
-    assert.equal(mismatch.response.run_dir, mismatch.runDir);
-    assert.ok(isAbsolute(mismatch.repository));
-    assert.equal(realpathSync(mismatch.repository), mismatch.repository);
-    assert.equal(relative(mismatch.repository, mismatch.runDir).startsWith(".."), false);
-    assert.equal(operatorRefAbsent(operator, mismatchBranch), true);
-    const beforeMismatch = snapshot(mismatch.runDir);
-    const mismatchResult = configureAndCompare(operator, mismatch.repository, () => {
-      git(operator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
-    });
-    assert.equal(mismatchResult.ok, false);
-    assert.deepEqual(mismatchResult.events, ["operator-capture", "sandbox-configure", "operator-recapture", "sandbox-recapture", "compare"]);
-    assert.equal(mismatchResult.message, `factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${mismatch.repository}`);
-    for (const hidden of [secretOne, secretTwo, "operator-user", "credential-token", "other-user", "other-token", "fetch-target.git", "push-target.git"]) {
-      assert.equal(mismatchResult.message.includes(hidden), false, `refusal disclosed ${hidden}`);
-    }
-    assert.deepEqual(snapshot(mismatch.runDir), beforeMismatch);
-    assert.equal(gitResult(mismatch.repository, "show-ref", "--verify", "--quiet", `refs/heads/${mismatchBranch}`).status, 1);
-    assert.equal(existsSync(join(mismatch.runDir, "factory.lock")), false);
-    assert.equal(existsSync(mismatch.repository), true);
-    assert.equal(gitResult(bare, "show-ref", "--verify", "--quiet", `refs/heads/${mismatchBranch}`).status, 1);
-    const mismatchStatus = factory("status", "push-mismatch", "--repo", mismatch.repository);
-    assert.equal(mismatchStatus.valid, true);
-    assert.equal(mismatchStatus.lock, "absent");
+    const partialSandbox = join(container, "r-partial");
+    git(root, "clone", "--quiet", "--local", "--", operator, partialSandbox);
+    let partialWrite = true;
+    refusal(() => configureSandboxPushTarget({ operatorRoot: realpathSync(operator), sandboxRoot: realpathSync(partialSandbox) }, {
+      write(fd, bytes, offset, length) {
+        if (!partialWrite) throw foreign("partial");
+        partialWrite = false;
+        return writeSync(fd, bytes, offset, Math.min(12, length));
+      },
+    }), fixed.sandbox(realpathSync(partialSandbox)), "r-partial");
+    const partialFragment = join(partialSandbox, ".git", "factory-push-target.config");
+    yes(existsSync(partialFragment), "r-partial-exists");
+    yes(lstatSync(partialFragment).size === 12 && (lstatSync(partialFragment).mode & 0o777) === 0o600, "r-partial-bytes");
+    const partialBefore = inventory(partialSandbox);
+    opaque(inventory(partialSandbox), partialBefore, "r-partial-retained");
+    yes(!existsSync(join(partialSandbox, ".factory", "r-partial", "run.json")), "r-partial-manifest");
 
-    git(operator, "config", "--replace-all", "remote.origin.pushurl", secretOne);
-    const crashBranch = "feature/crash-recovery";
-    const crash = initFresh(operator, ["crash-recovery", "--branch", crashBranch, "--pr-base", "main", "--now", "2026-08-04T12:01:00.000Z"]);
-    assert.equal(gitResult(crash.repository, "config", "--get-all", "remote.origin.pushurl").status, 1);
-    const crashRun = JSON.parse(readFileSync(join(crash.runDir, "run.json"), "utf8"));
-    const crashStatus = factory("status", "crash-recovery", "--repo", crash.repository);
-    assert.equal(bootstrapPending(crashRun, crashStatus), true);
-    assert.equal(configureAndCompare(operator, crash.repository).ok, true);
-    const configuredTarget = git(crash.repository, "config", "--get-all", "remote.origin.pushurl");
-    assert.equal(configureAndCompare(operator, crash.repository).ok, true);
-    assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), configuredTarget);
-    assert.equal(operatorRefAbsent(operator, crashBranch), true);
-    const crashCreated = createBranch(crash.repository, crashBranch);
-    assert.equal(operatorRefAbsent(operator, crashBranch), true);
-    assert.equal(provenance(crash.repository, crashBranch, true).ok, true);
-    assert.equal(existsSync(join(crash.runDir, "factory.lock")), false);
-
-    writeFileSync(join(crash.runDir, "artifacts", "story.md"), "story\n");
-    factory("gate", "crash-recovery", "story", "pending", "--artifact", "artifacts/story.md", "--repo", crash.repository, "--now", "2026-08-04T12:02:00.000Z");
-    // The sandbox is a clone, and `git clone` does not copy the operator's committer identity —
-    // it lives in the source repository's own config, not in anything cloned. On a developer
-    // machine a global identity fills the gap invisibly; on a fresh CI runner there is none, and
-    // this commit failed with `fatal: empty ident name`. Configure it here rather than relying on
-    // the environment, the same way every other fixture in this suite does.
-    git(crash.repository, "config", "user.name", "Factory Test");
-    git(crash.repository, "config", "user.email", "factory@example.test");
-    writeFileSync(join(crash.repository, "progressed.txt"), "progressed\n");
-    git(crash.repository, "add", "progressed.txt");
-    git(crash.repository, "commit", "-m", "progress branch");
-    assert.equal(provenance(crash.repository, crashBranch, true).ok, false);
-    const progressed = provenance(crash.repository, crashBranch, false);
-    assert.equal(progressed.ok, true, progressed.reason);
-    assert.equal(progressed.seed, crashCreated.seed);
-    const staleIntakeBranch = "feature/stale-intake";
-    git(operator, "branch", staleIntakeBranch, "HEAD");
-    assert.equal(operatorRefAbsent(operator, staleIntakeBranch), false);
-    const resumed = selectResume(crash.runDir, crash.repository, staleIntakeBranch);
-    assert.deepEqual(resumed.events, [
-      "intake-branch",
-      "manifest-validated",
-      "feature-branch-bound",
-      "feature-ref-bound",
-      "integration-worktree-bound",
-      "operator-guard-ready",
-    ]);
-    assert.notEqual(resumed.intakeBranch, resumed.featureBranch);
-    assert.equal(resumed.featureBranch, crashBranch);
-    assert.equal(resumed.featureRef, `refs/heads/${crashBranch}`);
-    assert.equal(resumed.integrationWorktree, crash.repository);
-    assert.equal(resumed.operatorGuard(operator, resumed.featureBranch), true);
-    assert.equal(resumed.operatorGuard(operator, resumed.intakeBranch), false);
-    assert.equal(provenance(crash.repository, resumed.featureBranch, false).ok, true);
-    assert.equal(provenance(crash.repository, resumed.intakeBranch, false).ok, false);
-    assert.equal(resumed.preLockFeatureRef, `refs/heads/${crashBranch}`);
-    assert.equal(gitResult(operator, "show-ref", "--verify", "--quiet", resumed.preLockFeatureRef).status, 1);
-    assert.equal(gitResult(operator, "show-ref", "--verify", "--quiet", `refs/heads/${staleIntakeBranch}`).status, 0);
-    assert.equal(existsSync(join(crash.runDir, "factory.lock")), false);
-    const resumedStatus = factory("status", "crash-recovery", "--repo", crash.repository);
-    assert.equal(resumedStatus.branch, crashBranch);
-    assert.notEqual(resumedStatus.branch, staleIntakeBranch);
-    const publicationRef = `refs/heads/${resumedStatus.branch}`;
-    assert.equal(publicationRef, `refs/heads/${crashBranch}`);
-    assert.notEqual(publicationRef, `refs/heads/${staleIntakeBranch}`);
-    assert.equal(gitResult(bare, "show-ref", "--verify", "--quiet", publicationRef).status, 1);
-    const activePushBefore = git(crash.repository, "config", "--get-all", "remote.origin.pushurl");
+    git(root, "clone", "--quiet", "--local", "--", operator, sandbox);
+    opaque(configureSandboxPushTarget({ operatorRoot: realpathSync(operator), sandboxRoot: realpathSync(sandbox) }), "verified", "r-real-config");
+    const privateFragment = join(sandbox, ".git", "factory-push-target.config");
+    yes((lstatSync(privateFragment).mode & 0o777) === 0o600, "r-real-mode");
+    const observed = git(sandbox, "remote", "get-url", "--push", "origin");
+    yes(observed.subarray(0, -1).equals(Buffer.from(specialSecret)), "r-real-roundtrip");
+    opaque(compareSelectedRunPushTarget({ selectedRoot: sandbox, runId: "r-real" }), "verified", "r-real-compare");
+    const fragmentBefore = hash(readFileSync(privateFragment));
     git(operator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
-    assert.equal(compareOnly(operator, crash.repository).ok, false);
-    assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), activePushBefore);
-    git(operator, "config", "--replace-all", "remote.origin.pushurl", activePushBefore);
-    assert.equal(compareOnly(operator, crash.repository).ok, true);
-    assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), activePushBefore);
+    refusal(() => compareSelectedRunPushTarget({ selectedRoot: sandbox, runId: "r-real" }), fixed.mismatch(realpathSync(sandbox)), "r-real-mismatch");
+    opaque(hash(readFileSync(privateFragment)), fragmentBefore, "r-real-stable");
+    git(operator, "config", "--replace-all", "remote.origin.pushurl", specialSecret);
+    opaque(compareSelectedRunPushTarget({ selectedRoot: operator, runId: "legacy" }), "legacy-direct", "r-legacy");
+    refusal(() => compareSelectedRunPushTarget({ selectedRoot: sandbox, runId: "wrong" }), fixed.operator(realpathSync(sandbox)), "r-run-context");
 
-    const recreatedBranch = "feature/recreated";
-    const recreated = initFresh(operator, ["recreated", "--branch", recreatedBranch, "--pr-base", "main", "--now", "2026-08-04T12:03:00.000Z"]);
-    configureAndCompare(operator, recreated.repository);
-    const firstCreation = createBranch(recreated.repository, recreatedBranch);
-    const firstRaw = readFileSync(firstCreation.log, "utf8");
-    git(recreated.repository, "switch", "main");
-    git(recreated.repository, "branch", "-D", recreatedBranch);
-    git(recreated.repository, "switch", "--no-track", "-c", recreatedBranch, firstCreation.seed);
-    writeFileSync(firstCreation.log, `${firstRaw}${readFileSync(firstCreation.log, "utf8")}`);
-    assert.equal(provenance(recreated.repository, recreatedBranch, true).ok, false);
+    const missing = join(root, "missing");
+    refusal(() => compareSelectedRunPushTarget({ selectedRoot: missing, runId: "r" }), fixed.context(missing), "r-missing");
+    const linked = join(root, "linked");
+    symlinkSync(sandbox, linked);
+    refusal(() => compareSelectedRunPushTarget({ selectedRoot: linked, runId: "r-real" }), fixed.context(linked), "r-linked");
+    refusal(() => compareSelectedRunPushTarget({ selectedRoot: sandbox, runId: "r-real" }, {
+      lstat: () => { const error = foreign("unreadable"); error.code = "EACCES"; throw error; },
+    }), fixed.context(sandbox), "r-unreadable");
+    const contextResponses = [foreign("context")];
+    const contextFake = fakeOperations(contextResponses, { lstat: () => ({ isDirectory: () => true, isSymbolicLink: () => false }) });
+    refusal(() => compareSelectedRunPushTarget({ selectedRoot: activeRoot, runId: "r-active" }, contextFake.operations), fixed.operator(activeRoot), "r-context-foreign");
 
-    const raceLooseBranch = "feature/race-loose";
-    assert.equal(operatorRefAbsent(operator, raceLooseBranch), true);
-    git(operator, "branch", raceLooseBranch, "HEAD");
-    const raceLoose = initFresh(operator, ["race-loose", "--branch", raceLooseBranch, "--pr-base", "main", "--now", "2026-08-04T12:04:00.000Z"]);
-    const raceLooseState = snapshot(raceLoose.runDir);
-    assert.equal(operatorRefAbsent(operator, raceLooseBranch), false);
-    assert.equal(gitResult(raceLoose.repository, "config", "--get-all", "remote.origin.pushurl").status, 1);
-    assert.deepEqual(snapshot(raceLoose.runDir), raceLooseState);
-    assert.equal(existsSync(join(raceLoose.runDir, "factory.lock")), false);
+    const freshOperator = join(root, "fresh-operator");
+    mkdirSync(freshOperator);
+    git(freshOperator, "init", "--quiet", "--initial-branch=main");
+    git(freshOperator, "config", "user.name", "Factory Test");
+    git(freshOperator, "config", "user.email", "factory@example.test");
+    writeFileSync(join(freshOperator, ".gitignore"), ".factory-sandboxes/\n.factory/\n");
+    writeFileSync(join(freshOperator, "tracked"), "tracked\n");
+    git(freshOperator, "add", ".");
+    git(freshOperator, "commit", "--quiet", "-m", "seed");
+    git(freshOperator, "config", "--replace-all", "remote.origin.pushurl", secret);
+    const init = spawnSync(process.execPath, [cli, "init", "r-cli", "--repo", freshOperator, "--json"], { encoding: "utf8" });
+    yes(init.status === 0, "r-cli-init-status");
+    noLeaks([init.stdout, init.stderr], "r-cli-init-output");
+    const initialized = JSON.parse(init.stdout);
+    const cliFragment = join(initialized.sandbox_path, ".git", "factory-push-target.config");
+    yes((lstatSync(cliFragment).mode & 0o777) === 0o600, "r-cli-mode");
+    const plainStatus = spawnSync(process.execPath, [cli, "status", "r-cli", "--repo", initialized.sandbox_path], { encoding: "utf8" });
+    const jsonStatus = spawnSync(process.execPath, [cli, "status", "r-cli", "--repo", initialized.sandbox_path, "--json"], { encoding: "utf8" });
+    noLeaks([plainStatus.stdout, plainStatus.stderr, jsonStatus.stdout, jsonStatus.stderr], "r-cli-status-output");
+    const manifestPath = join(initialized.run_dir, "run.json");
+    noLeaks([readFileSync(manifestPath)], "r-cli-manifest");
 
-    const raceHeadBranch = "feature/race-head";
-    assert.equal(operatorRefAbsent(operator, raceHeadBranch), true);
-    git(operator, "switch", "-c", raceHeadBranch);
-    const raceHead = initFresh(operator, ["race-head", "--branch", raceHeadBranch, "--pr-base", "main", "--now", "2026-08-04T12:05:00.000Z"]);
-    const inheritedRefs = git(raceHead.repository, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n").sort();
-    const raceHeadState = snapshot(raceHead.runDir);
-    assert.equal(operatorRefAbsent(operator, raceHeadBranch), false);
-    assert.equal(provenance(raceHead.repository, raceHeadBranch, true).ok, false);
-    assert.deepEqual(git(raceHead.repository, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n").sort(), inheritedRefs);
-    assert.equal(gitResult(raceHead.repository, "config", "--get-all", "remote.origin.pushurl").status, 1);
-    assert.deepEqual(snapshot(raceHead.runDir), raceHeadState);
-    assert.equal(existsSync(join(raceHead.runDir, "factory.lock")), false);
-    assert.equal(existsSync(raceHead.repository), true);
+    git(freshOperator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
+    const manifestBefore = readFileSync(manifestPath);
+    const malformed = JSON.parse(manifestBefore);
+    malformed.unexpected = true;
+    writeFileSync(manifestPath, `${JSON.stringify(malformed)}\n`);
+    const manifestFirst = spawnSync(process.execPath, [cli, "lock", "r-cli", "claim", "--session", "s1", "--repo", initialized.sandbox_path], { encoding: "utf8" });
+    yes(/unknown key/u.test(manifestFirst.stderr) && !manifestFirst.stderr.includes("effective push target"), "r-manifest-first");
+    noLeaks([manifestFirst.stdout, manifestFirst.stderr], "r-manifest-first-output");
+    writeFileSync(manifestPath, manifestBefore);
+    const lockInventory = inventory(initialized.sandbox_path);
+    const lockRefusal = spawnSync(process.execPath, [cli, "lock", "r-cli", "claim", "--session", "s1", "--repo", initialized.sandbox_path], { encoding: "utf8" });
+    opaque(lockRefusal.stderr, `${fixed.mismatch(initialized.sandbox_path)}\n`, "r-lock-message");
+    opaque(inventory(initialized.sandbox_path), lockInventory, "r-lock-retained");
+    yes(!existsSync(join(initialized.run_dir, "factory.lock")), "r-lock-absent");
+    noLeaks([lockRefusal.stdout, lockRefusal.stderr], "r-lock-output");
+
+    const cliFragmentBytes = readFileSync(cliFragment);
+    const tracePaths = [join(root, "trace.log"), join(root, "trace2.log"), join(root, "gcm.log")];
+    const targetEnv = { ...process.env, ...Object.fromEntries(SENSITIVE_CHILD_ENV_DENYLIST.map((name) => [name, secret])) };
+    [targetEnv.GIT_TRACE, targetEnv.GIT_TRACE2_EVENT, targetEnv.GCM_TRACE] = tracePaths;
+    const gate = (label, expected) => {
+      const beforeGate = inventory(initialized.sandbox_path);
+      const observedGate = spawnSync(process.execPath, [cli, "gate", "r-cli", "pre_pr", "approved", "--repo", initialized.sandbox_path, "--json"], { encoding: "utf8", env: targetEnv });
+      opaque(observedGate.stderr, `${expected}\n`, `${label}-message`);
+      opaque(inventory(initialized.sandbox_path), beforeGate, `${label}-inventory`);
+      noLeaks([observedGate.stdout, observedGate.stderr], `${label}-output`);
+      for (const [index, path] of tracePaths.entries()) yes(!existsSync(path), `${label}-trace-${index}`);
+      return observedGate;
+    };
+    const mismatchGate = gate("r-gate-mismatch", fixed.mismatch(initialized.sandbox_path));
+    git(freshOperator, "config", "--unset-all", "remote.origin.pushurl");
+    const operatorGate = gate("r-gate-operator", fixed.operator(initialized.sandbox_path));
+    git(freshOperator, "config", "--replace-all", "remote.origin.pushurl", secret);
+    rmSync(cliFragment);
+    const sandboxGate = gate("r-gate-sandbox", fixed.sandbox(initialized.sandbox_path));
+    writeFileSync(cliFragment, cliFragmentBytes, { mode: 0o600 });
+    chmodSync(cliFragment, 0o600);
+
+    git(freshOperator, "config", "--replace-all", "remote.origin.pushurl", secret);
+    execFileSync(process.execPath, [cli, "lock", "r-cli", "claim", "--session", "s1", "--repo", initialized.sandbox_path], { stdio: "ignore" });
+    execFileSync(process.execPath, [cli, "terminal", "r-cli", "needs-human", "--reason", "pause", "--repo", initialized.sandbox_path], { stdio: "ignore" });
+    git(freshOperator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
+    const resumeBefore = inventory(initialized.sandbox_path);
+    const resumeRefusal = spawnSync(process.execPath, [cli, "resume", "r-cli", "--session", "s1", "--repo", initialized.sandbox_path], { encoding: "utf8" });
+    opaque(resumeRefusal.stderr, `${fixed.mismatch(initialized.sandbox_path)}\n`, "r-resume-message");
+    opaque(inventory(initialized.sandbox_path), resumeBefore, "r-resume-inventory");
+    noLeaks([resumeRefusal.stdout, resumeRefusal.stderr], "r-resume-output");
+    yes(spawnSync(process.execPath, [cli, "heartbeat", "r-cli", "--session", "s1", "--repo", initialized.sandbox_path], { stdio: "ignore" }).status === 0, "r-heartbeat");
+    yes(spawnSync(process.execPath, [cli, "lock", "r-cli", "release", "--session", "s1", "--repo", initialized.sandbox_path], { stdio: "ignore" }).status === 0, "r-release");
+
+    const refusedOperator = join(root, "refused-operator");
+    mkdirSync(refusedOperator);
+    git(refusedOperator, "init", "--quiet", "--initial-branch=main");
+    git(refusedOperator, "config", "user.name", "Factory Test");
+    git(refusedOperator, "config", "user.email", "factory@example.test");
+    writeFileSync(join(refusedOperator, "tracked"), "tracked\n");
+    git(refusedOperator, "add", ".");
+    git(refusedOperator, "commit", "--quiet", "-m", "seed");
+    git(refusedOperator, "config", "--replace-all", "remote.origin.pushurl", join(root, "local-target"));
+    const refusedSandbox = join(realpathSync(refusedOperator), ".factory-sandboxes", "r-refused");
+    const refused = spawnSync(process.execPath, [cli, "init", "r-refused", "--repo", refusedOperator], { encoding: "utf8" });
+    opaque(refused.stderr, `${fixed.operator(refusedSandbox)}\n`, "r-fresh-refusal");
+    yes(existsSync(refusedSandbox) && !existsSync(join(refusedSandbox, ".factory", "r-refused", "run.json")), "r-fresh-retained");
+    const refusedBefore = inventory(refusedSandbox);
+    const repeated = spawnSync(process.execPath, [cli, "init", "r-refused", "--repo", refusedOperator], { encoding: "utf8" });
+    yes(/already exists without a manifest/u.test(repeated.stderr), "r-fresh-repeat");
+    opaque(inventory(refusedSandbox), refusedBefore, "r-fresh-repeat-retained");
+    noLeaks([refused.stdout, refused.stderr, repeated.stdout, repeated.stderr], "r-fresh-output");
+
+    const publish = join(root, "publish");
+    const remote = join(root, "remote.git");
+    mkdirSync(publish);
+    git(publish, "init", "--quiet", "--initial-branch=main");
+    git(root, "init", "--quiet", "--bare", remote);
+    git(publish, "config", "user.name", "Factory Test");
+    git(publish, "config", "user.email", "factory@example.test");
+    writeFileSync(join(publish, "tracked"), "tracked\n");
+    writeFileSync(join(publish, "body"), "body\n");
+    git(publish, "add", ".");
+    git(publish, "commit", "--quiet", "-m", "seed");
+    git(publish, "remote", "add", "origin", remote);
+    git(publish, "config", "remote.origin.pushurl", remote);
+    const hookSentinel = join(root, "hook-ran");
+    const hook = join(publish, ".git", "hooks", "pre-push");
+    writeFileSync(hook, `#!/bin/sh\nprintf hook >${JSON.stringify(hookSentinel)}\n`);
+    chmodSync(hook, 0o755);
+    const bin = join(root, "bin");
+    const gitJournal = join(root, "git-argv.jsonl");
+    const ghJournal = join(root, "gh-argv.jsonl");
+    const factoryJournal = join(root, "factory-argv.jsonl");
+    mkdirSync(bin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const journalPrelude = 'const fs=require("node:fs");const deny=JSON.parse(process.env.DENYLIST);const present=deny.filter((key)=>Object.hasOwn(process.env,key));const providers=JSON.parse(process.env.PROVIDERS).filter((key)=>Object.hasOwn(process.env,key));';
+    writeFileSync(join(bin, "git"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.GIT_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");if(process.env.GIT_SHIM_FAIL==="1"){const corpus=JSON.parse(process.env.SHIM_CORPUS).join("\\n")+"\\n";process.stdout.write(corpus);process.stderr.write(corpus);for(const key of ["GIT_TRACE","GIT_TRACE2_EVENT","GCM_TRACE"]){if(process.env[key])fs.appendFileSync(process.env[key],corpus)}process.exit(42)}const r=require("node:child_process").spawnSync(process.env.REAL_GIT,process.argv.slice(2),{stdio:"inherit",env:process.env});process.exit(r.status??1);\n`);
+    writeFileSync(join(bin, "gh"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.GH_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");process.stdout.write(process.env.GH_STDOUT||"");process.stderr.write(process.env.GH_STDERR||"");process.exit(Number(process.env.GH_EXIT||0));\n`);
+    writeFileSync(join(bin, "factory"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.FACTORY_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");\n`);
+    for (const name of ["git", "gh", "factory"]) chmodSync(join(bin, name), 0o755);
+    const publicationStart = skill.indexOf("set +x\npublication_child()");
+    const publicationScript = skill.slice(publicationStart, skill.indexOf("\n```", publicationStart));
+    yes(publicationStart >= 0 && publicationScript.endsWith('factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"'), "r-pub-script");
+    const publicationTrace = [join(root, "publication-trace"), join(root, "publication-trace2"), join(root, "publication-gcm")];
+    const traceSentinel = "trace sentinel unchanged\n";
+    const publication = (overrides = {}, { seedTrace = false } = {}) => {
+      for (const path of [gitJournal, ghJournal, factoryJournal, hookSentinel, ...publicationTrace]) rmSync(path, { force: true });
+      if (seedTrace) writeFileSync(publicationTrace[0], traceSentinel);
+      const env = {
+        ...process.env,
+        ...Object.fromEntries(SENSITIVE_CHILD_ENV_DENYLIST.map((name) => [name, secret])),
+        PATH: `${bin}:${process.env.PATH}`, DENYLIST: JSON.stringify(SENSITIVE_CHILD_ENV_DENYLIST), PROVIDERS: JSON.stringify(providerNames),
+        REAL_GIT: realGit, GIT_JOURNAL: gitJournal, GH_JOURNAL: ghJournal, FACTORY_JOURNAL: factoryJournal,
+        R: "r-publish", RUN_REPO: publish, FEATURE_BRANCH: "main", O: publish, PR_BASE: "main",
+        TITLE: "title", BODY_FILE: join(publish, "body"),
+        ...Object.fromEntries(providerNames.map((name) => [name, `provider-${name}`])),
+        GIT_CONFIG_COUNT: "0",
+        ...overrides,
+      };
+      [env.GIT_TRACE, env.GIT_TRACE2_EVENT, env.GCM_TRACE] = publicationTrace;
+      return spawnSync("sh", ["-c", publicationScript], { encoding: "utf8", env });
+    };
+    const journal = (path) => readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+    const assertJournal = (path, expectedArgs, label, { sanitized = true } = {}) => {
+      const rows = journal(path);
+      opaque(rows.map(({ args }) => args), expectedArgs, `${label}-args`);
+      if (sanitized) yes(rows.every(({ present }) => present.length === 0), `${label}-env`);
+      yes(rows.every(({ providers }) => hash(providers) === hash(providerNames)), `${label}-providers`);
+      noLeaks([readFileSync(path)], `${label}-leak`);
+    };
+    const refspec = "refs/heads/main:refs/heads/main";
+    const pushArgs = [["-C", publish, "push", "--no-verify", "origin", refspec]];
+    const ghArgs = [["pr", "create", "--draft", "--base", "main", "--head", "main", "--title", "title", "--body-file", join(publish, "body")]];
+    const pushFailure = publication({ GIT_SHIM_FAIL: "1", SHIM_CORPUS: JSON.stringify(forbidden), GH_STDOUT: secret, GH_STDERR: secretTwo }, { seedTrace: true });
+    opaque({ status: pushFailure.status, stdout: pushFailure.stdout, stderr: pushFailure.stderr }, { status: 1, stdout: fixed.push(publish), stderr: "" }, "r-push-fail");
+    assertJournal(gitJournal, pushArgs, "r-push-journal");
+    yes(!existsSync(ghJournal) && !existsSync(factoryJournal), "r-push-stop");
+    yes(!existsSync(hookSentinel), "r-push-hook");
+    opaque(readFileSync(publicationTrace[0]), traceSentinel, "r-push-trace-unchanged");
+    yes(!existsSync(publicationTrace[1]) && !existsSync(publicationTrace[2]), "r-push-trace-absent");
+    noLeaks([pushFailure.stdout, pushFailure.stderr], "r-push-outer");
+
+    const ghFailure = publication({ GH_EXIT: "42", GH_STDOUT: secret, GH_STDERR: secretTwo });
+    opaque({ status: ghFailure.status, stdout: ghFailure.stdout, stderr: ghFailure.stderr }, { status: 1, stdout: fixed.gh(publish), stderr: "" }, "r-gh-fail");
+    assertJournal(gitJournal, pushArgs, "r-gh-git-journal");
+    assertJournal(ghJournal, ghArgs, "r-gh-journal");
+    yes(!existsSync(factoryJournal), "r-gh-stop");
+    noLeaks([ghFailure.stdout, ghFailure.stderr], "r-gh-outer");
+
+    const unsafeGh = publication({ GH_STDOUT: `${secret}\n`, GH_STDERR: secretTwo });
+    opaque({ status: unsafeGh.status, stdout: unsafeGh.stdout, stderr: unsafeGh.stderr }, { status: 1, stdout: fixed.gh(publish), stderr: "" }, "r-gh-unsafe-run");
+    assertJournal(gitJournal, pushArgs, "r-gh-unsafe-git");
+    assertJournal(ghJournal, ghArgs, "r-gh-unsafe-gh");
+    yes(!existsSync(factoryJournal), "r-gh-unsafe-stop");
+    noLeaks([unsafeGh.stdout, unsafeGh.stderr], "r-gh-unsafe-outer");
+
+    const safePublication = publication({ GH_STDOUT: `${allowedUrl}\n` });
+    opaque({ status: safePublication.status, stdout: safePublication.stdout, stderr: safePublication.stderr }, { status: 0, stdout: "", stderr: "" }, "r-pub-safe");
+    assertJournal(gitJournal, pushArgs, "r-pub-safe-git");
+    assertJournal(ghJournal, ghArgs, "r-pub-safe-gh");
+    assertJournal(factoryJournal, [["pr", "r-publish", "--url", allowedUrl, "--repo", publish]], "r-pub-safe-factory", { sanitized: false });
+    yes(!existsSync(hookSentinel), "r-pub-hook");
+    for (const [index, path] of publicationTrace.entries()) yes(!existsSync(path), `r-pub-trace-${index}`);
+    for (const [index, path] of [join(root, "PR_RESULT"), join(root, "PR_URL"), join(root, "publication.out")].entries()) yes(!existsSync(path), `r-pub-remnant-${index}`);
+
+    const capturedOutput = (observed) => ({ status: observed.status, stdout: observed.stdout, stderr: observed.stderr });
+    const evidenceOutput = join(initialized.run_dir, "evidence", "captured-refusals.json");
+    const reviewOutput = join(initialized.run_dir, "reviews", "captured-publication.json");
+    const factoryOutput = join(initialized.run_dir, "factory.log");
+    const cliRefusals = {
+      manifest: capturedOutput(manifestFirst), lock: capturedOutput(lockRefusal), mismatch: capturedOutput(mismatchGate),
+      operator: capturedOutput(operatorGate), sandbox: capturedOutput(sandboxGate), resume: capturedOutput(resumeRefusal),
+      fresh: capturedOutput(refused), repeated: capturedOutput(repeated),
+    };
+    const publicationRefusals = {
+      push: capturedOutput(pushFailure), gh: capturedOutput(ghFailure), unsafe: capturedOutput(unsafeGh),
+    };
+    writeFileSync(evidenceOutput, `${JSON.stringify(cliRefusals)}\n`);
+    writeFileSync(reviewOutput, `${JSON.stringify(publicationRefusals)}\n`);
+    writeFileSync(factoryOutput, `${JSON.stringify({ cli: cliRefusals, publication: publicationRefusals })}\n`);
+    for (const [index, path] of [evidenceOutput, reviewOutput, factoryOutput].entries()) {
+      noLeaks([readFileSync(path)], `r-sink-${index}`);
+    }
+
+    const scannerProbe = join(root, "scanner-negative");
+    mkdirSync(scannerProbe);
+    writeFileSync(join(scannerProbe, "planted"), forbidden[Math.floor(forbidden.length / 2)]);
+    const scannerResult = caught(() => scanTree(scannerProbe, new Set(), "r-scanner-inner"));
+    yes(scannerResult.error instanceof Error, "r-scanner-detected");
+    noLeaks(failureSurface(scannerResult.error), "r-scanner-safe-output");
+    rmSync(scannerProbe, { recursive: true, force: true });
+
+    const excluded = new Set([
+      join(operator, ".git", "config"), privateFragment, partialFragment,
+      join(freshOperator, ".git", "config"), cliFragment,
+      join(freshOperator, ".factory-sandboxes", "r-cli", ".git", "factory-push-target.config"),
+    ]);
+    scanTree(root, excluded, "r-tree");
+    scanTree(initialized.run_dir, new Set(), "r-control-plane");
+
+    const negative = spawnSync(process.execPath, ["-e", 'require("node:assert/strict").equal(true,false,"r-neg")'], {
+      encoding: "utf8", env: { ...process.env, FACTORY_NEGATIVE_SECRET: secret },
+    });
+    yes(negative.status !== 0, "r-negative-status");
+    noLeaks([negative.stdout, negative.stderr], "r-negative-output");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

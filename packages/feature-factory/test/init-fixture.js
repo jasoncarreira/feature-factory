@@ -6,7 +6,10 @@ import { SCHEMA_VERSION, validateRun } from "../state/schema.js";
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "factory.js");
 
-export function initFresh(operator, args) {
+export function initFresh(operator, args, { pushTarget = "https://fixture.invalid/feature-factory.git" } = {}) {
+  if (pushTarget !== null) {
+    execFileSync("git", ["config", "--replace-all", "remote.origin.pushurl", pushTarget], { cwd: operator, stdio: "ignore" });
+  }
   const response = JSON.parse(execFileSync(process.execPath, [CLI, "init", ...args, "--repo", operator, "--json"], {
     encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   }));
