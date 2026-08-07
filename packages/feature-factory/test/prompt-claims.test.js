@@ -1276,10 +1276,24 @@ const CLAIMS = [
       for (const [id, required] of NEEDS_HUMAN_PROSE) {
         assert.throws(() => checkNeedsHumanProse(prose.replace(required, "")), new RegExp(id, "u"));
       }
+      // Every surface that shows an executable resume, not just the one that happened to be loaded
+      // here. The first version checked the skill alone while claiming all three, and a negative
+      // control against the skill confirmed the one surface that was covered -- so removing
+      // --session from either README still left CI green.
+      for (const [label, surfacePath] of [
+        ["skill", join(pkg, "skills", "feature", "SKILL.md")],
+        ["package README", join(pkg, "README.md")],
+        ["root README", join(pkg, "..", "..", "README.md")],
+      ]) {
+        const surface = readFileSync(surfacePath, "utf8");
+        checkResumeInvocations(surface);
+        // Strip the session from a resume invocation specifically. A bare /--session \S+ / hits the
+        // first one anywhere in the file, which in the skill is a lock example, leaving the resume
+        // invocation intact and the control passing for the wrong reason.
+        assert.throws(() => checkResumeInvocations(surface.replace(/(`factory resume [^`]*?)--session \S+ /u, "$1")),
+          /resume-invocation-without-session/u, `${label} must fail when the session is removed`);
+      }
       for (const marker of RESUME_ORDER) {
-        checkResumeInvocations(prose);
-        assert.throws(() => checkResumeInvocations(prose.replace("--session \"$FACTORY_SESSION_ID\" ", "")),
-          /resume-invocation-without-session/u);
         assert.throws(() => checkResumeOrder(prose.replace(`${marker}\n`, "")), /resume-order/u);
         assert.throws(() => checkResumeOrder(prose.replace(marker, `${marker}\n${marker}`)), /resume-order/u);
       }
