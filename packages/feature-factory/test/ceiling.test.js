@@ -284,6 +284,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //    proven statically — the very form the decomposer recommends. So both sides are pinned on the
     //    distinction, not merely on the prohibition: what blocks is a claim the later path invalidates.
     const byName = new Map(agentText.map(({ name, text }) => [name, text]));
+    // Enforcement: these checks prevent false-green drift in shipped agent contracts.
     const forbiddenAgentTerms = /jira|atlassian|figma|logrocket|confluence|cloudid|tracker[ _-]?key|context7|get_best_practices|search_documentation|find_examples/giu;
     const agentPolicyFiles = sourceFiles(join(pkg, "agents"), [], PROSE_EXTENSIONS);
     const agentPolicyOffenders = agentPolicyFiles.flatMap((path) =>
