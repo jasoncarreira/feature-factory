@@ -136,14 +136,10 @@ function sandboxRuns(repo) {
 // The run an operator means when they open the sidebar: the one still going. Terminal runs stay
 // listed but never win, so finishing a run does not make yesterday's the headline.
 export function selectActiveRun(runs) {
-  return runs.find((run) => run.valid && !run.terminal && run.awaiting_gate)
-    ?? runs.find((run) => run.valid && !run.terminal)
-    ?? runs.find((run) => run.valid && run.terminal)
-    ?? runs.find((run) => !run.valid)
-    ?? null;
+  return sortRuns(runs)[0] ?? null;
 }
 
-const TERMINAL = new Set(["completed", "blocked", "partial", "needs-human"]);
+const TERMINAL = new Set(["completed", "blocked", "partial"]);
 const SESSION_LOCK_KEYS = ["session", "pid", "run_id", "branch", "claimed_at", "heartbeat_at"];
 const SESSION_LOCK_TTL_MS = 30 * 60 * 1000;
 
@@ -203,6 +199,7 @@ function project(runDir, runId, { source, sandboxPath, expectedRunId }) {
   const slices = Array.isArray(run.slices) ? run.slices : [];
   const lock = inspectSessionLock(runDir);
   const terminal = TERMINAL.has(run.status);
+  const parked = run.status === "needs-human";
   return {
     run_id: run.run_id ?? runId,
     valid: true,
@@ -217,7 +214,8 @@ function project(runDir, runId, { source, sandboxPath, expectedRunId }) {
     updated_at: run.updated_at ?? null,
     session: navigableSession(lock.owner?.session),
     terminal,
-    deadLock: !terminal && lock.state === "stale",
+    parked,
+    deadLock: run.status === "running" && lock.state === "stale",
     // Which gate is waiting is the one thing an operator acts on, so it is not buried in a map.
     gates: Object.entries(run.gates ?? {}).map(([name, gate]) => ({ name, status: gate?.status ?? "absent" })),
     // The step still in flight, with its attempt count against the run's own bound. Slices carried
@@ -244,7 +242,7 @@ function project(runDir, runId, { source, sandboxPath, expectedRunId }) {
 function invalidRun(runId, error, source, manifestPath, sandboxPath) {
   return {
     run_id: runId, valid: false, error, source, manifest_path: manifestPath,
-    sandbox_path: sandboxPath, terminal: false, deadLock: false, updated_at: null,
+    sandbox_path: sandboxPath, terminal: false, parked: false, deadLock: false, updated_at: null,
   };
 }
 
@@ -276,16 +274,26 @@ function deduplicateRuns(runs) {
 
 function sortRuns(runs) {
   return [...runs].sort((left, right) => {
-    const leftGroup = left.valid ? (left.terminal ? 1 : 0) : 2;
-    const rightGroup = right.valid ? (right.terminal ? 1 : 0) : 2;
+    const leftGroup = sortGroup(left);
+    const rightGroup = sortGroup(right);
     if (leftGroup !== rightGroup) return leftGroup - rightGroup;
     if (left.valid && right.valid) {
       const byUpdated = Date.parse(right.updated_at) - Date.parse(left.updated_at);
       if (byUpdated !== 0) return byUpdated;
+      return String(left.run_id).localeCompare(String(right.run_id));
     }
     return String(left.run_id).localeCompare(String(right.run_id))
       || left.manifest_path.localeCompare(right.manifest_path);
   });
+}
+
+function sortGroup(run) {
+  if (!run.valid) return 5;
+  if (run.status === "running" && !run.deadLock && run.awaiting_gate) return 0;
+  if (run.status === "running" && !run.deadLock) return 1;
+  if (run.parked) return 2;
+  if (run.status === "running" && run.deadLock) return 3;
+  return 4;
 }
 
 // One poll: where the control plane is, every run in it, which one is live, and — when there is

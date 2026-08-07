@@ -334,7 +334,8 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     "make the final read with the following command",
     "A legacy run selected at `RUN_REPO=\"$O\"` keeps\nits prior local behavior",
     "never fetch from,\narchive, or remove a supposed sandbox",
-    "`blocked`, `partial`,\n`needs-human`, and nonterminal dead-lock runs only report their sandbox paths and remain untouched",
+    "Completed handoff remains final, while top-level needs-human is parked and requires explicit factory resume.",
+    "`blocked`, `partial`, and nonterminal dead-lock runs only report their sandbox paths and remain untouched",
     "no handoff journal, replay protocol, retry loop,\nintermediate archive plane, tombstone, or cleanup state machine",
   ]) required(fragment);
   const statusAtOperator = [...handoff.matchAll(/factory status "\$R" --json --repo "\$O"/gu)].map((match) => match.index);

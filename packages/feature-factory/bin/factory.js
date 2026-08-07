@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Every mutating command uses a checked transition and atomic compare-and-swap rename.
+// False-green enforcement: parked preflights precede effects; every mutation uses checked atomic CAS.
 // Initialization alone creates run.json through atomic no-clobber publication.
 // The orchestrator calls this CLI instead of writing control-plane state directly.
 // Flags are declared per command; unknown options fail rather than becoming missing fields.
@@ -23,6 +23,7 @@ import {
 export const COMMANDS = Object.freeze({
   init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
+  resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
   // No --force: `lock <id> steal` is the same operation with a name that says what it
   // does, and two spellings of "take someone else's lock" is one too many.
   lock: Object.freeze(["--repo", "--session", "--branch", "--ttl-ms", "--now", "--json"]),
@@ -122,6 +123,14 @@ function briefDigestFor(decision, state, runDir) {
 function runDirFor(flags, runId) {
   if (!runId) throw new CliError("a <run-id> is required");
   return join(resolve(flags.repo ?? process.cwd()), CONTROL_PLANE, runId);
+}
+
+function assertRunNotParked(runDir, command) {
+  const run = readRun(runDir);
+  if (run.status === "needs-human") {
+    throw new CliError(`factory ${command} refuses while run status is needs-human; run factory resume first`);
+  }
+  return run;
 }
 
 // The integration branch's worktree and currently observed head. Three call sites asked
@@ -373,12 +382,13 @@ const HANDLERS = {
   async validator([runId], flags) {
     if (!flags.report) throw new CliError("factory validator requires --report");
     const runDir = runDirFor(flags, runId);
+    const run = assertRunNotParked(runDir, "validator");
     const repo = resolve(flags.repo ?? process.cwd());
     const at = stamp(flags);
     // Neither the verdict nor the head is an argument any more. Both come from the
     // validator's own record, which must name the integration head as observed right now —
     // otherwise a report about one commit could be recorded as a verdict on another.
-    const head = integrationHead(repo, readRun(runDir));
+    const head = integrationHead(repo, run);
     const review = readValidatorReview(runDir, head.commit);
     const next = await transition(runDir, {
       participants: [{ familyId: "verdict", mode: "record" }],
@@ -401,6 +411,7 @@ const HANDLERS = {
   async pr([runId], flags) {
     if (!flags.url) throw new CliError("factory pr requires --url");
     const runDir = runDirFor(flags, runId);
+    assertRunNotParked(runDir, "pr");
     const repo = resolve(flags.repo ?? process.cwd());
     const run = readRun(runDir);
     const at = stamp(flags);
@@ -434,6 +445,7 @@ const HANDLERS = {
 
   async ["slices-seed"]([runId], flags) {
     const runDir = runDirFor(flags, runId);
+    assertRunNotParked(runDir, "slices-seed");
     const from = flags.from ?? "plan/slices.json";
     let bytes;
     try {
@@ -499,6 +511,7 @@ const HANDLERS = {
   async slice([runId, sliceId, status], flags) {
     if (!SLICE_STATUSES.includes(status)) throw new CliError(`status must be one of ${SLICE_STATUSES.join(" | ")}`);
     const runDir = runDirFor(flags, runId);
+    assertRunNotParked(runDir, "slice");
     const repo = resolve(flags.repo ?? process.cwd());
     const at = stamp(flags);
 
@@ -677,6 +690,7 @@ const HANDLERS = {
       throw new CliError("--repository-verify is valid only for test-verifier");
     }
     const runDir = runDirFor(flags, runId);
+    assertRunNotParked(runDir, "observe");
     const repo = resolve(flags.repo ?? process.cwd());
     const run = readRun(runDir);
     const integration = flags.repositoryVerify ? requireIntegrationWorktree(repo, run, flags.worktree) : null;
@@ -767,7 +781,7 @@ const HANDLERS = {
       mode: run.mode,
       branch: run.branch,
       pr_base: run.pr_base ?? null,
-      lock: lock.state, dead_lock: !run.terminal_result && lock.state === "stale",
+      lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,
       gates: Object.fromEntries(GATE_NAMES.filter((name) => run.gates[name]).map((name) => [name, run.gates[name].status])),
       steps: run.steps.map((step) => `${step.agent}:${step.status}(${step.attempts})`),
@@ -818,6 +832,7 @@ const HANDLERS = {
     if (!GATE_NAMES.includes(name)) throw new CliError(`gate must be one of ${GATE_NAMES.join(" | ")}`);
     if (!GATE_STATUSES.includes(decision)) throw new CliError(`decision must be one of ${GATE_STATUSES.join(" | ")}`);
     const runDir = runDirFor(flags, runId);
+    assertRunNotParked(runDir, "gate");
     const repo = resolve(flags.repo ?? process.cwd());
     const at = stamp(flags);
 
@@ -860,6 +875,7 @@ const HANDLERS = {
     if (!agent) throw new CliError("factory step requires <agent>");
     if (!STEP_STATUSES.includes(status)) throw new CliError(`status must be one of ${STEP_STATUSES.join(" | ")}`);
     const runDir = runDirFor(flags, runId);
+    assertRunNotParked(runDir, "step");
     const at = stamp(flags);
     const next = await transition(runDir, {
       participants: [{ familyId: "steps", mode: "record" }],
@@ -892,6 +908,7 @@ const HANDLERS = {
     if (!TERMINAL_STATUSES.includes(status)) throw new CliError(`status must be one of ${TERMINAL_STATUSES.join(" | ")}`);
     if (!flags.reason) throw new CliError("factory terminal requires --reason");
     const runDir = runDirFor(flags, runId);
+    assertRunNotParked(runDir, "terminal");
     const at = stamp(flags);
     const next = await transition(runDir, {
       participants: [{ familyId: "envelope", mode: "terminalize" }],
@@ -903,6 +920,45 @@ const HANDLERS = {
       }),
     });
     return emit(flags, { run_id: runId, status: next.status, reason: next.terminal_result.reason });
+  },
+
+  async resume(positional, flags) {
+    if (positional.length !== 1) throw new CliError("factory resume requires exactly one <run-id>");
+    const [runId] = positional;
+    const runDir = runDirFor(flags, runId);
+    const current = readRun(runDir);
+    if (current.status !== "needs-human") {
+      throw new CliError(`factory resume requires current status needs-human; found '${current.status}'`);
+    }
+    // Ownership is proven here and nowhere else in this command's family. Every other mutating
+    // command advances a run whose driver already holds the lock; resume is the handoff itself --
+    // the moment a new driver picks up a run nobody is driving. Two drivers resuming the same
+    // parked run would both believe they own it, which is the single-writer invariant the lock
+    // exists for. So the caller must already hold a fresh lock: claim, then verify, then resume.
+    if (!flags.session) throw new CliError("factory resume requires --session <session-id>");
+    const held = inspectSessionLock(runDir);
+    if (held.state === "absent") {
+      throw new CliError(`factory resume requires a held session lock for run '${runId}'; claim it with 'lock ${runId} claim --session ${flags.session}'`);
+    }
+    if (held.state === "stale") {
+      throw new CliError(`factory resume refuses a stale session lock for run '${runId}' (owner ${held.owner.session}, heartbeat ${held.owner.heartbeat_at}); take it with 'lock ${runId} steal --session ${flags.session}'`);
+    }
+    if (held.owner.session !== flags.session) {
+      throw new CliError(`run '${runId}' is held by session ${held.owner.session}, not ${flags.session}; take it with 'lock ${runId} steal --session ${flags.session}'`);
+    }
+    const at = stamp(flags);
+    const next = await transition(runDir, {
+      participants: [{ familyId: "envelope", mode: "resume-needs-human" }],
+      apply: (state) => {
+        if (state.status !== "needs-human") {
+          throw new CliError(`factory resume requires current status needs-human; found '${state.status}'`);
+        }
+        return { ...state, status: "running", updated_at: at };
+      },
+    });
+    return emit(flags, {
+      run_id: runId, status: next.status, terminal_result: next.terminal_result, next: nextAction(next),
+    });
   },
 };
 
@@ -1113,6 +1169,7 @@ function usage() {
 
   factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
+  factory resume <run-id> --session ID [--now ISO]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID
   factory gate <run-id> <${GATE_NAMES.join("|")}> <${GATE_STATUSES.join("|")}> [--artifact REF]

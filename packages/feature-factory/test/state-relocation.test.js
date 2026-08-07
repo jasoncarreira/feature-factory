@@ -74,7 +74,8 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "refuses a merge commit that does not have exactly two parents",
     "**A moved base is fine.**",
     "--repo \"$RUN_REPO\"",
-    "A `blocked`, `partial`, or `needs-human` sandbox run retains `RUN_REPO`",
+    "A top-level needs-human sandbox stays retained while parked and continues only after explicit factory resume.",
+    "A `blocked` or `partial` sandbox run retains `RUN_REPO`",
     "stale nonterminal locks retain it",
     "Nothing removes any of those sandboxes automatically.",
     "RECORDED_RUN_WORKTREE = parsedRun.worktree",
@@ -88,7 +89,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "BRANCH_POINT = ROOT_SLICE.base_ref",
     "Neither value comes from status, current\nHEAD, a branch name, or an unpersisted variable",
     "validates it and returns its exact\n`sandbox_path`",
-    "status reports `dead_lock: true` only for\na stale lock on a nonterminal run",
+    "status reports `dead_lock: true` only for\na stale lock on a current `running` run",
     "Before consulting `status.next`, computing or activating a wave",
     "walk first\nparents from the current integration HEAD, nearest to oldest",
     "not\na base-movement-only guard",
@@ -102,7 +103,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "binds `SESSION_ID` to the actual stable host-adapter identity",
     "never require session-ID inequality",
     "artifacts/post-merge-repairs.md",
-    "planned → committed|needs-human",
+    "Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`",
     "--repository-verify --repo \"$RUN_REPO\"",
   ]) assert.ok(skill.includes(fragment), `state-relocation contract is missing: ${fragment}`);
 
@@ -154,7 +155,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "the closed classifier must bind all four outcomes, including exact provenance and the canonical unavailable tuple");
   assert.match(classificationPolicy, /Only matching `unavailable` evidence, no active\s+repair record, a freshly verified exact integration worktree on the recorded feature branch, current\s+integration `HEAD` equal to that row's immutable merge SHA, and a freshly observable clean tree authorize\s+replay/u,
     "same-SHA replay must require every fresh safety proof");
-  assert.match(classificationPolicy, /Dirty, moved, or unobservable replay\s+safety state and malformed, foreign, stale-head, wrong-command, missing-field, or internally inconsistent\s+evidence never execute and durably terminalize `needs-human`[\s\S]*Clean, unchanged second-unavailable\s+exhaustion is the sole nonterminal exception/u,
+  assert.match(classificationPolicy, /Unsafe verification evidence parks top-level needs-human; explicit resume must replay the existing reconciliation path\.[\s\S]*Clean, unchanged second-unavailable\s+exhaustion is the sole nonterminal exception/u,
     "unsafe and untrusted outcomes must remain durably terminal while clean exhaustion stays nonterminal");
   const repairPolicy = stepFour.slice(stepFour.indexOf("### Post-merge finding routing and repair journal"), stepFour.indexOf("**Ownership disclosure.**"));
   const exhaustionPolicy = stepFour.slice(stepFour.indexOf("### Orderly repository-verification exhaustion"), stepFour.indexOf("### Post-merge finding routing and repair journal"));
@@ -183,6 +184,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   assert.deepEqual([...statusSentence.matchAll(/`([^`]+)`/gu)].map((match) => match[1]), [
     "planned", "committed", "verified", "failed", "exhausted", "needs-human",
   ]);
+  assert.ok(repairPolicy.includes("This repair record is not the run envelope, and envelope resume does not clear that status."));
   for (const fragment of [
     "attempts are ordered, contiguous, duplicate- and gap-free `1..N`",
     "`N <= max_retries`; globally at most one record is active (`planned` or `committed`)",
@@ -197,12 +199,14 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "committed → verified|failed|exhausted|needs-human",
     "failed → exhausted",
   ], "the repair journal must admit only the approved transitions");
+  assert.ok(repairPolicy.includes("Envelope resume does not clear or alter these repair transitions."));
+  assert.ok(repairPolicy.includes("This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication."));
   for (const [state, outcomes] of [
     ["planned", ["tree is clean", "`HEAD === Starting head`", "same known trigger", "resume edits without rerunning verify", "Otherwise terminalize"]],
     ["committed", ["valid repair head and diff plus green evidence becomes `verified`", "known failed evidence becomes\n`failed` or `exhausted`", "unknown evidence or any mismatch terminalizes"]],
     ["failed", ["matching\nrepair head and known failed evidence creates the next contiguous attempt when allowed", "otherwise it\nbecomes `exhausted`", "mismatch, green, or unknown terminalizes"]],
     ["verified", ["permits progression only when\nit is latest for that introducing merge and canonical evidence is green at current HEAD", "reconcile any\nnearer recorded merge independently"]],
-    ["exhausted", ["`exhausted` and `needs-human` always block"]],
+    ["exhausted", ["`exhausted` and every unresolved repair record always block", "envelope resume does not clear either"]],
   ]) {
     for (const outcome of outcomes) assert.ok(repairPolicy.includes(outcome), `${state} resume outcome is missing: ${outcome}`);
   }
@@ -314,6 +318,19 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     const terminal = factory(repository, "status", "state-relocation");
     assert.equal(terminal.dead_lock, false, "AC11 terminal retained sandbox must not report a dead nonterminal lock");
     assert.equal(terminal.sandbox_path, resolve(repository));
+
+    const resumed = seedLegacyRun(repository, "resumed-stale", { branch: "feature/resumed-stale", pr_base: "main" });
+    factory(repository, "terminal", "resumed-stale", "needs-human", "--reason", "external cause", "--now", "2026-08-05T00:00:00Z");
+    factory(repository, "lock", "resumed-stale", "claim", "--session", "resumed-session", "--branch", "feature/resumed-stale");
+    factory(repository, "resume", "resumed-stale", "--session", "resumed-session", "--now", "2026-08-05T00:01:00Z");
+    writeFileSync(join(resumed.runDir, "factory.lock"), `${JSON.stringify({
+      session: "dead-resumed-session", pid: 1234, run_id: "resumed-stale", branch: "feature/resumed-stale",
+      claimed_at: "2020-01-01T00:00:00.000Z", heartbeat_at: "2020-01-01T00:00:00.000Z",
+    })}\n`);
+    const resumedStale = factory(repository, "status", "resumed-stale");
+    assert.equal(resumedStale.status, "running");
+    assert.deepEqual(resumedStale.terminal_result, { status: "needs-human", reason: "external cause" });
+    assert.equal(resumedStale.dead_lock, true, "historical parked result must not hide a crashed running run");
   } finally {
     rmSync(repository, { recursive: true, force: true });
   }

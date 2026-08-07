@@ -115,6 +115,25 @@ Gate 3 always runs a separate fresh integrated `test-verifier` observation at th
 overwrites canonical evidence through the existing command mode and never shares, substitutes, or
 optimizes from post-merge evidence, even when the head is unchanged.
 
+## Resuming a parked run
+
+A top-level `needs-human` status is a parked stop, not a final result. `completed`, `partial`, and
+`blocked` remain final. Fix the external cause, then preserve this order: bind the intended retained
+sandbox and validate its manifest and containment; run the post-selection exact-ref-absent guard;
+complete effective-push proof; accept branch provenance, worktree binding, seed ancestry, cleanliness,
+recovery, and every operator-ref recheck; rerun the final exact-ref guard immediately before claim;
+claim or justifiably steal and verify fresh ownership plus the unchanged parked result; run
+`factory resume <run-id> --session <id> --repo <sandbox>` and verify running status, unchanged historical result, real
+next action, and the same owner; replay only existing post-lock reconciliation for an already-recorded
+merge; then continue solely from the newly qualified `status.next`.
+
+Status remains readable while parked, and lock claim, justified steal, heartbeat, and owning release
+remain available for ordered qualification. Every other effectful command refuses until explicit
+resume. Resume changes only `status` and `updated_at`; it preserves the original terminal reason and all
+progress. A resumed recorded merge still traverses the existing clean-head, retry-safety, evidence, and
+repository-verification path. An unresolved repair-journal record is separate and remains
+publication-blocking. If the cause was not fixed, the run may park again with the same reason.
+
 `publish` remains a deferred future ordinary shell step; existing push and PR behavior is unchanged and
 push-target publication is deferred to #224. Static `publishing_identity` has no runtime input and
 returns the non-empty account-name value itself; a missing, non-string, or empty identity makes the
