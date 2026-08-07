@@ -1218,12 +1218,13 @@ const CLAIMS = [
       for (const [id, required] of NEEDS_HUMAN_PROSE) {
         assert.throws(() => checkNeedsHumanProse(prose.replace(required, "")), new RegExp(id, "u"));
       }
-      // Every surface that shows an executable resume, not just the one that happened to be loaded
-      // here. The first version checked the skill alone while claiming all three, and a negative
-      // control against the skill confirmed the one surface that was covered -- so removing
-      // --session from either README still left CI green.
+      // Every surface a driver reads or that shows an executable resume: the canonical workflow,
+      // both adapter-packaged copies, and both READMEs. A negative control checks each surface so
+      // narrowing this list cannot silently restore the partial-coverage defect.
       for (const [label, surfacePath] of [
-        ["workflow", join(pkg, "WORKFLOW.md")],
+        ["canonical workflow", join(pkg, "WORKFLOW.md")],
+        ["OpenCode packaged workflow", join(pkg, "..", "opencode-feature-factory", "skills", "feature", "WORKFLOW.md")],
+        ["Prime packaged workflow", join(pkg, "..", "prime-agent-feature-factory", "skills", "feature", "WORKFLOW.md")],
         ["package README", join(pkg, "README.md")],
         ["root README", join(pkg, "..", "..", "README.md")],
       ]) {
