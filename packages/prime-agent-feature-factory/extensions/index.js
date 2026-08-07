@@ -14,6 +14,15 @@ export function primeSessionId(sessionFile, fallback = randomUUID()) {
 
 export default function featureFactoryExtension(pi, options = {}) {
   const resources = factoryResources(options.resolveFeatureFactory);
+  const sessionIds = new WeakMap();
+
+  function sessionIdFor(sessionManager) {
+    const existing = sessionIds.get(sessionManager);
+    if (existing) return existing;
+    const sessionId = primeSessionId(sessionManager.getSessionFile());
+    sessionIds.set(sessionManager, sessionId);
+    return sessionId;
+  }
 
   pi.registerTool({
     name: "feature_factory_context",
@@ -21,7 +30,7 @@ export default function featureFactoryExtension(pi, options = {}) {
     description: "Return the stable Prime session lock identity and installed specialist-agent directory.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const sessionId = primeSessionId(ctx.sessionManager.getSessionFile());
+      const sessionId = sessionIdFor(ctx.sessionManager);
       return {
         content: [{ type: "text", text: JSON.stringify({ sessionId, agents: resources.agents, cli: resources.cli }) }],
         details: { sessionId, agents: resources.agents, cli: resources.cli },

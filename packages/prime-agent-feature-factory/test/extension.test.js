@@ -42,6 +42,21 @@ describe("Prime extension", () => {
     assert.equal(result.content[0].text, JSON.stringify(result.details));
   });
 
+  it("memoizes an ephemeral lock identity for each live Prime session", async () => {
+    const runtime = host();
+    featureFactoryExtension(runtime.pi, { resolveFeatureFactory });
+    const tool = runtime.tools.get("feature_factory_context");
+    const firstSession = { getSessionFile: () => undefined };
+    const secondSession = { getSessionFile: () => undefined };
+
+    const first = await tool.execute("one", {}, undefined, undefined, { sessionManager: firstSession });
+    const repeated = await tool.execute("two", {}, undefined, undefined, { sessionManager: firstSession });
+    const other = await tool.execute("three", {}, undefined, undefined, { sessionManager: secondSession });
+
+    assert.equal(repeated.details.sessionId, first.details.sessionId);
+    assert.notEqual(other.details.sessionId, first.details.sessionId);
+  });
+
   it("registers /feature and forwards its arguments unchanged in a separate text part", async () => {
     const runtime = host();
     featureFactoryExtension(runtime.pi, { resolveFeatureFactory });
