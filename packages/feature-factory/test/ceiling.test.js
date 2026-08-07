@@ -576,9 +576,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // command where a new driver takes over a run nobody is driving -- so two drivers could otherwise
     // both resume the same parked run and both believe they own it. Twelve of the sixteen lines are the
     // three refusals and the reasoning.
-    // 3372 -> 3575 for issue #224's closed Buffer target boundary, private mode-0600 Git include,
+    // 3372 -> 3581 for issue #224's closed Buffer target boundary, private mode-0600 Git include,
     // sanitized child environment, and init/lock/resume/Gate 3 false-green enforcement.
-    assert.equal(total, 3575, "issue #224 landed at 3575 production lines");
+    assert.equal(total, 3581, "issue #224 landed at 3581 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 

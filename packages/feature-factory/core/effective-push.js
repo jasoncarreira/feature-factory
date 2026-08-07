@@ -17,7 +17,9 @@ const DEFAULT_EFFECTIVE_PUSH_OPERATIONS = Object.freeze({
   dirname, basename, joinPath: join, open: openSync, write: writeSync, fsync: fsyncSync, close: closeSync,
 });
 
-const targetError = (kind, sandbox) => new Error(kind === "operator"
+class EffectivePushRefusal extends Error {}
+
+const targetError = (kind, sandbox) => new EffectivePushRefusal(kind === "operator"
   ? `factory sandbox: operator effective push target unavailable; sandbox retained at ${sandbox}`
   : kind === "sandbox"
     ? `factory sandbox: sandbox effective push target unavailable at ${sandbox}`
@@ -162,7 +164,11 @@ export function configureSandboxPushTarget({ operatorRoot, sandboxRoot }, overri
 
 export function compareSelectedRunPushTarget({ selectedRoot, runId }, overrides = DEFAULT_EFFECTIVE_PUSH_OPERATIONS) {
   const operations = { ...DEFAULT_EFFECTIVE_PUSH_OPERATIONS, ...overrides };
-  const lexical = operations.resolvePath(selectedRoot);
+  let lexical;
+  try { lexical = operations.resolvePath(selectedRoot); } catch {
+    lexical = resolve(selectedRoot);
+    throw new Error(`factory sandbox: selected repository unavailable at ${lexical}; selected run unchanged`);
+  }
   let sandbox;
   try {
     const stat = operations.lstat(lexical);
@@ -172,10 +178,10 @@ export function compareSelectedRunPushTarget({ selectedRoot, runId }, overrides 
   } catch {
     throw new Error(`factory sandbox: selected repository unavailable at ${lexical}; selected run unchanged`);
   }
-  const container = operations.dirname(sandbox);
-  contextTop(sandbox, sandbox, operations);
-  if (operations.basename(container) !== ".factory-sandboxes") return "legacy-direct";
   try {
+    const container = operations.dirname(sandbox);
+    contextTop(sandbox, sandbox, operations);
+    if (operations.basename(container) !== ".factory-sandboxes") return "legacy-direct";
     if (operations.basename(sandbox) !== runId) throw new Error("run mismatch");
     exactDirectory(container, operations);
     const operator = operations.dirname(container);
@@ -185,7 +191,7 @@ export function compareSelectedRunPushTarget({ selectedRoot, runId }, overrides 
     const currentSandbox = capture(sandbox, "sandbox", sandbox, operations);
     if (!currentOperator.equals(currentSandbox)) throw targetError("mismatch", sandbox);
   } catch (error) {
-    if (error?.message?.startsWith("factory sandbox:")) throw error;
+    if (error instanceof EffectivePushRefusal) throw error;
     throw targetError("operator", sandbox);
   }
   return "verified";
