@@ -120,7 +120,7 @@ sandbox and validate its manifest and containment; run the post-selection exact-
 complete effective-push proof; accept branch provenance, worktree binding, seed ancestry, cleanliness,
 recovery, and every operator-ref recheck; rerun the final exact-ref guard immediately before claim;
 claim or justifiably steal and verify fresh ownership plus the unchanged parked result; run
-`factory resume <run-id> --repo <sandbox>` and verify running status, unchanged historical result, real
+`factory resume <run-id> --session <id> --repo <sandbox>` and verify running status, unchanged historical result, real
 next action, and the same owner; replay only existing post-lock reconciliation for an already-recorded
 merge; then continue solely from the newly qualified `status.next`.
 

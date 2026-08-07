@@ -128,7 +128,7 @@ const RESUME_ORDER = [
   "Resume order 4 — accept the feature branch only after existing reflog/provenance, branch/worktree binding, seed ancestry, cleanliness/recovery, and operator exact-ref rechecks pass in their current order.",
   "Resume order 5 — immediately before claiming, rerun the final operator exact-ref-absent guard.",
   "Resume order 6 — claim with the current host session or perform a justified existing steal, then verify qualified status still shows this fresh owner and the parked result originally observed.",
-  "Resume order 7 — invoke explicit factory resume, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.",
+  "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.",
   "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.",
   "Resume order 9 — continue solely from the newly qualified status.next.",
 ];
@@ -140,6 +140,18 @@ function checkNeedsHumanProse(prose) {
     if (!line || line.includes(forbidden)) throw new Error(id);
   }
   if ((prose.match(/needs-human/gu) ?? []).length !== NEEDS_HUMAN_PROSE.length) throw new Error("needs-human-count");
+}
+
+// Every *executable* resume instruction must pass the session. The command rejects without it, so an
+// instruction that omits it tells a driver to run something that cannot succeed -- which is what shipped
+// once already: the prose said "with no session flag" while the CLI had just been made to require one.
+function checkResumeInvocations(prose) {
+  for (const line of prose.split("\n")) {
+    if (!/`factory resume [^`]*`/u.test(line)) continue;
+    for (const invocation of line.match(/`factory resume [^`]*`/gu) ?? []) {
+      if (!invocation.includes("--session")) throw new Error(`resume-invocation-without-session: ${invocation}`);
+    }
+  }
 }
 
 function checkResumeOrder(prose) {
@@ -1265,6 +1277,9 @@ const CLAIMS = [
         assert.throws(() => checkNeedsHumanProse(prose.replace(required, "")), new RegExp(id, "u"));
       }
       for (const marker of RESUME_ORDER) {
+        checkResumeInvocations(prose);
+        assert.throws(() => checkResumeInvocations(prose.replace("--session \"$FACTORY_SESSION_ID\" ", "")),
+          /resume-invocation-without-session/u);
         assert.throws(() => checkResumeOrder(prose.replace(`${marker}\n`, "")), /resume-order/u);
         assert.throws(() => checkResumeOrder(prose.replace(marker, `${marker}\n${marker}`)), /resume-order/u);
       }

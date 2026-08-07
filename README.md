@@ -171,7 +171,7 @@ an error rather than a silently ignored typo.
 ```
 factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
 factory status <run-id> [--json]
-factory resume <run-id> [--now ISO]
+factory resume <run-id> --session ID [--now ISO]
 factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
 factory heartbeat <run-id> --session ID
 factory gate <run-id> <story|brief|pre_pr> <pending|approved|changes|stop> [--artifact REF]
@@ -236,7 +236,7 @@ A current `needs-human` run is parked and explicitly resumable; only `completed`
 4. Accept the feature branch only after provenance, worktree binding, seed ancestry, cleanliness or recovery, and every existing operator-ref recheck passes in order.
 5. Immediately before claiming, rerun the final operator exact-ref-absent guard.
 6. Claim with the current host session or perform a justified steal, then verify fresh ownership, parked status, and the deeply unchanged result.
-7. Run `factory resume <run-id> --repo S`, then verify running status, unchanged historical result, the real next action, and the same fresh owner.
+7. Run `factory resume <run-id> --session ID --repo S`, then verify running status, unchanged historical result, the real next action, and the same fresh owner.
 8. Run only existing post-lock reconciliation for any already-recorded merge, including its evidence and repository verification.
 9. Continue solely from the newly qualified `status.next`, never from the pre-resume read or reason text.
 
