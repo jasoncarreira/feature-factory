@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMANDS } from "../bin/factory.js";
 import { FAMILY_IDS } from "../core/contracts.js";
@@ -284,6 +284,31 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //    proven statically — the very form the decomposer recommends. So both sides are pinned on the
     //    distinction, not merely on the prohibition: what blocks is a claim the later path invalidates.
     const byName = new Map(agentText.map(({ name, text }) => [name, text]));
+    const forbiddenAgentTerms = /jira|atlassian|figma|logrocket|confluence|cloudid|tracker[ _-]?key|context7|get_best_practices|search_documentation|find_examples/giu;
+    const agentPolicyFiles = sourceFiles(join(pkg, "agents"), [], PROSE_EXTENSIONS);
+    const agentPolicyOffenders = agentPolicyFiles.flatMap((path) =>
+      [...readFileSync(path, "utf8").matchAll(forbiddenAgentTerms)]
+        .map(([token]) => `${relative(pkg, path)} :: ${token}`));
+    assert.deepEqual(agentPolicyOffenders, [], "shipped agent prose contains a prohibited vendor or operational tool identifier");
+    const requiredAgentFragments = [
+      { name: "backend-builder", label: "current backend commit-template field", fragment: "<issue_key>: <imperative backend summary>" },
+      { name: "backend-builder", label: "backend no-key fallback", fragment: "If no issue key yet, use a short imperative subject" },
+      { name: "backend-builder", label: "backend delivery ownership", fragment: "Do **not** push or open a PR" },
+      { name: "frontend-builder", label: "generic framework documentation guidance", fragment: "For framework API questions, use whatever framework skill or documentation tool this repository provides rather than guessing from older patterns." },
+      { name: "frontend-builder", label: "current frontend commit-template field", fragment: "<issue_key>: <imperative frontend summary>" },
+      { name: "frontend-builder", label: "frontend delivery ownership", fragment: "Do **not** push or open a PR" },
+      { name: "story-writer", label: "neutral repository classification", fragment: "suggested repository classification" },
+      { name: "story-writer", label: "neutral ticket authority", fragment: "never creates or edits an external ticket itself" },
+      { name: "story-writer", label: "external-ticket creation boundary", fragment: "You do not create or edit the external ticket" },
+      { name: "story-writer", label: "neutral ticket output structure", fragment: "**Suggested ticket fields (orchestrator will use these if you approve creating the ticket):**" },
+      { name: "story-writer", label: "draft-only ownership", fragment: "you only draft. The orchestrator handles creation." },
+      { name: "story-writer", label: "human ticket-creation gate", fragment: "creating the ticket is a human-gated step the orchestrator performs after approval." },
+      { name: "codebase-researcher", label: "neutral research context", fragment: "If an issue reference or design brief is included" },
+      { name: "codebase-researcher", label: "code-over-requirements boundary", fragment: "your job is the **code**, not the requirements." },
+    ];
+    for (const { name, label, fragment } of requiredAgentFragments) {
+      assert.ok(byName.get(name)?.includes(fragment), `${name} is missing ${label}: ${fragment}`);
+    }
     const decomposer = byName.get("work-decomposer") ?? "";
     const reviewer = byName.get("work-reviewer") ?? "";
     assert.match(decomposer, /No slice may depend on the absence of what another slice owns/u,
@@ -348,7 +373,6 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     }
     assert.match(design, /absent[^.]*gap|gap[^.]*absent/iu);
     assert.match(design, /do not infer/iu);
-    assert.doesNotMatch(design, /figma|jira|atlassian|cloudid|tracker key/iu);
 
     const predecessorMarker = ["vi", "so"].join("");
     const repo = resolve(pkg, "..", "..");
