@@ -638,7 +638,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // command where a new driver takes over a run nobody is driving -- so two drivers could otherwise
     // both resume the same parked run and both believe they own it. Twelve of the sixteen lines are the
     // three refusals and the reasoning.
-    assert.equal(total, 3372, "issue #243 landed at 3372 production lines, 3372 after review");
+    // 3372 -> 3376 removing the session lock's `pid`: two lines of code deleted, six of comment
+    // added. The field was never the run's owner -- it was the CLI, or the transient shell that
+    // invoked it -- so it could not answer the liveness question its presence implied, and #250
+    // was closed for trying. The comment is the change: the key stays *listed* so locks written
+    // before this still validate, and deleting it from that list would read every one of them as
+    // absent and let a second session claim a run being worked. Net growth for a deletion is the
+    // honest count, so it is recorded rather than trimmed away.
+    assert.equal(total, 3376, "issue #194 closure landed at 3376 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 
