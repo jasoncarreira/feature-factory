@@ -131,11 +131,93 @@ progress. A resumed recorded merge still traverses the existing clean-head, retr
 repository-verification path. An unresolved repair-journal record is separate and remains
 publication-blocking. If the cause was not fixed, the run may park again with the same reason.
 
-`publish` remains a deferred future ordinary shell step; existing push and PR behavior is unchanged and
-push-target publication is deferred to #224. Static `publishing_identity` has no runtime input and
-returns the non-empty account-name value itself; a missing, non-string, or empty identity makes the
-config malformed. It is not yet consumed, and identity enforcement is deferred to #216. The live config
-is not part of this package and no generated config or resolver asset is shipped. See the repository's
+`.factory.json.publish` remains uninvoked. Static `publishing_identity` has no runtime input and returns
+the non-empty account-name value itself; a missing, non-string, or empty identity makes the config
+malformed. It is not yet consumed, and identity enforcement is deferred to #216. The live config is not
+part of this package and no generated config or resolver asset is shipped.
+
+## Effective push-target proof
+
+Fresh `factory init` pre-reserves the deterministic sandbox, makes its one local clone, and proves
+physical containment before the package captures the operator's effective push target. It configures
+the fresh clone through a private mode-0600 Git include fragment, recaptures both current values, and
+requires exact `Buffer.equals` equality before PR-base lookup, feature-branch creation, lock creation,
+manifest publication, or output. Target bytes are never decoded or normalized.
+
+Only cwd-independent transports are accepted: absolute `http://`, `https://`, `ssh://`, or `git://`
+network URIs with nonempty authority, and non-drive SCP-style targets with nonempty suffixes. Relative
+or unqualified paths, absolute local paths, tilde paths, Windows drive paths, `file://`, remote-helper
+`transport::address`, and unsupported or malformed schemes refuse. Lookup stdout must be a Buffer ending
+in exactly one LF, optionally preceded by one CR. Only that terminator is removed; empty values and any
+remaining NUL, CR, LF, DEL, or other ASCII control byte refuse. Accepted current values are compared
+byte-for-byte without normalizing credentials, case, slash, percent-encoding, escaping, Unicode, or URL
+syntax.
+
+Existing sandbox commands compare only and never rewrite Git configuration. Qualified `lock` claim or
+steal, `resume`, and `gate pre_pr approved` validate the selected manifest and then recapture both
+current values in code. Gate 3 compares before transition construction or a transition temporary file.
+Status, heartbeat, lock release, `pr`, and unrelated transitions do not compare. A legacy direct run
+outside `.factory-sandboxes` has no distinct sandbox destination and remains compare-free.
+
+If an active selected root becomes missing, unreadable, a symlink, or a non-directory after manifest
+validation but before physical canonicalization, the operation makes no retention claim and refuses:
+
+```text
+factory sandbox: selected repository unavailable at <P>; selected run unchanged
+```
+
+Once canonicalization succeeds, relationship or Git-top-level failures under `.factory-sandboxes` use
+the operator refusal and never fall back to legacy behavior. Target operations use exactly these three
+messages:
+
+```text
+factory sandbox: operator effective push target unavailable; sandbox retained at <S>
+factory sandbox: sandbox effective push target unavailable at <S>
+factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>
+```
+
+No message contains a target, subprocess output, argv, child environment, low-level stack, or cause. A
+fresh refusal retains the deterministic clone before `run.json`, leaving a non-resumable inspection
+state that status cannot select and repeated init cannot reuse. The driver does not retry, clean, repair,
+delete, or choose another destination; after inspection, the operator may manually remove it. An active
+refusal leaves the manifest, configuration, and lock unchanged, remains resumable after repair, and
+still permits status, heartbeat, and lock release as applicable.
+
+The target boundary strips debug and trace variables from Git children, sets `LC_ALL=C` and
+`GIT_TERMINAL_PROMPT=0`, and preserves credential providers. The shipped publication wrapper applies
+the same ordered denylist to push and `gh`:
+
+```text
+DEBUG GH_DEBUG CURL_VERBOSE GIT_TRACE GIT_TRACE_PACKET GIT_TRACE_PACK_ACCESS
+GIT_TRACE_PERFORMANCE GIT_TRACE_SETUP GIT_TRACE_SHALLOW GIT_TRACE_FSMONITOR
+GIT_TRACE_CURL GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE2 GIT_TRACE2_EVENT
+GIT_TRACE2_PERF GIT_TRACE2_BRIEF GIT_TRACE2_CONFIG_PARAMS GIT_TRACE2_ENV_VARS
+GIT_TRACE2_PARENT_SID GIT_TRACE_REDACT GIT_REDIRECT_STDOUT GIT_REDIRECT_STDERR
+GCM_TRACE GCM_TRACE2 GCM_DEBUG GIT_CONFIG_PARAMETERS
+```
+
+Host debug logging may remain enabled for run health, but those variables never reach target or
+publication children. Shell tracing is disabled while publication values and child output are in scope.
+Push uses configured `origin`, a fully qualified refspec, mandatory `--no-verify`, and suppressed stdout
+and stderr; it never uses a URL, hook, `tee`, output or trace file, debug echo, expanded dump, or raw child
+error. `gh pr create` runs from the operator checkout through the same wrapper, suppresses stderr, and
+keeps captured stdout private.
+
+Only one nonempty absolute HTTPS URL with empty username and password, no query or fragment, and
+serialization equal to origin plus pathname is accepted. That validated userinfo-free URL may be passed
+to `factory pr` and persisted as `pr_url`. Failures expose only:
+
+```text
+factory publication: git push failed; selected repository retained at <RUN_REPO>
+factory publication: draft PR creation failed or returned unsafe output; selected repository retained at <RUN_REPO>
+```
+
+Git transport-helper process-table state on the trusted local host is the explicit ephemeral exclusion;
+traces, child output, raw errors, state, and logs remain suppressed. The package makes no push or forge call,
+`.factory.json.publish` remains uninvoked, and publishing-identity enforcement remains deferred to #216.
+The proof adds no command, CLI flag, feature flag, output field, package export, dependency, or
+`run.json` key. The live config is not part of this package and no generated config or resolver asset is
+shipped. See the repository's
 [operator guide](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/OPERATING.md) for
 the complete operating contract.
 

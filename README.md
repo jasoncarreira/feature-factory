@@ -156,10 +156,9 @@ Gate 3 always performs its own fresh integrated `test-verifier` observation at t
 the existing command mode. It overwrites the canonical evidence independently and never shares,
 substitutes, or optimizes from post-merge evidence, even when the head has not moved.
 
-`publish` remains a deferred future ordinary shell step; existing push and PR behavior is unchanged and
-push-target publication is deferred to #224. Static `publishing_identity` has no runtime input and
-returns the non-empty account-name value itself; a missing, non-string, or empty identity makes the
-config malformed. It is not yet consumed, and identity enforcement is deferred to #216. See
+`.factory.json.publish` remains uninvoked. Static `publishing_identity` has no runtime input and returns
+the non-empty account-name value itself; a missing, non-string, or empty identity makes the config
+malformed. It is not yet consumed, and identity enforcement is deferred to #216. See
 [OPERATING.md](OPERATING.md) for the exact refusal text, what an absent declaration means, and credential
 guidance.
 
@@ -189,8 +188,11 @@ The usage lines above keep the compact advertised command shape. Every command a
 
 For a fresh run, call init with the canonical operator checkout `O` as `--repo O`. Init derives the
 single destination `S = O/.factory-sandboxes/<run-id>`, pre-reserves an empty `S`, makes exactly one
-`git clone --local -- O S` attempt, and completes the physical containment proof before publishing
-`run.json`. There is no fallback clone, staging location, or second attempt.
+`git clone --local -- O S` attempt, and completes the physical containment proof before its code-owned
+effective-push proof. It captures the operator target, configures the fresh sandbox through a private
+mode-0600 Git include fragment, recaptures both current targets, and requires exact `Buffer.equals`
+equality before PR-base lookup, feature-branch creation, lock creation, `run.json`, or output. Target
+bytes are never decoded or normalized. There is no fallback clone, staging location, or second attempt.
 
 On success, JSON output returns its canonical `sandbox_path` and absolute `run_dir`. Pass that returned
 `sandbox_path` as `--repo S` to status and every later factory command; commands do not redirect an
@@ -206,11 +208,51 @@ reused, retried, or deleted during bootstrap or refusal. Resume a valid sandbox 
 `--repo S`; surface invalid state instead of replacing it. `O/.factory/<run-id>` is supported only as
 a legacy direct-run location, resumed with `--repo O`, and is never migrated or backfilled by init.
 
-After selecting a fresh or resumed sandbox, the orchestrator proves the effective push targets match
-and establishes feature-branch provenance. Branch creation or recovery and provenance checks finish
-before a lock is claimed or an agent is dispatched. A push-target mismatch reports only the mismatch
-and `S`; neither effective target is printed, persisted, or included in an error cause, and the sandbox
-is retained.
+Target lookup accepts only cwd-independent transports: absolute `http://`, `https://`, `ssh://`, or
+`git://` network URIs with nonempty authority, and non-drive SCP-style targets with nonempty suffixes.
+It rejects relative or unqualified paths, absolute local paths, tilde paths, Windows drive paths,
+`file://`, remote-helper `transport::address`, and unsupported or malformed schemes. Lookup output must
+be a Buffer ending in exactly one LF, optionally preceded by one CR; only that terminator is removed,
+and empty values or remaining NUL, CR, LF, DEL, or other ASCII control bytes are rejected. Accepted
+current values are compared byte-for-byte without normalizing credentials, case, slash,
+percent-encoding, escaping, Unicode, or URL syntax.
+
+Fresh init owns capture, configuration, both current recaptures, and equality. Active sandbox `lock`
+claim or steal, `resume`, and `gate pre_pr approved` validate the selected manifest and then perform a
+compare-only proof; Gate 3 compares before transition construction or a transition temporary file.
+Existing sandboxes are never reconfigured or migrated. Status, heartbeat, lock release, `pr`, and
+unrelated transitions do not compare. A legacy direct run outside `.factory-sandboxes` has no distinct
+sandbox destination and remains compare-free. Branch creation or recovery and provenance checks finish
+before a lock is claimed or an agent is dispatched.
+
+After manifest validation but before an active comparison, a selected-root race, missing or unreadable
+path, symlink substitution, or non-directory substitution refuses with the lexical absolute path:
+
+```text
+factory sandbox: selected repository unavailable at <P>; selected run unchanged
+```
+
+Once the selected root is physically canonical, relationship or Git-top-level failures under
+`.factory-sandboxes` use the operator-target refusal and never fall back to legacy behavior. Target
+operations expose exactly three refusal messages:
+
+```text
+factory sandbox: operator effective push target unavailable; sandbox retained at <S>
+factory sandbox: sandbox effective push target unavailable at <S>
+factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>
+```
+
+On every refusal, neither effective target is printed, persisted, or included in an error cause. The
+messages contain no subprocess output, argv, child environment, or low-level stack.
+A fresh refusal retains the deterministic clone before `run.json`; it is a non-resumable inspection
+state, so status cannot select it and repeated init refuses the occupied destination. The driver never
+retries, repairs, cleans, deletes, or chooses another destination; after inspection, the operator may
+manually remove it. An active refusal leaves the existing manifest, configuration, and lock unchanged,
+so the run remains resumable after the external cause is repaired and status, heartbeat, and lock
+release remain available as applicable.
+
+This target proof adds no command, CLI flag, feature flag, output field, package export, dependency, or
+`run.json` key. Targets never enter factory state, evidence, logs, or error causes.
 
 Run state under `S/.factory/<run-id>/run.json` should be gitignored — if it is tracked, every slice diff
 carries manifest churn and every merge trips the privileged-path refusal.
@@ -246,11 +288,51 @@ slice, observe, validator, terminal-rewrite, and PR command refuses before effec
 clean-head and retry-safety checks before progression, and unresolved repair-journal records remain
 publication blockers. An unfixed cause may park the run again with the same reason.
 
-The orchestrator creates the external draft PR with the recorded values before recording its URL:
+Gate 3 approval is the final code-owned target comparison. Step 6 performs no target lookup or remote
+mutation and allows no mutating or publishing effect between its final branch, ref, and provenance
+checks and push. External publication disables shell tracing and runs both children through a sanitized
+wrapper. The wrapper removes this ordered denylist while preserving credential providers such as
+`GH_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, askpass variables, and existing
+`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` helper configuration:
+
+```text
+DEBUG GH_DEBUG CURL_VERBOSE GIT_TRACE GIT_TRACE_PACKET GIT_TRACE_PACK_ACCESS
+GIT_TRACE_PERFORMANCE GIT_TRACE_SETUP GIT_TRACE_SHALLOW GIT_TRACE_FSMONITOR
+GIT_TRACE_CURL GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE2 GIT_TRACE2_EVENT
+GIT_TRACE2_PERF GIT_TRACE2_BRIEF GIT_TRACE2_CONFIG_PARAMS GIT_TRACE2_ENV_VARS
+GIT_TRACE2_PARENT_SID GIT_TRACE_REDACT GIT_REDIRECT_STDOUT GIT_REDIRECT_STDERR
+GCM_TRACE GCM_TRACE2 GCM_DEBUG GIT_CONFIG_PARAMETERS
+```
+
+The wrapper also sets `LC_ALL=C` and `GIT_TERMINAL_PROMPT=0`. Push names configured `origin`, never a
+URL, uses the fully qualified recorded refspec and mandatory `--no-verify`, and suppresses stdout and
+stderr. No `tee`, output or trace file, debug echo, expanded dump, raw child error, or pre-push hook is
+allowed. A Git transport-helper descendant may transiently receive the target in the trusted local
+host's process table; that ephemeral process state is the explicit exclusion.
+
+Host debug logging may remain enabled for run-health diagnosis, but `DEBUG`, `GH_DEBUG`, and the full
+trace denylist never reach target or publication children, so target bytes and raw child output do not
+enter those logs.
+
+`gh pr create` runs from `O` through the same wrapper with stderr suppressed and stdout captured but
+never displayed or logged. Its result must be exactly one nonempty absolute HTTPS URL with empty
+username and password, no query or fragment, and serialization equal to origin plus pathname. Only that
+validated userinfo-free URL is legitimate publication identity; it may be passed to `factory pr` and
+persisted as `pr_url`. Publication failures expose only these fixed messages:
+
+```text
+factory publication: git push failed; selected repository retained at <RUN_REPO>
+factory publication: draft PR creation failed or returned unsafe output; selected repository retained at <RUN_REPO>
+```
+
+The package performs no push or forge call, and `.factory.json.publish` remains uninvoked. Publishing
+identity enforcement remains deferred to #216. The orchestrator's external call shape is:
 
 ```sh
 factory status <run-id> --json
-gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"
+publication_child git -C "$RUN_REPO" push --no-verify origin \
+  "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH" >/dev/null 2>&1
+publication_child gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"
 factory pr <run-id> --url <pr-url>
 ```
 

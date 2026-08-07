@@ -98,8 +98,95 @@ The entries have these execution contracts:
 | entry | input and return contract | failure meaning | status |
 | --- | --- | --- | --- |
 | `verify` | The unchanged string runs as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio; no structured stdin or factory payload. Each attempt gets the full configured timeout. Stdout and stderr are visible, informational, and unparsed rather than captured or persisted. | Numeric child exit status is authoritative. Zero succeeds; non-zero means repository verification failed; no numeric status is unavailable. | Invoked after each newly recorded merge with at most two executions per merge or replay invocation. Direct committed test-only repair observation remains one execution. |
-| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked; existing push and PR behavior remains unchanged. Push-target publication is deferred to #224. |
+| `publish` | Reserved future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. | No runtime classification exists. | `.factory.json.publish` remains uninvoked. |
 | `publishing_identity` | No runtime input; the static non-empty account-name string is the return value. | A missing, non-string, or empty identity makes the config malformed. | Not consumed for identity enforcement; deferred to #216. |
+
+### Effective push-target and publication contract
+
+Fresh `factory init` pre-reserves `S = O/.factory-sandboxes/<run-id>`, performs exactly one local clone,
+and proves physical containment before its code-owned target boundary begins. The package captures the
+operator's effective push target, configures the clone through the sole new target-bearing sink
+`S/.git/factory-push-target.config` with mode 0600, recaptures both current values, and requires exact
+`Buffer.equals` equality before PR-base lookup, branch or lock creation, manifest publication, or output.
+Target bytes are never decoded or normalized.
+
+Only cwd-independent targets are accepted: absolute `http://`, `https://`, `ssh://`, or `git://` network
+URIs with nonempty authority, and non-drive SCP-style targets with nonempty suffixes. Relative or
+unqualified paths, absolute local paths, tilde paths, Windows drive paths, `file://`, remote-helper
+`transport::address`, and unsupported or malformed schemes refuse. Lookup stdout must be a Buffer ending
+in exactly one LF, optionally preceded by one CR. Only that terminator is removed; empty values and any
+remaining NUL, CR, LF, DEL, or other ASCII control byte refuse. Current values compare byte-for-byte,
+without normalizing credentials, case, slash, percent-encoding, escaping, Unicode, or URL syntax.
+
+Existing sandboxes compare only and are never automatically configured or migrated. Qualified
+`factory lock ... claim|steal`, `factory resume`, and `factory gate ... pre_pr approved` validate the
+selected manifest and then recapture both current targets in code. Gate 3 performs the proof before
+transition construction or any transition temporary file. Status, heartbeat, lock release, `pr`, and
+unrelated transitions do not compare. A legacy direct run outside `.factory-sandboxes` has no distinct
+sandbox destination and remains compare-free.
+
+After active manifest validation but before physical canonicalization, a selected-root race, unreadable
+or missing path, symlink substitution, or non-directory substitution refuses with the lexical absolute
+path and no claim that a sandbox was retained:
+
+```text
+factory sandbox: selected repository unavailable at <P>; selected run unchanged
+```
+
+Once canonicalization succeeds, relationship or Git-top-level failures under `.factory-sandboxes` use
+the operator-target refusal and never fall back to legacy behavior. Target operations expose exactly
+three refusal messages:
+
+```text
+factory sandbox: operator effective push target unavailable; sandbox retained at <S>
+factory sandbox: sandbox effective push target unavailable at <S>
+factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>
+```
+
+`<S>` is the exact physically canonical sandbox root. These errors contain no target, subprocess output,
+argv, environment, low-level stack, or cause. A fresh refusal retains the deterministic clone before
+`run.json`, creating a non-resumable inspection state: status cannot select it, repeated init refuses the
+occupied destination, and the driver does not retry, repair, clean, delete, or choose another path. After
+inspection, the operator may manually remove it. An active refusal leaves manifest, configuration, and
+lock bytes unchanged. Repair the external cause and resume through the same qualified checks; status,
+heartbeat, and lock release remain available as applicable.
+
+The target boundary and external publication children remove this exact ordered denylist while
+preserving credential providers such as `GH_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, askpass variables,
+and existing `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` helper configuration:
+
+```text
+DEBUG GH_DEBUG CURL_VERBOSE GIT_TRACE GIT_TRACE_PACKET GIT_TRACE_PACK_ACCESS
+GIT_TRACE_PERFORMANCE GIT_TRACE_SETUP GIT_TRACE_SHALLOW GIT_TRACE_FSMONITOR
+GIT_TRACE_CURL GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE2 GIT_TRACE2_EVENT
+GIT_TRACE2_PERF GIT_TRACE2_BRIEF GIT_TRACE2_CONFIG_PARAMS GIT_TRACE2_ENV_VARS
+GIT_TRACE2_PARENT_SID GIT_TRACE_REDACT GIT_REDIRECT_STDOUT GIT_REDIRECT_STDERR
+GCM_TRACE GCM_TRACE2 GCM_DEBUG GIT_CONFIG_PARAMETERS
+```
+
+Children receive `LC_ALL=C` and `GIT_TERMINAL_PROMPT=0`. Shell tracing is disabled before the
+publication wrapper is defined and remains disabled until child output and credential-bearing shell
+values are out of scope. Push uses only configured `origin`, the fully qualified recorded refspec, and
+mandatory `--no-verify`; stdout and stderr are suppressed. Never use a URL, pre-push hook, `tee`, output
+or trace file, debug echo, expanded dump, or raw child error. A Git transport-helper descendant may
+transiently receive the target in the trusted local host's process table; that ephemeral state is the
+explicit exclusion.
+
+`gh pr create` runs from `O` through the same sanitized wrapper, with stderr suppressed and stdout
+captured but never displayed or logged. Accept exactly one nonempty absolute HTTPS URL with empty
+username and password, no query or fragment, and serialization equal to origin plus pathname. Only that
+validated userinfo-free URL may be emitted, passed to `factory pr`, and persisted as `pr_url`. Failures
+expose only:
+
+```text
+factory publication: git push failed; selected repository retained at <RUN_REPO>
+factory publication: draft PR creation failed or returned unsafe output; selected repository retained at <RUN_REPO>
+```
+
+The package performs no push or forge call. `.factory.json.publish` remains uninvoked, and
+publishing-identity enforcement remains deferred to #216. The proof adds no command, CLI flag, feature
+flag, output field, package export, dependency, or `run.json` key. Targets never enter factory state,
+evidence, logs, output, assertions, or causes.
 
 The merge record commits before `verify` begins. A successful observation is written through the existing
 canonical `evidence/test-verifier.json` schema against the current merged head and the immutable base of
@@ -184,7 +271,9 @@ Three details, each of which cost something:
   runs built correct code, passed every gate, and terminalized without a PR on HTTP 403. The pin makes
   publication independent of machine state.
 - **`--log-level DEBUG --print-logs`.** The only instrument that distinguishes a stalled run from a slow
-  one. Attach it always.
+  one. Attach it always. Host debug logging stays useful, while the target and publication child
+  boundaries strip `DEBUG`, `GH_DEBUG`, and the full trace denylist so targets and raw child output do
+  not enter those logs.
 - **Keep the host awake.** A batch queued overnight ran one issue and then sat idle until the machine woke
   nine hours later. Hold sleep off around the queue, or expect to lose the night — nothing in the factory
   reports this, because from its side no time passed at all.
