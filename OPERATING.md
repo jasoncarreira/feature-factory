@@ -251,6 +251,43 @@ Publishing-identity verification is enforcement because it prevents false-green 
 publication. Supplying the token and installing this helper recipe are instruction only, not factory
 credential provisioning or a helper-setup guard.
 
+**An unprepared launch refuses, and that is the decision rather than a gap.** A run with no inherited
+`GH_TOKEN` stops at the first identity guard and says so, naming the declared account. It does not fall
+back, retry, or publish as whoever happens to be machine-active.
+
+The obvious-looking alternative was considered and rejected: have the run derive the token itself from
+the declared identity, so that any invocation is correct without preparation —
+
+```sh
+# rejected: this is a factory credential manager wearing a one-liner
+PUBLISHING_TOKEN="$(gh auth token --user "$DECLARED_PUBLISHING_IDENTITY")"
+GH_TOKEN="$PUBLISHING_TOKEN" gh pr create --draft ...
+```
+
+It works, and it is what makes an unprepared launch publish. The line it crosses is not whether a run
+holds a credential — a prepared run plainly does. The launcher injects `GH_TOKEN`, the run inspects that
+inherited value, and both publication effects consume it. **The distinction is acquisition and selection
+versus consumption.**
+
+Today the factory consumes a credential it was explicitly given, and never chooses one. It does not read
+the operator's keyring, does not enumerate authenticated accounts, does not decide which of them the
+declared identity corresponds to, and does not fall back when the answer is inconvenient. The rejected
+design adds all four: the factory would reach into ambient stored authentication and select a secret on
+the operator's behalf, on every publication.
+
+That is a materially larger trust boundary than passing along a value the operator handed over, and it is
+the one the repository declined. The cost of declining is that an unprepared launch produces an error
+message instead of a pull request.
+
+**That choice is enforced, not merely described.** At the three identity guards the skill forbids `gh
+auth`, a `GH_TOKEN=` assignment in argv, command substitution, and any retry or fallback, and
+`packages/feature-factory/test/effective-push.test.js` fails on each. An attempt to add the snippet above
+is rejected by the suite within seconds — which is how this note came to be written.
+
+If the tradeoff is ever revisited, it is a policy reversal and belongs in its own issue: the guards and
+their tests both encode the current answer, and the disclosure question has to be faced directly rather
+than arrived at as a side effect of making launches easier.
+
 Three details, each of which cost something:
 
 - **The leading space** before `--autonomous`. The launcher's argument parser consumes the flag
