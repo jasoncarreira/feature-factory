@@ -65,7 +65,19 @@ const SKILL_CONTRACTS = [
   ["a post-record failure preserves the merged slice and forbids its reopening, reseeding, re-observation, or redispatch", (text) => /If the row is `merged` at exactly\s+`MERGE_COMMIT`, preserve its evidence, review, refs, attempts, paths, test plan, and merge commit;[\s\S]*stop before `status\.next`, wave calculation,\s+activation, reopen, reseed, slice re-observation, or redispatch\. Never reopen or redispatch a\s+merged slice\./u.test(text)],
   ["Gate 3 is a fresh independent observation", (text) => /Gate 3 observation is always fresh and independent[\s\S]*never shares, substitutes,\s+or optimizes from a post-merge repository verification result/u.test(text)],
   ["operator ownership and privileged protection remain in force", (text) => /It remains operator-owned:[\s\S]*refused by the privileged-path policy/u.test(text)],
-  ["push-target proof is code-owned while identity remains deferred", (text) => /final code-owned target comparison[\s\S]*publishing-identity enforcement remains deferred to #216/u.test(text)],
+  ["fresh and active target proof is code-owned", (text) => /captures and configures the\s+effective push target in code, recaptures both current values, compares their exact bytes[\s\S]*`factory init` owns the fresh capture, private mode-0600 configuration fragment, both current lookups,\s+and exact Buffer equality[\s\S]*qualified\s+`lock` claim or steal, `resume`, and Gate 3 approval/u.test(text), "and exact Buffer equality."],
+  ["the transport policy is explicit", (text) => /Only absolute `http:\/\/`, `https:\/\/`, `ssh:\/\/`, or `git:\/\/` network targets with an authority, and\s+non-drive SCP-style targets, are accepted\. Relative, local, tilde, drive, `file:\/\/`, remote-helper, and\s+unsupported targets refuse/u.test(text), "non-drive SCP-style targets, are accepted."],
+  ["the three target refusals are exact", (text) => [
+    "factory sandbox: operator effective push target unavailable; sandbox retained at <S>",
+    "factory sandbox: sandbox effective push target unavailable at <S>",
+    "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>",
+  ].every((message) => text.includes(message)), "factory sandbox: operator effective push target unavailable; sandbox retained at <S>"],
+  ["fresh refusal is non-resumable while active refusal preserves resumability", (text) => /fresh refusal retains the\s+deterministic clone before `run\.json`, so it is a non-resumable inspection state[\s\S]*active\s+refusal leaves the manifest, configuration, and lock unchanged and permits status, heartbeat, and lock\s+release/u.test(text), "deterministic clone before `run.json`, so it is a non-resumable inspection state:"],
+  ["publication children receive the complete sanitized boundary", (text) => /env -u DEBUG -u GH_DEBUG -u CURL_VERBOSE -u GIT_TRACE -u GIT_TRACE_PACKET[\s\S]*-u GCM_TRACE2 -u GCM_DEBUG -u GIT_CONFIG_PARAMETERS[\s\S]*LC_ALL=C GIT_TERMINAL_PROMPT=0 "\$@"/u.test(text), "env -u DEBUG -u GH_DEBUG -u CURL_VERBOSE -u GIT_TRACE -u GIT_TRACE_PACKET"],
+  ["push uses origin without hooks or observable child output", (text) => /publication_child git -C "\$RUN_REPO" push --no-verify origin[\s\S]*>\/dev\/null 2>&1[\s\S]*never use a URL, `tee`, output or trace file, debug echo, expanded dump, or raw child error/u.test(text), "publication_child git -C \"$RUN_REPO\" push --no-verify origin"],
+  ["publication failures are fixed and the validated PR URL is allowed", (text) => /factory publication: git push failed; selected repository retained at \$RUN_REPO[\s\S]*factory publication: draft PR creation failed or returned unsafe output; selected repository retained at \$RUN_REPO[\s\S]*single userinfo-free absolute HTTPS URL with no query or fragment[\s\S]*may be emitted as `PR_URL` and persisted as `pr_url`/u.test(text), "factory publication: git push failed; selected repository retained at $RUN_REPO"],
+  ["config publication stays uninvoked while identity remains deferred", (text) => /`\.factory\.json\.publish`\s+remains uninvoked and publishing-identity enforcement remains deferred to #216/u.test(text), "remains uninvoked and publishing-identity enforcement remains deferred to #216."],
+  ["shell target capture and configuration are absent", (text) => !/remote get-url --push origin|remote\.origin\.pushurl/u.test(text), (text) => `${text}\nremote get-url --push origin\n`],
 ];
 const README_CONTRACTS = [
   ["the four-required plus optional-timeout schema", (text) => text.includes(CONFIG_SCHEMA)],
@@ -86,8 +98,21 @@ const README_CONTRACTS = [
   ["restart verifies an identity-agnostic claim before reconciliation", (text) => /later invocation repeats all normal guards, claims with its actual\s+host-exported session ID, verifies ownership, and only then reconciles the same SHA[\s\S]*value may equal\s+the prior value/u.test(text)],
   ["Gate 3 is fresh and does not share evidence", (text) => /Gate 3 always runs a separate fresh integrated `test-verifier` observation[\s\S]*never shares, substitutes, or\s+optimizes from post-merge evidence/u.test(text)],
   ["the config remains operator-owned and privileged", (text) => /file is operator-owned,\s+committed, and protected as\s+a privileged path/u.test(text)],
-  ["deferred consumers are named", (text) => /push-target publication is deferred to #224[\s\S]*identity enforcement is deferred to #216/u.test(text)],
-  ["the live config is not packaged", (text) => /live config\s+is not part of this package[\s\S]*no generated config or resolver asset is shipped/u.test(text)],
+  ["fresh proof configures and compares exact Buffer values before state", (text) => /proves\s+physical containment before the package captures[\s\S]*private mode-0600 Git include fragment, recaptures both current values, and\s+requires exact `Buffer\.equals` equality before PR-base lookup, feature-branch creation, lock creation,\s+manifest publication, or output/u.test(text), "requires exact `Buffer.equals` equality before PR-base lookup"],
+  ["accepted and rejected target transports are complete", (text) => /absolute `http:\/\/`, `https:\/\/`, `ssh:\/\/`, or `git:\/\/`\s+network URIs with nonempty authority, and non-drive SCP-style targets[\s\S]*Relative\s+or unqualified paths, absolute local paths, tilde paths, Windows drive paths, `file:\/\/`, remote-helper\s+`transport::address`, and unsupported or malformed schemes refuse/u.test(text), "`transport::address`, and unsupported or malformed schemes refuse."],
+  ["active proof and pre-canonicalization behavior are distinct", (text) => /Qualified `lock` claim or\s+steal, `resume`, and `gate pre_pr approved` validate the selected manifest[\s\S]*factory sandbox: selected repository unavailable at <P>; selected run unchanged[\s\S]*never fall back to legacy behavior/u.test(text), "factory sandbox: selected repository unavailable at <P>; selected run unchanged"],
+  ["the three exact target refusals are documented", (text) => [
+    "factory sandbox: operator effective push target unavailable; sandbox retained at <S>",
+    "factory sandbox: sandbox effective push target unavailable at <S>",
+    "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>",
+  ].every((message) => text.includes(message)), "factory sandbox: operator effective push target unavailable; sandbox retained at <S>"],
+  ["fresh and active retention semantics are different", (text) => /fresh refusal retains the deterministic clone before `run\.json`, leaving a non-resumable inspection\s+state[\s\S]*active\s+refusal leaves the manifest, configuration, and lock unchanged, remains resumable after repair/u.test(text), "fresh refusal retains the deterministic clone before `run.json`"],
+  ["debug and trace sanitization preserves authentication", (text) => /strips debug and trace variables[\s\S]*preserves credential providers[\s\S]*DEBUG GH_DEBUG CURL_VERBOSE GIT_TRACE GIT_TRACE_PACKET[\s\S]*GCM_TRACE GCM_TRACE2 GCM_DEBUG GIT_CONFIG_PARAMETERS[\s\S]*Host debug logging may remain enabled/u.test(text), "Host debug logging may remain enabled for run health"],
+  ["publication suppresses traces and uses no hooks", (text) => /Push uses configured `origin`, a fully qualified refspec, mandatory `--no-verify`, and suppressed stdout\s+and stderr[\s\S]*never uses a URL, hook, `tee`, output or trace file, debug echo, expanded dump, or raw child\s+error/u.test(text), "mandatory `--no-verify`, and suppressed stdout"],
+  ["fixed publication failures and the safe URL are documented", (text) => /validated userinfo-free URL may be passed\s+to `factory pr` and persisted as `pr_url`[\s\S]*factory publication: git push failed; selected repository retained at <RUN_REPO>[\s\S]*factory publication: draft PR creation failed or returned unsafe output; selected repository retained at <RUN_REPO>/u.test(text), "factory publication: draft PR creation failed or returned unsafe output; selected repository retained at <RUN_REPO>"],
+  ["no new surface was added and deferred consumers remain deferred", (text) => /package makes no push or forge call,\s+`\.factory\.json\.publish` remains uninvoked, and publishing-identity enforcement remains deferred to #216[\s\S]*adds no command, CLI flag, feature flag, output field, package export, dependency, or\s+`run\.json` key/u.test(text), "The proof adds no command, CLI flag, feature flag, output field, package export, dependency, or"],
+  ["the live config is not packaged", (text) => text.includes("The live config is not part of this package")
+    && /no generated config or resolver asset is\s+shipped/u.test(text)],
 ];
 const ROOT_README_CONTRACTS = [
   ["the four-required plus optional-timeout schema", (text) => text.includes(CONFIG_SCHEMA)],
@@ -103,7 +128,20 @@ const ROOT_README_CONTRACTS = [
   ["restart verifies an identity-agnostic claim before reconciliation", (text) => /later invocation repeats every normal selection,\s+manifest, provenance, branch, worktree, push-target, and operator-ref guard, claims with its actual\s+host-exported session ID, verifies ownership, and only then reconciles the same SHA[\s\S]*may equal the old one/u.test(text)],
   ["Gate 3 is separately fresh without evidence sharing", (text) => /Gate 3 always performs its own fresh integrated `test-verifier` observation[\s\S]*never shares,\s+substitutes, or optimizes from post-merge evidence/u.test(text)],
   ["operator ownership and privileged protection remain in force", (text) => /file is operator-owned,\s+committed, and protected as\s+a privileged path/u.test(text)],
-  ["publish and identity remain deferred", (text) => /push-target publication is deferred to #224[\s\S]*identity enforcement is deferred to #216/u.test(text)],
+  ["fresh proof configures and compares exact Buffer values before state", (text) => /physical containment proof before its code-owned\s+effective-push proof[\s\S]*private\s+mode-0600 Git include fragment, recaptures both current targets, and requires exact `Buffer\.equals`\s+equality before PR-base lookup, feature-branch creation, lock creation, `run\.json`, or output/u.test(text), "requires exact `Buffer.equals`"],
+  ["accepted and rejected target transports are complete", (text) => /absolute `http:\/\/`, `https:\/\/`, `ssh:\/\/`, or\s+`git:\/\/` network URIs with nonempty authority, and non-drive SCP-style targets[\s\S]*relative or unqualified paths, absolute local paths, tilde paths, Windows drive paths,\s+`file:\/\/`, remote-helper `transport::address`, and unsupported or malformed schemes/u.test(text), "`file://`, remote-helper `transport::address`, and unsupported or malformed schemes."],
+  ["active proof and pre-canonicalization behavior are distinct", (text) => /Active sandbox `lock`\s+claim or steal, `resume`, and `gate pre_pr approved` validate the selected manifest[\s\S]*factory sandbox: selected repository unavailable at <P>; selected run unchanged[\s\S]*never fall back to legacy behavior/u.test(text), "factory sandbox: selected repository unavailable at <P>; selected run unchanged"],
+  ["the three exact target refusals are documented", (text) => [
+    "factory sandbox: operator effective push target unavailable; sandbox retained at <S>",
+    "factory sandbox: sandbox effective push target unavailable at <S>",
+    "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>",
+  ].every((message) => text.includes(message)), "factory sandbox: operator effective push target unavailable; sandbox retained at <S>"],
+  ["fresh and active retention semantics are different", (text) => /fresh refusal retains the deterministic clone before `run\.json`; it is a non-resumable inspection\s+state[\s\S]*active refusal leaves the existing manifest, configuration, and lock unchanged,\s+so the run remains resumable/u.test(text), "fresh refusal retains the deterministic clone before `run.json`; it is a non-resumable inspection"],
+  ["debug and trace sanitization preserves authentication", (text) => /removes this ordered denylist while preserving credential providers[\s\S]*DEBUG GH_DEBUG CURL_VERBOSE GIT_TRACE GIT_TRACE_PACKET[\s\S]*GCM_TRACE GCM_TRACE2 GCM_DEBUG GIT_CONFIG_PARAMETERS[\s\S]*Host debug logging may remain enabled/u.test(text), "Host debug logging may remain enabled for run-health diagnosis"],
+  ["publication suppresses traces and uses no hooks", (text) => /Push names configured `origin`, never a\s+URL, uses the fully qualified recorded refspec and mandatory `--no-verify`, and suppresses stdout and\s+stderr[\s\S]*No `tee`, output or trace file, debug echo, expanded dump, raw child error, or pre-push hook/u.test(text), "mandatory `--no-verify`, and suppresses stdout and"],
+  ["fixed publication failures and the safe URL are documented", (text) => /validated userinfo-free URL is legitimate publication identity; it may be passed to `factory pr` and\s+persisted as `pr_url`[\s\S]*factory publication: git push failed; selected repository retained at <RUN_REPO>[\s\S]*factory publication: draft PR creation failed or returned unsafe output; selected repository retained at <RUN_REPO>/u.test(text), "factory publication: draft PR creation failed or returned unsafe output; selected repository retained at <RUN_REPO>"],
+  ["no new surface was added and deferred consumers remain deferred", (text) => /package performs no push or forge call, and `\.factory\.json\.publish` remains uninvoked[\s\S]*Publishing\s+identity enforcement remains deferred to #216/u.test(text)
+    && /adds no command, CLI flag, feature flag, output field, package export, dependency, or\s+`run\.json` key/u.test(text), "This target proof adds no command, CLI flag, feature flag, output field, package export, dependency, or"],
 ];
 const OPERATING_CONTRACTS = [
   ["the four-required plus optional-timeout schema", (text) => text.includes(CONFIG_SCHEMA)],
@@ -122,12 +160,28 @@ const OPERATING_CONTRACTS = [
   ["absent config silently preserves prior behavior", (text) => /An absent `\.factory\.json` remains silent compatibility behavior[\s\S]*returns the same merge result as before this consumer existed/u.test(text)],
   ["Gate 3 remains fresh and independent", (text) => /Gate 3 always runs a fresh, independent integrated\s+`test-verifier` observation[\s\S]*without sharing or optimizing from the post-merge result/u.test(text)],
   ["operator ownership and privileged protection remain in force", (text) => /live file is operator-owned[\s\S]*protected by the\s+privileged-path policy/u.test(text)],
-  ["publish and identity remain deferred", (text) => /Push-target publication is deferred to #224[\s\S]*deferred to #216/u.test(text)],
+  ["fresh proof configures and compares exact Buffer values before state", (text) => /proves physical containment before its code-owned target boundary begins[\s\S]*mode 0600, recaptures both current values, and requires exact\s+`Buffer\.equals` equality before PR-base lookup, branch or lock creation, manifest publication, or output/u.test(text), "`Buffer.equals` equality before PR-base lookup, branch or lock creation, manifest publication, or output."],
+  ["accepted and rejected target transports are complete", (text) => /absolute `http:\/\/`, `https:\/\/`, `ssh:\/\/`, or `git:\/\/` network\s+URIs with nonempty authority, and non-drive SCP-style targets[\s\S]*Relative or\s+unqualified paths, absolute local paths, tilde paths, Windows drive paths, `file:\/\/`, remote-helper\s+`transport::address`, and unsupported or malformed schemes/u.test(text), "`transport::address`, and unsupported or malformed schemes refuse."],
+  ["active proof and pre-canonicalization behavior are distinct", (text) => /Qualified\s+`factory lock \.\.\. claim\|steal`, `factory resume`, and `factory gate \.\.\. pre_pr approved` validate the\s+selected manifest[\s\S]*factory sandbox: selected repository unavailable at <P>; selected run unchanged[\s\S]*never fall back to legacy behavior/u.test(text), "factory sandbox: selected repository unavailable at <P>; selected run unchanged"],
+  ["the three exact target refusals are documented", (text) => [
+    "factory sandbox: operator effective push target unavailable; sandbox retained at <S>",
+    "factory sandbox: sandbox effective push target unavailable at <S>",
+    "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>",
+  ].every((message) => text.includes(message)), "factory sandbox: operator effective push target unavailable; sandbox retained at <S>"],
+  ["fresh and active retention semantics are different", (text) => /fresh refusal retains the deterministic clone before\s+`run\.json`, creating a non-resumable inspection state[\s\S]*active refusal leaves manifest, configuration, and\s+lock bytes unchanged/u.test(text), "fresh refusal retains the deterministic clone before"],
+  ["debug and trace sanitization preserves authentication", (text) => /remove this exact ordered denylist while\s+preserving credential providers[\s\S]*DEBUG GH_DEBUG CURL_VERBOSE GIT_TRACE GIT_TRACE_PACKET[\s\S]*GCM_TRACE GCM_TRACE2 GCM_DEBUG GIT_CONFIG_PARAMETERS[\s\S]*Host debug logging stays useful/u.test(text), "Host debug logging stays useful"],
+  ["publication suppresses traces and uses no hooks", (text) => /Push uses only configured `origin`, the fully qualified recorded refspec, and\s+mandatory `--no-verify`; stdout and stderr are suppressed[\s\S]*Never use a URL, pre-push hook, `tee`, output\s+or trace file, debug echo, expanded dump, or raw child error/u.test(text), "mandatory `--no-verify`; stdout and stderr are suppressed."],
+  ["fixed publication failures and the safe URL are documented", (text) => /validated userinfo-free URL may be emitted, passed to `factory pr`, and persisted as `pr_url`[\s\S]*factory publication: git push failed; selected repository retained at <RUN_REPO>[\s\S]*factory publication: draft PR creation failed or returned unsafe output; selected repository retained at <RUN_REPO>/u.test(text), "factory publication: draft PR creation failed or returned unsafe output; selected repository retained at <RUN_REPO>"],
+  ["no new surface was added and deferred consumers remain deferred", (text) => /package performs no push or forge call\. `\.factory\.json\.publish` remains uninvoked, and\s+publishing-identity enforcement remains deferred to #216[\s\S]*adds no command, CLI flag, feature\s+flag, output field, package export, dependency, or `run\.json` key/u.test(text), "The proof adds no command, CLI flag, feature"],
 ];
 
 function assertContracts(text, contracts, artifact) {
-  for (const [contract, matches] of contracts) {
+  for (const [contract, matches, negative] of contracts) {
     assert.equal(matches(text), true, `${artifact} must preserve the contract that ${contract}`);
+    if (negative === undefined) continue;
+    const changed = typeof negative === "function" ? negative(text) : text.replace(negative, "");
+    assert.notEqual(changed, text, `${artifact} negative control must change the prose for ${contract}`);
+    assert.equal(matches(changed), false, `${artifact} negative control must fail for ${contract}`);
   }
 }
 
@@ -226,7 +280,7 @@ describe("what actually ships", () => {
         ["later commands use S", /returned\s+`sandbox_path` as `--repo S`/u],
         ["the clone destination is pre-reserved", /pre-reserves an empty `S`/u],
         ["one local clone is attempted", /exactly one\s+`git clone --local -- O S` attempt/u],
-        ["proof precedes publication", /physical containment proof before publishing\s+`run\.json`/u],
+        ["containment and target proof precede publication", /physical containment proof before its code-owned\s+effective-push proof[\s\S]*requires exact `Buffer\.equals`[\s\S]*before PR-base lookup, feature-branch creation, lock creation, `run\.json`, or output/u],
         ["collisions are retained", /collision is retained for inspection/u],
         ["collisions are not reused, retried, or deleted", /never\s+reused, retried, or deleted during bootstrap or refusal/u],
         ["branch recovery precedes lock and dispatch", /Branch creation or recovery and provenance checks finish\s+before a lock is claimed or an agent is dispatched/u],
