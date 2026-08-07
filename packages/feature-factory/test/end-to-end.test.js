@@ -201,10 +201,18 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const mergeCommit = mergeIntoFeature(p.repo);
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, true, merged.stderr);
+      // review_archive names where this verdict was preserved before a later attempt could
+      // overwrite it. It is reported rather than kept silent so that a null -- meaning the
+      // reasoning behind a verdict was NOT retained -- is visible when it happens.
       assert.deepEqual(merged.out, {
         run_id: RUN, slice: "be-thing", status: "merged", attempts: 1,
         base_ref: p.basePoint, merge_commit: mergeCommit,
+        review_archive: "reviews/be-thing.attempt-1.json",
       });
+      assert.deepEqual(
+        JSON.parse(readFileSync(join(p.runDir, "reviews", "be-thing.attempt-1.json"), "utf8")),
+        JSON.parse(readFileSync(join(p.runDir, "reviews", "be-thing.json"), "utf8")),
+        "an archive must be a faithful copy of the record it preserves");
       assert.equal(runJson(p.runDir).slices[0].status, "merged");
       assert.equal(existsSync(join(p.runDir, "evidence", "test-verifier.json")), false);
     } finally { cleanupProject(p); }
@@ -296,6 +304,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.deepEqual(merged.out, {
         run_id: RUN, slice: "be-thing", status: "merged", attempts: 1,
         base_ref: defaultTimeout.basePoint, merge_commit: mergeCommit,
+        review_archive: "reviews/be-thing.attempt-1.json",
       }, "omitting verify_timeout_ms must preserve the existing merged response shape");
       assert.deepEqual(JSON.parse(readFileSync(defaultTrace.trace, "utf8")), {
         command: defaultCommand, args: [], timeout: 900000,
@@ -499,6 +508,14 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const staleLock = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
       assert.equal(staleLock.ok, false);
       assert.match(staleLock.stderr, /refuses a stale session lock/u);
+      // The lock written just above still carries `pid`, which the CLI no longer writes. That is the
+      // migration contract, and it is load-bearing: `pid` is not required any more, but it must stay
+      // a *tolerated* key, because the validator rejects unknown ones. Delisting it would read every
+      // lock written before the change as absent -- not stale, absent -- and a second session could
+      // then claim a run that is still being worked. "Stale" is only reachable by a lock that parsed,
+      // so this refusal is the proof the legacy shape was recognised.
+      assert.doesNotMatch(staleLock.stderr, /requires a held session lock/u,
+        "a lock carrying the retired `pid` must still be recognised, not read as absent");
       assert.equal(factory(resumed.repo, ["lock", RUN, "steal", "--session", "session-b", "--branch", "feature"]).ok, true);
       assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes,
         "every ownership refusal must leave the manifest untouched");

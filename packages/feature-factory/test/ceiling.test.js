@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMANDS } from "../bin/factory.js";
 import { FAMILY_IDS } from "../core/contracts.js";
@@ -286,6 +286,69 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //    proven statically — the very form the decomposer recommends. So both sides are pinned on the
     //    distinction, not merely on the prohibition: what blocks is a claim the later path invalidates.
     const byName = new Map(agentText.map(({ name, text }) => [name, text]));
+    // Enforcement: these checks prevent false-green drift in shipped agent contracts.
+    const forbiddenAgentTerms = /jira|atlassian|figma|logrocket|confluence|cloudid|tracker[ _-]?key|context7|get_best_practices|search_documentation|find_examples/giu;
+    // Enforcement: the declaration above IS the guard, so the declaration itself must be pinned.
+    // The scan below runs against a corpus that is clean today, so deleting a token from the regex
+    // leaves every agent file passing and the suite green — the check would quietly stop covering
+    // the term it was added for, which is the false green this whole block exists to prevent. Each
+    // row proves the detector still fires for one prohibited form, independently of the corpus.
+    // `String.match` is used rather than `.test` because the regex is global and `.test` would
+    // advance `lastIndex` between rows.
+    const forbiddenTermProbes = [
+      ["jira", "file the Jira ticket first"],
+      ["atlassian", "see the Atlassian docs"],
+      ["figma", "open the Figma frame"],
+      ["logrocket", "check LogRocket for the session"],
+      ["confluence", "linked from the Confluence page"],
+      ["cloudid", "pass the cloudId parameter"],
+      ["tracker key", "record the tracker key"],
+      ["tracker_key", "read the tracker_key field"],
+      ["tracker-key", "read the tracker-key field"],
+      ["trackerkey", "read the trackerkey field"],
+      ["context7", "resolve the library through context7"],
+      ["get_best_practices", "call get_best_practices first"],
+      ["search_documentation", "call search_documentation for the API"],
+      ["find_examples", "call find_examples for usage"],
+    ];
+    for (const [term, probe] of forbiddenTermProbes) {
+      assert.ok(probe.match(forbiddenAgentTerms)?.length,
+        `forbiddenAgentTerms no longer detects '${term}' — the declaration was weakened`);
+    }
+    // The other direction: a detector that matched ordinary prose would make the scan unfalsifiable,
+    // because every agent file would have to be written around it rather than around the rule.
+    for (const benign of [
+      "the issue key is recorded on the branch",
+      "use whatever documentation tool this repository provides",
+      "track the work in the run manifest",
+    ]) {
+      assert.equal(benign.match(forbiddenAgentTerms), null,
+        `forbiddenAgentTerms over-matches ordinary prose: ${benign}`);
+    }
+    const agentPolicyFiles = sourceFiles(join(pkg, "agents"), [], PROSE_EXTENSIONS);
+    const agentPolicyOffenders = agentPolicyFiles.flatMap((path) =>
+      [...readFileSync(path, "utf8").matchAll(forbiddenAgentTerms)]
+        .map(([token]) => `${relative(pkg, path)} :: ${token}`));
+    assert.deepEqual(agentPolicyOffenders, [], "shipped agent prose contains a prohibited vendor or operational tool identifier");
+    const requiredAgentFragments = [
+      { name: "backend-builder", label: "current backend commit-template field", fragment: "<issue_key>: <imperative backend summary>" },
+      { name: "backend-builder", label: "backend no-key fallback", fragment: "If no issue key yet, use a short imperative subject" },
+      { name: "backend-builder", label: "backend delivery ownership", fragment: "Do **not** push or open a PR" },
+      { name: "frontend-builder", label: "generic framework documentation guidance", fragment: "For framework API questions, use whatever framework skill or documentation tool this repository provides rather than guessing from older patterns." },
+      { name: "frontend-builder", label: "current frontend commit-template field", fragment: "<issue_key>: <imperative frontend summary>" },
+      { name: "frontend-builder", label: "frontend delivery ownership", fragment: "Do **not** push or open a PR" },
+      { name: "story-writer", label: "neutral repository classification", fragment: "suggested repository classification" },
+      { name: "story-writer", label: "neutral ticket authority", fragment: "never creates or edits an external ticket itself" },
+      { name: "story-writer", label: "external-ticket creation boundary", fragment: "You do not create or edit the external ticket" },
+      { name: "story-writer", label: "neutral ticket output structure", fragment: "**Suggested ticket fields (orchestrator will use these if you approve creating the ticket):**" },
+      { name: "story-writer", label: "draft-only ownership", fragment: "you only draft. The orchestrator handles creation." },
+      { name: "story-writer", label: "human ticket-creation gate", fragment: "creating the ticket is a human-gated step the orchestrator performs after approval." },
+      { name: "codebase-researcher", label: "neutral research context", fragment: "If an issue reference or design brief is included" },
+      { name: "codebase-researcher", label: "code-over-requirements boundary", fragment: "your job is the **code**, not the requirements." },
+    ];
+    for (const { name, label, fragment } of requiredAgentFragments) {
+      assert.ok(byName.get(name)?.includes(fragment), `${name} is missing ${label}: ${fragment}`);
+    }
     const decomposer = byName.get("work-decomposer") ?? "";
     const reviewer = byName.get("work-reviewer") ?? "";
     assert.match(decomposer, /No slice may depend on the absence of what another slice owns/u,
@@ -350,7 +413,6 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     }
     assert.match(design, /absent[^.]*gap|gap[^.]*absent/iu);
     assert.match(design, /do not infer/iu);
-    assert.doesNotMatch(design, /figma|jira|atlassian|cloudid|tracker key/iu);
 
     const predecessorMarker = ["vi", "so"].join("");
     const repo = resolve(pkg, "..", "..");
@@ -578,7 +640,24 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // command where a new driver takes over a run nobody is driving -- so two drivers could otherwise
     // both resume the same parked run and both believe they own it. Twelve of the sixteen lines are the
     // three refusals and the reasoning.
-    assert.equal(total, 3372, "issue #243 landed at 3372 production lines, 3372 after review");
+    // 3372 -> 3376 removing the session lock's `pid`: two lines of code deleted, six of comment
+    // added. The field was never the run's owner -- it was the CLI, or the transient shell that
+    // invoked it -- so it could not answer the liveness question its presence implied, and #250
+    // was closed for trying. The comment is the change: the key stays *listed* so locks written
+    // before this still validate, and deleting it from that list would read every one of them as
+    // absent and let a second session claim a run being worked. Net growth for a deletion is the
+    // honest count, so it is recorded rather than trimmed away.
+    // 3376 -> 3376 for issue #216. The publishing-identity guard lives in the skill, the docs and
+    // the tests rather than in production JavaScript, so it adds no counted production source
+    // while its acceptance checks still bind the early and the pre-publication boundaries.
+    // 3376 -> 3433 retaining each attempt's review verdict. A review record lives at one path per
+    // subject, so attempt 3 destroys what attempts 1 and 2 said. That is fatal exactly where it
+    // matters: attempts are budgeted, exhausting the budget blocks a run, and `blocked` is final --
+    // so the artifact an operator most needs to understand a blocked run is the one the final
+    // attempt overwrites. Run 216's test-verifier was rejected twice and approved on the third,
+    // and both reasons had to be inferred from commit subjects. Roughly half of these lines are the
+    // reasoning for why an archive is create-only and why a failed archive must not fail the step.
+    assert.equal(total, 3433, "retaining review attempts landed at 3433 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 

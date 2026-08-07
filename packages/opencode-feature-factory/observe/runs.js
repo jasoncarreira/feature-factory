@@ -140,6 +140,9 @@ export function selectActiveRun(runs) {
 }
 
 const TERMINAL = new Set(["completed", "blocked", "partial"]);
+// `pid` is tolerated, not required: the CLI stopped writing it, and locks predating that
+// still carry it. Requiring it would blank the sidebar's session column for every new
+// lock; dropping it from this list would do the same for every old one.
 const SESSION_LOCK_KEYS = ["session", "pid", "run_id", "branch", "claimed_at", "heartbeat_at"];
 const SESSION_LOCK_TTL_MS = 30 * 60 * 1000;
 
@@ -176,7 +179,6 @@ function validSessionLock(value) {
     && !Array.isArray(value)
     && Object.keys(value).every((key) => SESSION_LOCK_KEYS.includes(key))
     && typeof value.session === "string" && value.session.trim().length > 0
-    && Number.isInteger(value.pid)
     && typeof value.run_id === "string" && value.run_id.trim().length > 0
     && Number.isFinite(Date.parse(value.claimed_at || ""))
     && Number.isFinite(Date.parse(value.heartbeat_at || ""));

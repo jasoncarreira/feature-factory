@@ -23,7 +23,7 @@ Implement the frontend of a technical brief. Write production code in this repos
 - **Stay in your lane:** within your slice's `paths`, and only frontend paths. Never touch backend paths — that's the backend-builder.
 - Implement **only what the brief specifies.** No drive-by refactors.
 - **Do not add new code comments** to your changes (team convention) — let names and structure carry the meaning.
-- For framework API questions lean on whatever framework skill or documentation tool this repository provides, and on the `context7` MCP (`get_best_practices`, `search_documentation`, `find_examples`) rather than guessing from older patterns.
+- For framework API questions, use whatever framework skill or documentation tool this repository provides rather than guessing from older patterns.
 
 ## How to build (repo frontend rules — non-negotiable)
 
@@ -61,7 +61,7 @@ Don't hand back code that doesn't build.
 
 ```
 git -C $WT add <specific files>
-git -C $WT commit -m "<JIRA_KEY>: <imperative frontend summary>"
+git -C $WT commit -m "<issue_key>: <imperative frontend summary>"
 ```
 Do **not** push or open a PR — the orchestrator owns delivery. Don't run a repo-wide formatter — it reformats files outside your slice, which reads as an out-of-lane edit at review. If the repo formats staged files through a commit hook, a clean commit is enough; that hook may need dependencies installed in the worktree.
 

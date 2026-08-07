@@ -11,6 +11,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertReviewBinding, observeMergeProof, readEvidence, readReview } from "../observe/review.js";
+import { archiveReviewAttempt } from "../state/review-archive.js";
 
 const run = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
@@ -83,7 +84,7 @@ describe("attack 3 — an approval presented against a different commit", () => 
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
-  it("refuses a review from an earlier attempt", () => {
+  it("refuses a review from an earlier attempt, and retains what each attempt said", async () => {
     // Attempts are distinct review rounds: attempt 1's approval says nothing about the
     // code produced for attempt 2. Isolated deliberately — the subject and commit both
     // match, so only the attempt comparison can refuse this.
@@ -99,6 +100,43 @@ describe("attack 3 — an approval presented against a different commit", () => 
       assert.throws(() => assertReviewBinding({
         review, ref, observedHead: f.sliceHead, subject: "be-slice", attempt: 2,
       }), /is for attempt 1, subject is at attempt 2/u);
+
+      // Distinct rounds share one path, so each attempt overwrites the last. That is fatal
+      // exactly when it matters: attempts are budgeted, exhausting the budget blocks a run,
+      // and `blocked` is final. Run 216's test-verifier was rejected twice and approved on
+      // the third, and both rejection reasons are gone — reconstructable only from commit
+      // subjects, which is guesswork wearing evidence's clothes.
+      const rejected = writeReview(f.runDir, "round", {
+        reviewed_commit: f.sliceHead, attempt: 1, verdict: "REQUEST_CHANGES",
+        required_fixes: ["cover the refusal path"],
+      });
+      assert.equal(await archiveReviewAttempt(f.runDir, rejected), "reviews/round.attempt-1.json");
+
+      writeReview(f.runDir, "round", { reviewed_commit: f.sliceHead, attempt: 2, verdict: "APPROVE" });
+      assert.equal(await archiveReviewAttempt(f.runDir, rejected), "reviews/round.attempt-2.json");
+
+      const archived = (n) =>
+        JSON.parse(readFileSync(join(f.runDir, "reviews", `round.attempt-${n}.json`), "utf8"));
+      assert.equal(archived(1).verdict, "REQUEST_CHANGES", "the overwritten verdict must survive");
+      assert.deepEqual(archived(1).required_fixes, ["cover the refusal path"],
+        "what the reviewer demanded is the whole reason to keep it");
+      assert.equal(archived(2).verdict, "APPROVE");
+
+      // An archive that can be rewritten is not an archive: a later record filed under an
+      // attempt already preserved must not be able to restate that attempt's history.
+      writeReview(f.runDir, "round", {
+        reviewed_commit: f.sliceHead, attempt: 1, verdict: "APPROVE", findings: ["revised"],
+      });
+      assert.equal(await archiveReviewAttempt(f.runDir, rejected), "reviews/round.attempt-1.json");
+      assert.equal(archived(1).verdict, "REQUEST_CHANGES", "the first record of an attempt wins");
+
+      // Instruction, not enforcement: a record that cannot be archived must not fail the step
+      // that earned it, because losing a verdict cannot manufacture a false green.
+      assert.equal(await archiveReviewAttempt(f.runDir, "reviews/absent.json"), null);
+      writeFileSync(join(f.runDir, "reviews", "torn.json"), "{ not json");
+      assert.equal(await archiveReviewAttempt(f.runDir, "reviews/torn.json"), null);
+      writeReview(f.runDir, "no-attempt", { attempt: undefined });
+      assert.equal(await archiveReviewAttempt(f.runDir, "reviews/no-attempt.json"), null);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 

@@ -25,6 +25,6 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --import ../../tools/resolve-guard.mjs --test test/*.test.js"
   }
 }

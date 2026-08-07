@@ -174,12 +174,55 @@ Gate 3 always performs its own fresh integrated `test-verifier` observation at t
 the existing command mode. It overwrites the canonical evidence independently and never shares,
 substitutes, or optimizes from post-merge evidence, even when the head has not moved.
 
-`publish` remains a deferred future ordinary shell step; existing push and PR behavior is unchanged and
-push-target publication is deferred to #224. Static `publishing_identity` has no runtime input and
-returns the non-empty account-name value itself; a missing, non-string, or empty identity makes the
-config malformed. It is not yet consumed, and identity enforcement is deferred to #216. See
-[OPERATING.md](OPERATING.md) for the exact refusal text, what an absent declaration means, and credential
-guidance.
+`resolve`, `verify`, and `publishing_identity` are consumed now; only `publish` remains deferred to #224.
+The validated raw `publishing_identity` is retained exactly as parsed, without trimming, normalization,
+case-folding, or reserialization. A missing, non-string, or whitespace-only identity makes a present
+config malformed. This consumer adds no config key or syntax, run status, or factory command.
+
+With a present valid config, every mode checks that identity at exactly three boundaries: immediately
+after verified post-lock ownership, or immediately after an explicit resume is verified running with
+the same fresh owner and before reconciliation or other work; immediately before `git push`, after
+effective push-target equality; and immediately before `gh pr create`, after the push is known
+successful. No operation intervenes across a guard boundary. An absent config skips all three guards and
+preserves existing behavior.
+
+Before each guard, inherited `GH_TOKEN` must exist and contain at least one character. Missing or empty
+means identity is unobservable without invoking `gh`, the network, stored authentication, credential
+queries, or any fallback. A prepared environment submits exactly this read-only network probe as one
+ordinary host shell step with cwd exactly `RUN_REPO`, inherited environment, and no stdin:
+
+```sh
+gh api --method GET /user --jq .login
+```
+
+The direct stdout bytes, stderr bytes, and numeric status are parsed strictly. Only numeric zero, empty
+stderr, and exactly one ASCII GitHub login plus one LF are observable; the required LF alone is removed,
+then the raw login is compared exactly and case-sensitively with the raw declaration. `gh auth status`
+does not prove the publishing identity.
+
+A mismatch names the safely rendered declared and observed values and says to authenticate as the
+declared account; an unobservable result names the safely rendered declaration and says to launch with
+inherited `GH_TOKEN` for it. Values use deterministic ASCII-only JSON-string rendering, including
+lowercase `\uXXXX` escapes outside printable ASCII. The complete rendered reason is transported as one
+shell-safe argv token and the sole `--reason` value. The token, raw stdout or stderr, diagnostics, status,
+targets, helper output, and environment are never exposed, and the factory never manages credentials or
+transport.
+
+Either refusal quiesces outstanding work, parks through existing `needs-human`, verifies the exact
+persisted reason and owner, releases that owner, verifies the lock absent, and retains the sandbox. After
+the environment is fixed, a later driver binds the retained sandbox and repeats every selection,
+manifest, containment, config, effective-push, provenance, branch, worktree, cleanliness or recovery,
+and exact-ref precheck; makes and verifies a fresh claim with its own `FACTORY_SESSION_ID`; runs exactly
+`factory resume "$R" --session "$FACTORY_SESSION_ID" --repo "$RUN_REPO"`; verifies running status, the
+unchanged historical result, real next action, and same owner; performs existing post-resume
+reconciliation; and continues only from the newly qualified `status.next`. It never reuses the released
+session.
+
+Publishing-identity verification is enforcement because it prevents false-green or wrong-account
+publication. Credential provisioning and helper setup are instruction only. Existing push,
+`gh pr create`, `factory pr`, Gate 3, merge, and approval semantics remain unchanged. See
+[OPERATING.md](OPERATING.md) for the shared inherited-token helper recipe; it does not acquire, store,
+install, or repair credentials.
 
 ## The CLI
 

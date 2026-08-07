@@ -25,6 +25,11 @@ So everything a run needs must be in the issue *before launch*:
   reviewer will reasonably demand in-repository proof of something no repository test can establish —
   and the run will go looking for it outside the tree, which hangs (§5).
 - **Corrections belong in the body, never a comment.** `gh issue view` returns the body.
+- **Say "read only inside the tree" — and say what to do when it isn't there.** The bare prohibition is
+  wrong often enough to be dangerous: a dependency's source genuinely may not be in the repository. The
+  form that works is *if the API you need is not in the tree, the dependency is not declared yet: declare
+  it, install it, and read it there.* A run given only the prohibition went looking anyway and wedged for
+  65 minutes on an unscoped search; a run given neither read the host's installed CLI and ended its turn.
 
 ## 2. Launching
 
@@ -52,7 +57,8 @@ required values, and invalid timeout values make a present file malformed. All r
 optional timeout are validated before an entry is used. A command may name credentials supplied through
 its inherited environment, but credential values must not appear in the file.
 
-`resolve` and `verify` are consumed today. After mode admission, `resolve` runs as one ordinary shell step with its
+`resolve`, `verify`, and `publishing_identity` are consumed today;
+only `publish` remains deferred to #224. After mode admission, `resolve` runs as one ordinary shell step with its
 configured string submitted unchanged, exact cwd `O`, the inherited environment plus `FACTORY_INPUT`,
 and no positional argument or structured stdin. `FACTORY_INPUT` is the exact admitted request remainder,
 including its original whitespace and bytes. Exit zero with no stdout means the input was not recognized;
@@ -99,7 +105,59 @@ The entries have these execution contracts:
 | --- | --- | --- | --- |
 | `verify` | The unchanged string runs as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio; no structured stdin or factory payload. Each attempt gets the full configured timeout. Stdout and stderr are visible, informational, and unparsed rather than captured or persisted. | Numeric child exit status is authoritative. Zero succeeds; non-zero means repository verification failed; no numeric status is unavailable. | Invoked after each newly recorded merge with at most two executions per merge or replay invocation. Direct committed test-only repair observation remains one execution. |
 | `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked; existing push and PR behavior remains unchanged. Push-target publication is deferred to #224. |
-| `publishing_identity` | No runtime input; the static non-empty account-name string is the return value. | A missing, non-string, or empty identity makes the config malformed. | Not consumed for identity enforcement; deferred to #216. |
+| `publishing_identity` | No runtime input; retain the raw validated string exactly as parsed, without trimming, normalization, case-folding, or reserialization. | A missing, non-string, or whitespace-only identity makes the config malformed; the observed login is compared exactly and case-sensitively. | Active in every mode at exactly three guards; absent config preserves existing behavior. |
+
+Publishing identity is checked immediately after verified post-lock ownership, or immediately after an
+explicit resume is verified running with the same fresh owner and before reconciliation or other work;
+immediately before `git push`, after effective push-target equality; and immediately before
+`gh pr create`, after the push is known successful. No operation may intervene across any guard
+boundary. There is no separate guard before `factory pr`. This adds no config key or syntax, run status,
+or factory command, and existing push, `gh pr create`, `factory pr`, Gate 3, merge, and approval semantics
+remain unchanged.
+
+Before each guard, inherited `GH_TOKEN` must exist and contain at least one character. Missing or empty
+parks identity as unobservable without invoking `gh`, the network, stored authentication, credential
+queries, or any fallback. A prepared environment submits exactly this read-only network probe as one
+ordinary host shell step with cwd exactly `RUN_REPO`, inherited environment, and no stdin:
+
+```sh
+gh api --method GET /user --jq .login
+```
+
+Use the host result directly as exact stdout bytes, exact stderr bytes, and numeric status. Identity is
+observable only for numeric zero, exactly zero stderr bytes, and exactly one ASCII login matching
+`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$` followed by exactly one LF byte. Remove only that LF,
+then compare the raw declared and observed strings exactly and case-sensitively. Do not trim, normalize,
+retry, capture through shell indirection, or use `gh auth status`; machine-active authentication is not
+proof of the publishing identity.
+
+The refusal reasons are:
+
+```text
+publishing identity mismatch: declared <declared-ascii-json>, observed <observed-ascii-json>; authenticate as <declared-ascii-json> and retry.
+publishing identity unobservable: declared <declared-ascii-json>; launch with inherited GH_TOKEN for <declared-ascii-json> as documented in OPERATING.md and retry.
+```
+
+Values use deterministic ASCII-only JSON-string rendering, including lowercase `\uXXXX` escapes for
+code units outside printable ASCII. The complete rendered reason is transported as one shell-safe argv
+token and the sole `--reason` value. Never expose the token, raw stdout or stderr, diagnostics, status,
+targets, helper output, or environment, and never manage credentials or transport.
+
+On either refusal, quiesce outstanding work, park through existing `needs-human`, verify the persisted
+reason byte-for-byte and the owner, release only that owner, verify the lock absent with null owner, and
+retain the sandbox. After fixing the environment, a later driver must bind the retained sandbox; repeat
+all selection, manifest, containment, config, effective-push, provenance, branch, worktree, cleanliness
+or recovery, and exact-ref prechecks; claim with that driver's own `FACTORY_SESSION_ID`; verify the fresh
+owner and the unchanged parked state; and run exactly:
+
+```sh
+factory resume "$R" --session "$FACTORY_SESSION_ID" --repo "$RUN_REPO"
+```
+
+After resume it verifies running status, unchanged historical result, the real next action, and the same
+fresh owner; performs only existing post-resume reconciliation; and continues from the newly qualified
+`status.next`. Never reuse the released session. A parking, durable-reason, owner, release, or unlock
+verification failure reports retained-lock error rather than claiming safe resumability.
 
 The merge record commits before `verify` begins. A successful observation is written through the existing
 canonical `evidence/test-verifier.json` schema against the current merged head and the immutable base of
@@ -167,8 +225,15 @@ does not create, write, merge, archive, or package it.
 
 ### Launch command
 
+The parent shell, launcher, or supervisor must inject and export a nonempty `GH_TOKEN` for the declared
+account before this recipe begins. Do not derive it from the machine-active account. On another machine,
+apply the same ephemeral helper configuration so Git and `gh` consume the one inherited token:
+
 ```sh
-export GH_TOKEN=$(gh auth token -u <account>)
+if [ -z "${GH_TOKEN:-}" ]; then
+  printf '%s\n' 'GH_TOKEN must be inherited and nonempty' >&2
+  exit 1
+fi
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper \
   GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
 
@@ -176,13 +241,23 @@ opencode run --log-level DEBUG --print-logs --dir <repo> \
   --command feature " --autonomous <issue-number>"
 ```
 
+The Git credential helper reads the inherited `GH_TOKEN` as its password, while `gh` reads that same
+inherited variable directly. The real identity probe is a read-only network request, so a locally active
+machine account, cached login, or successful `gh auth status` is not a prepared environment. Credential
+acquisition, storage, installation, and repair remain operator responsibilities outside this recipe; the
+factory does none of them.
+
+Publishing-identity verification is enforcement because it prevents false-green or wrong-account
+publication. Supplying the token and installing this helper recipe are instruction only, not factory
+credential provisioning or a helper-setup guard.
+
 Three details, each of which cost something:
 
 - **The leading space** before `--autonomous`. The launcher's argument parser consumes the flag
   otherwise, and `--` makes the host crash. The skill's mode admission tolerates the space.
 - **The credential pin.** The machine-active `gh` account flips as a side effect of unrelated work. Two
-  runs built correct code, passed every gate, and terminalized without a PR on HTTP 403. The pin makes
-  publication independent of machine state.
+  runs built correct code, passed every gate, and terminalized without a PR on HTTP 403. The inherited
+  token and shared helper make Git publication and the forge command independent of machine state.
 - **`--log-level DEBUG --print-logs`.** The only instrument that distinguishes a stalled run from a slow
   one. Attach it always.
 - **Keep the host awake.** A batch queued overnight ran one issue and then sat idle until the machine woke
@@ -204,7 +279,9 @@ Three details, each of which cost something:
 | `grep "message=asking id=per_"` | reliable: a real permission request |
 | `pgrep -f "opencode run"` | **matches your own monitor script** |
 | `pgrep -f "bin/opencode run"` | real processes only |
-| non-terminal manifest + no process | a genuine orphan; needs a lock release |
+| `running` + no process | a genuine orphan; needs a lock release |
+| `needs-human` + no process | **parked, not crashed** — a person is being waited on; resumable |
+| `pgrep -f "bin/opencode run"` for a TUI-driven run | **finds nothing** — its driver is the TUI process |
 | matching package versions | **proves nothing** — see §7 |
 | `duplicate skill name" name=feature` | the run may be following a different skill entirely — see §7 |
 
@@ -214,7 +291,18 @@ startup, and it is the only notice you get that the run is not executing the ski
 The reliable health check is: a live process, a debug log that has moved within ~20 minutes, and zero
 real permission requests.
 
+**Distinguish parked from crashed before touching anything.** They look identical to a process check and
+call for opposite responses: an orphan needs its lock released and a relaunch, a parked run needs its
+*cause* fixed and then a resume. Read the status, not the absence of a process.
+
+**A run started in the TUI is invisible to the run-command pattern**, because its driver is the TUI
+itself. Checking `pgrep -f "bin/opencode run"` for such a run reports zero and reads exactly like a
+crash — that nearly got a healthy run declared dead. For a TUI-driven run, check the lock's session and
+its child processes instead.
+
 ## 4. Recovery
+
+**A crashed run** — `running`, nothing alive:
 
 ```sh
 kill <pid>                                    # by PID; never pattern-kill
@@ -222,8 +310,49 @@ factory lock <run-id> release --session <session-from-the-lock-file>
 rm -rf .factory-sandboxes/<run-id>            # only after confirming the work is merged or worthless
 ```
 
-The manifest carries the run, so nothing is lost by relaunching. Confirm merge state with "is this PR
-merged?" — **not** by comparing commits, because squash merges make the originals unrecognisable.
+**A parked run** — `needs-human` — is different, and this changed recently. It used to be terminal, which
+meant a human who fixed the cause had nowhere to put the fix: every park became hand-finishing, and three
+runs were finished by hand for causes as small as a wrong number in an issue. `needs-human` is now a
+*resumable stop*. Fix the external cause, then resume:
+
+```sh
+factory lock <run-id> claim --session "$SESSION_ID" --branch <branch> --repo <sandbox>
+factory resume <run-id> --session "$SESSION_ID" --repo <sandbox>
+```
+
+Resume proves ownership: it refuses without a session, with no lock, with a stale one, or with a lock held
+by anyone else. Claim first, then resume. The original reason stays recorded after the stop is cleared.
+
+**Where the cause lives decides whether resume can help**, and only one of the two has a supported path.
+
+*Outside the sandbox* — a host timeout, a service outage, missing credentials, an unclean worktree, a
+file the operator can commit — fix it and resume the retained sandbox. That is the path above, and it is
+the reason `needs-human` stopped being terminal.
+
+*Inside the sandbox* — its `bin/factory.js`, its skill, or its `.factory.json` predates the fix — and
+there is **no** supported recovery. A sandbox executes its own copy of all three; it is a clone, not a
+view, so a fix installed on the host or committed to the operator checkout never reaches it. Nor can the
+run acquire a fresh one: resume binds the retained sandbox, and `factory init` refuses outright while
+that manifest exists (`run '<id>' already exists at '<sandbox manifest>'`).
+
+The only route is to **abandon the run and start a new one**:
+
+```sh
+rm -rf .factory-sandboxes/<run-id>     # takes the manifest with it -- the control plane lives inside
+# then launch the issue again as a fresh run
+```
+
+**That discards everything held only in that sandbox**, including merged slices whose branches were
+never pushed. Confirm nothing is alive on the run first, then check what the sandbox still holds and push
+anything worth keeping. Confirm merge state by asking "is this PR merged?" — **not** by comparing commits,
+because squash merges make the originals unrecognisable. One run lost two merged prose slices this way,
+cheaply; a run further along would not be.
+
+This distinction cost an hour three separate ways: a stale `.factory.json` verify command, a missing
+`.gitignore` entry, and a sandbox CLI with no `resume` command at all. In each case the fix was already
+on the host and could not reach the run.
+
+`completed`, `partial` and `blocked` remain final; only `needs-human` re-enters.
 
 ## 5. Failure modes to expect
 
@@ -238,6 +367,12 @@ that treats the refusal as fatal will end its turn, which is the next item.
 
 **A run can end its turn without terminalizing**, leaving `status: running`, a step marked in flight,
 and nothing alive. Two clean reproductions. Recovery is §4.
+
+**A command that outruns the shell default is killed at 120000 ms**, and the message says so plainly if
+you read far enough into the log. A repository test suite is the one command in a run whose duration the
+repository sets, not the factory: 129s here, 5m40s in a larger repo. Both exceed the default. Declare
+`verify_timeout_ms` when a suite needs longer. Three runs stalled on this before the number was found,
+2,486 lines into a debug log.
 
 **Publication can fail after all the work succeeds.** Gates approved, slices merged, then HTTP 403. The
 run records the reason accurately rather than claiming success; the branch is pushable by hand.
@@ -286,6 +421,11 @@ Then look at what else that copy shipped. The stale one carried its own `assets/
 reviewer that does not exist in the current lineage — so every stage would have run against agent
 definitions from a dead lineage, not merely a stale skill. Prefer packages that ship no skill or agent
 assets at all: nothing to shadow with is better than shadowing detected.
+
+**Installing a fix does not reach a run already in flight.** A sandbox is a `git clone --local` taken at
+bootstrap, and the run uses what is inside it: its own `bin/factory.js`, its own skill, its own
+`.factory.json`. So "I installed the fix and resumed" is not a recovery — the resumed run re-executes the
+old code. A fix reaches only runs whose sandbox was cloned after it landed.
 
 **Never reinstall while a run is live.** Swapping CLI flags under an orchestrator that is following the
 previously installed skill breaks it mid-flight.

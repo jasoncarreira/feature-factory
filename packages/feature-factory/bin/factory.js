@@ -13,6 +13,7 @@ import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
+import { archiveReviewAttempt } from "../state/review-archive.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { dispatchInitPublication } from "./init-publication.js";
 import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, validateRun } from "../state/schema.js";
@@ -677,7 +678,9 @@ const HANDLERS = {
     // merge time. The skill previously said to read it from `factory status`, which does not
     // expose it — so the documented path could not be followed at all.
     if (status === "merged") await verifyRecordedMerge({ repo, runDir, runId, mergeCommit: row.merge_commit });
-    return emit(flags, mergedPayload(runId, sliceId, row));
+    // Slice attempts are budgeted the same way, so their rejected verdicts vanish the same way.
+    const sliceReviewArchive = await archiveReviewAttempt(runDir, row.review_ref);
+    return emit(flags, { ...mergedPayload(runId, sliceId, row), review_archive: sliceReviewArchive });
   },
 
   async observe([runId, subject], flags) {
@@ -901,7 +904,12 @@ const HANDLERS = {
       },
     });
     const row = next.steps.find((step) => step.agent === agent);
-    return emit(flags, { run_id: runId, agent, status: row.status, attempts: row.attempts });
+    // Snapshot before the next attempt overwrites the record. Reported so a failed archive is
+    // visible rather than silent -- null here means this verdict's reasoning was not kept.
+    const reviewArchive = await archiveReviewAttempt(runDir, row.review_ref);
+    return emit(flags, {
+      run_id: runId, agent, status: row.status, attempts: row.attempts, review_archive: reviewArchive,
+    });
   },
 
   async terminal([runId, status], flags) {
