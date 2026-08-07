@@ -12,10 +12,13 @@ Ships three things:
 | | |
 | --- | --- |
 | `bin/factory.js` | the `factory` CLI — twelve commands, each state change one checked transition |
-| `skills/feature/SKILL.md` | the `/feature` orchestrator prose |
-| `agents/` | eleven agent definitions the skill dispatches |
+| `WORKFLOW.md` | the canonical, host-agnostic workflow contract |
+| `agents/` | eleven specialist definitions dispatched by a host adapter |
 
-Point your agent host at `skills/feature/SKILL.md` and `agents/`, then drive runs with the CLI.
+This package owns `WORKFLOW.md`; it does not ship a platform `SKILL.md`. Each adapter owns its own
+host binding and copies this workflow beside that skill at build/pack time. Install
+`opencode-feature-factory` or `prime-agent-feature-factory` for a supported host, or build an adapter
+that loads the complete workflow and drives all durable state changes through the CLI.
 
 ## Repository command configuration
 

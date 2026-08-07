@@ -283,7 +283,7 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
 }
 
 test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only then removes the sandbox", () => {
-  const skill = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+  const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
   const start = skill.indexOf("## Step 7 — Summary and completed sandbox handoff");
   const end = skill.indexOf("## Resuming", start);
   assert.ok(start >= 0 && end > start, "AC10 completed handoff section must precede resume behavior");

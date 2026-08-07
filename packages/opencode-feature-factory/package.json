@@ -11,6 +11,7 @@
   },
   "files": [
     "plugin",
+    "skills",
     "tui/dist",
     "observe",
     "README.md",
@@ -24,8 +25,10 @@
   },
   "scripts": {
     "build": "rm -rf tui/dist && esbuild tui/index.jsx --bundle --platform=node --format=esm --jsx=automatic --jsx-import-source=@opentui/solid --packages=external --outfile=tui/dist/index.js",
-    "prepack": "npm run build",
-    "test": "npm run build && node --test test/*.test.js"
+    "prepack": "npm run sync:workflow && npm run build",
+    "test": "npm run build && node --test test/*.test.js",
+    "sync:workflow": "node ../../scripts/sync-workflows.js opencode-feature-factory",
+    "pretest": "npm run sync:workflow"
   },
   "peerDependencies": {
     "solid-js": "^1.9.0",

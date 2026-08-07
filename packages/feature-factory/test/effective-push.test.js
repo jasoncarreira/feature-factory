@@ -11,7 +11,7 @@ import { initFresh } from "./init-fixture.js";
 test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", () => {
   const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const cli = resolve(pkg, "bin", "factory.js");
-  const skill = readFileSync(resolve(pkg, "skills", "feature", "SKILL.md"), "utf8");
+  const skill = readFileSync(resolve(pkg, "WORKFLOW.md"), "utf8");
   const resumeStart = skill.indexOf("### Resume or collision");
   const freshStart = skill.indexOf("### Fresh sandbox request");
   const gateOneStart = skill.indexOf("### Gate 1 — Story");

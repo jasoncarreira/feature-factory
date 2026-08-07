@@ -3,19 +3,22 @@
 A durable, observed control plane for running a feature from idea to draft PR through a chain of
 focused agents, with human approval gates.
 
-Two packages:
+Three packages:
 
 | Package | What it is |
 | --- | --- |
-| [`packages/feature-factory`](packages/feature-factory) | The standalone factory: the `factory` CLI, the `/feature` skill, and the agent definitions. Zero dependencies, host-agnostic. |
-| [`packages/opencode-feature-factory`](packages/opencode-feature-factory) | The opencode integration: server plugin and sidebar. Reads run state; never writes it. |
+| [`packages/feature-factory`](packages/feature-factory) | The host-agnostic factory: the `factory` CLI, the canonical `WORKFLOW.md`, and the agent definitions. Zero dependencies. |
+| [`packages/opencode-feature-factory`](packages/opencode-feature-factory) | The OpenCode adapter: its platform `SKILL.md`, server plugin, and sidebar. Reads run state; never writes it. |
+| [`packages/prime-agent-feature-factory`](packages/prime-agent-feature-factory) | The Prime Agent adapter: its platform `SKILL.md` and `/feature` extension. Currently foreground-only. |
 
-This repository is a workspace root and publishes nothing itself.
+The factory owns the workflow contract. Each adapter owns its host-specific `SKILL.md` and ships an
+exact build-time copy of the factory's `WORKFLOW.md` beside it. This repository is a workspace root and
+publishes nothing itself.
 
 ## Why it exists
 
-The whole system is one skill's worth of prose plus the smallest amount of code that prose cannot
-enforce. The dividing line is deliberate:
+The whole system is one canonical workflow's worth of prose plus the smallest amount of code that
+prose cannot enforce. The dividing line is deliberate:
 
 - **Agents cannot reliably hand-write a schema-perfect `run.json`.** So every state change goes
   through a checked transition — `lock → read → validate → apply → validate → compare-and-swap →
@@ -43,17 +46,22 @@ claim is re-derived from the repository before it is believed.
 
 ## Install
 
-The CLI, the skill and the agents:
+Install the factory directly when you need its host-agnostic CLI, workflow, and agent definitions:
 
 ```sh
 npm install feature-factory
 ```
 
-Then point your agent host at `node_modules/feature-factory/skills/feature/SKILL.md` and
-`node_modules/feature-factory/agents/`.
+A host integration should come from an adapter rather than from the factory package. The adapter
+depends on `feature-factory`, supplies the host-specific `SKILL.md`, and bundles the exact workflow
+copy that skill loads.
 
-For opencode, additionally install the integration where the host's modules resolve, and name it in
+For OpenCode, install the adapter where the host's modules resolve and name it in
 `~/.config/opencode/tui.json`:
+
+```sh
+npm install opencode-feature-factory
+```
 
 ```jsonc
 {
@@ -63,6 +71,16 @@ For opencode, additionally install the integration where the host's modules reso
 
 The host reads the sidebar entry from `exports["./tui"]`; the package root is the server plugin and
 has no sidebar hook, so it is never mistaken for one.
+
+For Prime Agent:
+
+```sh
+prime-agent package install npm:prime-agent-feature-factory
+```
+
+That command installs the adapter and its `feature-factory` runtime dependency. The Prime adapter
+currently supports foreground `/feature [--autonomous | --headless] <request>` runs only and rejects
+`--background` before creating or changing a run.
 
 ## Repository command configuration
 
@@ -265,10 +283,11 @@ tokens and hash chains · a reviewer panel with a verdict lattice · a security-
 ## Development
 
 ```sh
-npm install          # workspaces
-npm test             # both packages
+npm install          # all three workspaces
+npm test             # all three packages and pack checks
 npm run test:factory
 npm run test:opencode
+npm run test:prime
 ```
 
 Run sandboxes are gitignored. Sandbox deletion is allowed only during the verified Step 7 completed
@@ -277,9 +296,9 @@ verification all succeed. Bootstrap failures, collisions, push mismatches, and n
 retain their sandbox for inspection.
 
 `test/ceiling.test.js` is the scope lock. It asserts the exact command set, the exact `run.json` key
-set, the family list, the absence of every dropped subsystem, that the skill invokes only commands
-and flags the CLI accepts, that every agent the skill dispatches ships, and a hard line budget on
-production source. Widening any of it means editing that file, which is the point — the decision
+set, the family list, the absence of every dropped subsystem, that the canonical workflow invokes only
+commands and flags the CLI accepts, that every specialist it dispatches ships, and a hard line budget
+on production source. Widening any of it means editing that file, which is the point — the decision
 shows up in a diff instead of arriving as a reasonable-sounding addition.
 
 The design is recorded in [BUILD-PLAN-SMALL.md](BUILD-PLAN-SMALL.md), the reasoning for the scope in

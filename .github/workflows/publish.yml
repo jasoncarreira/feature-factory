@@ -1,16 +1,18 @@
 name: Publish Package
 
-# Two packages version independently now, so a bare `v1.2.3` tag no longer says what to
+# Three packages version independently now, so a bare `v1.2.3` tag no longer says what to
 # publish — and the root manifest is private with no version at all, which is what the old
 # tag guard read. Tags therefore name their package:
 #
 #   feature-factory-v0.1.0
 #   opencode-feature-factory-v0.3.0
+#   prime-agent-feature-factory-v0.1.0
 on:
   push:
     tags:
       - "feature-factory-v*"
       - "opencode-feature-factory-v*"
+      - "prime-agent-feature-factory-v*"
 
 permissions:
   contents: read
@@ -34,7 +36,7 @@ jobs:
         # so testing the shorter name first would publish the wrong package under the right tag.
         run: |
           tag="$GITHUB_REF_NAME"
-          for name in opencode-feature-factory feature-factory; do
+          for name in prime-agent-feature-factory opencode-feature-factory feature-factory; do
             case "$tag" in
               "$name"-v*)
                 echo "name=$name" >> "$GITHUB_OUTPUT"
@@ -60,8 +62,8 @@ jobs:
               throw new Error(`tag says ${process.env.VERSION}, manifest says ${manifest.version}`);
             }
           '
-      # Both workspaces, plus the factory on its own: the standalone claim in its
-      # zero-dependency manifest is only true if it passes with no opencode installed.
+      # All workspaces, plus the factory on its own: the standalone claim in its
+      # zero-dependency manifest is only true if it passes with no host adapter installed.
       - run: npm test
       - run: npm test --workspace feature-factory
       - run: npm publish --workspace ${{ steps.target.outputs.name }}

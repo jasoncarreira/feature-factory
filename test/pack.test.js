@@ -30,7 +30,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const PACKAGES = ["feature-factory", "opencode-feature-factory"];
+const PACKAGES = ["feature-factory", "opencode-feature-factory", "prime-agent-feature-factory"];
 const CONFIG_SCHEMA = `{
   "resolve": "<non-empty shell command>",
   "verify": "<non-empty shell command>",
@@ -60,7 +60,7 @@ const SKILL_CONTRACTS = [
   ["verify has exact closed classification and canonical unavailable evidence", (text) => /Classify it into exactly four outcomes:[\s\S]*`green`: exact run, subject, current head, and unchanged `verify` command binding, observed integer\s+exit zero, and `review_ready: true`[\s\S]*`failed`: the same exact binding with an observed nonzero integer exit, or observed zero that is not\s+review-ready[\s\S]*`unavailable`: the same exact binding with canonical `observed: false`, `exit: null`, and\s+`skipped_reason: null`[\s\S]*`unknown`: missing, unreadable, malformed, foreign, stale-head, wrong-command, missing-field, or\s+internally inconsistent evidence[\s\S]*only replay-eligible class/u.test(text)],
   ["safe replay has every fresh proof while unsafe and untrusted state stays terminal", (text) => /Only matching `unavailable` evidence, no active\s+repair record, a freshly verified exact integration worktree on the recorded feature branch, current\s+integration `HEAD` equal to that row's immutable merge SHA, and a freshly observable clean tree authorize\s+replay[\s\S]*Dirty, moved, or unobservable replay\s+safety state and malformed, foreign, stale-head, wrong-command, missing-field, or internally inconsistent\s+evidence never execute and durably terminalize `needs-human`[\s\S]*Clean, unchanged second-unavailable\s+exhaustion is the sole nonterminal exception/u.test(text)],
   ["clean exhaustion quiesces and verifies release", (text) => /terminalize means terminate the current `factory slice … merged` CLI invocation[\s\S]*does not mean the irreversible\s+factory terminal transition[\s\S]*Await every in-flight specialist task[\s\S]*await every heartbeat already in flight[\s\S]*Outcome: repository-verify-exhausted[\s\S]*Outcome: retained-lock-error/u.test(text)],
-  ["restart repeats guards and verifies an identity-agnostic new claim before replay", (text) => /later driver invocation repeats normal run selection, manifest validation, provenance, branch,\s+worktree, effective-push, and operator-ref guards[\s\S]*actual host-exported\s+`FACTORY_SESSION_ID`[\s\S]*reports that exact session as owner[\s\S]*Only then may it perform same-SHA reconciliation[\s\S]*never require session-ID inequality/u.test(text)],
+  ["restart repeats guards and verifies an identity-agnostic new claim before replay", (text) => /later driver invocation repeats normal run selection, manifest validation, provenance, branch,\s+worktree, effective-push, and operator-ref guards[\s\S]*binds `SESSION_ID` to the actual stable host-adapter identity[\s\S]*reports that exact session as owner[\s\S]*Only then may it perform same-SHA reconciliation[\s\S]*never require session-ID inequality/u.test(text)],
   ["absent config preserves merge behavior silently", (text) => /An absent config preserves\s+the old response and emits nothing new/u.test(text)],
   ["a post-record failure preserves the merged slice and forbids its reopening, reseeding, re-observation, or redispatch", (text) => /If the row is `merged` at exactly\s+`MERGE_COMMIT`, preserve its evidence, review, refs, attempts, paths, test plan, and merge commit;[\s\S]*stop before `status\.next`, wave calculation,\s+activation, reopen, reseed, slice re-observation, or redispatch\. Never reopen or redispatch a\s+merged slice\./u.test(text)],
   ["Gate 3 is a fresh independent observation", (text) => /Gate 3 observation is always fresh and independent[\s\S]*never shares, substitutes,\s+or optimizes from a post-merge repository verification result/u.test(text)],
@@ -174,14 +174,17 @@ describe("what actually ships", () => {
     try {
       const factory = pack("feature-factory", dir);
       const opencode = pack("opencode-feature-factory", dir);
+      const prime = pack("prime-agent-feature-factory", dir);
 
-      // The skill is useless without the agents it dispatches, and both READMEs promise them.
-      for (const required of ["skills/feature/SKILL.md", "bin/factory.js", "state/index.js", "README.md", "LICENSE"]) {
+      // The factory owns the host-neutral workflow and agents; each adapter owns its platform skill.
+      for (const required of ["WORKFLOW.md", "bin/factory.js", "state/index.js", "README.md", "LICENSE"]) {
         assert.ok(factory.files.includes(required), `feature-factory must ship ${required}`);
       }
+      assert.equal(factory.files.includes("skills/feature/SKILL.md"), false,
+        "the host-neutral factory must not ship a platform skill");
       const agents = factory.files.filter((file) => file.startsWith("agents/"));
       assert.equal(agents.length, 11, `feature-factory must ship all eleven agents, packed ${agents.length}`);
-      for (const [name, { files }] of [["feature-factory", factory], ["opencode-feature-factory", opencode]]) {
+      for (const [name, { files }] of [["feature-factory", factory], ["opencode-feature-factory", opencode], ["prime-agent-feature-factory", prime]]) {
         assert.deepEqual(files.filter((file) => file.startsWith(".factory/")), [],
           `${name} must not package operator-owned .factory content`);
         const repositoryCommandAssets = files.filter((file) => /(^|\/)(?:(?:factory[-_.]|generated[-_.])?(?:config|resolver)|config-resolver)(?:[./_-]|$)/u.test(file));
@@ -190,9 +193,9 @@ describe("what actually ships", () => {
           `${name} must not add a generated config or resolver asset`);
       }
 
-      const sourceSkill = readFileSync(join(root, "packages", "feature-factory", "skills", "feature", "SKILL.md"), "utf8");
+      const sourceWorkflow = readFileSync(join(root, "packages", "feature-factory", "WORKFLOW.md"), "utf8");
       const sourcePackageReadme = readFileSync(join(root, "packages", "feature-factory", "README.md"), "utf8");
-      assertContracts(sourceSkill, SKILL_CONTRACTS, "source skill");
+      assertContracts(sourceWorkflow, SKILL_CONTRACTS, "source workflow");
       assertContracts(sourcePackageReadme, README_CONTRACTS, "source package README");
 
       // observe/ is not an entrypoint, which is exactly why it was left out: both entrypoints import
@@ -200,6 +203,12 @@ describe("what actually ships", () => {
       for (const required of ["plugin/index.js", "tui/dist/index.js", "observe/runs.js", "README.md", "LICENSE"]) {
         assert.ok(opencode.files.includes(required), `opencode-feature-factory must ship ${required}`);
       }
+      for (const [name, packed] of [["opencode-feature-factory", opencode], ["prime-agent-feature-factory", prime]]) {
+        for (const required of ["skills/feature/SKILL.md", "skills/feature/WORKFLOW.md", "README.md", "LICENSE"]) {
+          assert.ok(packed.files.includes(required), `${name} must ship ${required}`);
+        }
+      }
+      assert.ok(prime.files.includes("extensions/index.js"), "Prime adapter must ship its extension");
       // The host loads the built bundle and does not transform JSX, so shipping source instead of
       // output would fail at load with a syntax error.
       assert.deepEqual(opencode.files.filter((file) => file.endsWith(".jsx")), [],
@@ -207,7 +216,7 @@ describe("what actually ships", () => {
 
       // Tests are not a release artifact. Shipping them doubles the tarball and invites a consumer to
       // run a suite against their own repository.
-      for (const { files } of [factory, opencode]) {
+      for (const { files } of [factory, opencode, prime]) {
         assert.deepEqual(files.filter((file) => file.includes("test/")), []);
       }
 
@@ -249,14 +258,20 @@ describe("what actually ships", () => {
       // The dependency has to have resolved locally, or the install silently pulled something else.
       const manifest = JSON.parse(readFileSync(
         join(consumer, "node_modules", "opencode-feature-factory", "package.json"), "utf8"));
+      const primeManifest = JSON.parse(readFileSync(
+        join(consumer, "node_modules", "prime-agent-feature-factory", "package.json"), "utf8"));
       const factory = JSON.parse(readFileSync(
         join(consumer, "node_modules", "feature-factory", "package.json"), "utf8"));
       assert.equal(manifest.dependencies["feature-factory"], factory.version,
-        "the installed integration must be pinned to the installed factory");
+        "the installed OpenCode integration must be pinned to the installed factory");
+      assert.equal(primeManifest.dependencies["feature-factory"], factory.version,
+        "the installed Prime integration must be pinned to the installed factory");
+      assert.deepEqual(primeManifest.pi.skills, ["./skills"]);
+      assert.deepEqual(primeManifest.pi.extensions, ["./extensions"]);
       assert.deepEqual(factory.exports, { ".": "./state/index.js" },
         "the existing package export must remain sufficient");
       assert.deepEqual(factory.files,
-        ["bin", "core", "observe", "state", "skills", "agents", "README.md", "LICENSE"],
+        ["bin", "core", "observe", "state", "WORKFLOW.md", "agents", "README.md", "LICENSE"],
         "the existing files allowlist must ship the contract without generated assets");
       // The integration depends on the factory and nothing else. It registers a tool as a plain
       // object literal rather than through `@opencode-ai/plugin`'s `tool()` helper — that helper is a
@@ -331,11 +346,17 @@ describe("what actually ships", () => {
       ], { cwd: consumer, encoding: "utf8" });
       assert.match(absent, /"valid": false/u, "the CLI must report an absent run rather than crash");
 
-      const skill = readFileSync(
-        join(consumer, "node_modules", "feature-factory", "skills", "feature", "SKILL.md"), "utf8");
+      const workflow = readFileSync(
+        join(consumer, "node_modules", "feature-factory", "WORKFLOW.md"), "utf8");
+      const opencodeWorkflow = readFileSync(
+        join(consumer, "node_modules", "opencode-feature-factory", "skills", "feature", "WORKFLOW.md"), "utf8");
+      const primeWorkflow = readFileSync(
+        join(consumer, "node_modules", "prime-agent-feature-factory", "skills", "feature", "WORKFLOW.md"), "utf8");
       const packageReadme = readFileSync(
         join(consumer, "node_modules", "feature-factory", "README.md"), "utf8");
-      assertContracts(skill, SKILL_CONTRACTS, "installed skill");
+      assert.equal(opencodeWorkflow, workflow, "OpenCode must ship the exact factory workflow");
+      assert.equal(primeWorkflow, workflow, "Prime must ship the exact factory workflow");
+      assertContracts(workflow, SKILL_CONTRACTS, "installed workflow");
       assertContracts(packageReadme, README_CONTRACTS, "installed package README");
       for (const [contract, pattern] of [
         ["init is requested with O", /factory init "\$R" --branch "\$FEATURE_BRANCH"[^\n]*--repo "\$O" --json/u],
@@ -346,14 +367,14 @@ describe("what actually ships", () => {
         ["push mismatch omits targets", /never contains either target/u],
         ["completed removal is guarded", /Only after all ref and archive verification succeeds, guard the destructive removal/u],
       ]) {
-        assert.match(skill, pattern, `installed skill must preserve the contract that ${contract}`);
+        assert.match(workflow, pattern, `installed workflow must preserve the contract that ${contract}`);
       }
-      const recovery = skill.indexOf("### Feature branch provenance and crash recovery");
-      const beforeLock = skill.indexOf("Immediately before claiming or stealing a lock", recovery);
-      const lock = skill.indexOf('factory lock "$R" claim', beforeLock);
-      const dispatch = skill.indexOf("dispatch the planned ticket", lock);
+      const recovery = workflow.indexOf("### Feature branch provenance and crash recovery");
+      const beforeLock = workflow.indexOf("Immediately before claiming or stealing a lock", recovery);
+      const lock = workflow.indexOf('factory lock "$R" claim', beforeLock);
+      const dispatch = workflow.indexOf("dispatch the planned ticket", lock);
       assert.ok(recovery >= 0 && recovery < beforeLock && beforeLock < lock && lock < dispatch,
-        "installed skill must recover/prove the branch before lock and dispatch");
+        "installed workflow must recover/prove the branch before lock and dispatch");
 
       // Executed *directly*, not through `node`. That is the only way the shebang and the executable
       // bit get exercised: npm sets the mode when packing a `bin` entry, and a tarball missing either

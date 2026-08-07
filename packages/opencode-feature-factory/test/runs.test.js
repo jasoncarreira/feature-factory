@@ -41,9 +41,9 @@ function repo(name) {
 // Drift here is silent and asymmetric — the run works, the sidebar reports "no runs" — which cost two
 // separate debugging rounds before the container even existed.
 const CONTAINER_NAME = (() => {
-  const skill = readFileSync(new URL("../../feature-factory/skills/feature/SKILL.md", import.meta.url), "utf8");
-  const name = /`O\/(\.factory-sandboxes)\/R\/\.factory\/R`/u.exec(skill)?.[1];
-  if (!name) throw new Error("SKILL.md must state the CLI-created sandbox manifest candidate");
+  const workflow = readFileSync(new URL("../../feature-factory/WORKFLOW.md", import.meta.url), "utf8");
+  const name = /`O\/(\.factory-sandboxes)\/R\/\.factory\/R`/u.exec(workflow)?.[1];
+  if (!name) throw new Error("WORKFLOW.md must state the CLI-created sandbox manifest candidate");
   return name;
 })();
 
@@ -1749,7 +1749,7 @@ describe("registering the workflow with the host", () => {
         writeFileSync(path, poison);
       }
 
-      const cfg = await configured({ root });
+      const cfg = await configured({ root, skillRoot: root });
       assert.deepEqual(Object.keys(cfg.agent).sort(), ["feature-factory", "run-orchestrator", "safe-agent"]);
       assert.equal(cfg.skills.paths[0], join(root, "skills"));
       assert.equal(globalThis[marker], undefined);

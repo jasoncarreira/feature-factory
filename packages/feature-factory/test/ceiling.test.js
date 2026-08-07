@@ -11,7 +11,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -106,14 +106,16 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     ]);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
-    // The skill is the authoritative instruction set, and nothing checked it against the CLI
+    // The workflow is the authoritative host-neutral instruction set, and nothing checked it against the CLI
     // it drives. Four of its examples had drifted far enough to block a normal merge and the
     // late-head recovery — including one this session introduced while correcting the same
     // command elsewhere in the same round. Every prose fix so far was found by reading, which
     // is why they kept coming back.
-    const markdown = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
-    const frontmatter = /^---\n([\s\S]*?)\n---/u.exec(markdown)?.[1];
-    assert.ok(frontmatter?.includes("`/feature [--autonomous | --headless] <ticket key | feature idea>`."));
+    const markdown = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
+    assert.equal(markdown.startsWith("---\n"), false, "WORKFLOW.md is not a platform skill");
+    for (const platformToken of ["OpenCode", "feature_background", "run-orchestrator", "FACTORY_SESSION_ID", "--background"]) {
+      assert.equal(markdown.includes(platformToken), false, `WORKFLOW.md must stay host-neutral: ${platformToken}`);
+    }
     const admissionIndex = markdown.indexOf("## Mode admission");
     const operatingModesIndex = markdown.indexOf("## Operating modes");
     const intakeIndex = markdown.indexOf("## Step 0 — Intake, run id, lock, manifest");
@@ -122,7 +124,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     for (const fragment of [
       "Before any intake action, including ticket, story, or design detection, branch intent, run-id\nderivation, manifest or state reads, and every `factory` command, process the raw invocation arguments",
       "Ignore leading whitespace.",
-      "The **mode prefix** is the maximal consecutive sequence of\n   whitespace-delimited tokens that are exactly and case-sensitively `--autonomous` or `--headless`.",
+      "The **mode prefix** is the maximal consecutive sequence of\nwhitespace-delimited tokens that are exactly and case-sensitively `--autonomous` or `--headless`.",
       "The first other token ends the prefix.",
       "If both distinct flags occur in that prefix, in either order, return exactly:",
       "`conflicting mode flags: --autonomous and --headless; choose one`.",
@@ -245,15 +247,15 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Every agent the skill dispatches must ship with the package. The predecessor's agent
     // definitions lived in a separate assets/ tree, so the skill named seven agents the
     // package did not contain and could not run a feature at all.
-    const targetList = /The only specialized task targets a run driver may dispatch are exactly:\n\n[\s\S]*?\n\n((?:- `[^`\n]+`\n)+)\nA `run-orchestrator` must not dispatch/u.exec(markdown)?.[1] ?? "";
+    const targetList = /The only specialized task targets a run driver may dispatch are exactly:\n\n((?:- `[^`\n]+`\n)+)\nA specialist must not dispatch/u.exec(markdown)?.[1] ?? "";
     const dispatched = [...new Set([...targetList.matchAll(/^- `([^`\n]+)`$/gmu)]
       .map(([, name]) => name))];
     const shipped = readdirSync(join(pkg, "agents")).filter((entry) => entry.endsWith(".md"))
       .map((entry) => entry.replace(/\.md$/u, ""));
     assert.deepEqual(dispatched.sort(), [...AGENT_NAMES].sort(),
       "the skill must recognize exactly the declared dispatched agents");
-    assert.ok(markdown.includes("For the OpenCode background driver, the host’s flat task allow makes the task tool available but does\nnot enforce the target names below. The list and its exclusions are prompt/skill policy."),
-      "the skill must state that target names are prompt/skill policy, not host enforcement");
+    assert.ok(markdown.includes("binding policy even if its host cannot enforce target names structurally."),
+      "the workflow must require adapters to enforce the closed target list");
     // And nothing ships that the chain never runs — security-reviewer is a declared non-goal,
     // so its presence would mean a dropped stage walked back in as a file.
     assert.deepEqual(shipped.sort(), [...AGENT_NAMES].sort(),
@@ -319,7 +321,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // paths, branches and ports that are one repository's
       "src\\/main\\/", "origin\\/development", "localhost:\\d+", ":9000",
     ].join("|"), "iu");
-    const prose = [...agentText, { name: "skills/feature/SKILL.md", text: markdown }];
+    const prose = [...agentText, { name: "WORKFLOW.md", text: markdown }];
     const leaked = prose.filter(({ text }) => REFERENCE_STACK.test(text)).map(({ name }) => name);
     assert.deepEqual(leaked, [], "an agent names the reference repository's stack instead of asking this one");
 
@@ -357,7 +359,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       ["ls-files", "--", "packages/feature-factory", "packages/opencode-feature-factory"],
       { cwd: repo, encoding: "utf8" },
     ).split("\n").filter((path) => predecessorExtensions.some((extension) => path.endsWith(extension)))
-      .map((path) => join(repo, path));
+      .map((path) => join(repo, path)).filter(existsSync);
     const predecessorOffenders = packageFiles
       .filter((path) => readFileSync(path, "utf8").toLowerCase().includes(predecessorMarker))
       .map((path) => path.slice(repo.length + 1));

@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "packages/feature-factory",
-    "packages/opencode-feature-factory"
+    "packages/opencode-feature-factory",
+    "packages/prime-agent-feature-factory"
   ],
   "repository": {
     "type": "git",
@@ -21,7 +22,9 @@
     "test:packages": "npm test --workspaces",
     "test:pack": "npm run build --workspace opencode-feature-factory && node --test test/pack.test.js",
     "test:factory": "npm test --workspace feature-factory",
-    "test:opencode": "npm test --workspace opencode-feature-factory"
+    "test:opencode": "npm test --workspace opencode-feature-factory",
+    "test:prime": "npm test --workspace prime-agent-feature-factory",
+    "sync:workflows": "node scripts/sync-workflows.js"
   },
   "engines": {
     "node": ">=22"

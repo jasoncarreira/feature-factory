@@ -150,7 +150,7 @@ const CLAIMS = [
   },
   {
     id: "slice-observe-command-must-be-ratified",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "`SLICE_TEST_COMMAND` must be copied verbatim from one persisted ratified `test_plan` entry; `factory observe` refuses any other supplied slice command.",
     expect: "refused",
     matches: /test command for slice 's1' must exactly match one ratified test_plan entry/u,
@@ -181,7 +181,7 @@ const CLAIMS = [
   },
   {
     id: "slices-seed-requires-plan-envelope",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "Run `work-decomposer` → `plan/slices.json` (required top-level shape: `{ \"slices\": [...] }`) and the\nhuman-readable `plan/plan.md`.",
     expect: "refused",
     matches: /^plan\/slices\.json must have top-level shape \{ "slices": \[\.\.\.\] \}\n$/u,
@@ -217,7 +217,7 @@ const CLAIMS = [
   },
   {
     id: "brief-approval-binds-the-presented-plan-bytes",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "Only after that approval succeeds, invoke the separate first seed using the exact plan bytes that were\npresented.",
     expect: "refused",
     matches: /^plan\/slices\.json changed since the brief gate was presented; re-present it before approving\n$/u,
@@ -248,7 +248,7 @@ const CLAIMS = [
   },
   {
     id: "slices-seed-binds-the-approved-plan-bytes",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "Only after that approval succeeds, invoke the separate first seed using the exact plan bytes that were\npresented.",
     expect: "refused",
     matches: /^plan\/slices\.json is not the plan the brief gate approved\n$/u,
@@ -273,7 +273,7 @@ const CLAIMS = [
   },
   {
     id: "slices-seed-requires-brief-approval",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "Never invoke `slices-seed` before Brief approval.",
     expect: "refused",
     matches: /^slices-seed requires the Brief gate to be approved\n$/u,
@@ -291,7 +291,7 @@ const CLAIMS = [
   },
   {
     id: "brief-approval-records-unseeded-state",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "On approval, record only the Brief decision. This produces a durable Brief-approved, zero-slices state",
     expect: "allowed",
     matches: /"brief": "approved"[\s\S]*"slices": \[\][\s\S]*"next": "seed-slices"/u,
@@ -308,7 +308,7 @@ const CLAIMS = [
   },
   {
     id: "approved-plan-uses-separate-first-seed",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "Only after that approval succeeds, invoke the separate first seed",
     expect: "allowed",
     matches: /seeded: 1/u,
@@ -324,7 +324,7 @@ const CLAIMS = [
   },
   {
     id: "pending-brief-changes-loop-represents-revised-plan",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "`pending` → `changes` → revise → `pending` → re-present → decision.",
     expect: "allowed",
     matches: /seeded: 1/u,
@@ -347,7 +347,7 @@ const CLAIMS = [
   },
   {
     id: "failed-first-seed-retries-identical-presented-bytes",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "restore the exact unchanged presented bytes and retry that\nfirst seed.",
     expect: "allowed",
     matches: /seeded: 1/u,
@@ -373,7 +373,7 @@ const CLAIMS = [
   },
   {
     id: "approved-plan-reopens-before-byte-change",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "reopen the approved\nBrief directly to `pending` **before mutating the plan**",
     expect: "allowed",
     matches: /seeded: 1/u,
@@ -398,7 +398,7 @@ const CLAIMS = [
   },
   {
     id: "approved-unseeded-status-outranks-later-work",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "whose status reports `next: seed-slices`",
     expect: "allowed",
     matches: /"next": "seed-slices"/u,
@@ -414,7 +414,7 @@ const CLAIMS = [
   },
   {
     id: "active-driver-owns-state-transitions",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "The active run driver owns every state-changing `factory` command for\nits run.",
     expect: "allowed",
     matches: /"story": "pending"/u,
@@ -426,41 +426,8 @@ const CLAIMS = [
     },
   },
   {
-    id: "background-session-parks-interactive-gate",
-    file: "skills/feature/SKILL.md",
-    fragment: "For an interactive background session, an orderly pending-gate park is complete only after all of\nthese actions:",
-    expect: "allowed",
-    matches: /"lock": "absent"[\s\S]*"story": "pending"/u,
-    act(repo) {
-      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
-      const terminalSelector = "An exact terminal `--background` with no separator, or one followed only by whitespace,\nreturns exactly `missing /feature request after --background; no session or run created.` before run-id\nderivation and every tool, client, state, or CLI effect.";
-      const innerAdmission = "The `run-orchestrator` applies only the inner maximal mode-prefix\nadmission and shared derivation before its first `factory` command. It never repeats outer background\nplacement admission on the forwarded inner request, so an inner second `--background` remains request\ncontent.";
-      assert.ok(prose.includes(terminalSelector));
-      assert.ok(prose.includes(innerAdmission));
-      assert.equal(prose.includes("repeats outer/inner admission"), false);
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
-      const artifact = join(runDir, "artifacts", "story.md");
-      writeFileSync(artifact, "story\n");
-      assert.equal(factory(repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
-      assert.equal(factory(repository, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]).ok, true);
-      assert.equal(existsSync(artifact), true);
-      const run = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
-      assert.deepEqual(run.gates.story, { status: "pending", at: null, artifact: "artifacts/story.md" });
-      const pending = JSON.parse(factory(repository, ["status", RUN, "--json"]).out);
-      assert.equal(pending.mode, "interactive");
-      assert.equal(pending.gates.story, "pending");
-      assert.equal(pending.lock_session, "session-a");
-      assert.equal(factory(repository, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
-      const result = factory(repository, ["status", RUN, "--json"]);
-      const unlocked = JSON.parse(result.out);
-      assert.equal(unlocked.lock, "absent");
-      assert.equal(unlocked.lock_session, null);
-      return result;
-    },
-  },
-  {
     id: "exact-gate-artifact-map",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "| Story | `story` | `artifacts/story.md` |\n| Brief | `brief` | `artifacts/technical-brief.md` |\n| Pre-PR | `pre_pr` | `gates/pre_pr.md` |",
     expect: "allowed",
     matches: /gate: pre_pr\nstatus: pending/u,
@@ -491,33 +458,8 @@ const CLAIMS = [
     },
   },
   {
-    id: "same-background-session-reclaims-and-approves",
-    file: "skills/feature/SKILL.md",
-    fragment: "Claim with\nthe same real `FACTORY_SESSION_ID`, then repeat the qualified status verification.",
-    expect: "allowed",
-    matches: /gate: story\nstatus: approved/u,
-    act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
-      writeFileSync(join(runDir, "artifacts", "story.md"), "story\n");
-      assert.equal(factory(repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
-      assert.equal(factory(repository, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]).ok, true);
-      assert.equal(factory(repository, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
-      const parkedStatus = JSON.parse(factory(repository, ["status", RUN, "--json"]).out);
-      assert.equal(parkedStatus.mode, "interactive");
-      assert.equal(parkedStatus.gates.story, "pending");
-      assert.equal(parkedStatus.lock, "absent");
-      assert.equal(factory(repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
-      const reclaimed = JSON.parse(factory(repository, ["status", RUN, "--json"]).out);
-      assert.equal(reclaimed.lock_session, "session-a");
-      assert.equal(reclaimed.gates.story, "pending");
-      const result = factory(repository, ["gate", RUN, "story", "approved", "--now", NOW]);
-      assert.equal(JSON.parse(factory(repository, ["status", RUN, "--json"]).out).next, "gate:brief");
-      return result;
-    },
-  },
-  {
     id: "same-background-session-changes-and-represents",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "`changes-at-gate:<name>`, revises only the affected stage, and re-presents it pending.",
     expect: "allowed",
     matches: /gate: story\nstatus: pending/u,
@@ -540,8 +482,8 @@ const CLAIMS = [
   },
   {
     id: "same-background-session-stops-unlocked-and-nonterminal",
-    file: "skills/feature/SKILL.md",
-    fragment: "This is an unlocked\n  nonterminal stop: do not terminalize it",
+    file: "WORKFLOW.md",
+    fragment: "This is an unlocked\nnonterminal stop: do not terminalize it",
     expect: "allowed",
     matches: /"lock": "absent"[\s\S]*"story": "stop"[\s\S]*"terminal_result": null[\s\S]*"next": "stopped-at-gate:story"/u,
     act(repo) {
@@ -573,7 +515,7 @@ const CLAIMS = [
   // opencode's next five, in its order. Each was enforced and unstated, or stated and unproven.
   {
     id: "seeded-plan-freezes-an-approved-gate",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "**Once the plan is seeded, only Gate 3 may re-open.**",
     expect: "refused",
     matches: /gate 'story' cannot be re-opened once approved and its plan is seeded/u,
@@ -587,7 +529,7 @@ const CLAIMS = [
   // contradicts itself has nothing built to strand, and blocking it cost a whole run.
   {
     id: "unseeded-approved-gate-still-reopens",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "**Before the plan is seeded, an approved gate still re-opens**",
     expect: "allowed",
     matches: /"story": "approved"/u,
@@ -605,7 +547,7 @@ const CLAIMS = [
   // replacement. `changes` asks for another round, so the round has to be reachable.
   {
     id: "changes-reopens-at-any-gate",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "**`changes` is a request for another round, not the end of the run.**",
     expect: "allowed",
     matches: /"story": "approved"/u,
@@ -621,7 +563,7 @@ const CLAIMS = [
   },
   {
     id: "pre-pr-may-reopen",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "factory gate <run-id> pre_pr pending",
     expect: "allowed",
     matches: /status: pending/u,
@@ -635,7 +577,7 @@ const CLAIMS = [
   },
   {
     id: "publication-needs-all-three-gates",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "**all three gates currently approved**",
     expect: "refused",
     matches: /every gate must be approved; not approved: story\(absent\)/u,
@@ -647,7 +589,7 @@ const CLAIMS = [
   },
   {
     id: "merge-needs-two-parents",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "refuses a merge commit that does not have exactly two parents",
     expect: "refused",
     matches: /has 1 parent; a slice merge must be a two-parent merge \(use --no-ff\)/u,
@@ -673,7 +615,7 @@ const CLAIMS = [
   },
   {
     id: "base-ref-immutable-after-activation",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "`base_ref` is fixed when the slice is activated and cannot be changed afterwards",
     expect: "refused",
     matches: /base_ref is immutable once recorded/u,
@@ -691,7 +633,7 @@ const CLAIMS = [
   },
   {
     id: "init-needs-no-branch-or-worktree",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "**Do not ask the engineer for a branch or worktree.**",
     expect: "allowed",
     matches: /branch: feature\/app-1/u,
@@ -706,7 +648,7 @@ const CLAIMS = [
   },
   {
     id: "pr-base-uses-configured-worktree",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "Otherwise require the symbolic branch in the configured operator worktree",
     expect: "allowed",
     matches: /pr_base: integration/u,
@@ -725,7 +667,7 @@ const CLAIMS = [
   },
   {
     id: "pr-base-override-bypasses-worktree-observation",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "An explicit `PR_BASE` wins.",
     expect: "allowed",
     matches: /pr_base: release\/1/u,
@@ -744,7 +686,7 @@ const CLAIMS = [
   },
   {
     id: "detached-pr-base-is-refused",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "detached, missing, escaping, or unprovable worktree state is refused by init.",
     expect: "refused",
     matches: /could not observe a symbolic branch in PR base worktree '\.' for sandbox/u,
@@ -760,7 +702,7 @@ const CLAIMS = [
   },
   {
     id: "missing-pr-base-worktree-is-refused",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "detached, missing, escaping, or unprovable worktree state is refused by init.",
     expect: "refused",
     matches: /physical containment could not be proved for sandbox/u,
@@ -774,7 +716,7 @@ const CLAIMS = [
   },
   {
     id: "outside-pr-base-worktree-is-refused",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "detached, missing, escaping, or unprovable worktree state is refused by init.",
     expect: "refused",
     matches: /configured worktree escapes the sandbox/u,
@@ -791,7 +733,7 @@ const CLAIMS = [
   },
   {
     id: "existing-new-manifest-is-resumed-not-reinitialized",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "Once a manifest candidate exists, do\nnot call `factory init` again or backfill a missing legacy `pr_base`.",
     expect: "refused",
     matches: /run 'app-1' already exists at '.*run\.json'; run status\/resume with --repo/u,
@@ -809,7 +751,7 @@ const CLAIMS = [
   },
   {
     id: "existing-manifest-resumes-from-status",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "run `factory status <run-id> --json` and resume; never",
     expect: "allowed",
     matches: /"valid": true[\s\S]*"next": "gate:story"/u,
@@ -820,7 +762,7 @@ const CLAIMS = [
   },
   {
     id: "existing-legacy-manifest-is-resumed-not-backfilled",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "Once a manifest candidate exists, do\nnot call `factory init` again or backfill a missing legacy `pr_base`.",
     expect: "refused",
     matches: /run 'app-1' already exists at '.*run\.json'; run status\/resume with --repo/u,
@@ -836,7 +778,7 @@ const CLAIMS = [
   },
   {
     id: "scaffold-only-sandbox-is-retained",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "A refused or uncertain init retains its\nreported state and path for inspection; do not substitute another destination or repeat init.",
     expect: "refused",
     matches: /sandbox destination '.*\.factory-sandboxes\/app-1' already exists without a manifest; it was not reused, changed, or deleted/u,
@@ -854,7 +796,7 @@ const CLAIMS = [
   },
   {
     id: "new-status-exposes-pr-base",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "Only a\nsuccessful JSON response selects paths.",
     expect: "allowed",
     matches: /pr_base: feature/u,
@@ -867,7 +809,7 @@ const CLAIMS = [
   },
   {
     id: "unknown-init-outcome-stops-on-invalid-manifest",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "An invalid candidate is surfaced and never replaced.",
     expect: "allowed",
     matches: /"valid": false[\s\S]*"error": "run: unknown keys: unexpected"/u,
@@ -885,7 +827,7 @@ const CLAIMS = [
   },
   {
     id: "unknown-init-outcome-stops-on-missing-steps-manifest",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "An invalid candidate is surfaced and never replaced.",
     expect: "allowed",
     matches: /"valid": false[\s\S]*steps/u,
@@ -909,7 +851,7 @@ const CLAIMS = [
   },
   {
     id: "legacy-step-six-requires-human-base-without-inference-or-backfill",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "For a legacy manifest where `pr_base` is absent or null, stop and\nrequire a human/operator to choose or confirm the exact target, then pass that value through\n`gh pr create --base`. Never infer it from HEAD, the feature branch, repository or forge defaults, and\nnever backfill the legacy manifest.",
     expect: "allowed",
     matches: /"pr_base": null/u,
@@ -927,7 +869,7 @@ const CLAIMS = [
   },
   {
     id: "step-six-reads-recorded-pr-base",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "gh pr create --draft --base \"<pr_base>\" --head \"<branch>\" --title \"<title>\" --body-file \"<body-file>\"",
     expect: "allowed",
     matches: /"pr_base": "feature"/u,
@@ -938,12 +880,12 @@ const CLAIMS = [
   },
   {
     id: "repository-resolver-contract-declares-its-own-intake",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: '"verify_timeout_ms": 900000',
     expect: "allowed",
     matches: /"run_id": "205"/u,
     act(repo) {
-      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const prose = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
       const configured = /#### Configured resolver path\n\n([\s\S]*?)\n\n#### Absence means no repository resolver/u.exec(prose)?.[1] ?? "";
       const absence = /#### Absence means no repository resolver\n\n([\s\S]*?)\n\n#### Resolver and repository verification boundaries/u.exec(prose)?.[1] ?? "";
       const boundaries = /#### Resolver and repository verification boundaries\n\n([\s\S]*?)\n\n#### Remaining intake classification/u.exec(prose)?.[1] ?? "";
@@ -967,7 +909,7 @@ const CLAIMS = [
       assert.match(configured, /exact same stdout bytes unchanged to `story-reader` as\n   `ISSUE_PAYLOAD`/u);
       assert.match(configured, /configured `run_id` must match `\^\[a-z0-9\]\(\?:\[a-z0-9\._-\]\*\[a-z0-9\]\)\?\$`/u);
       assert.match(configured, /digit-only value must be\npositive decimal without leading zeroes\. Bind `R` exactly to that value/u);
-      assert.match(configured, /becomes the background `runId`, expected-ID comparison value, manifest candidate name,\nsandbox name, and default feature-branch suffix/u);
+      assert.match(configured, /becomes the adapter run ID, expected-ID comparison value, manifest candidate name,\nsandbox name, and default feature-branch suffix/u);
       for (const refusal of [
         "invalid factory config: .factory.json; no session or run created.",
         "invalid factory config: .factory.json entry 'verify_timeout_ms' must be a positive integer; no session or run created.",
@@ -975,7 +917,7 @@ const CLAIMS = [
         "factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.",
         "factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.",
       ]) assert.ok(prose.includes(refusal), `resolver refusal is missing: ${refusal}`);
-      assert.match(configured, /refusals stop before canonical run selection, `feature_background`, manifest or state reads,\nsandbox creation, every `factory` command, or specialist dispatch/u);
+      assert.match(configured, /refusals stop before canonical run selection, placement dispatch, manifest or state reads,\nsandbox creation, every `factory` command, or specialist dispatch/u);
       assert.match(configured, /They never continue through the ticket, `story-reader`, or\n`story-writer` paths/u);
       assert.match(configured, /Never print,\nquote, reproduce, log, or persist the configured command string, an expanded or resolved command line,\ncredentials, or shell\/tool diagnostics/u);
       // Blocker 2: a refusal that names only the entry leaves an operator resolving several references
@@ -1003,9 +945,9 @@ const CLAIMS = [
       assert.match(boundaries, /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted[\s\S]*at most two executions in that merge invocation[\s\S]*timeout and retry never apply to resolver, slice, or Gate 3 commands/u);
       assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |"));
       assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; the static config value itself | Non-empty account-name string in the config | Missing, non-string, or empty makes the config malformed | Not read for identity enforcement; consumption is deferred to #216. |"));
-      assert.match(prose, /Foreground, background primary, and background `run-orchestrator`\nderivation use the following same configured-or-absent policy/u);
-      assert.match(prose, /background primary does not forward or persist its\npayload/u);
-      assert.match(prose, /uses its own non-empty resolver stdout unchanged as `ISSUE_PAYLOAD` and requires exact\nequality between its derived `R` and the control part's expected canonical ID before its first `factory`\ncommand/u);
+      assert.match(prose, /Every host adapter and run driver uses the following same\nconfigured-or-absent policy/u);
+      assert.match(prose, /adapter transfers execution to another run\ndriver, that driver independently derives its own payload through this same policy/u);
+      assert.match(prose, /uses its own non-empty resolver stdout unchanged as `ISSUE_PAYLOAD`, requires exact equality between its\nderived `R` and the adapter-provided expected canonical ID before its first `factory` command/u);
       assert.match(prose, /configured exit-zero, zero-byte result may therefore classify a bare integer as ordinary prose/u);
       for (const postMergeClaim of [
         "production source is never repaired on the integration branch",
@@ -1041,7 +983,7 @@ const CLAIMS = [
       fragment: "include every attempt under\n`## Post-merge test-only repairs`",
     },
   ].map(({ id, fragment }) => ({
-    id, file: "skills/feature/SKILL.md", fragment, expect: "allowed", matches: /"run_id": "app-1"/u,
+    id, file: "WORKFLOW.md", fragment, expect: "allowed", matches: /"run_id": "app-1"/u,
     act(repo) {
       const initialized = initFresh(repo, [RUN, "--now", NOW]);
       return factory(initialized.repository, ["status", RUN, "--json"]);
@@ -1049,12 +991,12 @@ const CLAIMS = [
   })),
   {
     id: "repository-verify-exhaustion-releases-a-nonterminal-run",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "Outcome: repository-verify-exhausted",
     expect: "allowed",
     matches: /"status": "running"[\s\S]*"lock": "absent"[\s\S]*"terminal_result": null/u,
     act(repo) {
-      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const prose = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
       const policy = prose.slice(prose.indexOf("### Orderly repository-verification exhaustion"), prose.indexOf("### Post-merge finding routing and repair journal"));
       assert.match(policy, /terminalize means terminate the current `factory slice … merged` CLI invocation and\s+its enclosing run-driver invocation[\s\S]*does not mean the irreversible\s+factory terminal transition/u);
       assert.match(policy, /Await every in-flight specialist task[\s\S]*Stop\s+scheduling heartbeats and await every heartbeat already in flight[\s\S]*factory lock "\$R" release --session "\$SESSION_ID" --repo "\$RUN_REPO"[\s\S]*factory status "\$R" --json --repo "\$RUN_REPO"[\s\S]*Outcome: repository-verify-exhausted/u);
@@ -1066,7 +1008,7 @@ const CLAIMS = [
   },
   {
     id: "repository-verify-exhaustion-retains-an-unverified-lock",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "selected repository, perform no further orchestration, and make no resumability claim.",
     expect: "refused",
     matches: /run 'app-1' is held by session session-a/u,
@@ -1082,14 +1024,14 @@ const CLAIMS = [
   },
   {
     id: "repository-verify-restart-verifies-a-new-claim-before-replay",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "never require session-ID inequality.",
     expect: "allowed",
     matches: /"lock": "(?:held|stale)"[\s\S]*"lock_session": "session-a"/u,
     act(repo) {
-      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const prose = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
       const policy = prose.slice(prose.indexOf("A later driver invocation repeats normal run selection"), prose.indexOf("### Post-merge finding routing and repair journal"));
-      assert.match(policy, /actual host-exported\s+`FACTORY_SESSION_ID`[\s\S]*factory lock "\$R" claim --session "\$SESSION_ID" --repo "\$RUN_REPO"[\s\S]*reports that exact session as owner[\s\S]*Only then may it perform same-SHA reconciliation/u);
+      assert.match(policy, /binds `SESSION_ID` to the actual stable host-adapter identity[\s\S]*factory lock "\$R" claim --session "\$SESSION_ID" --repo "\$RUN_REPO"[\s\S]*reports that exact session as owner[\s\S]*Only then may it perform same-SHA reconciliation/u);
       const initialized = initFresh(repo, [RUN, "--now", NOW]);
       assert.equal(factory(initialized.repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
       assert.equal(factory(initialized.repository, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
@@ -1099,12 +1041,12 @@ const CLAIMS = [
   },
   {
     id: "post-merge-production-defect-terminalizes",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "A production defect terminalizes\n`needs-human`; production source is never repaired on the integration branch.",
     expect: "allowed",
     matches: /"status": "needs-human"[\s\S]*factory config entry 'verify'[\s\S]*\.factory\.json verify suite/u,
     act(repo) {
-      const skill = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
       const stepFour = skill.slice(skill.indexOf("## Step 4 — Build slices"), skill.indexOf("## Step 5 — Integrate"));
       assert.match(stepFour,
         /The reason names the full `INTRODUCING_MERGE`, “factory config entry 'verify'”, the numeric\s+or unavailable status, and an independently established failing-test identifier when one exists;\s+otherwise name the truthful `\.factory\.json verify suite`\./u,
@@ -1142,7 +1084,7 @@ const CLAIMS = [
       assert.match(reader, /Pass every supplied link through verbatim/iu);
       assert.doesNotMatch(reader, /two shapes|Jira|APP-|cloudId|getJira|searchJira|Jira fields/iu);
       assert.equal((reader.match(/Exactly one shape/gu) ?? []).length, 1);
-      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      const prose = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
       assert.match(prose, /Give the exact same stdout bytes unchanged to `story-reader` as\s+`ISSUE_PAYLOAD` and untrusted supplied normalization input/u);
       assert.match(prose, /specialist performs no external\s+lookup/u);
 
@@ -1152,7 +1094,7 @@ const CLAIMS = [
   },
   {
     id: "no-mode-persists-interactive",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "With no recognized leading mode token, omit `--mode`; existing `factory init` records\n     `interactive`.",
     expect: "allowed",
     matches: /"mode": "interactive"/u,
@@ -1163,7 +1105,7 @@ const CLAIMS = [
   },
   {
     id: "autonomous-mode-persists",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "`--autonomous` maps only to `factory init --mode autonomous`.",
     expect: "allowed",
     matches: /"mode": "autonomous"/u,
@@ -1174,7 +1116,7 @@ const CLAIMS = [
   },
   {
     id: "headless-mode-persists",
-    file: "skills/feature/SKILL.md",
+    file: "WORKFLOW.md",
     fragment: "terminalize with reason exactly `headless run reached a human gate`:",
     expect: "allowed",
     matches: /"status": "needs-human"[\s\S]*"mode": "headless"[\s\S]*"terminal_result": \{\s*"status": "needs-human",\s*"reason": "headless run reached a human gate"\s*\}[\s\S]*"next": "terminal:needs-human"/u,
