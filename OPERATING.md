@@ -264,11 +264,20 @@ PUBLISHING_TOKEN="$(gh auth token --user "$DECLARED_PUBLISHING_IDENTITY")"
 GH_TOKEN="$PUBLISHING_TOKEN" gh pr create --draft ...
 ```
 
-It works, and it is what makes an unprepared launch publish. It also means the factory reads a secret out
-of the operator's keyring and injects it into child environments on every publication — which is the
-exposure a run is otherwise able to prove it never touches. Given a choice between a run that publishes
-without preparation and a run that cannot hold a credential, this repository chose the second, and
-accepted that the cost is an operator error message.
+It works, and it is what makes an unprepared launch publish. The line it crosses is not whether a run
+holds a credential — a prepared run plainly does. The launcher injects `GH_TOKEN`, the run inspects that
+inherited value, and both publication effects consume it. **The distinction is acquisition and selection
+versus consumption.**
+
+Today the factory consumes a credential it was explicitly given, and never chooses one. It does not read
+the operator's keyring, does not enumerate authenticated accounts, does not decide which of them the
+declared identity corresponds to, and does not fall back when the answer is inconvenient. The rejected
+design adds all four: the factory would reach into ambient stored authentication and select a secret on
+the operator's behalf, on every publication.
+
+That is a materially larger trust boundary than passing along a value the operator handed over, and it is
+the one the repository declined. The cost of declining is that an unprepared launch produces an error
+message instead of a pull request.
 
 **That choice is enforced, not merely described.** At the three identity guards the skill forbids `gh
 auth`, a `GH_TOKEN=` assignment in argv, command substitution, and any retry or fallback, and
