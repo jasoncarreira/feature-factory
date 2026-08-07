@@ -31,6 +31,24 @@ const CLI_COMMANDS = [
   "slices-seed", "slice", "observe", "validator", "pr",
 ];
 
+// Test-owned complete command surface. This must not be built from COMMANDS: accepting a new
+// flag is a public CLI expansion even when no documentation has caught up with it yet.
+const CLI_FLAGS = {
+  init: ["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"],
+  status: ["--repo", "--json"],
+  resume: ["--repo", "--session", "--now", "--json"],
+  lock: ["--repo", "--session", "--branch", "--ttl-ms", "--now", "--json"],
+  heartbeat: ["--repo", "--session", "--now", "--json"],
+  gate: ["--repo", "--artifact", "--now", "--json"],
+  step: ["--repo", "--attempts", "--review-ref", "--evidence-ref", "--now", "--json"],
+  terminal: ["--repo", "--reason", "--now", "--json"],
+  "slices-seed": ["--repo", "--from", "--now", "--json"],
+  slice: ["--repo", "--attempts", "--worktree", "--branch", "--evidence-ref", "--review-ref", "--merge-commit", "--now", "--json"],
+  observe: ["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--repository-verify", "--claim", "--status", "--blocked-reason", "--now", "--json"],
+  validator: ["--repo", "--report", "--now", "--json"],
+  pr: ["--repo", "--url", "--now", "--json"],
+};
+
 const RUN_JSON_KEYS = [
   // the inherited fifteen
   "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
@@ -100,11 +118,7 @@ const proseFiles = sourceFiles(pkg, [], PROSE_EXTENSIONS);
 describe("ceiling — scope cannot grow without editing this file", () => {
   it("exposes exactly the declared CLI commands, and the skill invokes only those", () => {
     assert.deepEqual(Object.keys(COMMANDS).sort(), [...CLI_COMMANDS].sort());
-    assert.deepEqual(COMMANDS.init, [
-      "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode",
-      "--max-parallel-slices", "--max-retries", "--now", "--json",
-    ]);
-    assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
+    assert.deepEqual(Object.fromEntries(Object.entries(COMMANDS).map(([command, flags]) => [command, [...flags]])), CLI_FLAGS);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
     // The skill is the authoritative instruction set, and nothing checked it against the CLI

@@ -18,6 +18,17 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const cli = resolve(pkg, "bin", "factory.js");
   const skill = readFileSync(resolve(pkg, "skills", "feature", "SKILL.md"), "utf8");
+  // Test-owned, ordered boundary: do not derive this from the production export. A missing
+  // production entry must fail before any child fixture can accidentally inherit it.
+  const sensitiveChildEnvDenylist = [
+    "DEBUG", "GH_DEBUG", "CURL_VERBOSE", "GIT_TRACE", "GIT_TRACE_PACKET",
+    "GIT_TRACE_PACK_ACCESS", "GIT_TRACE_PERFORMANCE", "GIT_TRACE_SETUP", "GIT_TRACE_SHALLOW",
+    "GIT_TRACE_FSMONITOR", "GIT_TRACE_CURL", "GIT_TRACE_CURL_NO_DATA", "GIT_CURL_VERBOSE",
+    "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF", "GIT_TRACE2_BRIEF",
+    "GIT_TRACE2_CONFIG_PARAMS", "GIT_TRACE2_ENV_VARS", "GIT_TRACE2_PARENT_SID", "GIT_TRACE_REDACT",
+    "GIT_REDIRECT_STDOUT", "GIT_REDIRECT_STDERR", "GCM_TRACE", "GCM_TRACE2", "GCM_DEBUG",
+    "GIT_CONFIG_PARAMETERS",
+  ];
   const secret = "https://user224unique:token224unique@push.invalid/org/target224.git";
   const secretTwo = "https://user225unique:token225unique@push.invalid/org/target225.git";
   const specialSecret = 'https://user224unique:token224unique@push.invalid/org/a"b\\c-é.git';
@@ -83,7 +94,10 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     return {
       calls, writes, opened,
       operations: {
-        env: Object.fromEntries([...SENSITIVE_CHILD_ENV_DENYLIST, ...providerNames].map((name) => [name, `v-${name}`])),
+        env: {
+          ...Object.fromEntries(sensitiveChildEnvDenylist.map((name) => [name, secret])),
+          ...Object.fromEntries(providerNames.map((name) => [name, `v-${name}`])),
+        },
         realpath: (path) => path,
         spawn(command, args, options) {
           calls.push({ command, args, options });
@@ -159,6 +173,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     visit(root);
   };
 
+  opaque(SENSITIVE_CHILD_ENV_DENYLIST, sensitiveChildEnvDenylist, "r-denylist");
   for (const [index, fragment] of [
     "effective push target in code, recaptures both current values",
     "private mode-0600 configuration fragment",
@@ -174,7 +189,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   yes(!skill.includes("remote get-url --push origin"), "r-s20");
   yes(!skill.includes("remote.origin.pushurl"), "r-s21");
   yes(!skill.includes("CURRENT_OPERATOR_PUSH"), "r-s22");
-  for (const [index, name] of SENSITIVE_CHILD_ENV_DENYLIST.entries()) yes(skill.includes(`-u ${name}`), `r-d${index}`);
+  for (const [index, name] of sensitiveChildEnvDenylist.entries()) yes(skill.includes(`-u ${name}`), `r-d${index}`);
   yes(/factory gate "\$R" pre_pr approved --repo "\$RUN_REPO"/u.test(skill), "r-s23");
   yes(/git -C "\$RUN_REPO" push --no-verify origin/u.test(skill), "r-s24");
   const validatorCode = /node -e '([^']+)' 2>\/dev\/null/u.exec(skill)?.[1];
@@ -213,12 +228,14 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     const { fake, invoke } = invokeConfigure(targetResponses(target));
     opaque(invoke(), "verified", `r-a${index}`);
     opaque(fake.calls.map(({ args }) => args), expectedTargetArgv, `r-aa${index}`);
-    noLeaks(fake.calls.flatMap((call) => [call.command, ...call.args, ...Object.keys(call.options.env)]), `r-al${index}`);
+    noLeaks(fake.calls.flatMap((call) => [
+      call.command, ...call.args, ...Object.keys(call.options.env), ...Object.values(call.options.env),
+    ]), `r-al${index}`);
     for (const [callIndex, call] of fake.calls.entries()) {
       yes(call.options.shell === false && !Object.hasOwn(call.options, "encoding"), `r-ao${index}-${callIndex}`);
       opaque(call.options.stdio, ["ignore", "pipe", "pipe"], `r-as${index}-${callIndex}`);
       yes(call.options.env.LC_ALL === "C" && call.options.env.GIT_TERMINAL_PROMPT === "0", `r-ae${index}-${callIndex}`);
-      for (const [denyIndex, name] of SENSITIVE_CHILD_ENV_DENYLIST.entries()) {
+      for (const [denyIndex, name] of sensitiveChildEnvDenylist.entries()) {
         yes(!Object.hasOwn(call.options.env, name), `r-ad${index}-${callIndex}-${denyIndex}`);
       }
       for (const [providerIndex, name] of providerNames.entries()) {
@@ -410,16 +427,24 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     yes(/unknown key/u.test(manifestFirst.stderr) && !manifestFirst.stderr.includes("effective push target"), "r-manifest-first");
     noLeaks([manifestFirst.stdout, manifestFirst.stderr], "r-manifest-first-output");
     writeFileSync(manifestPath, manifestBefore);
+    git(freshOperator, "config", "--replace-all", "remote.origin.pushurl", secret);
+    execFileSync(process.execPath, [cli, "lock", "r-cli", "claim", "--session", "s1", "--repo", initialized.sandbox_path], { stdio: "ignore" });
+    git(freshOperator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
     const lockInventory = inventory(initialized.sandbox_path);
     const lockRefusal = spawnSync(process.execPath, [cli, "lock", "r-cli", "claim", "--session", "s1", "--repo", initialized.sandbox_path], { encoding: "utf8" });
     opaque(lockRefusal.stderr, `${fixed.mismatch(initialized.sandbox_path)}\n`, "r-lock-message");
     opaque(inventory(initialized.sandbox_path), lockInventory, "r-lock-retained");
-    yes(!existsSync(join(initialized.run_dir, "factory.lock")), "r-lock-absent");
+    yes(existsSync(join(initialized.run_dir, "factory.lock")), "r-lock-present");
     noLeaks([lockRefusal.stdout, lockRefusal.stderr], "r-lock-output");
+    const stealRefusal = spawnSync(process.execPath, [cli, "lock", "r-cli", "steal", "--session", "s2", "--repo", initialized.sandbox_path], { encoding: "utf8" });
+    opaque(stealRefusal.stderr, `${fixed.mismatch(initialized.sandbox_path)}\n`, "r-steal-message");
+    opaque(inventory(initialized.sandbox_path), lockInventory, "r-steal-retained");
+    noLeaks([stealRefusal.stdout, stealRefusal.stderr], "r-steal-output");
+    execFileSync(process.execPath, [cli, "lock", "r-cli", "release", "--session", "s1", "--repo", initialized.sandbox_path], { stdio: "ignore" });
 
     const cliFragmentBytes = readFileSync(cliFragment);
     const tracePaths = [join(root, "trace.log"), join(root, "trace2.log"), join(root, "gcm.log")];
-    const targetEnv = { ...process.env, ...Object.fromEntries(SENSITIVE_CHILD_ENV_DENYLIST.map((name) => [name, secret])) };
+    const targetEnv = { ...process.env, ...Object.fromEntries(sensitiveChildEnvDenylist.map((name) => [name, secret])) };
     [targetEnv.GIT_TRACE, targetEnv.GIT_TRACE2_EVENT, targetEnv.GCM_TRACE] = tracePaths;
     const gate = (label, expected) => {
       const beforeGate = inventory(initialized.sandbox_path);
@@ -493,10 +518,11 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     const factoryJournal = join(root, "factory-argv.jsonl");
     mkdirSync(bin);
     const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
-    const journalPrelude = 'const fs=require("node:fs");const deny=JSON.parse(process.env.DENYLIST);const present=deny.filter((key)=>Object.hasOwn(process.env,key));const providers=JSON.parse(process.env.PROVIDERS).filter((key)=>Object.hasOwn(process.env,key));';
-    writeFileSync(join(bin, "git"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.GIT_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");if(process.env.GIT_SHIM_FAIL==="1"){const corpus=JSON.parse(process.env.SHIM_CORPUS).join("\\n")+"\\n";process.stdout.write(corpus);process.stderr.write(corpus);for(const key of ["GIT_TRACE","GIT_TRACE2_EVENT","GCM_TRACE"]){if(process.env[key])fs.appendFileSync(process.env[key],corpus)}process.exit(42)}const r=require("node:child_process").spawnSync(process.env.REAL_GIT,process.argv.slice(2),{stdio:"inherit",env:process.env});process.exit(r.status??1);\n`);
-    writeFileSync(join(bin, "gh"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.GH_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");process.stdout.write(process.env.GH_STDOUT||"");process.stderr.write(process.env.GH_STDERR||"");process.exit(Number(process.env.GH_EXIT||0));\n`);
-    writeFileSync(join(bin, "factory"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.FACTORY_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");\n`);
+    const journalPrelude = 'const fs=require("node:fs");const deny=JSON.parse(process.env.DENYLIST);const present=deny.filter((key)=>Object.hasOwn(process.env,key));const providers=JSON.parse(process.env.PROVIDERS).filter((key)=>Object.hasOwn(process.env,key));const values=Object.fromEntries([...deny,...providers].map((key)=>[key,process.env[key]??null]));';
+    const factoryJournalPrelude = 'const fs=require("node:fs");const deny=JSON.parse(process.env.DENYLIST);const present=deny.filter((key)=>Object.hasOwn(process.env,key));const providers=JSON.parse(process.env.PROVIDERS).filter((key)=>Object.hasOwn(process.env,key));';
+    writeFileSync(join(bin, "git"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.GIT_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers,values})+"\\n");if(process.env.GIT_SHIM_FAIL==="1"){const corpus=JSON.parse(process.env.SHIM_CORPUS).join("\\n")+"\\n";process.stdout.write(corpus);process.stderr.write(corpus);for(const key of ["GIT_TRACE","GIT_TRACE2_EVENT","GCM_TRACE"]){if(process.env[key])fs.appendFileSync(process.env[key],corpus)}process.exit(42)}const r=require("node:child_process").spawnSync(process.env.REAL_GIT,process.argv.slice(2),{stdio:"inherit",env:process.env});process.exit(r.status??1);\n`);
+    writeFileSync(join(bin, "gh"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.GH_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers,values})+"\\n");process.stdout.write(process.env.GH_STDOUT||"");process.stderr.write(process.env.GH_STDERR||"");process.exit(Number(process.env.GH_EXIT||0));\n`);
+    writeFileSync(join(bin, "factory"), `#!/usr/bin/env node\n${factoryJournalPrelude}fs.appendFileSync(process.env.FACTORY_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");\n`);
     for (const name of ["git", "gh", "factory"]) chmodSync(join(bin, name), 0o755);
     const publicationStart = skill.indexOf("set +x\npublication_child()");
     const publicationScript = skill.slice(publicationStart, skill.indexOf("\n```", publicationStart));
@@ -508,8 +534,8 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
       if (seedTrace) writeFileSync(publicationTrace[0], traceSentinel);
       const env = {
         ...process.env,
-        ...Object.fromEntries(SENSITIVE_CHILD_ENV_DENYLIST.map((name) => [name, secret])),
-        PATH: `${bin}:${process.env.PATH}`, DENYLIST: JSON.stringify(SENSITIVE_CHILD_ENV_DENYLIST), PROVIDERS: JSON.stringify(providerNames),
+        ...Object.fromEntries(sensitiveChildEnvDenylist.map((name) => [name, secret])),
+        PATH: `${bin}:${process.env.PATH}`, DENYLIST: JSON.stringify(sensitiveChildEnvDenylist), PROVIDERS: JSON.stringify(providerNames),
         REAL_GIT: realGit, GIT_JOURNAL: gitJournal, GH_JOURNAL: ghJournal, FACTORY_JOURNAL: factoryJournal,
         R: "r-publish", RUN_REPO: publish, FEATURE_BRANCH: "main", O: publish, PR_BASE: "main",
         TITLE: "title", BODY_FILE: join(publish, "body"),
@@ -526,6 +552,10 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
       opaque(rows.map(({ args }) => args), expectedArgs, `${label}-args`);
       if (sanitized) yes(rows.every(({ present }) => present.length === 0), `${label}-env`);
       yes(rows.every(({ providers }) => hash(providers) === hash(providerNames)), `${label}-providers`);
+      if (sanitized) yes(rows.every(({ values }) => sensitiveChildEnvDenylist.every((name) => values[name] === null)), `${label}-values`);
+      noLeaks(rows.flatMap(({ args, present, providers, values }) => [
+        ...args, ...present, ...providers, ...Object.keys(values ?? {}), ...Object.values(values ?? {}),
+      ]), `${label}-value-leak`);
       noLeaks([readFileSync(path)], `${label}-leak`);
     };
     const refspec = "refs/heads/main:refs/heads/main";
