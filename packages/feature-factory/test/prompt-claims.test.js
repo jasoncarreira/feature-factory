@@ -101,7 +101,7 @@ const NEEDS_HUMAN_PROSE = [
   ["retention", "Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.", "the retained sandbox cannot resume"],
   ["failed-gate", "An autonomous failed gate parks top-level needs-human; fix the durable gate cause before explicit factory resume.", "a failed gate permanently ends the run"],
   ["gate-restart", "After an autonomous needs-human gate stop, explicitly resume only after the existing pre-lock and ownership checks pass.", "start a replacement run"],
-  ["identity-park", "Run `factory terminal \"$R\" needs-human --reason \"<exact reason above>\" --repo \"$RUN_REPO\"`, then require", "completed"],
+  ["identity-park", "factory terminal \"$R\" needs-human --reason <REASON_TOKEN> --repo \"$RUN_REPO\"", "completed"],
   ["identity-report", "Only after all of those steps succeed report the parked run, `RUN_REPO`, `Status: needs-human`, the exact", "final"],
   ["malformed-evidence", "Malformed verification evidence parks top-level needs-human; fix the evidence source and explicitly resume without editing evidence or run.json.", "malformed evidence makes the run final"],
   ["unsafe-evidence", "Unsafe verification evidence parks top-level needs-human; explicit resume must replay the existing reconciliation path.", "resume may bypass unsafe evidence"],

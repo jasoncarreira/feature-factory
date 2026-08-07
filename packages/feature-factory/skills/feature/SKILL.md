@@ -781,8 +781,13 @@ reconciliation, reading `status.next`, dispatch, or any transition. For a parked
 immediately after explicit resume has been verified `running` with unchanged historical result, real
 next action, and the same fresh owner. No operation may intervene on either side of this guard.
 
-Submit exactly this command as one ordinary host shell step with cwd exactly `RUN_REPO`, the inherited
-environment including `GH_TOKEN`, and no stdin:
+At every one of the three guards, before submitting a host shell step, inspect only the inherited
+environment value and require `GH_TOKEN` to exist and contain at least one character. Missing or empty
+`GH_TOKEN` is immediately the same unobservable reason below. Do not invoke `gh`, hit the network,
+inspect stored authentication, query or attempt credentials, or run any fallback in that case.
+
+After that preflight succeeds, submit exactly this command as one ordinary host shell step with cwd
+exactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin:
 
 ```sh
 gh api --method GET /user --jq .login
@@ -822,10 +827,21 @@ publishing identity unobservable: declared <declared-ascii-json>; launch with in
 
 Never expose the token, raw stdout or stderr, diagnostics, status, command text, target, helper output,
 or environment. On either reason, quiesce every builder, tool, background task, and heartbeat call.
-Run `factory terminal "$R" needs-human --reason "<exact reason above>" --repo "$RUN_REPO"`, then require
-qualified status to preserve that exact durable reason and show the same verified owner. Release only
-that owner with `factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"`, and require a
-final qualified status to prove the lock absent with null owner. Retain the run and repository.
+Bind `PRE_QUOTING_REASON` to the complete already-rendered ASCII reason. Encode it as one deterministic
+POSIX shell token by surrounding the complete reason with single quotes and replacing every literal
+`'` inside it with the exact shell sequence `'\''`. Use that encoded token as the sole `--reason`
+argument in the host shell command string:
+
+```sh
+factory terminal "$R" needs-human --reason <REASON_TOKEN> --repo "$RUN_REPO"
+```
+
+Do not put the raw or rendered reason inside double quotes, interpolate it as unquoted shell syntax,
+`eval` it, use command substitution, a temporary file, or environment indirection. The quoting form is
+transport only and is never persisted. After the command, require qualified status to preserve a reason
+byte-for-byte equal to `PRE_QUOTING_REASON`, not the encoded token, and show the same verified owner.
+Release only that owner with `factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"`, and
+require a final qualified status to prove the lock absent with null owner. Retain the run and repository.
 
 Only after all of those steps succeed report the parked run, `RUN_REPO`, `Status: needs-human`, the exact
 rendered reason, and `Lock: released`. The later-driver procedure must say to bind the retained run and
