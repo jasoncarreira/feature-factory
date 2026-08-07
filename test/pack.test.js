@@ -342,7 +342,7 @@ describe("what actually ships", () => {
         ["init is requested with O", /factory init "\$R" --branch "\$FEATURE_BRANCH"[^\n]*--repo "\$O" --json/u],
         ["S comes from the response", /RUN_REPO="<exact response sandbox_path>"/u],
         ["one local clone follows reservation", /pre-reserves the deterministic sandbox, performs exactly one\s+`git clone --local -- O S`/u],
-        ["physical proof precedes run.json", /completes the physical containment proof, and only then publishes\s+`run\.json`/u],
+        ["physical and target proof precede run.json", /completes the physical containment proof, captures and configures the[\s\S]*only then\s+publishes `run\.json`/u],
         ["failed init is not retried", /do not substitute another destination or repeat init/u],
         ["push mismatch omits targets", /never contains either target/u],
         ["completed removal is guarded", /Only after all ref and archive verification succeeds, guard the destructive removal/u],
