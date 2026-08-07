@@ -286,6 +286,43 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     const byName = new Map(agentText.map(({ name, text }) => [name, text]));
     // Enforcement: these checks prevent false-green drift in shipped agent contracts.
     const forbiddenAgentTerms = /jira|atlassian|figma|logrocket|confluence|cloudid|tracker[ _-]?key|context7|get_best_practices|search_documentation|find_examples/giu;
+    // Enforcement: the declaration above IS the guard, so the declaration itself must be pinned.
+    // The scan below runs against a corpus that is clean today, so deleting a token from the regex
+    // leaves every agent file passing and the suite green — the check would quietly stop covering
+    // the term it was added for, which is the false green this whole block exists to prevent. Each
+    // row proves the detector still fires for one prohibited form, independently of the corpus.
+    // `String.match` is used rather than `.test` because the regex is global and `.test` would
+    // advance `lastIndex` between rows.
+    const forbiddenTermProbes = [
+      ["jira", "file the Jira ticket first"],
+      ["atlassian", "see the Atlassian docs"],
+      ["figma", "open the Figma frame"],
+      ["logrocket", "check LogRocket for the session"],
+      ["confluence", "linked from the Confluence page"],
+      ["cloudid", "pass the cloudId parameter"],
+      ["tracker key", "record the tracker key"],
+      ["tracker_key", "read the tracker_key field"],
+      ["tracker-key", "read the tracker-key field"],
+      ["trackerkey", "read the trackerkey field"],
+      ["context7", "resolve the library through context7"],
+      ["get_best_practices", "call get_best_practices first"],
+      ["search_documentation", "call search_documentation for the API"],
+      ["find_examples", "call find_examples for usage"],
+    ];
+    for (const [term, probe] of forbiddenTermProbes) {
+      assert.ok(probe.match(forbiddenAgentTerms)?.length,
+        `forbiddenAgentTerms no longer detects '${term}' — the declaration was weakened`);
+    }
+    // The other direction: a detector that matched ordinary prose would make the scan unfalsifiable,
+    // because every agent file would have to be written around it rather than around the rule.
+    for (const benign of [
+      "the issue key is recorded on the branch",
+      "use whatever documentation tool this repository provides",
+      "track the work in the run manifest",
+    ]) {
+      assert.equal(benign.match(forbiddenAgentTerms), null,
+        `forbiddenAgentTerms over-matches ordinary prose: ${benign}`);
+    }
     const agentPolicyFiles = sourceFiles(join(pkg, "agents"), [], PROSE_EXTENSIONS);
     const agentPolicyOffenders = agentPolicyFiles.flatMap((path) =>
       [...readFileSync(path, "utf8").matchAll(forbiddenAgentTerms)]
