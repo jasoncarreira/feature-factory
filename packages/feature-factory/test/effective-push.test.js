@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateRun } from "../state/schema.js";
@@ -39,6 +39,39 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     cwd: options.cwd,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const identityCommand = "gh api --method GET /user --jq .login";
+  const asciiJson = (value) => {
+    let rendered = '"';
+    const short = new Map([[8, "\\b"], [9, "\\t"], [10, "\\n"], [12, "\\f"], [13, "\\r"]]);
+    for (let index = 0; index < value.length; index += 1) {
+      const unit = value.charCodeAt(index);
+      if (short.has(unit)) rendered += short.get(unit);
+      else if (unit === 34) rendered += '\\"';
+      else if (unit === 92) rendered += "\\\\";
+      else if (unit >= 0x20 && unit <= 0x7e) rendered += value[index];
+      else rendered += `\\u${unit.toString(16).padStart(4, "0")}`;
+    }
+    return `${rendered}"`;
+  };
+  const classifyIdentity = ({ status, stdout, stderr }) => {
+    if (typeof status !== "number" || status !== 0 || !Buffer.isBuffer(stdout) || !Buffer.isBuffer(stderr) || stderr.length !== 0) {
+      return { observable: false };
+    }
+    if (stdout.length < 2 || stdout[stdout.length - 1] !== 10) return { observable: false };
+    const bytes = stdout.subarray(0, -1);
+    if ([...bytes].some((byte) => byte > 0x7f)) return { observable: false };
+    const value = bytes.toString("ascii");
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u.test(value)) return { observable: false };
+    return { observable: true, value };
+  };
+  const identityFailure = (declared, result) => {
+    const observed = classifyIdentity(result);
+    if (!observed.observable) {
+      return `publishing identity unobservable: declared ${asciiJson(declared)}; launch with inherited GH_TOKEN for ${asciiJson(declared)} as documented in OPERATING.md and retry.`;
+    }
+    if (declared === observed.value) return null;
+    return `publishing identity mismatch: declared ${asciiJson(declared)}, observed ${asciiJson(observed.value)}; authenticate as ${asciiJson(declared)} and retry.`;
+  };
   const gitResult = (repository, ...args) => command("git", ["-C", repository, ...args]);
   const git = (repository, ...args) => {
     const result = gitResult(repository, ...args);
@@ -269,8 +302,155 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   required(summary, "guarded sandbox-removal", "Step 7 exclusion");
   required(summary, "Only after all ref and archive verification succeeds", "Step 7 guard");
 
+  const checkIdentityPolicy = (source) => {
+    const start = required(source, "#### Publishing identity enforcement", "identity enforcement");
+    const end = required(source, "#### Story presentation", "identity enforcement boundary");
+    const policy = source.slice(start, end);
+    assert.match(policy, /verification is enforcement under AGENTS\.md and CLAUDE\.md because it prevents a false-green\s+publication/u);
+    assert.match(policy, /Provisioning `GH_TOKEN` and\s+configuring credential helpers are instruction only/u);
+    assert.match(policy, /one ordinary host shell step with cwd exactly `RUN_REPO`, the inherited\s+environment including `GH_TOKEN`, and no stdin/u);
+    assert.match(policy, /host result directly as three separate values: exact stdout bytes, exact stderr bytes, and the\s+numeric status/u);
+    assert.match(policy, /Do not use command substitution, pipes, redirection, shell capture variables, temporary\s+files, nested capture, retry, fallback, `gh auth`, credential queries, Git configuration, a token in\s+argv, or persistence of output or diagnostics/u);
+    assert.match(policy, /status is numeric zero, stderr has exactly zero bytes, and stdout\s+is exactly one ASCII login followed by exactly one LF byte/u);
+    assert.ok(policy.includes("`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`"));
+    assert.match(policy, /compare the raw declared and observed strings exactly and\s+case-sensitively before rendering/u);
+    assert.match(policy, /deterministic ASCII-only JSON-string renderer[\s\S]*lowercase `\\uXXXX`[\s\S]*unpaired surrogate[\s\S]*Leave slash unescaped/u);
+    assert.ok(policy.includes("publishing identity mismatch: declared <declared-ascii-json>, observed <observed-ascii-json>; authenticate as <declared-ascii-json> and retry."));
+    assert.ok(policy.includes("publishing identity unobservable: declared <declared-ascii-json>; launch with inherited GH_TOKEN for <declared-ascii-json> as documented in OPERATING.md and retry."));
+    assert.match(policy, /Never expose the token, raw stdout or stderr, diagnostics, status, command text, target, helper output,\s+or environment/u);
+    assert.match(policy, /quiesce every builder, tool, background task, and heartbeat call[\s\S]*factory terminal "\$R" needs-human[\s\S]*preserve that exact durable reason[\s\S]*Release only\s+that owner[\s\S]*prove the lock absent with null owner/u);
+    assert.match(policy, /new driver's own `FACTORY_SESSION_ID`[\s\S]*factory resume "\$R" --session "\$FACTORY_SESSION_ID" --repo "\$RUN_REPO"[\s\S]*continue from the newly qualified `status\.next`[\s\S]*Never reuse the\s+released session/u);
+    assert.match(policy, /report only `Outcome: retained-lock-error`[\s\S]*no parked-success or resumability claim/u);
+    assert.match(source, /exact\s+boundary between completion of resume order 7 and the first operation in resume order 8/u);
+    assert.match(source, /There is no\s+separate identity guard before `factory pr`/u);
+    const positions = [...source.matchAll(new RegExp(identityCommand, "gu"))].map((match) => match.index);
+    assert.equal(positions.length, 3);
+    const push = required(source, 'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"', "identity push order");
+    const pr = required(source, 'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"', "identity PR order");
+    assert.ok(positions[0] > gateOneStart && positions[0] < end);
+    assert.ok(positions[1] > source.indexOf("Both lookups must succeed and return nonempty output") && positions[1] < push);
+    assert.ok(positions[2] > push && positions[2] < pr);
+  };
+  checkIdentityPolicy(skill);
+  for (const marker of [
+    "#### Publishing identity enforcement",
+    "Use the host result directly as three separate values",
+    "deterministic ASCII-only JSON-string renderer",
+    "publishing identity mismatch: declared <declared-ascii-json>",
+    "publishing identity unobservable: declared <declared-ascii-json>",
+    "report only `Outcome: retained-lock-error`",
+    "There is no\nseparate identity guard before `factory pr`",
+  ]) assert.throws(() => checkIdentityPolicy(skill.replace(marker, "")), undefined, marker);
+
   const root = mkdtempSync(join(tmpdir(), "factory-effective-push-"));
   try {
+    const fakeBin = join(root, "fake-bin");
+    mkdirSync(fakeBin);
+    const fakeGh = join(fakeBin, "gh");
+    writeFileSync(fakeGh, `#!/usr/bin/env node
+const expected = ["api", "--method", "GET", "/user", "--jq", ".login"];
+if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expected) || !process.env.GH_TOKEN) process.exit(97);
+process.stdout.write(Buffer.from(process.env.FAKE_GH_STDOUT_B64 ?? "", "base64"));
+process.stderr.write(Buffer.from(process.env.FAKE_GH_STDERR_B64 ?? "", "base64"));
+process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
+`);
+    chmodSync(fakeGh, 0o755);
+    const observeIdentity = (cwd, { stdout = Buffer.from("A\n"), stderr = Buffer.alloc(0), status = 0 } = {}) => spawnSync("sh", ["-c", identityCommand], {
+      cwd,
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
+        GH_TOKEN: "token-that-must-never-appear",
+        FAKE_GH_STDOUT_B64: stdout.toString("base64"),
+        FAKE_GH_STDERR_B64: stderr.toString("base64"),
+        FAKE_GH_STATUS: String(status),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const guardedDriver = (repository, declared, observations = []) => {
+      const events = [];
+      let observation = 0;
+      const guard = (name) => {
+        if (declared === null) return null;
+        events.push(`identity:${name}`);
+        const reason = identityFailure(declared, observeIdentity(repository, observations[observation]));
+        observation += 1;
+        return reason;
+      };
+      let reason = guard("post-lock-or-resume");
+      if (reason) return { events, reason };
+      events.push("reconciliation/status.next/dispatch/transition");
+      events.push("effective-push-targets-exactly-equal");
+      reason = guard("pre-push");
+      if (reason) return { events, reason };
+      events.push('git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"');
+      reason = guard("pre-pr-create");
+      if (reason) return { events, reason };
+      events.push('gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"');
+      events.push('factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"');
+      return { events, reason: null };
+    };
+    for (const [value, expected] of [
+      ['"', '"\\""'],
+      ["\\", '"\\\\"'],
+      ["/", '"/"'],
+      ["\u0000\b\t\n\f\r\u001f", '"\\u0000\\b\\t\\n\\f\\r\\u001f"'],
+      ["\u007f", '"\\u007f"'],
+      ["\u0080\u0085", '"\\u0080\\u0085"'],
+      ["\u2028\u2029", '"\\u2028\\u2029"'],
+      ["🚀", '"\\ud83d\\ude80"'],
+      ["\ud800", '"\\ud800"'],
+    ]) assert.equal(asciiJson(value), expected);
+    assert.deepEqual(classifyIdentity(observeIdentity(root)), { observable: true, value: "A" });
+    for (const result of [
+      { status: null, stdout: Buffer.from("A\n"), stderr: Buffer.alloc(0) },
+      { status: "0", stdout: Buffer.from("A\n"), stderr: Buffer.alloc(0) },
+      observeIdentity(root, { status: 1 }),
+      observeIdentity(root, { stdout: Buffer.from("A") }),
+      observeIdentity(root, { stdout: Buffer.from("A\n\n") }),
+      observeIdentity(root, { stdout: Buffer.from("-A\n") }),
+      observeIdentity(root, { stdout: Buffer.from(`${"A".repeat(40)}\n`) }),
+      observeIdentity(root, { stdout: Buffer.from([0x41, 0x85, 0x0a]) }),
+      observeIdentity(root, { stderr: Buffer.from("diagnostic-secret") }),
+    ]) assert.deepEqual(classifyIdentity(result), { observable: false });
+    assert.equal(identityFailure("A", observeIdentity(root)), null);
+    assert.equal(identityFailure("a", observeIdentity(root)), 'publishing identity mismatch: declared "a", observed "A"; authenticate as "a" and retry.');
+    const unobservableReason = identityFailure("A\u2028🚀", observeIdentity(root, {
+      stdout: Buffer.from("raw-output-secret"),
+      stderr: Buffer.from("diagnostic-secret token-that-must-never-appear"),
+    }));
+    assert.equal(unobservableReason, 'publishing identity unobservable: declared "A\\u2028\\ud83d\\ude80"; launch with inherited GH_TOKEN for "A\\u2028\\ud83d\\ude80" as documented in OPERATING.md and retry.');
+    for (const hidden of ["raw-output-secret", "diagnostic-secret", "token-that-must-never-appear", identityCommand, root]) {
+      assert.equal(unobservableReason.includes(hidden), false);
+    }
+    const allMatching = guardedDriver(root, "A", [{}, {}, {}]);
+    assert.deepEqual(allMatching, {
+      events: [
+        "identity:post-lock-or-resume",
+        "reconciliation/status.next/dispatch/transition",
+        "effective-push-targets-exactly-equal",
+        "identity:pre-push",
+        'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"',
+        "identity:pre-pr-create",
+        'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"',
+        'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
+      ],
+      reason: null,
+    });
+    const absentConfig = guardedDriver(root, null);
+    assert.deepEqual(absentConfig.events, allMatching.events.filter((event) => !event.startsWith("identity:")));
+    for (const [observations, finalEvent] of [
+      [[{ stdout: Buffer.from("B\n") }], undefined],
+      [[{}, { stdout: Buffer.from("B\n") }], "effective-push-targets-exactly-equal"],
+      [[{}, {}, { stdout: Buffer.from("B\n") }], 'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"'],
+    ]) {
+      const stopped = guardedDriver(root, "A", observations);
+      assert.equal(stopped.reason, 'publishing identity mismatch: declared "A", observed "B"; authenticate as "A" and retry.');
+      assert.equal(stopped.events.at(-2) === finalEvent || stopped.events.at(-1) === finalEvent, true);
+      assert.equal(stopped.events.includes('gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"'), false);
+      assert.equal(stopped.events.includes('factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"'), false);
+    }
+    assert.deepEqual(readdirSync(fakeBin), ["gh"]);
     const operator = join(root, "operator");
     const bare = join(root, "published.git");
     const secretOne = "https://operator-user:credential-token@example.invalid/org/fetch-target.git";
@@ -285,6 +465,33 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     git(operator, "commit", "-m", "fixture");
     git(operator, "remote", "add", "origin", bare);
     git(operator, "config", "--replace-all", "remote.origin.pushurl", secretOne);
+
+    const parkedIdentity = initFresh(operator, ["identity-park", "--branch", "feature/identity-park", "--pr-base", "main", "--now", "2026-08-04T11:59:00.000Z"]);
+    const parkedReason = 'publishing identity mismatch: declared "A", observed "B"; authenticate as "A" and retry.';
+    factory("lock", "identity-park", "claim", "--session", "released-session", "--repo", parkedIdentity.repository);
+    const ownedBeforePark = factory("status", "identity-park", "--repo", parkedIdentity.repository);
+    assert.equal(ownedBeforePark.lock_session, "released-session");
+    factory("terminal", "identity-park", "needs-human", "--reason", parkedReason, "--repo", parkedIdentity.repository);
+    const durablePark = factory("status", "identity-park", "--repo", parkedIdentity.repository);
+    assert.equal(durablePark.status, "needs-human");
+    assert.equal(durablePark.terminal_result.reason, parkedReason);
+    assert.equal(durablePark.lock_session, "released-session");
+    factory("lock", "identity-park", "release", "--session", "released-session", "--repo", parkedIdentity.repository);
+    const unlockedPark = factory("status", "identity-park", "--repo", parkedIdentity.repository);
+    assert.equal(unlockedPark.lock, "absent");
+    assert.equal(unlockedPark.lock_session, null);
+    factory("lock", "identity-park", "claim", "--session", "fresh-session", "--repo", parkedIdentity.repository);
+    const freshlyClaimed = factory("status", "identity-park", "--repo", parkedIdentity.repository);
+    assert.equal(freshlyClaimed.status, "needs-human");
+    assert.deepEqual(freshlyClaimed.terminal_result, durablePark.terminal_result);
+    assert.equal(freshlyClaimed.next, durablePark.next);
+    assert.equal(freshlyClaimed.lock_session, "fresh-session");
+    factory("resume", "identity-park", "--session", "fresh-session", "--repo", parkedIdentity.repository);
+    const resumedIdentity = factory("status", "identity-park", "--repo", parkedIdentity.repository);
+    assert.equal(resumedIdentity.status, "running");
+    assert.deepEqual(resumedIdentity.terminal_result, durablePark.terminal_result);
+    assert.equal(resumedIdentity.next, durablePark.next);
+    assert.equal(resumedIdentity.lock_session, "fresh-session");
 
     const mismatchBranch = "feature/push-mismatch";
     assert.equal(operatorRefAbsent(operator, mismatchBranch), true);

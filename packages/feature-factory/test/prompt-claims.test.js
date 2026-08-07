@@ -101,6 +101,8 @@ const NEEDS_HUMAN_PROSE = [
   ["retention", "Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.", "the retained sandbox cannot resume"],
   ["failed-gate", "An autonomous failed gate parks top-level needs-human; fix the durable gate cause before explicit factory resume.", "a failed gate permanently ends the run"],
   ["gate-restart", "After an autonomous needs-human gate stop, explicitly resume only after the existing pre-lock and ownership checks pass.", "start a replacement run"],
+  ["identity-park", "Run `factory terminal \"$R\" needs-human --reason \"<exact reason above>\" --repo \"$RUN_REPO\"`, then require", "completed"],
+  ["identity-report", "Only after all of those steps succeed report the parked run, `RUN_REPO`, `Status: needs-human`, the exact", "final"],
   ["malformed-evidence", "Malformed verification evidence parks top-level needs-human; fix the evidence source and explicitly resume without editing evidence or run.json.", "malformed evidence makes the run final"],
   ["unsafe-evidence", "Unsafe verification evidence parks top-level needs-human; explicit resume must replay the existing reconciliation path.", "resume may bypass unsafe evidence"],
   ["unsafe-retry", "An unsafe repository-verification retry parks top-level needs-human; clean the external cause before explicit factory resume and merge replay.", "unsafe retry is restart-ineligible forever"],
@@ -1017,6 +1019,22 @@ const CLAIMS = [
       const configured = /#### Configured resolver path\n\n([\s\S]*?)\n\n#### Absence means no repository resolver/u.exec(prose)?.[1] ?? "";
       const absence = /#### Absence means no repository resolver\n\n([\s\S]*?)\n\n#### Resolver and repository verification boundaries/u.exec(prose)?.[1] ?? "";
       const boundaries = /#### Resolver and repository verification boundaries\n\n([\s\S]*?)\n\n#### Remaining intake classification/u.exec(prose)?.[1] ?? "";
+      const checkPublishingIdentityConfig = (text) => {
+        assert.match(text, /Retain the validated `publishing_identity` string exactly as parsed, without trimming,\s+normalizing, case-folding, or reserializing it, as `DECLARED_PUBLISHING_IDENTITY` for this driver\s+invocation/u);
+        assert.match(text, /Do not tighten the existing non-whitespace validation to the observed-login grammar/u);
+        assert.match(text, /Do not bind `DECLARED_PUBLISHING_IDENTITY` and skip every publishing-identity\s+guard, preserving the existing behavior/u);
+        assert.match(text, /`resolve`, `verify`, and `publishing_identity` are consumed now\. Only `publish` remains deferred to #224/u);
+        assert.match(text, /`publishing_identity` \| No runtime input; retain the raw validated config string for this driver invocation \| Exact case-sensitive string compared with the observed login[\s\S]*Active at the three mandatory guards below; absent config preserves existing behavior/u);
+        assert.doesNotMatch(text, /`publish` and `publishing_identity` remain deferred|consumption is deferred to #216/u);
+      };
+      checkPublishingIdentityConfig(prose);
+      for (const marker of [
+        "Retain the validated `publishing_identity` string exactly as parsed",
+        "Do not tighten the existing non-whitespace validation",
+        "Do not bind `DECLARED_PUBLISHING_IDENTITY`",
+        "Only `publish` remains deferred to #224",
+        "Active at the three mandatory guards below",
+      ]) assert.throws(() => checkPublishingIdentityConfig(prose.replace(marker, "")));
       assert.match(prose, /root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and\s+`publishing_identity`, plus only the optional own property `verify_timeout_ms`/u);
       assert.match(prose, /`resolve`, `verify`, and\n`publish` are the only commands/u);
       assert.match(prose, /`publishing_identity` is\na static non-empty publishing account name in the file itself, not a command, token, credential, or\ncommand result/u);
@@ -1069,10 +1087,10 @@ const CLAIMS = [
       assert.match(boundaries, /Add no resolver cache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
       assert.match(boundaries, /For `resolve`, use the ordinary shell result directly[\s\S]*no stderr redirection or suppression rule,[\s\S]*timeout,\nretry, or fallback after any configured resolver result or failure/u);
       assert.match(boundaries, /optional timeout and bounded\nretry below apply only to repository `verify` shell attempts, never to `resolve`, slice observation, or\nGate 3 commands/u);
-      assert.match(boundaries, /`resolve` and `verify` are consumed now\. `publish` and `publishing_identity` remain deferred/u);
+      assert.match(boundaries, /`resolve`, `verify`, and `publishing_identity` are consumed now\. Only `publish` remains deferred to #224/u);
       assert.match(boundaries, /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted[\s\S]*at most two executions in that merge invocation[\s\S]*timeout and retry never apply to resolver, slice, or Gate 3 commands/u);
       assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |"));
-      assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; the static config value itself | Non-empty account-name string in the config | Missing, non-string, or empty makes the config malformed | Not read for identity enforcement; consumption is deferred to #216. |"));
+      assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; retain the raw validated config string for this driver invocation | Exact case-sensitive string compared with the observed login | Missing, non-string, or whitespace-only makes the config malformed; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; absent config preserves existing behavior. |"));
       assert.match(prose, /Foreground, background primary, and background `run-orchestrator`\nderivation use the following same configured-or-absent policy/u);
       assert.match(prose, /background primary does not forward or persist its\npayload/u);
       assert.match(prose, /uses its own non-empty resolver stdout unchanged as `ISSUE_PAYLOAD` and requires exact\nequality between its derived `R` and the control part's expected canonical ID before its first `factory`\ncommand/u);

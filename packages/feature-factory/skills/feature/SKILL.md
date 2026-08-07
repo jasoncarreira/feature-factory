@@ -373,11 +373,16 @@ command result. If present, `verify_timeout_ms` must be a positive safe integer;
 defaults repository verification to `900000` milliseconds. Unknown or missing required properties,
 invalid JSON, unreadable content, wrong types, and empty or whitespace-only required values make a
 present file malformed. Validate all required entries and the optional timeout before executing
-`resolve`. Credential values must not appear in the file; command strings may refer only to credentials
-supplied through inherited environment-variable names.
+`resolve`. Retain the validated `publishing_identity` string exactly as parsed, without trimming,
+normalizing, case-folding, or reserializing it, as `DECLARED_PUBLISHING_IDENTITY` for this driver
+invocation. Do not tighten the existing non-whitespace validation to the observed-login grammar.
+Credential values must not appear in the file; command strings may refer only to credentials supplied
+through inherited environment-variable names.
 
-An absent `$O/.factory.json` means no resolver is declared, per the absence rule below. If the path is
-present but malformed, do not execute any entry and refuse exactly:
+An absent `$O/.factory.json` means no resolver is declared and no publishing identity is declared, per
+the absence rule below. Do not bind `DECLARED_PUBLISHING_IDENTITY` and skip every publishing-identity
+guard, preserving the existing behavior. If the path is present but malformed, do not execute any entry
+and refuse exactly:
 
 > invalid factory config: .factory.json; no session or run created.
 
@@ -482,16 +487,16 @@ For `resolve`, use the ordinary shell result directly. Add no stderr redirection
 separate capture policy, output channel, buffering, truncation, redaction, output-size limit, timeout,
 retry, or fallback after any configured resolver result or failure. The optional timeout and bounded
 retry below apply only to repository `verify` shell attempts, never to `resolve`, slice observation, or
-Gate 3 commands. Do not change background-tool, title-association, host-session, or publication
-behavior. `story-reader` remains lookup-free and capability-free beyond its existing generic read tools.
+Gate 3 commands. Do not change background-tool, title-association, or host-session behavior.
+`story-reader` remains lookup-free and capability-free beyond its existing generic read tools.
 
-`resolve` and `verify` are consumed now. `publish` and `publishing_identity` remain deferred:
+`resolve`, `verify`, and `publishing_identity` are consumed now. Only `publish` remains deferred to #224:
 
 | Entry | Declared input | Return shape | Failure meaning | Current behavior |
 |---|---|---|---|---|
 | `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status means unavailable | Invoked after each newly recorded merge through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
 | `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |
-| `publishing_identity` | No runtime input; the static config value itself | Non-empty account-name string in the config | Missing, non-string, or empty makes the config malformed | Not read for identity enforcement; consumption is deferred to #216. |
+| `publishing_identity` | No runtime input; retain the raw validated config string for this driver invocation | Exact case-sensitive string compared with the observed login | Missing, non-string, or whitespace-only makes the config malformed; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; absent config preserves existing behavior. |
 
 #### Remaining intake classification
 
@@ -551,6 +556,11 @@ Resume order 6 — claim with the current host session or perform a justified ex
 Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.
 Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.
 Resume order 9 — continue solely from the newly qualified status.next.
+
+When a validated present config declares `publishing_identity`, the mandatory guard below is the exact
+boundary between completion of resume order 7 and the first operation in resume order 8. Nothing may
+intervene between the verified running/same-owner result and that guard, or between a successful guard
+and reconciliation. An absent config preserves the nine orders without adding an operation.
 
 For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment and before effective-push proof. Order 3 never absorbs containment, binding, or the post-selection exact-ref guard. During order 4 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 5 and claim or justified steal. Order 6 requires `lock_session === FACTORY_SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --session "$FACTORY_SESSION_ID" --repo "$RUN_REPO"` for order 7 — the same session order 6 just verified as the fresh owner — then require that owner unchanged. Resume refuses without it, and refuses a lock that is absent, stale, or held by anyone else. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 never uses the pre-resume observation or the stop reason.
 
@@ -748,11 +758,88 @@ factory lock "$R" steal --session "$SESSION_ID" --repo "$RUN_REPO"
 
 If another live session holds the lock, resume with that session or abort; steal only when qualified
 status proves the holder gone. Refresh long waits with
-`factory heartbeat "$R" --session "$SESSION_ID" --repo "$RUN_REPO"`. Only after the lock is established
-dispatch the planned ticket, story, or design agent. A valid status reports `dead_lock: true` only for
+`factory heartbeat "$R" --session "$SESSION_ID" --repo "$RUN_REPO"`. After claim or justified steal,
+immediately obtain qualified status and require a fresh lock owned by this driver's exact
+`FACTORY_SESSION_ID`. With a declared identity, the very next operation is the guard below. Only after
+ownership and any required guard succeed may the driver reconcile or consult `status.next`. Only then
+dispatch the planned ticket, story, or design agent or transition state.
+A valid status reports `dead_lock: true` only for
 a stale lock on a current `running` run; a historical parked result does not hide that crash. It authorizes no automatic state disposal.
 
 ### Gate 1 — Story
+
+#### Publishing identity enforcement
+
+This verification is enforcement under AGENTS.md and CLAUDE.md because it prevents a false-green
+publication under an account other than the repository declaration. Provisioning `GH_TOKEN` and
+configuring credential helpers are instruction only; do not add a factory credential manager or
+helper-setup guard.
+
+For a fresh run with `DECLARED_PUBLISHING_IDENTITY`, immediately after qualified status verifies fresh
+lock ownership by this driver's `FACTORY_SESSION_ID`, run the identity observation below before
+reconciliation, reading `status.next`, dispatch, or any transition. For a parked resume, run it instead
+immediately after explicit resume has been verified `running` with unchanged historical result, real
+next action, and the same fresh owner. No operation may intervene on either side of this guard.
+
+Submit exactly this command as one ordinary host shell step with cwd exactly `RUN_REPO`, the inherited
+environment including `GH_TOKEN`, and no stdin:
+
+```sh
+gh api --method GET /user --jq .login
+```
+
+Use the host result directly as three separate values: exact stdout bytes, exact stderr bytes, and the
+numeric status. Do not use command substitution, pipes, redirection, shell capture variables, temporary
+files, nested capture, retry, fallback, `gh auth`, credential queries, Git configuration, a token in
+argv, or persistence of output or diagnostics. The real command is a read-only network observation.
+
+The identity is observable only when status is numeric zero, stderr has exactly zero bytes, and stdout
+is exactly one ASCII login followed by exactly one LF byte. The login grammar is
+`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`. Every other status or byte sequence is unobservable;
+do not trim, decode-and-normalize, retry, or recover a partial value. Remove only the required final LF
+from an observable value, then compare the raw declared and observed strings exactly and
+case-sensitively before rendering either one.
+
+Render a value for the reason with the deterministic ASCII-only JSON-string renderer. Surround it with
+double quotes. Emit printable ASCII U+0020 through U+007E literally except quote and backslash, which
+use `\"` and `\\`. Use the fixed JSON short escapes `\b`, `\t`, `\n`, `\f`, and `\r` for U+0008,
+U+0009, U+000A, U+000C, and U+000D. Render every other UTF-16 code unit outside U+0020 through U+007E
+as lowercase `\uXXXX`. A non-BMP code point therefore renders as its two surrogate units, and an
+unpaired surrogate renders as its one unit. Leave slash unescaped. This covers C0, C1, DEL, U+0085,
+U+2028, U+2029, and non-BMP input without a literal non-ASCII or control byte.
+
+An observable unequal value uses exactly:
+
+```text
+publishing identity mismatch: declared <declared-ascii-json>, observed <observed-ascii-json>; authenticate as <declared-ascii-json> and retry.
+```
+
+An unobservable result uses exactly:
+
+```text
+publishing identity unobservable: declared <declared-ascii-json>; launch with inherited GH_TOKEN for <declared-ascii-json> as documented in OPERATING.md and retry.
+```
+
+Never expose the token, raw stdout or stderr, diagnostics, status, command text, target, helper output,
+or environment. On either reason, quiesce every builder, tool, background task, and heartbeat call.
+Run `factory terminal "$R" needs-human --reason "<exact reason above>" --repo "$RUN_REPO"`, then require
+qualified status to preserve that exact durable reason and show the same verified owner. Release only
+that owner with `factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"`, and require a
+final qualified status to prove the lock absent with null owner. Retain the run and repository.
+
+Only after all of those steps succeed report the parked run, `RUN_REPO`, `Status: needs-human`, the exact
+rendered reason, and `Lock: released`. The later-driver procedure must say to bind the retained run and
+repository, repeat all selection, config, effective-push, provenance, branch, and exact-ref prechecks,
+bind a fresh claim to that new driver's own `FACTORY_SESSION_ID`, verify the parked status, reason,
+historical result, real next action, and repository are unchanged, and then run exactly
+`factory resume "$R" --session "$FACTORY_SESSION_ID" --repo "$RUN_REPO"`. It must require running
+status, unchanged historical result, the real next action, and the same owner after resume, replay only
+the existing reconciliation, and continue from the newly qualified `status.next`. Never reuse the
+released session. If parking, durable-reason verification, owner verification, release, or unlock
+verification fails, report only `Outcome: retained-lock-error` with the retained or unverified lock and
+no parked-success or resumability claim.
+
+#### Story presentation
 
 Present the story. Open and decide it with the fully qualified commands below. A gate must be opened as
 `pending` before it can be decided — a gate that appears already approved is a decision nobody made,
@@ -1410,6 +1497,10 @@ gate. A collision or provenance failure stops
 before push, `gh`, or `factory pr` and retains all state. After those checks, disable command tracing and
 recapture the operator and selected-run effective push targets without changing either remote:
 
+Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as
+`PR_BASE`; never infer, shorten, normalize, or substitute either value. Bind both before target
+recapture, and do not rebind or re-observe them between target equality and push.
+
 ```sh
 factory status "$R" --json --repo "$RUN_REPO"
 git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"
@@ -1424,20 +1515,35 @@ echo, normalize, interpolate into a cause, or expose either target. Use the same
 refusal messages from Step 0. A lookup failure or mismatch leaves `RUN_REPO` intact, permits status only,
 and blocks every publication effect.
 
-Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as
-`PR_BASE`; never infer, shorten, normalize, or substitute either value. Publish the fully qualified
-recorded feature ref from `RUN_REPO`, run `gh` from `O` with that exact head and base, require a draft,
-and record the returned URL under `RUN_REPO`. Thus sandbox runs use `S` and legacy local runs use `O`
-through the selection already made in Step 0:
+With `DECLARED_PUBLISHING_IDENTITY`, immediately after exact target equality and before the unchanged
+push, run the same ordinary host observation under its exact cwd, environment, no-stdin, direct-result,
+validation, rendering, redaction, and parking rules. No operation may intervene between equality, this
+guard, and the push:
+
+```sh
+gh api --method GET /user --jq .login
+```
+
+Publish the fully qualified recorded feature ref from `RUN_REPO`, run `gh` from `O` with that exact head
+and base, require a draft, and record the returned URL under `RUN_REPO`. Thus sandbox runs use `S` and
+legacy local runs use `O` through the selection already made in Step 0:
 
 ```sh
 git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"
+gh api --method GET /user --jq .login
 (
   cd "$O"
   gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"
 )
 factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"
 ```
+
+The second observation runs only after that push is known successful and immediately before unchanged
+`gh pr create`, with no intervening operation. Both Step 6 guards are skipped when `.factory.json` is
+absent. A mismatch or unobservable result follows the common quiesce, park, durable-reason, owning
+release, unlock-verification, retention, reporting, and later-driver procedure above. There is no
+separate identity guard before `factory pr`; preserve that command and every existing publication mode,
+status, and gate exactly.
 
 The `gh` call is the orchestrator's external effect; the package makes no forge call and `factory pr`
 does not verify the forge's base. For a legacy manifest where `pr_base` is absent or null, stop and
