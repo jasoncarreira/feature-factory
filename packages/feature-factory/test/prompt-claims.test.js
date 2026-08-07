@@ -91,6 +91,76 @@ function seeded(operator) {
   return initialized;
 }
 
+const NEEDS_HUMAN_PROSE = [
+  ["persisted-mode", "Persisted mode parks a top-level needs-human stop; after the cause is fixed, explicitly resume it with factory resume before continuing.", "needs-human is final"],
+  ["headless", "Headless mode exits its host turn with top-level needs-human parked; a later host must explicitly resume it with factory resume.", "headless needs-human is terminal"],
+  ["mode-result", "Mode result needs-human means parked and explicitly resumable; only completed, partial, and blocked are final.", "needs-human is a final result"],
+  ["stop-command", "Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --session $SESSION_ID --repo S, which refuses unless that session already holds a fresh lock: claim, then verify, then resume.", "terminal needs-human ends the run permanently"],
+  ["parked-status", "For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.", "terminal:needs-human"],
+  ["report", "Report top-level needs-human as parked with its reason and explicit factory resume command.", "report needs-human as final"],
+  ["retention", "Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.", "the retained sandbox cannot resume"],
+  ["failed-gate", "An autonomous failed gate parks top-level needs-human; fix the durable gate cause before explicit factory resume.", "a failed gate permanently ends the run"],
+  ["gate-restart", "After an autonomous needs-human gate stop, explicitly resume only after the existing pre-lock and ownership checks pass.", "start a replacement run"],
+  ["malformed-evidence", "Malformed verification evidence parks top-level needs-human; fix the evidence source and explicitly resume without editing evidence or run.json.", "malformed evidence makes the run final"],
+  ["unsafe-evidence", "Unsafe verification evidence parks top-level needs-human; explicit resume must replay the existing reconciliation path.", "resume may bypass unsafe evidence"],
+  ["unsafe-retry", "An unsafe repository-verification retry parks top-level needs-human; clean the external cause before explicit factory resume and merge replay.", "unsafe retry is restart-ineligible forever"],
+  ["moved-head", "A moved integration head parks top-level needs-human; restore provenance before explicit factory resume and safety replay.", "a moved head requires hand-finishing"],
+  ["replay-safety", "Top-level needs-human remains parked while replay safety is false; explicit resume does not bypass the same safety check.", "needs-human can never be restarted"],
+  ["production-defect", "A production defect parks top-level needs-human; after the external fix, explicitly resume the intact run.", "a production defect requires a new run"],
+  ["repair-status", "Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`.", "envelope resume clears this repair-record"],
+  ["repair-planned-transition", "`planned → committed|needs-human`", "factory resume resolves the repair-record"],
+  ["repair-committed-transition", "`committed → verified|failed|exhausted|needs-human`", "factory resume resolves the repair-record"],
+  ["repair-guard", "This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication.", "envelope resume authorizes this repair-record"],
+  ["generic-stop", "Use terminal needs-human only to park a running envelope; use explicit factory resume after the cause is fixed.", "terminal needs-human is a final outcome"],
+  ["generic-retention", "A top-level needs-human sandbox stays retained while parked and continues only after explicit factory resume.", "retained needs-human cannot continue"],
+  ["gate-three-repair", "A Gate 3 repair-record needs-human remains unresolved because envelope resume does not clear it.", "envelope resume satisfies Gate 3 repair"],
+  ["publication-repair", "Publication refuses a repair-record needs-human because envelope resume does not clear the repair record.", "resume makes this repair publishable"],
+  ["publication-record", "This publication repair-record needs-human remains blocking, and envelope resume does not clear it.", "envelope resume erases publication repair"],
+  ["handoff", "Completed handoff remains final, while top-level needs-human is parked and requires explicit factory resume.", "needs-human is excluded from resume"],
+  ["autonomous-failure", "Autonomous gate failure parks top-level needs-human; quiesce and unlock before a later explicit factory resume.", "autonomous gate failure is final"],
+  ["bounded-loop", "A bounded loop parks top-level needs-human; explicit resume may repark it if the external cause remains unfixed.", "bounded-loop needs-human cannot resume"],
+];
+
+const RESUME_ORDER = [
+  "Resume order 1 — bind the selected manifest to the intended retained sandbox, prove physical containment, and obtain qualified status for that bound manifest.",
+  "Resume order 2 — run the post-selection operator exact-ref-absent guard.",
+  "Resume order 3 — complete the existing effective-push proof.",
+  "Resume order 4 — accept the feature branch only after existing reflog/provenance, branch/worktree binding, seed ancestry, cleanliness/recovery, and operator exact-ref rechecks pass in their current order.",
+  "Resume order 5 — immediately before claiming, rerun the final operator exact-ref-absent guard.",
+  "Resume order 6 — claim with the current host session or perform a justified existing steal, then verify qualified status still shows this fresh owner and the parked result originally observed.",
+  "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.",
+  "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.",
+  "Resume order 9 — continue solely from the newly qualified status.next.",
+];
+
+function checkNeedsHumanProse(prose) {
+  for (const [id, required, forbidden] of NEEDS_HUMAN_PROSE) {
+    if (prose.split(required).length !== 2) throw new Error(id);
+    const line = prose.split("\n").find((entry) => entry.includes(required));
+    if (!line || line.includes(forbidden)) throw new Error(id);
+  }
+  if ((prose.match(/needs-human/gu) ?? []).length !== NEEDS_HUMAN_PROSE.length) throw new Error("needs-human-count");
+}
+
+// Every *executable* resume instruction must pass the session. The command rejects without it, so an
+// instruction that omits it tells a driver to run something that cannot succeed -- which is what shipped
+// once already: the prose said "with no session flag" while the CLI had just been made to require one.
+function checkResumeInvocations(prose) {
+  for (const line of prose.split("\n")) {
+    if (!/`factory resume [^`]*`/u.test(line)) continue;
+    for (const invocation of line.match(/`factory resume [^`]*`/gu) ?? []) {
+      if (!invocation.includes("--session")) throw new Error(`resume-invocation-without-session: ${invocation}`);
+    }
+  }
+}
+
+function checkResumeOrder(prose) {
+  const markers = prose.split("\n").filter((line) => line.startsWith("Resume order "));
+  if (!markers.every((marker, index) => marker === RESUME_ORDER[index]) || markers.length !== RESUME_ORDER.length) {
+    throw new Error("resume-order");
+  }
+}
+
 // Each claim: where the prose lives, the exact fragment that makes the claim, and the behaviour it
 // asserts. `expect: "refused"` means the CLI must reject; `"allowed"` means it must succeed.
 const CLAIMS = [
@@ -1008,14 +1078,14 @@ const CLAIMS = [
       assert.match(prose, /uses its own non-empty resolver stdout unchanged as `ISSUE_PAYLOAD` and requires exact\nequality between its derived `R` and the control part's expected canonical ID before its first `factory`\ncommand/u);
       assert.match(prose, /configured exit-zero, zero-byte result may therefore classify a bare integer as ordinary prose/u);
       for (const postMergeClaim of [
-        "production source is never repaired on the integration branch",
+        "A production defect parks top-level needs-human; after the external fix, explicitly resume the intact run.",
         "`unavailable` is the only replay-eligible class",
         "exact run, subject, current head, and unchanged `verify` command binding",
         "canonical `observed: false`, `exit: null`, and\n  `skipped_reason: null`",
         "Only matching `unavailable` evidence, no active\nrepair record",
         "freshly verified exact integration worktree on the recorded feature branch",
         "do not replay again from that driver invocation after the CLI has\nexhausted its two attempts",
-        "evidence never execute and durably terminalize `needs-human`",
+        "Unsafe verification evidence parks top-level needs-human; explicit resume must replay the existing reconciliation path.",
         "merged-slice evidence and review\nremain preserved",
         "Apart from the safe matching-unavailable replay above, a configured command may run again\nonly after a committed test-only repair changes HEAD",
         "include every attempt under\n`## Post-merge test-only repairs`",
@@ -1100,9 +1170,9 @@ const CLAIMS = [
   {
     id: "post-merge-production-defect-terminalizes",
     file: "skills/feature/SKILL.md",
-    fragment: "A production defect terminalizes\n`needs-human`; production source is never repaired on the integration branch.",
+    fragment: "A production defect parks top-level needs-human; after the external fix, explicitly resume the intact run.",
     expect: "allowed",
-    matches: /"status": "needs-human"[\s\S]*factory config entry 'verify'[\s\S]*\.factory\.json verify suite/u,
+    matches: /"status": "needs-human"[\s\S]*factory config entry 'verify'[\s\S]*\.factory\.json verify suite[\s\S]*"next": "gate:story"/u,
     act(repo) {
       const skill = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
       const stepFour = skill.slice(skill.indexOf("## Step 4 — Build slices"), skill.indexOf("## Step 5 — Integrate"));
@@ -1175,9 +1245,9 @@ const CLAIMS = [
   {
     id: "headless-mode-persists",
     file: "skills/feature/SKILL.md",
-    fragment: "terminalize with reason exactly `headless run reached a human gate`:",
+    fragment: "Headless mode exits its host turn with top-level needs-human parked; a later host must explicitly resume it with factory resume.",
     expect: "allowed",
-    matches: /"status": "needs-human"[\s\S]*"mode": "headless"[\s\S]*"terminal_result": \{\s*"status": "needs-human",\s*"reason": "headless run reached a human gate"\s*\}[\s\S]*"next": "terminal:needs-human"/u,
+    matches: /"status": "needs-human"[\s\S]*"mode": "headless"[\s\S]*"terminal_result": \{\s*"status": "needs-human",\s*"reason": "headless run reached a human gate"\s*\}[\s\S]*"next": "gate:story"/u,
     act(repo) {
       const initialized = initFresh(repo, [RUN, "--mode", "headless", "--now", NOW]);
       assert.equal(factory(initialized.repository, ["terminal", RUN, "needs-human", "--reason", "headless run reached a human gate", "--now", NOW]).ok, true);
@@ -1189,8 +1259,51 @@ const CLAIMS = [
         status: "needs-human",
         reason: "headless run reached a human gate",
       });
-      assert.equal(durable.next, "terminal:needs-human");
+      assert.equal(durable.next, "gate:story");
       return result;
+    },
+  },
+  {
+    id: "needs-human-prose-and-resume-order",
+    file: "skills/feature/SKILL.md",
+    fragment: RESUME_ORDER[0],
+    expect: "allowed",
+    matches: /"next": "gate:story"/u,
+    act(repo) {
+      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      checkNeedsHumanProse(prose);
+      checkResumeOrder(prose);
+      for (const [id, required] of NEEDS_HUMAN_PROSE) {
+        assert.throws(() => checkNeedsHumanProse(prose.replace(required, "")), new RegExp(id, "u"));
+      }
+      // Every surface that shows an executable resume, not just the one that happened to be loaded
+      // here. The first version checked the skill alone while claiming all three, and a negative
+      // control against the skill confirmed the one surface that was covered -- so removing
+      // --session from either README still left CI green.
+      for (const [label, surfacePath] of [
+        ["skill", join(pkg, "skills", "feature", "SKILL.md")],
+        ["package README", join(pkg, "README.md")],
+        ["root README", join(pkg, "..", "..", "README.md")],
+      ]) {
+        const surface = readFileSync(surfacePath, "utf8");
+        checkResumeInvocations(surface);
+        // Strip the session from a resume invocation specifically. A bare /--session \S+ / hits the
+        // first one anywhere in the file, which in the skill is a lock example, leaving the resume
+        // invocation intact and the control passing for the wrong reason.
+        assert.throws(() => checkResumeInvocations(surface.replace(/(`factory resume [^`]*?)--session \S+ /u, "$1")),
+          /resume-invocation-without-session/u, `${label} must fail when the session is removed`);
+      }
+      for (const marker of RESUME_ORDER) {
+        assert.throws(() => checkResumeOrder(prose.replace(`${marker}\n`, "")), /resume-order/u);
+        assert.throws(() => checkResumeOrder(prose.replace(marker, `${marker}\n${marker}`)), /resume-order/u);
+      }
+      for (let index = 0; index < RESUME_ORDER.length - 1; index += 1) {
+        const pair = `${RESUME_ORDER[index]}\n${RESUME_ORDER[index + 1]}`;
+        const swapped = `${RESUME_ORDER[index + 1]}\n${RESUME_ORDER[index]}`;
+        assert.throws(() => checkResumeOrder(prose.replace(pair, swapped)), /resume-order/u);
+      }
+      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      return factory(initialized.repository, ["status", RUN, "--json"]);
     },
   },
 ];

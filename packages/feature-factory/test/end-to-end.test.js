@@ -406,60 +406,164 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { cleanupProject(moved); }
 
     const resumed = upToReview("verify-resume", undefined, {
-      verify: (operator) => `node -e "const f=require('fs');f.appendFileSync('${join(operator, "verify-count")}','x');if(!f.existsSync('${join(operator, "verify-ready")}'))setTimeout(()=>{},10000)"`,
+      verify: (operator) => `node -e "const f=require('fs'),p='${join(operator, "verify-count")}';f.appendFileSync(p,'x');if(f.readFileSync(p,'utf8').length===1){f.writeFileSync('repository-verify-dirty','dirty');setTimeout(()=>{},10000)}"`,
       verifyTimeout: 1000,
     });
     try {
-      assert.equal(factory(resumed.repo, ["lock", RUN, "claim", "--session", "session-one", "--branch", "feature"]).ok, true);
+      assert.equal(factory(resumed.repo, ["lock", RUN, "claim", "--session", "session-a", "--branch", "feature"]).ok, true);
       const mergeCommit = mergeIntoFeature(resumed.repo);
       const beforeReview = readFileSync(join(resumed.runDir, "reviews", "be-thing.json"), "utf8");
       const beforeEvidence = readFileSync(join(resumed.runDir, "evidence", "be-thing.json"), "utf8");
       const exhausted = factory(resumed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(exhausted.ok, false);
-      assert.match(exhausted.stderr, /exit status unavailable/u);
-      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "xx");
-      const exhaustedRun = readFileSync(join(resumed.runDir, "run.json"), "utf8");
+      assert.match(exhausted.stderr, /repository verification retry is unsafe.*uncommitted changes/u);
+      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "x");
       assert.equal(runJson(resumed.runDir).status, "running");
       assert.equal(runJson(resumed.runDir).terminal_result, null);
-      assert.equal(JSON.parse(readFileSync(join(resumed.runDir, "evidence", "test-verifier.json"), "utf8")).attempt, 2);
-      assert.equal(factory(resumed.repo, ["heartbeat", RUN, "--session", "session-one"]).ok, true);
+      assert.equal(JSON.parse(readFileSync(join(resumed.runDir, "evidence", "test-verifier.json"), "utf8")).attempt, 1);
+      const reason = exhausted.stderr.trim();
+      const parked = factory(resumed.repo, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW(5)]);
+      assert.equal(parked.ok, true, parked.stderr);
+      assert.equal(factory(resumed.repo, ["heartbeat", RUN, "--session", "session-a"]).ok, true);
       assert.equal(factory(resumed.repo, ["lock", RUN, "release", "--session", "other-session"]).ok, false);
       let status = factory(resumed.repo, ["status", RUN]);
       assert.equal(status.out.lock, "fresh");
-      assert.equal(status.out.lock_session, "session-one");
-      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "xx");
-      assert.equal(factory(resumed.repo, ["lock", RUN, "release", "--session", "session-one"]).ok, true);
+      assert.equal(status.out.lock_session, "session-a");
+      assert.equal(status.out.status, "needs-human");
+      assert.equal(status.out.dead_lock, false);
+      assert.equal(status.out.next, "gate:pre_pr");
+      assert.deepEqual(status.out.terminal_result, { status: "needs-human", reason });
+      assert.equal(factory(resumed.repo, ["lock", RUN, "release", "--session", "session-a"]).ok, true);
       status = factory(resumed.repo, ["status", RUN]);
-      assert.equal(status.out.status, "running");
-      assert.equal(status.out.terminal_result, null);
+      assert.equal(status.out.status, "needs-human");
       assert.equal(status.out.lock, "absent");
-      assert.equal(factory(resumed.repo, ["heartbeat", RUN, "--session", "session-one"]).ok, false);
-      assert.equal(factory(resumed.repo, ["lock", RUN, "claim", "--session", "session-one", "--branch", "feature"]).ok, true);
+      const parkedBytes = readFileSync(join(resumed.runDir, "run.json"), "utf8");
+      assert.deepEqual(factory(resumed.repo, ["status", RUN]).out, status.out);
+      assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes);
+
+      const forbidden = [
+        ["terminal", RUN, "needs-human", "--reason", "rewrite", "--now", NOW(6)],
+        ["gate", RUN, "story", "pending", "--now", NOW(6)],
+        ["step", RUN, "test-verifier", "accepted", "--now", NOW(6)],
+        ["slices-seed", RUN, "--now", NOW(6)],
+        ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(6)],
+        ["observe", RUN, "test-verifier", "--worktree", ".", "--base", resumed.basePoint, "--repository-verify", "--now", NOW(6)],
+        ["validator", RUN, "--report", "artifacts/validation-report.md", "--now", NOW(6)],
+        ["pr", RUN, "--url", "https://example.test/pr/parked", "--now", NOW(6)],
+      ];
+      for (const args of forbidden) {
+        const refused = factory(resumed.repo, args);
+        assert.equal(refused.ok, false, args[0]);
+        assert.equal(refused.stderr.trim(), `factory ${args[0]} refuses while run status is needs-human; run factory resume first`);
+        assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes, args[0]);
+        assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "x", args[0]);
+      }
+      const collision = factory(resumed.operator, ["init", RUN, "--now", NOW(6)]);
+      assert.equal(collision.ok, false);
+      assert.match(collision.stderr, /run status\/resume with --repo/u);
+      assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes);
+
+      assert.equal(factory(resumed.repo, ["lock", RUN, "claim", "--session", "old-owner", "--branch", "feature", "--now", "2020-01-01T00:00:00Z"]).ok, true);
+      assert.equal(factory(resumed.repo, ["lock", RUN, "steal", "--session", "session-b", "--branch", "feature"]).ok, true);
+      assert.equal(factory(resumed.repo, ["heartbeat", RUN, "--session", "session-b"]).ok, true);
       status = factory(resumed.repo, ["status", RUN]);
       assert.equal(status.out.lock, "fresh");
-      assert.equal(status.out.lock_session, "session-one");
-      writeFileSync(join(resumed.operator, "verify-ready"), "ready\n");
-      const replay = factory(resumed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(6)]);
+      assert.equal(status.out.lock_session, "session-b");
+      assert.deepEqual(status.out.terminal_result, { status: "needs-human", reason });
+      rmSync(join(resumed.repo, "repository-verify-dirty"));
+      const badArity = factory(resumed.repo, ["resume", RUN, "extra"]);
+      assert.equal(badArity.ok, false);
+      assert.equal(badArity.stderr.trim(), "factory resume requires exactly one <run-id>");
+      const badFlag = factory(resumed.repo, ["resume", RUN, "--branch", "feature"]);
+      assert.equal(badFlag.ok, false);
+      assert.match(badFlag.stderr, /unknown option '--branch' for 'resume'/u);
+
+      // Ownership, proven at the handoff. Every other mutating command advances a run whose driver
+      // already claimed the lock; resume is where a new driver takes over a run nobody is driving,
+      // so two drivers could otherwise both believe they own the same parked run. Each refusal
+      // below leaves the manifest byte-identical.
+      const noSession = factory(resumed.repo, ["resume", RUN, "--now", NOW(7)]);
+      assert.equal(noSession.ok, false);
+      assert.equal(noSession.stderr.trim(), "factory resume requires --session <session-id>");
+      const wrongSession = factory(resumed.repo, ["resume", RUN, "--session", "session-zzz", "--now", NOW(7)]);
+      assert.equal(wrongSession.ok, false);
+      assert.match(wrongSession.stderr, /is held by session session-b, not session-zzz/u);
+      assert.equal(factory(resumed.repo, ["lock", RUN, "release", "--session", "session-b"]).ok, true);
+      const unlocked = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
+      assert.equal(unlocked.ok, false);
+      assert.match(unlocked.stderr, /requires a held session lock/u);
+      writeFileSync(join(resumed.runDir, "factory.lock"), `${JSON.stringify({
+        session: "session-b", pid: process.pid, run_id: RUN, branch: "feature",
+        claimed_at: "2020-01-01T00:00:00.000Z", heartbeat_at: "2020-01-01T00:00:00.000Z",
+      }, null, 2)}\n`);
+      const staleLock = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
+      assert.equal(staleLock.ok, false);
+      assert.match(staleLock.stderr, /refuses a stale session lock/u);
+      assert.equal(factory(resumed.repo, ["lock", RUN, "steal", "--session", "session-b", "--branch", "feature"]).ok, true);
+      assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes,
+        "every ownership refusal must leave the manifest untouched");
+
+      const staleTime = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(5)]);
+      assert.equal(staleTime.ok, false);
+      assert.match(staleTime.stderr, /resume-needs-human must move updated_at forwards/u);
+      assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes);
+      const resume = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
+      assert.equal(resume.ok, true, resume.stderr);
+      assert.deepEqual(resume.out, {
+        run_id: RUN, status: "running", terminal_result: { status: "needs-human", reason }, next: "gate:pre_pr",
+      });
+      status = factory(resumed.repo, ["status", RUN]);
+      assert.equal(status.out.status, "running");
+      assert.equal(status.out.lock_session, "session-b");
+      assert.equal(status.out.next, "gate:pre_pr");
+      assert.deepEqual(status.out.terminal_result, { status: "needs-human", reason });
+      const resumedBytes = readFileSync(join(resumed.runDir, "run.json"), "utf8");
+      const replay = factory(resumed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(8)]);
       assert.equal(replay.ok, true, replay.stderr);
-      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "xxx");
-      assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), exhaustedRun);
+      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "xx");
+      assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), resumedBytes);
       assert.equal(readFileSync(join(resumed.runDir, "reviews", "be-thing.json"), "utf8"), beforeReview);
       assert.equal(readFileSync(join(resumed.runDir, "evidence", "be-thing.json"), "utf8"), beforeEvidence);
       const replayEvidence = JSON.parse(readFileSync(join(resumed.runDir, "evidence", "test-verifier.json"), "utf8"));
       assert.equal(replayEvidence.attempt, 1);
       assert.equal(replayEvidence.commit, mergeCommit);
       const independent = factory(resumed.repo, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", resumed.basePoint,
-        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(7)]);
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(9)]);
       assert.equal(independent.ok, true, independent.stderr);
-      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "xxx");
+      assert.equal(readFileSync(join(resumed.operator, "verify-count"), "utf8"), "xx");
       assert.equal(JSON.parse(readFileSync(join(resumed.runDir, "evidence", "test-verifier.json"), "utf8")).tests.cmd, PASSING_TEST_COMMAND);
-      assert.equal(recordValidator(resumed.repo, resumed.runDir, mergeCommit, "GO", NOW(7)).ok, true);
-      assert.equal(approveGate(resumed.repo, "pre_pr", NOW(7)).ok, true);
-      const pr = factory(resumed.repo, ["pr", RUN, "--url", "https://example.test/pr/resumed", "--now", NOW(8)]);
+      assert.equal(recordValidator(resumed.repo, resumed.runDir, mergeCommit, "GO", NOW(9)).ok, true);
+      assert.equal(approveGate(resumed.repo, "pre_pr", NOW(9)).ok, true);
+      const pr = factory(resumed.repo, ["pr", RUN, "--url", "https://example.test/pr/resumed", "--now", NOW(10)]);
       assert.equal(pr.ok, true, pr.stderr);
       assert.equal(runJson(resumed.runDir).pr_url, "https://example.test/pr/resumed");
-      assert.equal(factory(resumed.repo, ["lock", RUN, "release", "--session", "session-one"]).ok, true);
+      assert.equal(factory(resumed.repo, ["lock", RUN, "release", "--session", "session-b"]).ok, true);
     } finally { cleanupProject(resumed); }
+
+    const unfixed = upToReview("verify-resume-unfixed", undefined, {
+      verify: (operator) => `node -e "const f=require('fs');f.appendFileSync('${join(operator, "verify-count")}','x');f.writeFileSync('repository-verify-dirty','dirty');setTimeout(()=>{},10000)"`,
+      verifyTimeout: 1000,
+    });
+    try {
+      assert.equal(factory(unfixed.repo, ["lock", RUN, "claim", "--session", "session-a", "--branch", "feature"]).ok, true);
+      const mergeCommit = mergeIntoFeature(unfixed.repo);
+      const first = factory(unfixed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      const reason = first.stderr.trim();
+      assert.match(reason, /repository verification retry is unsafe.*uncommitted changes/u);
+      assert.equal(factory(unfixed.repo, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW(5)]).ok, true);
+      assert.equal(factory(unfixed.repo, ["lock", RUN, "release", "--session", "session-a"]).ok, true);
+      assert.equal(factory(unfixed.repo, ["lock", RUN, "claim", "--session", "session-b", "--branch", "feature"]).ok, true);
+      assert.equal(factory(unfixed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(6)]).ok, true);
+      const replay = factory(unfixed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(7)]);
+      assert.equal(replay.ok, false);
+      assert.equal(replay.stderr.trim(), reason);
+      assert.equal(factory(unfixed.repo, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW(8)]).ok, true);
+      const reparks = factory(unfixed.repo, ["status", RUN]).out;
+      assert.equal(reparks.status, "needs-human");
+      assert.deepEqual(reparks.terminal_result, { status: "needs-human", reason });
+      assert.equal(factory(unfixed.repo, ["lock", RUN, "release", "--session", "session-b"]).ok, true);
+      assert.equal(factory(unfixed.repo, ["status", RUN]).out.lock, "absent");
+    } finally { cleanupProject(unfixed); }
   });
 
   it("refuses a slice that changed a path it does not own", () => {
@@ -1077,6 +1181,23 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
         assert.equal(stopped.ok, true, stopped.stderr);
         assert.equal(Object.hasOwn(runJson(terminal.runDir), "pr_base"), false);
       } finally { cleanupProject(terminal); }
+
+      const runningBefore = readFileSync(join(p.runDir, "run.json"), "utf8");
+      const runningResume = factory(p.repo, ["resume", RUN, "--now", NOW(8)]);
+      assert.equal(runningResume.ok, false);
+      assert.equal(runningResume.stderr.trim(), "factory resume requires current status needs-human; found 'running'");
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), runningBefore);
+      for (const status of ["completed", "partial", "blocked"]) {
+        const finalRun = project(`resume-final-${status}`, { seed: false });
+        try {
+          assert.equal(factory(finalRun.repo, ["terminal", RUN, status, "--reason", "final", "--now", NOW(8)]).ok, true);
+          const before = readFileSync(join(finalRun.runDir, "run.json"), "utf8");
+          const refused = factory(finalRun.repo, ["resume", RUN, "--now", NOW(9)]);
+          assert.equal(refused.ok, false);
+          assert.equal(refused.stderr.trim(), `factory resume requires current status needs-human; found '${status}'`);
+          assert.equal(readFileSync(join(finalRun.runDir, "run.json"), "utf8"), before);
+        } finally { cleanupProject(finalRun); }
+      }
     } finally { cleanupProject(p); }
   });
 
@@ -1265,6 +1386,10 @@ describe("what happens next", () => {
     const check = (overrides, expected, label) => {
       const actual = action(overrides);
       if (actual !== expected) failures.push(`${label}: expected ${expected}, got ${actual}`);
+      if (overrides.status === undefined || overrides.status === "running") {
+        const parked = action({ ...overrides, status: "needs-human", terminal_result: { status: "needs-human", reason: "external cause" } });
+        if (parked !== expected) failures.push(`${label} parked: expected ${expected}, got ${parked}`);
+      }
     };
     const absentCases = [
       ["blocked category and array order", [
@@ -1343,10 +1468,13 @@ describe("what happens next", () => {
       check({ gates: allApproved, slices, steps, pr_url }, expected, `all gates approved: ${label}`);
     }
 
-    check({
-      status: "completed", gates: { story: gate("pending"), brief: gate("stop"), pre_pr: gate("changes") },
-      slices: competingSlices, steps: openSteps,
-    }, "terminal:completed", "terminal status must outrank all gate, slice, and step work");
+    for (const status of ["completed", "partial", "blocked"]) {
+      check({
+        status, terminal_result: { status, reason: "final" },
+        gates: { story: gate("pending"), brief: gate("stop"), pre_pr: gate("changes") },
+        slices: competingSlices, steps: openSteps,
+      }, `terminal:${status}`, `${status} status must outrank all gate, slice, and step work`);
+    }
     assert.deepEqual(failures, []);
   });
 });
@@ -1361,14 +1489,16 @@ describe("the holistic validator is required only when there is something holist
     review_ref: null, merge_commit: "b".repeat(40),
   });
   const HEAD = "c".repeat(40);
-  const state = (slices, validator = null) => ({
+  const state = (slices, validator = null, overrides = {}) => ({
     status: "running", slices, validator,
     gates: Object.fromEntries(["story", "brief", "pre_pr"].map((n) => [n, { status: "approved" }])),
+    terminal_result: null,
+    ...overrides,
   });
-  const refusal = (slices, validator) => {
+  const refusal = (slices, validator, overrides) => {
     try {
       assertPublicationReady({
-        runDir: "/nonexistent", state: state(slices, validator), runId: RUN, observeHead: () => HEAD,
+        runDir: "/nonexistent", state: state(slices, validator, overrides), runId: RUN, observeHead: () => HEAD,
       });
       return null;
     } catch (error) { return error.message; }
@@ -1388,5 +1518,12 @@ describe("the holistic validator is required only when there is something holist
     // And a recorded approval is still bound to the head it judged.
     assert.match(refusal([slice("one")], { verdict: "GO", reviewed_head: "d".repeat(40), report: null, loops: 1 }),
       /but the integration head is/u);
+    assert.match(refusal([slice("one")], null, {
+      status: "needs-human", terminal_result: { status: "needs-human", reason: "external cause" },
+    }), /a needs-human run is parked; run factory resume before publication/u);
+    const resumed = refusal([slice("one")], null, {
+      terminal_result: { status: "needs-human", reason: "external cause" },
+    });
+    assert.doesNotMatch(resumed, /parked|terminal/u);
   });
 });

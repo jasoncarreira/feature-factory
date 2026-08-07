@@ -295,8 +295,8 @@ describe("run projection", () => {
       }));
 
       const snapshot = pollRuns(root);
-      assert.deepEqual(snapshot.runs.map((run) => run.run_id), ["ordinary-newer", "waiting-older"]);
-      assert.equal(snapshot.active, snapshot.runs[1], "the explicit active run may differ from the first sorted run");
+      assert.deepEqual(snapshot.runs.map((run) => run.run_id), ["waiting-older", "ordinary-newer"]);
+      assert.equal(snapshot.active, snapshot.runs[0], "the first eligible sorted run is active");
       assert.equal(snapshot.active.awaiting_gate, "story");
       assert.equal(snapshot.active.deadLock, false, "a missing lock does not prevent gate priority");
       assert.equal(snapshot.active.session, null, "a missing session does not prevent gate priority");
@@ -310,6 +310,75 @@ describe("run projection", () => {
       ]);
       assert.deepEqual(runCommands(snapshot.runs, { navigate() {} }).map((command) => command.value), [],
         "visible sessionless runs remain unavailable for navigation");
+
+      const tierRoot = repo("exact-tiers");
+      try {
+        seedRun(tierRoot, "gate-old", RUN({
+          run_id: "gate-old", updated_at: "2026-07-30T01:00:00.000Z",
+          gates: { story: { status: "pending", at: null, artifact: null } },
+        }));
+        seedRun(tierRoot, "healthy-new", RUN({
+          run_id: "healthy-new", updated_at: "2026-07-30T13:00:00.000Z",
+        }));
+        for (const runId of ["healthy-z", "healthy-a"]) {
+          seedRun(tierRoot, runId, RUN({ run_id: runId, updated_at: "2026-07-30T12:00:00.000Z" }));
+        }
+        seedRun(tierRoot, "parked", RUN({
+          run_id: "parked", status: "needs-human", updated_at: "2026-07-30T20:00:00.000Z",
+          terminal_result: { status: "needs-human", reason: "external cause" },
+        }));
+        const dead = seedRun(tierRoot, "dead", RUN({
+          run_id: "dead", updated_at: "2026-07-30T21:00:00.000Z",
+        }));
+        writeFileSync(join(dead, "factory.lock"), JSON.stringify({
+          session: "ses_dead", pid: 7, run_id: "dead", branch: null,
+          claimed_at: "2026-07-30T00:00:00.000Z", heartbeat_at: "2026-07-30T00:00:00.000Z",
+        }));
+        const finalRows = [
+          ["final-completed", "completed", "2026-07-30T22:00:00.000Z"],
+          ["final-partial", "partial", "2026-07-30T23:00:00.000Z"],
+          ["final-blocked", "blocked", "2026-07-31T00:00:00.000Z"],
+        ];
+        for (const [runId, status, updated_at] of finalRows) {
+          const finalDir = seedRun(tierRoot, runId, RUN({
+            run_id: runId, status, updated_at,
+            terminal_result: status === "completed" ? null : { status, reason: `${status} result` },
+          }));
+          writeFileSync(join(finalDir, "factory.lock"), JSON.stringify({
+            session: `ses_${status}`, pid: 8, run_id: runId, branch: null,
+            claimed_at: "2026-07-30T00:00:00.000Z", heartbeat_at: "2026-07-30T00:00:00.000Z",
+          }));
+        }
+        seedRun(tierRoot, "invalid", RUN({
+          run_id: "invalid", updated_at: "2026-07-30T23:00:00.000Z", unexpected: true,
+        }));
+
+        const tiered = pollRuns(tierRoot);
+        assert.deepEqual(tiered.runs.map((run) => run.run_id), [
+          "gate-old", "healthy-new", "healthy-a", "healthy-z", "parked", "dead",
+          "final-blocked", "final-partial", "final-completed", "invalid",
+        ], "selection and sort use gate, healthy, parked, dead, final, invalid tiers with time then ID ties");
+        assert.equal(tiered.active, tiered.runs[0], "selection takes the first eligible sorted record");
+        assert.deepEqual(tiered.runs.map((run) => [run.run_id, run.terminal, run.parked, run.deadLock]), [
+          ["gate-old", false, false, false],
+          ["healthy-new", false, false, false],
+          ["healthy-a", false, false, false],
+          ["healthy-z", false, false, false],
+          ["parked", false, true, false],
+          ["dead", false, false, true],
+          ["final-blocked", true, false, false],
+          ["final-partial", true, false, false],
+          ["final-completed", true, false, false],
+          ["invalid", false, false, false],
+        ], "projection derives final, parked, and dead only from current status plus stale running lock");
+        for (const [runId, status] of finalRows) {
+          const final = tiered.runs.find((run) => run.run_id === runId);
+          assert.deepEqual({ terminal: final.terminal, parked: final.parked, deadLock: final.deadLock },
+            { terminal: true, parked: false, deadLock: false }, `${status} is final history even with a stale lock`);
+          assert.deepEqual(renderLines({ active: final, runs: [final], searched: [] }), [`${runId}  ${status}`],
+            `${status} uses compact final-history rendering`);
+        }
+      } finally { rmSync(tierRoot, { recursive: true, force: true }); }
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -428,7 +497,9 @@ describe("run projection", () => {
       Date.now = () => now;
       const primary = seedSandbox(root, "live-primary",
         RUN({ run_id: "live-primary", updated_at: "2026-07-30T12:00:00.000Z" }));
-      writeFileSync(join(primary.dir, "factory.lock"), JSON.stringify(staleOwner("live-primary")));
+      writeFileSync(join(primary.dir, "factory.lock"), JSON.stringify({
+        ...staleOwner("live-primary"), heartbeat_at: "2026-07-30T12:30:00.000Z",
+      }));
       const dead = seedSandbox(root, "live-dead",
         RUN({ run_id: "live-dead", updated_at: "2026-07-30T11:00:00.000Z" }));
       writeFileSync(join(dead.dir, "factory.lock"), JSON.stringify(staleOwner("live-dead")));
@@ -468,8 +539,8 @@ describe("run projection", () => {
         "[AC15] a valid live run headlines ahead of newer terminal and invalid records");
       assert.deepEqual(snapshot.runs.map((run) => [run.run_id, run.valid, run.terminal]), [
         ["live-primary", true, false],
-        ["live-dead", true, false],
         ["other-live", true, false],
+        ["live-dead", true, false],
         ["terminal-new", true, true],
         ["dup", false, false],
         ["dup", false, false],
@@ -477,15 +548,15 @@ describe("run projection", () => {
       ], "[AC6, AC15] records use live, terminal, then deterministic invalid precedence");
 
       const lines = renderLines(snapshot);
-      assert.deepEqual(lines.slice(0, 5), [
+      assert.deepEqual(lines.slice(0, 4), [
         "live-primary", "running  interactive  feature/app-1", "next: gate:story",
-        `sandbox: ${primary.sandbox}`, "lock: stale (dead; sandbox retained)",
-      ], "[AC13] the primary sandbox path and dead lock follow the full live block");
-      assert.deepEqual(lines.slice(5, 10), [
+        `sandbox: ${primary.sandbox}`,
+      ], "[AC13] the primary sandbox path follows the full live block");
+      assert.deepEqual(lines.slice(4, 9), [
+        "other-live",
+        "next: gate:story",
         "live-dead  lock: stale (dead; sandbox retained)",
         `sandbox: ${dead.sandbox}`,
-        "next: gate:story",
-        "other-live",
         "next: gate:story",
       ], "every secondary nonterminal is explicit in valid-live order with its projected next action");
       const invalids = snapshot.runs.filter((run) => !run.valid);
@@ -614,7 +685,7 @@ describe("run projection", () => {
       ">> next: gate:brief",
       "ordinary",
       "next: step:builder",
-      "stale  lock: stale (dead; sandbox retained)",
+      "stale  APP-3  lock: stale (dead; sandbox retained)",
       "sandbox: /repo/sandboxes/stale",
       "next: gate:review",
       "broken  INVALID",
@@ -626,6 +697,69 @@ describe("run projection", () => {
     assert.deepEqual(renderLines(snapshot), expected);
     assert.deepEqual(renderLines(snapshot), expected);
     assert.deepEqual(snapshot, before);
+
+    const fixture = {
+      run_id: "app-1", issue_key: "APP-1", valid: true, terminal: false,
+      mode: "interactive", branch: "feature/app-1", step: null, slice_total: 0, slices: [],
+      validator: null, pr_url: null, awaiting_gate: null, next: "slice:be-one",
+      sandbox_path: "/repo/.factory-sandboxes/app-1",
+      terminal_result: {
+        status: "needs-human",
+        reason: "repository verification retry is unsafe: worktree is dirty",
+      },
+    };
+    const primary = (run) => renderLines({ active: run, runs: [run], searched: [] });
+    const secondary = (run) => renderLines({
+      active: { run_id: "done", valid: true, terminal: true, status: "completed", manifest_path: "/done" },
+      runs: [run],
+      searched: [],
+    }).slice(1);
+    const parkedPrimary = [
+      "app-1  APP-1",
+      "needs-human (parked)  interactive  feature/app-1",
+      "reason: repository verification retry is unsafe: worktree is dirty",
+      "next: slice:be-one",
+      "sandbox: /repo/.factory-sandboxes/app-1",
+    ];
+    const parkedSecondary = [
+      "app-1  APP-1  needs-human (parked)",
+      "reason: repository verification retry is unsafe: worktree is dirty",
+      "next: slice:be-one",
+      "sandbox: /repo/.factory-sandboxes/app-1",
+    ];
+    for (const [lock, deadLock] of [["absent", false], ["fresh", false], ["stale", true]]) {
+      const parked = { ...fixture, status: "needs-human", parked: true, deadLock };
+      assert.deepEqual(primary(parked), parkedPrimary, `primary parked ${lock}`);
+      assert.deepEqual(secondary(parked), parkedSecondary, `secondary parked ${lock}`);
+    }
+    const resumed = { ...fixture, status: "running", parked: false, deadLock: false };
+    assert.deepEqual(primary(resumed), [
+      "app-1  APP-1",
+      "running  interactive  feature/app-1",
+      "next: slice:be-one",
+      "sandbox: /repo/.factory-sandboxes/app-1",
+    ], "primary resumed fresh");
+    assert.deepEqual(secondary(resumed), [
+      "app-1  APP-1",
+      "next: slice:be-one",
+    ], "secondary resumed fresh");
+    const resumedStale = { ...resumed, deadLock: true };
+    assert.deepEqual(primary(resumedStale), [
+      "app-1  APP-1",
+      "running  interactive  feature/app-1",
+      "next: slice:be-one",
+      "sandbox: /repo/.factory-sandboxes/app-1",
+      "lock: stale (dead; sandbox retained)",
+    ], "primary resumed stale");
+    assert.deepEqual(secondary(resumedStale), [
+      "app-1  APP-1  lock: stale (dead; sandbox retained)",
+      "sandbox: /repo/.factory-sandboxes/app-1",
+      "next: slice:be-one",
+    ], "secondary resumed stale");
+    for (const lines of [primary(resumed), secondary(resumed), primary(resumedStale), secondary(resumedStale)]) {
+      assert.equal(lines.some((line) => line.includes(fixture.terminal_result.reason)), false,
+        "resumed running hides the historical reason");
+    }
   });
 
   it("says so when there is no control plane at all", () => {
@@ -828,6 +962,10 @@ describe("the host registration contract", () => {
     const originalNow = Date.now;
     const now = Date.parse("2026-07-30T12:30:00.000Z");
     try {
+      const resolvedFactory = realpathSync(new URL(import.meta.resolve("feature-factory")));
+      const sourceFactory = realpathSync(new URL("../../feature-factory/state/index.js", import.meta.url));
+      assert.equal(resolvedFactory, sourceFactory,
+        "the bare feature-factory dependency must resolve inside this source workspace, not a parent checkout");
       Date.now = () => now;
       const dir = seedRun(root, "app-1", RUN());
       // A host-issued id, because that is what a lock now holds and the only thing the sidebar will
@@ -845,7 +983,7 @@ describe("the host registration contract", () => {
       assert.equal(pollRuns(root).active.session, "ses_03661f9e0ffeiAbZLdMQSm8xvd",
         "[AC13] the six-key owner is projected");
       assert.equal(pollRuns(root).active.deadLock, false, "[AC13] age equal to 30 minutes remains fresh");
-      writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T11:59:59.999Z")));
+      writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T11:00:00.000Z")));
       assert.equal(pollRuns(root).active.deadLock, true, "[AC13] age greater than 30 minutes is stale");
       writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T12:30:00.001Z")));
       assert.equal(pollRuns(root).active.deadLock, false, "[AC13] a future heartbeat remains fresh");
@@ -855,9 +993,64 @@ describe("the host registration contract", () => {
       writeFileSync(join(dir, "factory.lock"), "{ not json");
       assert.equal(pollRuns(root).active.session, null, "[AC13] a malformed lock is absent, not fatal");
 
+      const historical = {
+        status: "needs-human", reason: "repository verification retry is unsafe: worktree is dirty",
+      };
+      writeFileSync(join(dir, "run.json"), `${JSON.stringify(RUN({
+        status: "needs-human", terminal_result: historical,
+      }), null, 2)}\n`);
+      for (const heartbeat of [null, "2026-07-30T12:00:00.000Z", "2026-07-30T11:59:59.999Z"]) {
+        if (heartbeat === null) rmSync(join(dir, "factory.lock"), { force: true });
+        else writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner(heartbeat)));
+        const parked = pollRuns(root).active;
+        assert.equal(parked.terminal, false, "parked is not final");
+        assert.equal(parked.parked, true, "current needs-human is parked");
+        assert.equal(parked.deadLock, false, "parked is never a dead lock");
+      }
+
+      writeFileSync(join(dir, "run.json"), `${JSON.stringify(RUN({
+        status: "running", terminal_result: historical,
+      }), null, 2)}\n`);
+      writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T12:00:00.000Z")));
+      assert.deepEqual({
+        terminal: pollRuns(root).active.terminal,
+        parked: pollRuns(root).active.parked,
+        deadLock: pollRuns(root).active.deadLock,
+      }, { terminal: false, parked: false, deadLock: false }, "resumed fresh running ignores historical finality");
+      writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T11:00:00.000Z")));
+      const staleResumed = pollRuns(root).active;
+      assert.equal(staleResumed.valid, true, staleResumed.error);
+      assert.equal(staleResumed.session, "ses_03661f9e0ffeiAbZLdMQSm8xvd", "resumed running retains its lock owner");
+      assert.deepEqual({
+        terminal: staleResumed.terminal,
+        parked: staleResumed.parked,
+        deadLock: staleResumed.deadLock,
+      }, { terminal: false, parked: false, deadLock: true }, "resumed stale running is dead despite historical result");
+      assert.deepEqual(renderLines({ active: staleResumed, runs: [staleResumed], searched: [] }), [
+        "app-1",
+        "running  interactive  feature/app-1",
+        "next: gate:story",
+        "lock: stale (dead)",
+      ], "a local resumed stale run renders dead in primary position without its historical reason");
+
+      seedRun(root, "healthy", RUN({ run_id: "healthy", updated_at: "2026-07-30T13:00:00.000Z" }));
+      const withLocalSecondary = pollRuns(root);
+      assert.equal(withLocalSecondary.active.run_id, "healthy");
+      assert.deepEqual(renderLines(withLocalSecondary), [
+        "healthy",
+        "running  interactive  feature/app-1",
+        "next: gate:story",
+        "app-1  lock: stale (dead)",
+        "next: gate:story",
+      ], "a local resumed stale run renders dead in secondary position without its historical reason");
+      assert.equal(renderLines(withLocalSecondary).some((line) => line.includes(historical.reason)), false,
+        "local stale rendering hides the resumed historical reason");
+      rmSync(join(root, CONTROL_PLANE, "healthy"), { recursive: true, force: true });
+
       writeFileSync(join(dir, "run.json"), `${JSON.stringify(RUN({ status: "completed" }), null, 2)}\n`);
       writeFileSync(join(dir, "factory.lock"), JSON.stringify(owner("2026-07-30T11:59:59.999Z")));
       assert.equal(pollRuns(root).active.deadLock, false, "[AC13] terminal runs are never dead locks");
+      assert.equal(pollRuns(root).active.parked, false, "final runs are not parked");
     } finally {
       Date.now = originalNow;
       rmSync(root, { recursive: true, force: true });
@@ -1058,6 +1251,7 @@ describe("registering the workflow with the host", () => {
 
   it("registers the command, the skill path, and every agent the skill dispatches", async () => {
     const cfg = await configured();
+    const parkedResumePolicy = "Top-level `needs-human` is parked and resumable, not final. Resume only in this order after fixing the external cause: select and bind the retained sandbox and complete every existing pre-lock check; claim or perform a justified steal and verify the fresh owner and unchanged parked result; explicitly run `factory resume` and verify running status, unchanged historical result, real next action, and the same fresh owner; replay only existing post-lock reconciliation and safety checks; continue solely from newly qualified `status.next`. Never auto-clear or continue from `terminal_result.reason`; this plugin is read-only and never clears state.";
     assert.deepEqual(Object.keys(cfg.command), ["feature"]);
     assert.equal(cfg.command.feature.agent, "feature-factory", "the command runs as the orchestrator");
     assert.equal(cfg.command.feature.description,
@@ -1086,13 +1280,13 @@ describe("registering the workflow with the host", () => {
       "never mutate locally, dispatch a fresh child, use delivery, steer, queue, wait, or treat admittedSeq as execution proof",
       "Persisted `run.json.mode` is immutable and is the sole gate authority on resume",
       "In `interactive`, persist and present the pending gate and wait for a real human",
-      "In `headless`, preserve terminal `needs-human`",
+      "In `headless`, preserve parked top-level `needs-human`",
       "In `autonomous`, decide only when the existing preconditions authorize the decision",
     ]) assert.ok(cfg.agent["feature-factory"].prompt.includes(passage), passage);
     for (const passage of [
       "Persisted `run.json.mode` is the sole gate authority",
       "`interactive` persists and presents a pending gate and waits for a real human",
-      "`headless` preserves terminal `needs-human`",
+      "`headless` preserves parked top-level `needs-human`",
       "`autonomous` decides only when existing preconditions authorize",
       "Inability to ask never changes the persisted mode",
     ]) assert.ok(cfg.command.feature.template.includes(passage), passage);
@@ -1142,7 +1336,7 @@ describe("registering the workflow with the host", () => {
       "This child must not dispatch itself, `feature-factory`, another `run-orchestrator`, or any arbitrary project-owned agent",
       "It may observe builders it dispatched; builders never observe themselves",
       "In `interactive`, perform the orderly pending-gate park",
-      "In `headless`, preserve terminal `needs-human`",
+      "In `headless`, preserve parked top-level `needs-human`",
       "In `autonomous`, decide only under the existing autonomous preconditions and continue through existing Step 7",
       "Story gate `story` -> `artifacts/story.md`",
       "Brief gate `brief` -> `artifacts/technical-brief.md`",
@@ -1176,10 +1370,15 @@ describe("registering the workflow with the host", () => {
       "After Step 7 archives or removes a completed sandbox, query and report the canonical post-completion repository selected by Step 7",
       "Report only existing status, terminal result, and PR URL; add no durable fields",
     ]) assert.ok(child.prompt.includes(passage), passage);
+    assert.equal(cfg.agent["feature-factory"].prompt.split(parkedResumePolicy).length - 1, 1);
+    assert.equal(cfg.command.feature.template.split(parkedResumePolicy).length - 1, 1);
+    assert.equal(child.prompt.split(parkedResumePolicy).length - 1, 2);
     assert.doesNotMatch(child.prompt, /Outcome: pending-gate/u);
     assert.doesNotMatch(child.prompt, /decision child/u);
     assert.deepEqual(Object.keys(child).sort(), ["description", "mode", "permission", "prompt", "variant"]);
     const registrationSource = readFileSync(new URL("../plugin/config.js", import.meta.url), "utf8");
+    assert.equal(registrationSource.split(parkedResumePolicy).length - 1, 4,
+      "all four prompt literals carry the exact ordered parked/resume policy");
     for (const mechanism of [
       /\bfetch\s*\(/u,
       /\bJSON\.parse\s*\(/u,

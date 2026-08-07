@@ -227,8 +227,8 @@ function terminalResult(errors, value, status) {
   if (!object(errors, value, "run.terminal_result", TERMINAL_RESULT_KEYS)) return;
   enumValue(errors, value, "status", TERMINAL_STATUSES, "run.terminal_result");
   required(errors, value, "reason", "run.terminal_result");
-  if (value.status !== status) {
-    errors.push({ path: "run.terminal_result.status", message: "must match run.status" });
+  if (value.status !== status && !(status === "running" && value.status === "needs-human")) {
+    errors.push({ path: "run.terminal_result.status", message: "must match run.status or preserve a resumed needs-human result" });
   }
 }
 

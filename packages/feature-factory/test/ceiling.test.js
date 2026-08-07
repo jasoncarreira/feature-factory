@@ -24,10 +24,10 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Widened deliberately when slices/observe landed. BUILD-PLAN-SMALL.md declares
 // twelve commands; `validator` and `pr` are not built yet, so they are absent here
 // and adding them will be another visible diff.
-// All twelve commands BUILD-PLAN-SMALL.md declares are now built. A thirteenth
-// needs a reason in the plan first, not just an edit here.
+// All twelve commands BUILD-PLAN-SMALL.md declares are built. Issue #243 authorizes the thirteenth:
+// explicit resume is the sole transition that clears a parked needs-human stop.
 const CLI_COMMANDS = [
-  "init", "status", "lock", "heartbeat", "gate", "step", "terminal",
+  "init", "status", "resume", "lock", "heartbeat", "gate", "step", "terminal",
   "slices-seed", "slice", "observe", "validator", "pr",
 ];
 
@@ -104,6 +104,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode",
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
+    assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
     // The skill is the authoritative instruction set, and nothing checked it against the CLI
@@ -569,7 +570,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // this closes no reachable false green -- it keeps the predicate that authorizes another
     // execution from being correct only by virtue of its caller. Four of the five lines are
     // that reasoning.
-    assert.equal(total, 3293, "issue #240 landed at 3293 production lines, 3293 after review");
+    // 3293 -> 3356 for issue #243: an explicit resume transition, parked pre-effect command guards,
+    // historical-result validation, real continuation projection, and current-status health checks.
+    // 3356 -> 3372 on review: resume proves ownership before un-parking. It is the handoff -- the one
+    // command where a new driver takes over a run nobody is driving -- so two drivers could otherwise
+    // both resume the same parked run and both believe they own it. Twelve of the sixteen lines are the
+    // three refusals and the reasoning.
+    assert.equal(total, 3372, "issue #243 landed at 3372 production lines, 3372 after review");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 

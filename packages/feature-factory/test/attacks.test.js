@@ -102,6 +102,9 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
       [(run) => { run.slices = [{ id: "fe", stack: "frontend", depends_on: ["nope"], status: "pending", worktree: null, branch: null, attempts: 1, evidence_ref: null, review_ref: null, merge_commit: null }]; }, /unknown slice 'nope'/u],
       [(run) => { run.slices = [{ id: "be", stack: "backend", depends_on: [], status: "merged", worktree: null, branch: null, attempts: 1, evidence_ref: null, review_ref: null, merge_commit: null }]; }, /merge_commit: is required when a slice is merged/u],
       [(run) => { run.status = "blocked"; }, /terminal_result: is required when status is blocked/u],
+      [(run) => { run.terminal_result = { status: "completed", reason: "old" }; }, /must match run.status or preserve a resumed needs-human result/u],
+      [(run) => { run.terminal_result = { status: "partial", reason: "old" }; }, /must match run.status or preserve a resumed needs-human result/u],
+      [(run) => { run.terminal_result = { status: "blocked", reason: "old" }; }, /must match run.status or preserve a resumed needs-human result/u],
       [(run) => { run.pr_base = ""; }, /run\.pr_base: must be a non-empty string/u],
       [(run) => { run.pr_base = "   "; }, /run\.pr_base: must be a non-empty string/u],
       [(run) => { run.pr_base = 42; }, /run\.pr_base: must be a non-empty string/u],
@@ -135,6 +138,10 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
     assert.equal(validateRun(canonical).run_id, "app-1");
     assert.equal(validateRun(baseRun({ pr_base: null })).pr_base, null);
     assert.equal(validateRun(baseRun({ pr_base: "integration" })).pr_base, "integration");
+    assert.deepEqual(validateRun(baseRun({ terminal_result: { status: "needs-human", reason: "external cause" } })).terminal_result,
+      { status: "needs-human", reason: "external cause" });
+    assert.deepEqual(validateRun(baseRun({ status: "needs-human", terminal_result: { status: "needs-human", reason: "external cause" } })).terminal_result,
+      { status: "needs-human", reason: "external cause" });
 
     const malformed = malformedRun();
     assert.throws(() => validateRun(malformed), new RegExp(`unknown keys: ${REMOVED_KEY}`, "u"));
@@ -365,5 +372,61 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       assert.equal(next.status, "blocked");
       assert.equal(next.terminal_result.reason, "slice be-entity exhausted retries");
     } finally { rmSync(f.root, { recursive: true, force: true }); }
+
+    const result = { status: "needs-human", reason: "external cause" };
+    for (const [label, mode, apply, pattern] of [
+      ["undefined mode", undefined, (state) => ({ ...state, updated_at: LATER }), /must be resumed before any transition/u],
+      ["terminalize mode", "terminalize", (state) => ({ ...state, updated_at: LATER, terminal_result: { ...result, reason: "rewritten" } }), /must be resumed before any transition/u],
+      ["other envelope mode", "annotate", (state) => ({ ...state, updated_at: LATER }), /must be resumed before any transition/u],
+      ["resume keeps parked", "resume-needs-human", (state) => ({ ...state, updated_at: LATER }), /must change status to running/u],
+      ["resume changes result", "resume-needs-human", (state) => ({ ...state, updated_at: LATER, status: "running", terminal_result: { ...result, reason: "rewritten" } }), /must preserve terminal_result/u],
+      ["resume changes envelope", "resume-needs-human", (state) => ({ ...state, updated_at: LATER, status: "running", branch: "other" }), /cannot change envelope\.branch/u],
+      ["resume changes progress", "resume-needs-human", (state) => ({ ...state, updated_at: LATER, status: "running", gates: {} }), /cannot change run\.gates/u],
+      ["resume does not advance time", "resume-needs-human", (state) => ({ ...state, status: "running" }), /must move updated_at forwards/u],
+    ]) {
+      const parked = fixture(`parked-${label.replaceAll(" ", "-")}`, { status: "needs-human", terminal_result: result });
+      try {
+        const before = bytes(parked.runDir);
+        const participants = mode ? [{ familyId: "envelope", mode }] : [];
+        await assert.rejects(() => transition(parked.runDir, { participants, apply }), pattern);
+        assert.equal(bytes(parked.runDir), before, label);
+      } finally { rmSync(parked.root, { recursive: true, force: true }); }
+    }
+
+    for (const [familyId, mode] of [["gates", "open"], ["steps", "record"], ["slices", "record"], ["verdict", "record"]]) {
+      const parkedFamily = fixture(`parked-${familyId}`, { status: "needs-human", terminal_result: result });
+      try {
+        const before = bytes(parkedFamily.runDir);
+        await assert.rejects(() => transition(parkedFamily.runDir, {
+          participants: [{ familyId, mode }],
+          apply: (state) => ({ ...state, updated_at: LATER }),
+        }), /must be resumed before any transition/u);
+        assert.equal(bytes(parkedFamily.runDir), before, familyId);
+      } finally { rmSync(parkedFamily.root, { recursive: true, force: true }); }
+    }
+
+    for (const status of ["running", "completed", "partial", "blocked"]) {
+      const terminalResult = status === "running" ? null : { status, reason: "final" };
+      const notParked = fixture(`resume-from-${status}`, { status, terminal_result: terminalResult });
+      try {
+        const before = bytes(notParked.runDir);
+        await assert.rejects(() => transition(notParked.runDir, {
+          participants: [{ familyId: "envelope", mode: "resume-needs-human" }],
+          apply: (state) => ({ ...state, updated_at: LATER }),
+        }), new RegExp(`requires current status needs-human; found '${status}'`, "u"));
+        assert.equal(bytes(notParked.runDir), before);
+      } finally { rmSync(notParked.root, { recursive: true, force: true }); }
+    }
+
+    const parked = fixture("resume-ok", { status: "needs-human", terminal_result: result });
+    try {
+      const next = await transition(parked.runDir, {
+        participants: [{ familyId: "envelope", mode: "resume-needs-human" }],
+        apply: (state) => ({ ...state, updated_at: LATER, status: "running" }),
+      });
+      assert.equal(next.status, "running");
+      assert.deepEqual(next.terminal_result, result);
+      assert.deepEqual(Object.keys(next), Object.keys(parked.run));
+    } finally { rmSync(parked.root, { recursive: true, force: true }); }
   });
 });
