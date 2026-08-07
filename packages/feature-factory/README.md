@@ -11,7 +11,7 @@ Ships three things:
 
 | | |
 | --- | --- |
-| `bin/factory.js` | the `factory` CLI — thirteen commands, each state change one checked transition |
+| `bin/factory.js` | the `factory` CLI — fourteen commands, each state change one checked transition |
 | `WORKFLOW.md` | the canonical, host-agnostic workflow contract |
 | `agents/` | eleven specialist definitions dispatched by a host adapter |
 
@@ -134,10 +134,11 @@ progress. A resumed recorded merge still traverses the existing clean-head, retr
 repository-verification path. An unresolved repair-journal record is separate and remains
 publication-blocking. If the cause was not fixed, the run may park again with the same reason.
 
-`resolve`, `verify`, and `publishing_identity` are consumed now; only `publish` remains deferred to #224.
+`resolve`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
+Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
 The validated raw `publishing_identity` is retained exactly as parsed, without trimming, normalization,
 case-folding, or reserialization. A missing, non-string, or whitespace-only identity makes a present
-config malformed. This consumer adds no config key or syntax, run status, or factory command.
+config malformed. `publishing_identity` itself adds no config key or syntax, run status, or factory command. The independent `factory effective-push` command adds no state or flag.
 
 With a present valid config, every mode checks that identity at exactly three boundaries: immediately
 after verified post-lock ownership, or immediately after an explicit resume is verified running with
@@ -184,6 +185,20 @@ publication. Credential provisioning and helper setup are instruction only. Exis
 is not part of this package and no generated config or resolver asset is shipped. See the repository's
 [operator guide](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/OPERATING.md) for the
 shared inherited-token helper recipe; it does not acquire, store, install, or repair credentials.
+
+## Effective push target
+
+```text
+factory effective-push <bootstrap|check> <operator-repository> <sandbox-repository>
+```
+
+The command accepts exactly those three positional arguments and no options. `bootstrap` captures the
+operator's effective push target, configures the sandbox push URL from it, then freshly captures both
+repositories and compares them exactly. `check` freshly captures both targets and compares without
+configuration. Both modes use shell-free Git subprocesses, write no output on success, and retain the
+sandbox on a fixed redacted failure. Captured targets and child diagnostics are never returned, logged,
+persisted in factory state, printed, or attached as an error cause. The command is independent of
+`publishing_identity`, adds no run state or flag, and configured `publish` remains unconsumed.
 
 ## Why the code exists at all
 
