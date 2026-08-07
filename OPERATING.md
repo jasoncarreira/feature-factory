@@ -251,6 +251,34 @@ Publishing-identity verification is enforcement because it prevents false-green 
 publication. Supplying the token and installing this helper recipe are instruction only, not factory
 credential provisioning or a helper-setup guard.
 
+**An unprepared launch refuses, and that is the decision rather than a gap.** A run with no inherited
+`GH_TOKEN` stops at the first identity guard and says so, naming the declared account. It does not fall
+back, retry, or publish as whoever happens to be machine-active.
+
+The obvious-looking alternative was considered and rejected: have the run derive the token itself from
+the declared identity, so that any invocation is correct without preparation —
+
+```sh
+# rejected: this is a factory credential manager wearing a one-liner
+PUBLISHING_TOKEN="$(gh auth token --user "$DECLARED_PUBLISHING_IDENTITY")"
+GH_TOKEN="$PUBLISHING_TOKEN" gh pr create --draft ...
+```
+
+It works, and it is what makes an unprepared launch publish. It also means the factory reads a secret out
+of the operator's keyring and injects it into child environments on every publication — which is the
+exposure a run is otherwise able to prove it never touches. Given a choice between a run that publishes
+without preparation and a run that cannot hold a credential, this repository chose the second, and
+accepted that the cost is an operator error message.
+
+**That choice is enforced, not merely described.** At the three identity guards the skill forbids `gh
+auth`, a `GH_TOKEN=` assignment in argv, command substitution, and any retry or fallback, and
+`packages/feature-factory/test/effective-push.test.js` fails on each. An attempt to add the snippet above
+is rejected by the suite within seconds — which is how this note came to be written.
+
+If the tradeoff is ever revisited, it is a policy reversal and belongs in its own issue: the guards and
+their tests both encode the current answer, and the disclosure question has to be faced directly rather
+than arrived at as a side effect of making launches easier.
+
 Three details, each of which cost something:
 
 - **The leading space** before `--autonomous`. The launcher's argument parser consumes the flag
