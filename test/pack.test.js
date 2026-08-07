@@ -65,7 +65,7 @@ const SKILL_CONTRACTS = [
   ["a post-record failure preserves the merged slice and forbids its reopening, reseeding, re-observation, or redispatch", (text) => /If the row is `merged` at exactly\s+`MERGE_COMMIT`, preserve its evidence, review, refs, attempts, paths, test plan, and merge commit;[\s\S]*stop before `status\.next`, wave calculation,\s+activation, reopen, reseed, slice re-observation, or redispatch\. Never reopen or redispatch a\s+merged slice\./u.test(text)],
   ["Gate 3 is a fresh independent observation", (text) => /Gate 3 observation is always fresh and independent[\s\S]*never shares, substitutes,\s+or optimizes from a post-merge repository verification result/u.test(text)],
   ["operator ownership and privileged protection remain in force", (text) => /It remains operator-owned:[\s\S]*refused by the privileged-path policy/u.test(text)],
-  ["publication and identity remain deferred", (text) => /push-target migration is deferred to #224[\s\S]*consumption is deferred to #216/u.test(text)],
+  ["push-target proof is code-owned while identity remains deferred", (text) => /final code-owned target comparison[\s\S]*publishing-identity enforcement remains deferred to #216/u.test(text)],
 ];
 const README_CONTRACTS = [
   ["the four-required plus optional-timeout schema", (text) => text.includes(CONFIG_SCHEMA)],
@@ -161,6 +161,7 @@ function commitOperatorRepository(consumer) {
   writeFileSync(join(consumer, ".gitignore"), "node_modules/\n.factory/\n.factory-sandboxes/\n");
   writeFileSync(join(consumer, "operator.txt"), "committed operator fixture\n");
   execFileSync("git", ["init", "--initial-branch=main"], { cwd: consumer, encoding: "utf8" });
+  execFileSync("git", ["config", "remote.origin.pushurl", "https://fixture.invalid/feature-factory.git"], { cwd: consumer });
   execFileSync("git", ["config", "user.name", "Factory Pack Test"], { cwd: consumer });
   execFileSync("git", ["config", "user.email", "factory-pack@example.test"], { cwd: consumer });
   execFileSync("git", ["add", ".gitignore", "operator.txt", "package.json", "package-lock.json"], { cwd: consumer });
