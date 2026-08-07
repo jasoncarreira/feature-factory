@@ -274,11 +274,11 @@ A current `needs-human` run is parked and explicitly resumable; only `completed`
 
 1. Bind the intended retained sandbox, validate the selected manifest, and prove physical containment.
 2. Run the post-selection operator exact-ref-absent guard.
-3. Complete the existing effective-push proof.
-4. Accept the feature branch only after provenance, worktree binding, seed ancestry, cleanliness or recovery, and every existing operator-ref recheck passes in order.
-5. Immediately before claiming, rerun the final operator exact-ref-absent guard.
-6. Claim with the current host session or perform a justified steal, then verify fresh ownership, parked status, and the deeply unchanged result.
-7. Run `factory resume <run-id> --session ID --repo S`, then verify running status, unchanged historical result, the real next action, and the same fresh owner.
+3. Accept the feature branch only after provenance, worktree binding, seed ancestry, cleanliness or recovery, and every existing operator-ref recheck passes in order.
+4. Immediately before claiming, rerun the final operator exact-ref-absent guard.
+5. Claim with the current host session or perform a justified steal; that qualified command performs the first code-owned comparison before lock creation.
+6. Verify qualified status still shows fresh ownership, parked status, and the deeply unchanged result.
+7. Run `factory resume <run-id> --session ID --repo S`; it performs the second code-owned comparison before lock inspection and transition. Then verify running status, unchanged historical result, the real next action, and the same fresh owner.
 8. Run only existing post-lock reconciliation for any already-recorded merge, including its evidence and repository verification.
 9. Continue solely from the newly qualified `status.next`, never from the pre-resume read or reason text.
 

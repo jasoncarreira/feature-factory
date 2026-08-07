@@ -117,12 +117,14 @@ optimizes from post-merge evidence, even when the head is unchanged.
 A top-level `needs-human` status is a parked stop, not a final result. `completed`, `partial`, and
 `blocked` remain final. Fix the external cause, then preserve this order: bind the intended retained
 sandbox and validate its manifest and containment; run the post-selection exact-ref-absent guard;
-complete effective-push proof; accept branch provenance, worktree binding, seed ancestry, cleanliness,
-recovery, and every operator-ref recheck; rerun the final exact-ref guard immediately before claim;
-claim or justifiably steal and verify fresh ownership plus the unchanged parked result; run
-`factory resume <run-id> --session <id> --repo <sandbox>` and verify running status, unchanged historical result, real
-next action, and the same owner; replay only existing post-lock reconciliation for an already-recorded
-merge; then continue solely from the newly qualified `status.next`.
+accept branch provenance, worktree binding, seed ancestry, cleanliness, recovery, and every operator-ref
+recheck; rerun the final exact-ref guard immediately before claim; use a qualified lock claim or
+justified steal, which performs the first code-owned comparison before lock creation; verify fresh
+ownership plus the unchanged parked result; run
+`factory resume <run-id> --session <id> --repo <sandbox>`, which performs the second code-owned comparison
+before lock inspection and transition; then verify running status, unchanged historical result, real next
+action, and the same owner; replay only existing post-lock reconciliation for an already-recorded merge;
+then continue solely from the newly qualified `status.next`.
 
 Status remains readable while parked, and lock claim, justified steal, heartbeat, and owning release
 remain available for ordered qualification. Every other effectful command refuses until explicit
