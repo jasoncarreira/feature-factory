@@ -233,6 +233,14 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   yes(Buffer.concat(escaped.fake.writes).equals(Buffer.concat([
     Buffer.from("[remote \"origin\"]\n\tpushurl = \"https://host.invalid/a\\\"b\\\\c-"), Buffer.from("é"), Buffer.from(".git\"\n"),
   ])), "r-x1");
+  const crlf = (value) => Buffer.concat([Buffer.from(value), Buffer.from("\r\n")]);
+  opaque(invokeConfigure([result(crlf(secret)), result(), result(crlf(secret)), result(crlf(secret))]).invoke(), "verified", "r-crlf");
+  for (const [index, byte] of [...Array.from({ length: 0x20 }, (_entry, value) => value), 0x7f].entries()) {
+    const controlled = Buffer.concat([Buffer.from("https://host.invalid/a"), Buffer.from([byte]), Buffer.from("z.git\n")]);
+    refusal(invokeConfigure([result(controlled)]).invoke, fixed.operator("/operator/.factory-sandboxes/r01"), `r-control-${index}`);
+  }
+  refusal(invokeConfigure([result(Buffer.from("https://host.invalid/a\r\r\n"))]).invoke,
+    fixed.operator("/operator/.factory-sandboxes/r01"), "r-remaining-cr");
 
   for (const [index, target] of ["relative/path", "/absolute/path", "~/target", "C:\\target", "file:///target", "helper::address", "ftp://host/r", "https:///missing", "x:y"].entries()) {
     refusal(invokeConfigure([result(framed(target))]).invoke, fixed.operator("/operator/.factory-sandboxes/r01"), `r-t${index}`);
@@ -287,6 +295,24 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     const fake = activeFake(result(framed(operatorTarget)), result(framed(sandboxTarget)));
     refusal(() => compareSelectedRunPushTarget({ selectedRoot: activeRoot, runId: "r-active" }, fake.operations),
       fixed.mismatch(activeRoot), `r-am${index}`);
+  }
+  const contextVariants = (probe) => [
+    result(Buffer.alloc(0)),
+    result(framed(probe === 0 ? activeRoot : "/operator"), { status: 7 }),
+    result(framed(probe === 0 ? activeRoot : "/operator"), { signal: "SIGTERM", status: null }),
+    result(framed(probe === 0 ? activeRoot : "/operator"), { error: foreign(`context-result-${probe}`), status: null }),
+    result(framed(probe === 0 ? activeRoot : "/operator"), { stderr: Buffer.from(secret) }),
+    foreign(`context-throw-${probe}`),
+    result(framed("/relationship-mismatch")),
+  ];
+  for (const probe of [0, 1]) {
+    for (const [index, injected] of contextVariants(probe).entries()) {
+      const responses = [result(framed(activeRoot)), result(framed("/operator")), result(framed(secret)), result(framed(secret))];
+      responses[probe] = injected;
+      const fake = fakeOperations(responses, { lstat: () => ({ isDirectory: () => true, isSymbolicLink: () => false }) });
+      refusal(() => compareSelectedRunPushTarget({ selectedRoot: activeRoot, runId: "r-active" }, fake.operations),
+        fixed.operator(activeRoot), `r-context-${probe}-${index}`);
+    }
   }
   const forged = activeFake(undefined, undefined, { basename: () => { throw foreign("forged"); } });
   refusal(() => compareSelectedRunPushTarget({ selectedRoot: activeRoot, runId: "r-active" }, forged.operations),
@@ -374,9 +400,6 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     noLeaks([plainStatus.stdout, plainStatus.stderr, jsonStatus.stdout, jsonStatus.stderr], "r-cli-status-output");
     const manifestPath = join(initialized.run_dir, "run.json");
     noLeaks([readFileSync(manifestPath)], "r-cli-manifest");
-    writeFileSync(join(initialized.run_dir, "evidence", "probe.log"), "safe evidence\n");
-    writeFileSync(join(initialized.run_dir, "reviews", "probe.log"), "safe review\n");
-    writeFileSync(join(initialized.run_dir, "factory.log"), "safe factory log\n");
 
     git(freshOperator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
     const manifestBefore = readFileSync(manifestPath);
@@ -405,13 +428,14 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
       opaque(inventory(initialized.sandbox_path), beforeGate, `${label}-inventory`);
       noLeaks([observedGate.stdout, observedGate.stderr], `${label}-output`);
       for (const [index, path] of tracePaths.entries()) yes(!existsSync(path), `${label}-trace-${index}`);
+      return observedGate;
     };
-    gate("r-gate-mismatch", fixed.mismatch(initialized.sandbox_path));
+    const mismatchGate = gate("r-gate-mismatch", fixed.mismatch(initialized.sandbox_path));
     git(freshOperator, "config", "--unset-all", "remote.origin.pushurl");
-    gate("r-gate-operator", fixed.operator(initialized.sandbox_path));
+    const operatorGate = gate("r-gate-operator", fixed.operator(initialized.sandbox_path));
     git(freshOperator, "config", "--replace-all", "remote.origin.pushurl", secret);
     rmSync(cliFragment);
-    gate("r-gate-sandbox", fixed.sandbox(initialized.sandbox_path));
+    const sandboxGate = gate("r-gate-sandbox", fixed.sandbox(initialized.sandbox_path));
     writeFileSync(cliFragment, cliFragmentBytes, { mode: 0o600 });
     chmodSync(cliFragment, 0o600);
 
@@ -470,7 +494,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     mkdirSync(bin);
     const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
     const journalPrelude = 'const fs=require("node:fs");const deny=JSON.parse(process.env.DENYLIST);const present=deny.filter((key)=>Object.hasOwn(process.env,key));const providers=JSON.parse(process.env.PROVIDERS).filter((key)=>Object.hasOwn(process.env,key));';
-    writeFileSync(join(bin, "git"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.GIT_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");const r=require("node:child_process").spawnSync(process.env.REAL_GIT,process.argv.slice(2),{stdio:"inherit",env:process.env});process.exit(r.status??1);\n`);
+    writeFileSync(join(bin, "git"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.GIT_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");if(process.env.GIT_SHIM_FAIL==="1"){const corpus=JSON.parse(process.env.SHIM_CORPUS).join("\\n")+"\\n";process.stdout.write(corpus);process.stderr.write(corpus);for(const key of ["GIT_TRACE","GIT_TRACE2_EVENT","GCM_TRACE"]){if(process.env[key])fs.appendFileSync(process.env[key],corpus)}process.exit(42)}const r=require("node:child_process").spawnSync(process.env.REAL_GIT,process.argv.slice(2),{stdio:"inherit",env:process.env});process.exit(r.status??1);\n`);
     writeFileSync(join(bin, "gh"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.GH_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");process.stdout.write(process.env.GH_STDOUT||"");process.stderr.write(process.env.GH_STDERR||"");process.exit(Number(process.env.GH_EXIT||0));\n`);
     writeFileSync(join(bin, "factory"), `#!/usr/bin/env node\n${journalPrelude}fs.appendFileSync(process.env.FACTORY_JOURNAL,JSON.stringify({args:process.argv.slice(2),present,providers})+"\\n");\n`);
     for (const name of ["git", "gh", "factory"]) chmodSync(join(bin, name), 0o755);
@@ -478,8 +502,10 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     const publicationScript = skill.slice(publicationStart, skill.indexOf("\n```", publicationStart));
     yes(publicationStart >= 0 && publicationScript.endsWith('factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"'), "r-pub-script");
     const publicationTrace = [join(root, "publication-trace"), join(root, "publication-trace2"), join(root, "publication-gcm")];
-    const publication = (overrides = {}) => {
+    const traceSentinel = "trace sentinel unchanged\n";
+    const publication = (overrides = {}, { seedTrace = false } = {}) => {
       for (const path of [gitJournal, ghJournal, factoryJournal, hookSentinel, ...publicationTrace]) rmSync(path, { force: true });
+      if (seedTrace) writeFileSync(publicationTrace[0], traceSentinel);
       const env = {
         ...process.env,
         ...Object.fromEntries(SENSITIVE_CHILD_ENV_DENYLIST.map((name) => [name, secret])),
@@ -505,15 +531,15 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     const refspec = "refs/heads/main:refs/heads/main";
     const pushArgs = [["-C", publish, "push", "--no-verify", "origin", refspec]];
     const ghArgs = [["pr", "create", "--draft", "--base", "main", "--head", "main", "--title", "title", "--body-file", join(publish, "body")]];
-    git(publish, "config", "remote.origin.pushurl", join(root, "missing-remote.git"));
-    const pushFailure = publication({ GH_STDOUT: secret, GH_STDERR: secretTwo });
+    const pushFailure = publication({ GIT_SHIM_FAIL: "1", SHIM_CORPUS: JSON.stringify(forbidden), GH_STDOUT: secret, GH_STDERR: secretTwo }, { seedTrace: true });
     opaque({ status: pushFailure.status, stdout: pushFailure.stdout, stderr: pushFailure.stderr }, { status: 1, stdout: fixed.push(publish), stderr: "" }, "r-push-fail");
     assertJournal(gitJournal, pushArgs, "r-push-journal");
     yes(!existsSync(ghJournal) && !existsSync(factoryJournal), "r-push-stop");
     yes(!existsSync(hookSentinel), "r-push-hook");
+    opaque(readFileSync(publicationTrace[0]), traceSentinel, "r-push-trace-unchanged");
+    yes(!existsSync(publicationTrace[1]) && !existsSync(publicationTrace[2]), "r-push-trace-absent");
     noLeaks([pushFailure.stdout, pushFailure.stderr], "r-push-outer");
 
-    git(publish, "config", "remote.origin.pushurl", remote);
     const ghFailure = publication({ GH_EXIT: "42", GH_STDOUT: secret, GH_STDERR: secretTwo });
     opaque({ status: ghFailure.status, stdout: ghFailure.stdout, stderr: ghFailure.stderr }, { status: 1, stdout: fixed.gh(publish), stderr: "" }, "r-gh-fail");
     assertJournal(gitJournal, pushArgs, "r-gh-git-journal");
@@ -536,6 +562,33 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     yes(!existsSync(hookSentinel), "r-pub-hook");
     for (const [index, path] of publicationTrace.entries()) yes(!existsSync(path), `r-pub-trace-${index}`);
     for (const [index, path] of [join(root, "PR_RESULT"), join(root, "PR_URL"), join(root, "publication.out")].entries()) yes(!existsSync(path), `r-pub-remnant-${index}`);
+
+    const capturedOutput = (observed) => ({ status: observed.status, stdout: observed.stdout, stderr: observed.stderr });
+    const evidenceOutput = join(initialized.run_dir, "evidence", "captured-refusals.json");
+    const reviewOutput = join(initialized.run_dir, "reviews", "captured-publication.json");
+    const factoryOutput = join(initialized.run_dir, "factory.log");
+    const cliRefusals = {
+      manifest: capturedOutput(manifestFirst), lock: capturedOutput(lockRefusal), mismatch: capturedOutput(mismatchGate),
+      operator: capturedOutput(operatorGate), sandbox: capturedOutput(sandboxGate), resume: capturedOutput(resumeRefusal),
+      fresh: capturedOutput(refused), repeated: capturedOutput(repeated),
+    };
+    const publicationRefusals = {
+      push: capturedOutput(pushFailure), gh: capturedOutput(ghFailure), unsafe: capturedOutput(unsafeGh),
+    };
+    writeFileSync(evidenceOutput, `${JSON.stringify(cliRefusals)}\n`);
+    writeFileSync(reviewOutput, `${JSON.stringify(publicationRefusals)}\n`);
+    writeFileSync(factoryOutput, `${JSON.stringify({ cli: cliRefusals, publication: publicationRefusals })}\n`);
+    for (const [index, path] of [evidenceOutput, reviewOutput, factoryOutput].entries()) {
+      noLeaks([readFileSync(path)], `r-sink-${index}`);
+    }
+
+    const scannerProbe = join(root, "scanner-negative");
+    mkdirSync(scannerProbe);
+    writeFileSync(join(scannerProbe, "planted"), forbidden[Math.floor(forbidden.length / 2)]);
+    const scannerResult = caught(() => scanTree(scannerProbe, new Set(), "r-scanner-inner"));
+    yes(scannerResult.error instanceof Error, "r-scanner-detected");
+    noLeaks(failureSurface(scannerResult.error), "r-scanner-safe-output");
+    rmSync(scannerProbe, { recursive: true, force: true });
 
     const excluded = new Set([
       join(operator, ".git", "config"), privateFragment, partialFragment,
