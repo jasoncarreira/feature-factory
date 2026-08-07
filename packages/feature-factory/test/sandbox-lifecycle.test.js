@@ -23,6 +23,7 @@ function operator(root, name, plant) {
   git(repository, "init", "--quiet", "--initial-branch=main");
   git(repository, "config", "user.name", "Factory Test");
   git(repository, "config", "user.email", "factory@example.test");
+  git(repository, "config", "--replace-all", "remote.origin.pushurl", "https://fixture.invalid/feature-factory.git");
   writeFileSync(join(repository, ".gitignore"), ".factory/\n.factory-sandboxes/\n");
   writeFileSync(join(repository, "tracked.txt"), `${name}\n`);
   git(repository, "add", ".gitignore", "tracked.txt");
@@ -135,6 +136,14 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.equal(clones(record).length, 1);
     assert.deepEqual(clones(record)[0].args, ["clone", "--local", "--", realpathSync(source), sandbox]);
     assert.deepEqual({ exists: clones(record)[0].exists, empty: clones(record)[0].empty }, { exists: true, empty: true });
+    const targetEvents = events(record).filter((event) => event.args?.[0] === "remote"
+      || event.args?.join(" ") === "config --local --add include.path ./factory-push-target.config");
+    assert.deepEqual(targetEvents.map(({ args, cwd }) => ({ args, cwd })), [
+      { args: ["remote", "get-url", "--push", "origin"], cwd: realpathSync(source) },
+      { args: ["config", "--local", "--add", "include.path", "./factory-push-target.config"], cwd: sandbox },
+      { args: ["remote", "get-url", "--push", "origin"], cwd: realpathSync(source) },
+      { args: ["remote", "get-url", "--push", "origin"], cwd: sandbox },
+    ]);
     const objectId = git(source, "rev-parse", "HEAD:tracked.txt");
     const sourceObject = join(source, ".git", "objects", objectId.slice(0, 2), objectId.slice(2));
     const sandboxObject = join(sandbox, ".git", "objects", objectId.slice(0, 2), objectId.slice(2));

@@ -38,6 +38,7 @@ function project(name) {
   git("init", "-q", "-b", "feature");
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "T");
+  git("config", "--replace-all", "remote.origin.pushurl", "https://fixture.invalid/feature-factory.git");
   mkdirSync(join(repo, "src"), { recursive: true });
   writeFileSync(join(repo, "src", "base.ts"), "base\n");
   writeFileSync(join(repo, ".gitignore"), ".factory/\n");
@@ -124,11 +125,11 @@ const NEEDS_HUMAN_PROSE = [
 const RESUME_ORDER = [
   "Resume order 1 — bind the selected manifest to the intended retained sandbox, prove physical containment, and obtain qualified status for that bound manifest.",
   "Resume order 2 — run the post-selection operator exact-ref-absent guard.",
-  "Resume order 3 — complete the existing effective-push proof.",
-  "Resume order 4 — accept the feature branch only after existing reflog/provenance, branch/worktree binding, seed ancestry, cleanliness/recovery, and operator exact-ref rechecks pass in their current order.",
-  "Resume order 5 — immediately before claiming, rerun the final operator exact-ref-absent guard.",
-  "Resume order 6 — claim with the current host session or perform a justified existing steal, then verify qualified status still shows this fresh owner and the parked result originally observed.",
-  "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.",
+  "Resume order 3 — accept the feature branch only after existing reflog/provenance, branch/worktree binding, seed ancestry, cleanliness/recovery, and operator exact-ref rechecks pass in their current order.",
+  "Resume order 4 — immediately before claiming, rerun the final operator exact-ref-absent guard.",
+  "Resume order 5 — claim with the current host session or perform a justified existing steal; that qualified command compares the two current effective push targets before lock creation.",
+  "Resume order 6 — verify qualified status still shows this fresh owner and the parked result originally observed.",
+  "Resume order 7 — invoke explicit factory resume with the verified owning session; it compares again before lock inspection and transition, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.",
   "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.",
   "Resume order 9 — continue solely from the newly qualified status.next.",
 ];
@@ -161,9 +162,43 @@ function checkResumeOrder(prose) {
   }
 }
 
+const EFFECTIVE_PUSH_PROSE = [
+  "effective push target in code, recaptures both current values, compares their exact bytes",
+  "it and repeated init refuses the occupied destination",
+  "factory sandbox: operator effective push target unavailable; sandbox retained at <S>",
+  "factory sandbox: sandbox effective push target unavailable at <S>",
+  "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at <S>",
+  "Target-operation stdout, stderr, argv, traces, and causes stay suppressed.",
+  "runs in `O` through the same sanitized wrapper",
+  "Only a single userinfo-free absolute HTTPS URL with no query or fragment is accepted",
+  "makes no push or forge call",
+];
+
+function checkEffectivePushProse(prose) {
+  for (const fragment of EFFECTIVE_PUSH_PROSE) {
+    if (!prose.split("\n").some((line) => line.includes(fragment))) throw new Error(`effective-push-prose:${fragment}`);
+  }
+}
+
 // Each claim: where the prose lives, the exact fragment that makes the claim, and the behaviour it
 // asserts. `expect: "refused"` means the CLI must reject; `"allowed"` means it must succeed.
 const CLAIMS = [
+  {
+    id: "effective-push-code-owned-publication-boundary",
+    file: "skills/feature/SKILL.md",
+    fragment: "effective push target in code, recaptures both current values, compares their exact bytes",
+    expect: "allowed",
+    matches: /"valid": true/u,
+    act(repo) {
+      const prose = readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8");
+      checkEffectivePushProse(prose);
+      for (const fragment of EFFECTIVE_PUSH_PROSE) {
+        assert.throws(() => checkEffectivePushProse(prose.replace(fragment, "")), /effective-push-prose/u);
+      }
+      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      return factory(initialized.repository, ["status", RUN, "--json"]);
+    },
+  },
   {
     id: "no-amend-and-reseed",
     file: "agents/work-decomposer.md",
@@ -1071,7 +1106,7 @@ const CLAIMS = [
       assert.match(boundaries, /optional timeout and bounded\nretry below apply only to repository `verify` shell attempts, never to `resolve`, slice observation, or\nGate 3 commands/u);
       assert.match(boundaries, /`resolve` and `verify` are consumed now\. `publish` and `publishing_identity` remain deferred/u);
       assert.match(boundaries, /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted[\s\S]*at most two executions in that merge invocation[\s\S]*timeout and retry never apply to resolver, slice, or Gate 3 commands/u);
-      assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |"));
+      assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Sanitized push, `gh pr create`, and `factory pr` remain the publication path. |"));
       assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; the static config value itself | Non-empty account-name string in the config | Missing, non-string, or empty makes the config malformed | Not read for identity enforcement; consumption is deferred to #216. |"));
       assert.match(prose, /Foreground, background primary, and background `run-orchestrator`\nderivation use the following same configured-or-absent policy/u);
       assert.match(prose, /background primary does not forward or persist its\npayload/u);

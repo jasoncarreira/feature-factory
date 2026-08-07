@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// False-green enforcement: parked preflights precede effects; every mutation uses checked atomic CAS.
+// False-green enforcement: parked and effective-target preflights precede effects; every mutation uses checked atomic CAS.
 // Initialization alone creates run.json through atomic no-clobber publication.
 // The orchestrator calls this CLI instead of writing control-plane state directly.
 // Flags are declared per command; unknown options fail rather than becoming missing fields.
@@ -14,6 +14,7 @@ import { transition } from "../state/transition.js";
 import { buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
+import { compareSelectedRunPushTarget, configureSandboxPushTarget } from "../core/effective-push.js";
 import { dispatchInitPublication } from "./init-publication.js";
 import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, validateRun } from "../state/schema.js";
 import {
@@ -44,7 +45,8 @@ const BOOLEAN_FLAGS = new Set(["--json", "--repository-verify"]);
 const INIT_OPERATIONS = Object.freeze({
   cwd: () => process.cwd(), resolvePath: resolve, joinPath: join,
   realpath: realpathSync, lstat: lstatSync, mkdir: mkdirSync, readdir: readdirSync,
-  runGit: git, prove: proveInitContainment, publish: dispatchInitPublication,
+  runGit: git, prove: proveInitContainment, configurePushTarget: configureSandboxPushTarget,
+  publish: dispatchInitPublication,
 });
 
 class CliError extends Error {
@@ -799,6 +801,8 @@ const HANDLERS = {
     const now = flags.now ? Date.parse(flags.now) : undefined;
     try {
       if (action === "claim" || action === "steal") {
+        readRun(runDir);
+        compareSelectedRunPushTarget({ selectedRoot: flags.repo ?? process.cwd(), runId });
         const owner = await claimSessionLock(runDir, {
           session: flags.session, runId, branch: flags.branch, now, ttlMs, force: action === "steal",
         });
@@ -834,6 +838,9 @@ const HANDLERS = {
     const runDir = runDirFor(flags, runId);
     assertRunNotParked(runDir, "gate");
     const repo = resolve(flags.repo ?? process.cwd());
+    if (name === "pre_pr" && decision === "approved") {
+      compareSelectedRunPushTarget({ selectedRoot: repo, runId });
+    }
     const at = stamp(flags);
 
     // Gate 3's approval is what authorizes publication, and in the skill's flow it is the
@@ -930,6 +937,7 @@ const HANDLERS = {
     if (current.status !== "needs-human") {
       throw new CliError(`factory resume requires current status needs-human; found '${current.status}'`);
     }
+    compareSelectedRunPushTarget({ selectedRoot: flags.repo ?? process.cwd(), runId });
     // Ownership is proven here and nowhere else in this command's family. Every other mutating
     // command advances a run whose driver already holds the lock; resume is the handoff itself --
     // the moment a new driver picks up a run nobody is driving. Two drivers resuming the same
@@ -966,7 +974,7 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
   const candidate = preflightInit(positional, flags);
   const {
     cwd, resolvePath, joinPath, realpath, lstat, mkdir, readdir,
-    runGit, prove, publish,
+    runGit, prove, configurePushTarget, publish,
   } = operations;
   const dispatchInitPublication = publish;
   const runId = candidate.run_id;
@@ -1055,6 +1063,8 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
   } catch (error) {
     throw new CliError(`physical containment could not be proved for sandbox '${S}'; sandbox was retained`, { cause: error });
   }
+
+  configurePushTarget({ operatorRoot, sandboxRoot: proof.sandboxPath });
 
   let prBase = candidate.pr_base;
   if (prBase === null) {

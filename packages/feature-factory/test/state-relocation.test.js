@@ -141,6 +141,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     assert.ok(
       /^factory (?:observe|init|status|slice|pr)$/u.test(command)
         || /^factory sandbox:/u.test(command)
+        || /^factory publication:/u.test(command)
         || /^factory slice … (?:running|merged)$/u.test(command)
         || ["factory init --mode autonomous", "factory init --mode headless"].includes(command),
       `factory command shape is neither qualified nor a declared compatibility stem: ${command}`,
@@ -258,7 +259,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const resumeSection = skill.slice(skill.indexOf("### Resume or collision"), skill.indexOf("### Fresh sandbox request"));
   const parsedRunBinding = resumeSection.indexOf("bind it as `parsedRun`");
   const featureBranchBinding = resumeSection.indexOf("FEATURE_BRANCH = parsedRun.branch");
-  const resumePushProof = resumeSection.indexOf("Only after that guard passes may resume enter the");
+  const resumePushProof = resumeSection.indexOf("Only after that guard passes may resume continue toward");
   assert.ok(parsedRunBinding >= 0 && parsedRunBinding < featureBranchBinding && featureBranchBinding < resumePushProof,
     "resume must replace intake branch intent with parsedRun.branch before continuing");
   assert.match(resumeSection, /recorded state always wins/u);
@@ -357,6 +358,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     git(operator, "commit", "--quiet", "-m", "operator seed");
     git(operator, "switch", "--quiet", "-c", "operator-work");
     git(operator, "remote", "add", "origin", operator);
+    git(operator, "config", "--replace-all", "remote.origin.pushurl", "https://fixture.invalid/state-relocation.git");
     const operatorBefore = {
       branch: git(operator, "symbolic-ref", "--quiet", "--short", "HEAD"),
       head: git(operator, "rev-parse", "HEAD"),
@@ -371,8 +373,6 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     assert.equal(refAbsent(operator, featureRef), true);
     git(sandbox, "config", "user.name", "Factory Test");
     git(sandbox, "config", "user.email", "factory@example.test");
-    const operatorPush = git(operator, "remote", "get-url", "--push", "origin");
-    git(sandbox, "config", "--replace-all", "remote.origin.pushurl", operatorPush);
     assert.equal(git(operator, "remote", "get-url", "--push", "origin"), git(sandbox, "remote", "get-url", "--push", "origin"));
     assert.equal(refAbsent(operator, featureRef), true);
     const seedHead = git(sandbox, "rev-parse", "HEAD^{commit}");

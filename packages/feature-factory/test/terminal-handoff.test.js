@@ -231,6 +231,7 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
   const featureBranch = `feature/${runId}`;
   const featureRef = `refs/heads/${featureBranch}`;
   git(operator, "remote", "add", "origin", operator);
+  git(operator, "config", "--replace-all", "remote.origin.pushurl", "https://fixture.invalid/terminal-handoff.git");
   assert.equal(inspectRef(operator, featureRef).exists, false);
   const initialized = initFresh(operator, [runId, "--branch", featureBranch, "--pr-base", "main", "--mode", mode]);
   sandbox = initialized.repository;
@@ -238,8 +239,6 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
   assert.equal(inspectRef(operator, featureRef).exists, false);
   git(sandbox, "config", "user.name", "Factory Test");
   git(sandbox, "config", "user.email", "factory@example.test");
-  const operatorPush = git(operator, "remote", "get-url", "--push", "origin");
-  git(sandbox, "config", "--replace-all", "remote.origin.pushurl", operatorPush);
   assert.equal(git(operator, "remote", "get-url", "--push", "origin"), git(sandbox, "remote", "get-url", "--push", "origin"));
   assert.equal(inspectRef(operator, featureRef).exists, false);
   git(sandbox, "switch", "--quiet", "--no-track", "-c", featureBranch, git(sandbox, "rev-parse", "HEAD^{commit}"));

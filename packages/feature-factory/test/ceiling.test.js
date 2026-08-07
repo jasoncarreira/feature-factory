@@ -202,7 +202,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.equal(initHandler?.trim(), "return dispatchInit(positional, flags);",
       "HANDLERS.init must delegate to dispatchInit without an operations override or direct publication");
     assert.match(initOperations ?? "",
-      /(?:^|\n)  runGit: git, prove: proveInitContainment, publish: dispatchInitPublication,(?:\n|$)/u,
+      /(?:^|\n)  runGit: git, prove: proveInitContainment, configurePushTarget: configureSandboxPushTarget,\n  publish: dispatchInitPublication,(?:\n|$)/u,
       "dispatchInit's default operations must use the private publication dispatcher");
     assert.match(dispatchInitSource ?? "", /(?:^|\n)  const dispatchInitPublication = publish;(?:\n|$)/u,
       "dispatchInit must select publication from its operations");
@@ -576,7 +576,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // command where a new driver takes over a run nobody is driving -- so two drivers could otherwise
     // both resume the same parked run and both believe they own it. Twelve of the sixteen lines are the
     // three refusals and the reasoning.
-    assert.equal(total, 3372, "issue #243 landed at 3372 production lines, 3372 after review");
+    // 3372 -> 3575 for issue #224's closed Buffer target boundary, private mode-0600 Git include,
+    // sanitized child environment, and init/lock/resume/Gate 3 false-green enforcement.
+    assert.equal(total, 3575, "issue #224 landed at 3575 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 
