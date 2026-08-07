@@ -308,11 +308,11 @@ Do not create, write, merge, archive, or package `.factory.json`. It remains ope
 committed, so every clone and sandbox carries it, and refused by the privileged-path policy, so a run
 cannot widen its own configuration. It lived under the gitignored `.factory/` run directory until that proved unusable —
 `.factory/` is gitignored, so the file could not be committed and never reached a sandbox clone, which
-made the `verify` and deferred `publish` entries impossible and left this repository unable to resolve
-a reference from a fresh checkout. Add no helper module,
-command runner, parser service, repository-config execution in the integration package except the exact
+made the `verify` and unconsumed `publish` entries impossible and left this repository unable to resolve
+a reference from a fresh checkout. For configured resolver execution, add no helper module,
+command runner, parser service, additional `.factory.json` command consumer beyond the exact
 `verify` consumer below, plugin bridge,
-transport, protocol, or new CLI command. Add no resolver cache, payload handoff, manifest or session
+transport, protocol, or CLI command. Add no resolver cache, payload handoff, manifest or session
 field, generated asset, or `run.json` key. If a host adapter transfers execution to another run
 driver, that driver independently derives its own payload through this same policy; the adapter does
 not forward or persist the resolver payload. A configured resolver must therefore be deterministic and read-only.
@@ -329,12 +329,14 @@ retry below apply only to repository `verify` shell attempts, never to `resolve`
 Gate 3 commands. Do not change platform placement, background-tool, title-association, host-session, or
 publication behavior. `story-reader` remains lookup-free and capability-free beyond its existing generic read tools.
 
-`resolve`, `verify`, and `publishing_identity` are consumed now. Only `publish` remains deferred to #224:
+`resolve`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
+
+Effective push-target capture and comparison are active through the package-owned <code>factory effective-push</code> command; they are not deferred to configured `publish`.
 
 | Entry | Declared input | Return shape | Failure meaning | Current behavior |
 |---|---|---|---|---|
 | `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status means unavailable | Invoked after each newly recorded merge through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
-| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |
+| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |
 | `publishing_identity` | No runtime input; retain the raw validated config string for this driver invocation | Exact case-sensitive string compared with the observed login | Missing, non-string, or whitespace-only makes the config malformed; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; absent config preserves existing behavior. |
 
 #### Remaining intake classification
@@ -498,27 +500,20 @@ git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
 
 ### Effective push proof
 
-Disable command tracing before any effective-target operation and do not restore it until both captured
-values are out of scope. Capture through exactly
-`LC_ALL=C git -C <repository> remote get-url --push origin`; never read raw `remote.origin.url`.
-Never persist, log, echo, normalize, interpolate into a cause, or otherwise expose a captured target.
+The package-owned command captures, configures when authorized, recaptures, and compares without a
+shell. Never persist, log, echo, interpolate into a cause, or otherwise expose a captured target.
 
 Classify bootstrap-pending only by directly validated state: run status `running`; `created_at` exactly
 equals `updated_at`; gates, steps, and slices are empty; validator, terminal result, PR URL, and plan
-digest are null; and qualified status reports lock state exactly `absent`. Only that class may
-idempotently apply the operator's captured effective target to the sandbox remote before recapturing
-both sides:
+digest are null; and qualified status reports lock state exactly `absent`. Bind
+`EFFECTIVE_PUSH_OPERATION` to `bootstrap` only for that class and to `check` for an active resume, then
+invoke the same package mechanism:
 
-```sh
-set +x
-OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-git -C "$RUN_REPO" config --replace-all remote.origin.pushurl "$OPERATOR_PUSH"
-CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"
-```
+    factory effective-push "$EFFECTIVE_PUSH_OPERATION" "$O" "$RUN_REPO"
 
-An active resume skips the configuration command and only performs the two current lookups. Every
-lookup must succeed with nonempty output, and the two current shell strings must be exactly equal.
+Bootstrap configures the sandbox and freshly recaptures both targets before comparing. An active resume
+uses `check`, performs two fresh captures, and never changes remote configuration. Both lookups must
+succeed and return nonempty output, and the freshly captured strings must be exactly equal.
 Use only these refusal messages:
 
 ```text
@@ -528,8 +523,8 @@ factory sandbox: sandbox effective push target does not match operator target; s
 ```
 
 The failure names only the side or mismatch class and exact `RUN_REPO`; it never contains either target.
-Suppress target-operation stdout, stderr, and argv from operator-visible errors as well as logs; map a
-configuration failure to the sandbox-unavailable refusal without attaching its cause.
+The package discards target-operation stdout, stderr, and subprocess errors; configuration failure maps
+to the sandbox-unavailable refusal without a cause.
 On any capture, configuration, recapture, or equality failure, retain all repository and control-plane
 state, permit only `factory status "$R" --json --repo "$RUN_REPO"`, and stop before branch handling,
 lock claim or steal, dispatch, transition, push, forge command, or further publication.
@@ -1347,8 +1342,8 @@ Immediately before any publication effect, read the delivery intent from the sel
 then, for a sandbox-selected run, repeat the operator exact-ref-absent and sandbox
 branch-provenance/ancestry gate from Step 0. Use the status response's exact recorded branch for that
 gate. A collision or provenance failure stops
-before push, `gh`, or `factory pr` and retains all state. After those checks, disable command tracing and
-recapture the operator and selected-run effective push targets without changing either remote:
+before push, `gh`, or `factory pr` and retains all state. After those checks, invoke the package-owned
+fresh comparison without changing either remote:
 
 Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as
 `PR_BASE`; never infer, shorten, normalize, or substitute either value. Bind both before target
@@ -1357,14 +1352,13 @@ recapture, and do not rebind or re-observe them between target equality and push
 ```sh
 factory status "$R" --json --repo "$RUN_REPO"
 git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"
-set +x
-CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"
 ```
 
-Both lookups must succeed and return nonempty output, and their shell strings must be exactly equal.
-Step 6 only compares and never runs `git config` or otherwise reconfigures a remote. Never persist, log,
-echo, normalize, interpolate into a cause, or expose either target. Use the same three exact redacted
+    factory effective-push check "$O" "$RUN_REPO"
+
+Both lookups must succeed and return nonempty output, and their captured strings must be exactly equal.
+Step 6 only compares and never reconfigures a remote. Never persist, log, echo, interpolate into a cause,
+or expose either target. Use the same three exact redacted
 refusal messages from Step 0. A lookup failure or mismatch leaves `RUN_REPO` intact, permits status only,
 and blocks every publication effect.
 
