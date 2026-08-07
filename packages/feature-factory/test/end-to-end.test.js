@@ -499,6 +499,14 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const staleLock = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
       assert.equal(staleLock.ok, false);
       assert.match(staleLock.stderr, /refuses a stale session lock/u);
+      // The lock written just above still carries `pid`, which the CLI no longer writes. That is the
+      // migration contract, and it is load-bearing: `pid` is not required any more, but it must stay
+      // a *tolerated* key, because the validator rejects unknown ones. Delisting it would read every
+      // lock written before the change as absent -- not stale, absent -- and a second session could
+      // then claim a run that is still being worked. "Stale" is only reachable by a lock that parsed,
+      // so this refusal is the proof the legacy shape was recognised.
+      assert.doesNotMatch(staleLock.stderr, /requires a held session lock/u,
+        "a lock carrying the retired `pid` must still be recognised, not read as absent");
       assert.equal(factory(resumed.repo, ["lock", RUN, "steal", "--session", "session-b", "--branch", "feature"]).ok, true);
       assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes,
         "every ownership refusal must leave the manifest untouched");

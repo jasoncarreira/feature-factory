@@ -1,5 +1,5 @@
 // factory.lock retains the predecessor's session-lock record shape:
-//   { session, pid, run_id, branch, claimed_at, heartbeat_at }
+//   { session, run_id, branch, claimed_at, heartbeat_at }
 // Unlike the brief run-json transition lock, this answers which session owns the
 // whole run and enables resume, steal, or abort. A fresh heartbeat means another
 // session is working; one older than the TTL may be stolen.
@@ -10,6 +10,12 @@ import { rm } from "node:fs/promises";
 
 export const SESSION_LOCK_FILE = "factory.lock";
 export const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
+// `pid` is no longer written, but stays listed so locks written before it was dropped
+// still validate. Removing it would make every pre-existing lock fail the unknown-key
+// check below, read as absent, and let a second session claim a run that is still being
+// worked -- the dangerous direction. Why it was dropped, from #194: the recorded pid was
+// the CLI or the transient shell that invoked it, never the run's owner, so it could not
+// answer the liveness question its presence implied.
 export const SESSION_LOCK_KEYS = Object.freeze([
   "session", "pid", "run_id", "branch", "claimed_at", "heartbeat_at",
 ]);
@@ -51,7 +57,6 @@ export async function claimSessionLock(runDir, { session, runId, branch, now, tt
   }
   const owner = {
     session,
-    pid: process.pid,
     run_id: runId,
     branch: branch ?? null,
     // Re-claiming your own lock preserves when you first took it.
@@ -86,7 +91,6 @@ function isValidLock(value) {
     && !Array.isArray(value)
     && Object.keys(value).every((key) => SESSION_LOCK_KEYS.includes(key))
     && typeof value.session === "string" && value.session.trim().length > 0
-    && Number.isInteger(value.pid)
     && typeof value.run_id === "string" && value.run_id.trim().length > 0
     && Number.isFinite(Date.parse(value.claimed_at || ""))
     && Number.isFinite(Date.parse(value.heartbeat_at || ""));
