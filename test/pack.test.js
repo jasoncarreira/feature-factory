@@ -131,6 +131,24 @@ function assertContracts(text, contracts, artifact) {
   }
 }
 
+function assertResumeInvocations(text, artifact, checkNegativeControl = true) {
+  const invocations = [...text.matchAll(/`factory resume [^`]*`/gu)].map(([invocation]) => invocation);
+  assert.ok(invocations.length > 0, `${artifact} must document an executable factory resume invocation`);
+  for (const invocation of invocations) {
+    assert.ok(invocation.includes("--session"), `${artifact} resume invocation must pass --session: ${invocation}`);
+  }
+  if (checkNegativeControl) {
+    for (const invocation of invocations) {
+      const broken = text.replace(invocation, invocation.replace("--session", "--owner"));
+      assert.throws(
+        () => assertResumeInvocations(broken, artifact, false),
+        /must pass --session/u,
+        `${artifact} needs its own negative control for the session requirement`,
+      );
+    }
+  }
+}
+
 function pack(name, destination) {
   const output = execFileSync("npm", ["pack", "--json", "--pack-destination", destination],
     { cwd: join(root, "packages", name), encoding: "utf8" });
@@ -194,9 +212,21 @@ describe("what actually ships", () => {
       }
 
       const sourceWorkflow = readFileSync(join(root, "packages", "feature-factory", "WORKFLOW.md"), "utf8");
+      const sourceOpenCodeWorkflow = readFileSync(join(root, "packages", "opencode-feature-factory", "skills", "feature", "WORKFLOW.md"), "utf8");
+      const sourcePrimeWorkflow = readFileSync(join(root, "packages", "prime-agent-feature-factory", "skills", "feature", "WORKFLOW.md"), "utf8");
       const sourcePackageReadme = readFileSync(join(root, "packages", "feature-factory", "README.md"), "utf8");
+      const sourceRootReadme = readFileSync(join(root, "README.md"), "utf8");
       assertContracts(sourceWorkflow, SKILL_CONTRACTS, "source workflow");
       assertContracts(sourcePackageReadme, README_CONTRACTS, "source package README");
+      for (const [artifact, text] of [
+        ["canonical workflow", sourceWorkflow],
+        ["OpenCode packaged workflow", sourceOpenCodeWorkflow],
+        ["Prime packaged workflow", sourcePrimeWorkflow],
+        ["package README", sourcePackageReadme],
+        ["root README", sourceRootReadme],
+      ]) {
+        assertResumeInvocations(text, artifact);
+      }
 
       // observe/ is not an entrypoint, which is exactly why it was left out: both entrypoints import
       // it, and nothing that only reads `exports` would notice.

@@ -1218,13 +1218,10 @@ const CLAIMS = [
       for (const [id, required] of NEEDS_HUMAN_PROSE) {
         assert.throws(() => checkNeedsHumanProse(prose.replace(required, "")), new RegExp(id, "u"));
       }
-      // Every surface a driver reads or that shows an executable resume: the canonical workflow,
-      // both adapter-packaged copies, and both READMEs. A negative control checks each surface so
-      // narrowing this list cannot silently restore the partial-coverage defect.
+      // Every factory-owned surface that shows an executable resume. Workspace integration tests
+      // separately cover both adapter-packaged copies without reversing the package dependency.
       for (const [label, surfacePath] of [
         ["canonical workflow", join(pkg, "WORKFLOW.md")],
-        ["OpenCode packaged workflow", join(pkg, "..", "opencode-feature-factory", "skills", "feature", "WORKFLOW.md")],
-        ["Prime packaged workflow", join(pkg, "..", "prime-agent-feature-factory", "skills", "feature", "WORKFLOW.md")],
         ["package README", join(pkg, "README.md")],
         ["root README", join(pkg, "..", "..", "README.md")],
       ]) {
