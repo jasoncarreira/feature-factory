@@ -101,6 +101,8 @@ const NEEDS_HUMAN_PROSE = [
   ["retention", "Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.", "the retained sandbox cannot resume"],
   ["failed-gate", "An autonomous failed gate parks top-level needs-human; fix the durable gate cause before explicit factory resume.", "a failed gate permanently ends the run"],
   ["gate-restart", "After an autonomous needs-human gate stop, explicitly resume only after the existing pre-lock and ownership checks pass.", "start a replacement run"],
+  ["bootstrap-resume-parked", "For configured order 7, the CLI binds the exact raw `run.json` bytes, the validated parked manifest, a forward `updated_at`, and the exact fresh owner before running bootstrap while durable status remains `needs-human`.", "bootstrap changes durable status before execution"],
+  ["bootstrap-resume-failure", "An ordinary failure with intact bindings records the exact command and integer or `null` result, advances `updated_at`, remains `needs-human`, preserves progress and the historical result, and refuses; a later explicit resume reruns bootstrap.", "discards the historical result"],
   ["identity-park", "factory terminal \"$R\" needs-human --reason <REASON_TOKEN> --repo \"$RUN_REPO\"", "completed"],
   ["identity-report", "Only after all of those steps succeed report the parked run, `RUN_REPO`, `Status: needs-human`, the exact", "final"],
   ["malformed-evidence", "Malformed verification evidence parks top-level needs-human; fix the evidence source and explicitly resume without editing evidence or run.json.", "malformed evidence makes the run final"],
@@ -155,12 +157,28 @@ const BOOTSTRAP_POLICY_FRAGMENTS = [
   "never invoked by resolver, merge verification or replay, direct repository verification, slice or Gate 3 observation, effective push, or publication",
 ];
 
+const BOOTSTRAP_POLICY_CONTRACTS = [
+  ...BOOTSTRAP_POLICY_FRAGMENTS.map((fragment, index) => [
+    `fragment-${index}`, fragment, (text) => text.includes(fragment),
+  ]),
+  ["schema-optionals", "`publishing_identity`, plus only the optional own properties `verify_timeout_ms`, `bootstrap`, and", (text) => /root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and\s+`publishing_identity`, plus only the optional own properties `verify_timeout_ms`, `bootstrap`, and\s+`bootstrap_timeout_ms`/u.test(text)],
+  ["command-shapes", "`bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present", (text) => /`resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present\s+command must be non-empty/u.test(text)],
+  ["timeout-shape", "safe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`.", (text) => /Both timeout values must be positive\nsafe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`/u.test(text)],
+  ["timeout-defaults", "`verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;", (text) => /`verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;\s+neither timeout shares or consumes the other's budget/u.test(text)],
+  ["bootstrap-precedence", "The two bootstrap keys are known keys. Invalid `bootstrap` outranks missing required entries and every", (text) => /Invalid `bootstrap` outranks missing required entries and every\ntimeout defect, including an invalid or otherwise orphaned bootstrap timeout/u.test(text)],
+  ["invalid-bootstrap-refusal", "invalid factory config: .factory.json entry 'bootstrap' must be a non-empty string; no session or run created.", (text) => text.includes("invalid factory config: .factory.json entry 'bootstrap' must be a non-empty string; no session or run created.")],
+  ["orphan-timeout-refusal", "invalid factory config: .factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command; no session or run created.", (text) => text.includes("invalid factory config: .factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command; no session or run created.")],
+  ["invalid-timeout-refusal", "invalid factory config: .factory.json entry 'bootstrap_timeout_ms' must be a positive integer; no session or run created.", (text) => text.includes("invalid factory config: .factory.json entry 'bootstrap_timeout_ms' must be a positive integer; no session or run created.")],
+  ["timeout-boundary", "below apply only to repository `verify` shell attempts; the bootstrap timeout applies only to CLI-owned", (text) => /verify timeout and bounded retry\nbelow apply only to repository `verify` shell attempts; the bootstrap timeout applies only to CLI-owned\ninit and explicit resume/u.test(text)],
+];
+
 function checkNeedsHumanProse(prose) {
   for (const [id, required, forbidden] of NEEDS_HUMAN_PROSE) {
     if (prose.split(required).length !== 2) throw new Error(id);
     const line = prose.split("\n").find((entry) => entry.includes(required));
     if (!line || line.includes(forbidden)) throw new Error(id);
   }
+  if ((prose.match(/needs-human/gu) ?? []).length !== NEEDS_HUMAN_PROSE.length) throw new Error("needs-human-count");
 }
 
 // Every *executable* resume instruction must pass the session. The command rejects without it, so an
@@ -182,11 +200,14 @@ function checkResumeOrder(prose) {
   }
 }
 
-function checkBootstrapPolicy(prose) {
-  for (const fragment of BOOTSTRAP_POLICY_FRAGMENTS) {
-    const line = prose.split("\n").find((entry) => entry.includes(fragment));
-    if (!line) throw new Error(`bootstrap-policy: ${fragment}`);
+function checkBootstrapContract(prose, [id, marker, matches]) {
+  if (!prose.split("\n").some((entry) => entry.includes(marker)) || !matches(prose)) {
+    throw new Error(`bootstrap-policy:${id}`);
   }
+}
+
+function checkBootstrapPolicy(prose) {
+  for (const contract of BOOTSTRAP_POLICY_CONTRACTS) checkBootstrapContract(prose, contract);
 }
 
 // Each claim: where the prose lives, the exact fragment that makes the claim, and the behaviour it
@@ -1005,7 +1026,7 @@ const CLAIMS = [
   {
     id: "repository-resolver-contract-declares-its-own-intake",
     file: "WORKFLOW.md",
-    fragment: BOOTSTRAP_POLICY_FRAGMENTS[0],
+    fragment: BOOTSTRAP_POLICY_CONTRACTS[0][1],
     expect: "allowed",
     matches: /"run_id": "205"/u,
     act(repo) {
@@ -1024,8 +1045,12 @@ const CLAIMS = [
       };
       checkPublishingIdentityConfig(prose);
       checkBootstrapPolicy(prose);
-      for (const marker of BOOTSTRAP_POLICY_FRAGMENTS) {
-        assert.throws(() => checkBootstrapPolicy(prose.replace(marker, "")), /bootstrap-policy/u);
+      for (const contract of BOOTSTRAP_POLICY_CONTRACTS) {
+        const [id, marker] = contract;
+        assert.throws(
+          () => checkBootstrapContract(prose.replace(marker, ""), contract),
+          (error) => error.message === `bootstrap-policy:${id}`,
+        );
       }
       for (const marker of [
         "Retain the validated `publishing_identity` string exactly as parsed",
@@ -1035,12 +1060,7 @@ const CLAIMS = [
         "Effective push-target capture and comparison are active through the package-owned <code>factory effective-push</code> command",
         "Active at the three mandatory guards below",
       ]) assert.throws(() => checkPublishingIdentityConfig(prose.replace(marker, "")));
-      assert.match(prose, /root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and\s+`publishing_identity`, plus only the optional own properties `verify_timeout_ms`, `bootstrap`, and\s+`bootstrap_timeout_ms`/u);
-      assert.match(prose, /`resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present\s+command must be non-empty/u);
       assert.match(prose, /`publishing_identity` is a static non-empty publishing account name in the\s+file itself, not a command, token, credential, or command result/u);
-      assert.match(prose, /Both timeout values must be positive\nsafe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`/u);
-      assert.match(prose, /`verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;\s+neither timeout shares or consumes the other's budget/u);
-      assert.match(prose, /Invalid `bootstrap` outranks missing required entries and every\ntimeout defect, including an invalid or otherwise orphaned bootstrap timeout/u);
       assert.match(prose, /Credential values must not appear in the file/u);
       assert.match(prose, /An absent `\$O\/\.factory\.json` means no resolver is declared/u);
       assert.match(prose, /This refusal stops under the same effect-free boundary as every configured resolver refusal below/u);
@@ -1058,9 +1078,6 @@ const CLAIMS = [
       assert.match(configured, /becomes the adapter run ID, expected-ID comparison value, manifest candidate name,\nsandbox name, and default feature-branch suffix/u);
       for (const refusal of [
         "invalid factory config: .factory.json; no session or run created.",
-        "invalid factory config: .factory.json entry 'bootstrap' must be a non-empty string; no session or run created.",
-        "invalid factory config: .factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command; no session or run created.",
-        "invalid factory config: .factory.json entry 'bootstrap_timeout_ms' must be a positive integer; no session or run created.",
         "invalid factory config: .factory.json entry 'verify_timeout_ms' must be a positive integer; no session or run created.",
         "factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.",
         "factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.",
@@ -1088,7 +1105,6 @@ const CLAIMS = [
       assert.doesNotMatch(prose, /https:\/\/github\.com\/<owner>\/<repo>\/issues/u);
       assert.match(boundaries, /Add no resolver\ncache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
       assert.match(boundaries, /For `resolve`, use the ordinary shell result directly[\s\S]*no stderr redirection or suppression rule,[\s\S]*timeout,\nretry, or fallback after any configured resolver result or failure/u);
-      assert.match(boundaries, /verify timeout and bounded retry\nbelow apply only to repository `verify` shell attempts; the bootstrap timeout applies only to CLI-owned\ninit and explicit resume/u);
       assert.match(boundaries, /`resolve`, `verify`, and `publishing_identity` are consumed now\. Configured `publish` remains unconsumed and is not invoked\./u);
       assert.match(boundaries, /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted[\s\S]*at most two executions in that merge invocation[\s\S]*timeout and retry never apply to resolver, slice, or Gate 3 commands/u);
       assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |"));
@@ -1313,6 +1329,7 @@ const CLAIMS = [
       for (const [id, required] of NEEDS_HUMAN_PROSE) {
         assert.throws(() => checkNeedsHumanProse(prose.replace(required, "")), new RegExp(id, "u"));
       }
+      assert.throws(() => checkNeedsHumanProse(`${prose}\nunregistered needs-human policy\n`), /needs-human-count/u);
       // Every factory-owned surface that shows an executable resume. Workspace integration tests
       // separately cover both adapter-packaged copies without reversing the package dependency.
       for (const [label, surfacePath] of [
