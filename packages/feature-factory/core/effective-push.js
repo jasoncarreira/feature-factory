@@ -9,9 +9,12 @@ function failure(message) {
 }
 
 function execute(run, args) {
+  // No `encoding`: stdout stays a Buffer. Decoding to utf8 replaces every distinct
+  // invalid byte sequence with the same U+FFFD, so two unequal targets could compare
+  // equal here while `git push` used the original raw bytes. A local-path remote on
+  // Unix may legitimately hold non-UTF-8 bytes, so this is reachable, not theoretical.
   return run("git", args, {
     shell: false,
-    encoding: "utf8",
     env: { ...process.env, LC_ALL: "C" },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -25,9 +28,20 @@ function capture(run, repository) {
     return null;
   }
   if (!result || result.error || result.signal !== null && result.signal !== undefined
-    || result.status !== 0 || typeof result.stdout !== "string") return null;
-  const target = result.stdout.replace(/\n+$/u, "");
-  return target.length > 0 ? target : null;
+    || result.status !== 0 || result.stdout === null || result.stdout === undefined) return null;
+  // A test double may still hand back a string; normalise to bytes either way.
+  const raw = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(String(result.stdout), "utf8");
+  let end = raw.length;
+  while (end > 0 && raw[end - 1] === 0x0a) end -= 1;   // strip only the intended LF bytes
+  const target = raw.subarray(0, end);
+  return target.length > 0 ? Buffer.from(target) : null;
+}
+
+// argv is bytes-as-string, so a target that does not survive a utf8 round trip cannot be
+// placed there without silently altering it. Refuse instead of configuring something other
+// than what was captured.
+function argvSafe(target) {
+  return Buffer.from(target.toString("utf8"), "utf8").equals(target);
 }
 
 function configure(run, repository, target) {
@@ -49,7 +63,10 @@ export function enforceEffectivePushTarget(positionals, { spawnSync: run = spawn
     throw failure(`factory sandbox: operator effective push target unavailable; sandbox retained at ${sandboxRepository}`);
   }
   if (operation === "bootstrap") {
-    if (!configure(run, sandboxRepository, operatorTarget)) {
+    if (!argvSafe(operatorTarget)) {
+      throw failure(`factory sandbox: operator effective push target is not representable for configuration; sandbox retained at ${sandboxRepository}`);
+    }
+    if (!configure(run, sandboxRepository, operatorTarget.toString("utf8"))) {
       throw failure(`factory sandbox: sandbox effective push target unavailable at ${sandboxRepository}`);
     }
     operatorTarget = capture(run, operatorRepository);
@@ -61,7 +78,7 @@ export function enforceEffectivePushTarget(positionals, { spawnSync: run = spawn
   if (sandboxTarget === null) {
     throw failure(`factory sandbox: sandbox effective push target unavailable at ${sandboxRepository}`);
   }
-  if (sandboxTarget !== operatorTarget) {
+  if (!sandboxTarget.equals(operatorTarget)) {
     throw failure(`factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${sandboxRepository}`);
   }
 }

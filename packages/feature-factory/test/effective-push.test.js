@@ -130,7 +130,12 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     for (const event of events) {
       assert.equal(event.name, "git");
       assert.equal(event.options.shell, false);
-      assert.equal(event.options.encoding, "utf8");
+      // No encoding: stdout must stay bytes. Decoding to utf8 maps every distinct invalid
+      // byte sequence to the same U+FFFD, so two unequal targets could compare equal here
+      // while `git push` used the original raw bytes. This assertion previously pinned
+      // `"utf8"` — it pinned the defect.
+      assert.equal(event.options.encoding, undefined,
+        "the target comparison must read bytes, not a lossily decoded string");
       assert.deepEqual(event.options.stdio, ["ignore", "pipe", "pipe"]);
       assert.equal(event.options.env.LC_ALL, "C");
       assert.equal(event.options.env.PATH, process.env.PATH);
@@ -216,7 +221,8 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     { ...childResult(diagnosticTarget), status: null, signal: "SIGTERM", stderr: diagnosticTarget },
     { ...childResult(diagnosticTarget), status: null, stderr: diagnosticTarget },
     { ...childResult(diagnosticTarget), status: 7, stderr: diagnosticTarget },
-    { ...childResult(Buffer.from(diagnosticTarget)), stderr: diagnosticTarget },
+    // A Buffer stdout used to count as "unavailable", because capture required a string.
+    // Bytes are now the normal case, so that row asserted the lossy-decode defect itself.
     childResult("\n\n"),
   ];
   for (const unavailable of unavailableResults) {
@@ -268,6 +274,32 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   assert.equal(checkMismatch.events.length, 2);
   assert.equal(checkMismatch.error?.message, "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at sandbox");
   assert.equal(checkMismatch.error?.cause, undefined);
+  // Two DIFFERENT invalid UTF-8 targets. Decoded as utf8 both become the same U+FFFD string
+  // and this comparison passes, while `git push` would use the original unequal bytes — a
+  // sandbox publishing to a target the operator never approved. Byte comparison refuses.
+  // A local-path remote on Unix can legitimately hold non-UTF-8 bytes, so this is reachable.
+  const invalidA = Buffer.concat([Buffer.from("ssh://host/"), Buffer.from([0xff]), Buffer.from("\n")]);
+  const invalidB = Buffer.concat([Buffer.from("ssh://host/"), Buffer.from([0xfe]), Buffer.from("\n")]);
+  assert.equal(invalidA.toString("utf8"), invalidB.toString("utf8"),
+    "the premise: utf8 decoding collapses these two distinct targets to one string");
+  const undecodableMismatch = invokeEffectivePush(["check", "operator", "sandbox"], [
+    childResult(invalidA), childResult(invalidB),
+  ]);
+  assert.equal(undecodableMismatch.error?.message,
+    "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at sandbox",
+    "distinct invalid UTF-8 targets must not compare equal");
+  // Equal raw bytes still match, so the byte comparison did not simply refuse everything.
+  const undecodableMatch = invokeEffectivePush(["check", "operator", "sandbox"], [
+    childResult(Buffer.from(invalidA)), childResult(Buffer.from(invalidA)),
+  ]);
+  assert.equal(undecodableMatch.error, null, "identical raw targets must still pass");
+  // Bootstrap cannot place a non-round-tripping target in argv without altering it, so it
+  // refuses rather than configuring something other than what it captured.
+  const unrepresentable = invokeEffectivePush(["bootstrap", "operator", "sandbox"], [
+    childResult(invalidA),
+  ]);
+  assert.equal(unrepresentable.error?.message,
+    "factory sandbox: operator effective push target is not representable for configuration; sandbox retained at sandbox");
   const featureLog = (repository, branch) => {
     const raw = git(repository, "rev-parse", "--git-path", `logs/refs/heads/${branch}`);
     const path = isAbsolute(raw) ? raw : resolve(repository, raw);

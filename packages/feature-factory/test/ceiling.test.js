@@ -661,7 +661,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // reasoning for why an archive is create-only and why a failed archive must not fail the step.
     // 3433 -> 3509 for issue #224: one private shell-free effective-push mechanism validates its
     // positional contract, freshly observes and aligns targets, and emits only cause-free refusals.
-    assert.equal(total, 3509, "package-owned effective-push enforcement landed at 3509 production lines");
+    // 3509 -> 3526 on review: the target comparison read a utf8-decoded string, and Node maps
+    // every distinct invalid byte sequence to the same U+FFFD. Two unequal targets could
+    // therefore compare equal while `git push` used the original raw bytes -- a sandbox
+    // publishing somewhere the operator never approved, from a guard that reported a match.
+    // A local-path remote on Unix may legitimately carry non-UTF-8 bytes, so it is reachable.
+    // Capture now keeps bytes and compares them, and bootstrap refuses a target that would
+    // not survive the utf8 round trip argv requires rather than configuring something else.
+    assert.equal(total, 3526, "byte-exact effective-push comparison landed at 3526 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 
