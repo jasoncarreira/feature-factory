@@ -45,8 +45,10 @@ An independently-implementable unit of the brief with:
 
 **The original `paths` prefix and `test_plan` are ratified when the plan is seeded and cannot be changed
 afterwards.** Every later ownership check judges against the current persisted paths. The seeded prefix
-is immutable; only a parked run's verified operator may append a durable path amendment to an unmerged
-slice, and the test waiver can never be granted after the fact.
+is immutable; only the `amend-paths` procedure may append a durable path amendment to an unmerged slice,
+and the test waiver can never be granted after the fact. That amendment is audited rather than authorized:
+it requires a parked run and a freshly verified owning session, and the owning driver can create both, so
+plan for correct ownership at Gate 2 rather than treating amendment as a routine escape.
 
 There is no amend-and-reseed path — `factory slices-seed` refuses a second seed and `test_plan` plus the
 original path prefix are immutable, by design. If a slice turns out to need required nonprivileged scope

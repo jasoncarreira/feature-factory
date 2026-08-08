@@ -337,8 +337,10 @@ Enforced, not suggested. Each is a mechanism with a test that fails when the mec
 - A review must record the 40-character commit it judged, and is refused against any other head.
 - A merge must be a two-parent merge that contributed exactly the reviewed paths, with content on
   those paths identical to the reviewed commit.
-- A slice may only change its seeded paths plus authorized durable amendments, and never an unamended or
-  privileged control-plane path.
+- A slice may only change its seeded paths plus durable audited amendments, and never an unamended or
+  privileged control-plane path. An amendment is audited, not authorized: it requires a parked run and a
+  freshly verified owning session, both of which the owning driver can create, so the record of what was
+  added and why is what makes it attributable. What is enforced is the path check itself.
 - Evidence must be observed on a clean worktree that did not move while the tests ran.
 - Whether a slice may ship untested is ratified in its `test_plan` at seeding — there is no flag
   that waives tests at observation time.
