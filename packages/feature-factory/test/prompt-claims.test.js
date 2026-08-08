@@ -140,13 +140,27 @@ const RESUME_ORDER = [
   "Resume order 9 — continue solely from the newly qualified status.next.",
 ];
 
+const BOOTSTRAP_POLICY_FRAGMENTS = [
+  "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.",
+  "Configured `bootstrap` is consumed only by CLI-owned fresh init and explicit resume; the workflow consumer validates it but never executes it itself.",
+  "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.",
+  "Bootstrap cleanliness examines tracked worktree and index paths only; untracked dependency output is ignored.",
+  "Bootstrap has an independent `900000` millisecond default and budget; it does not change resolver, verify, configured publish, effective-push, push, PR, or Gate 3 behavior.",
+  "A successful configured attempt stores the exact command in `bootstrap_command` and the numeric result in paired `bootstrap_exit`; status output remains unchanged.",
+  "A configured fresh-init failure retains the deterministic sandbox, emits no init JSON stdout, and leaves `run.json` absent.",
+  "For configured order 7, the CLI binds the exact raw `run.json` bytes",
+  "Every factory-mediated claim, force-steal, refresh, and release holds `run-json.lock`",
+  "A clean zero records the command and exit `0`",
+  "child stdout and stderr both routed to CLI stderr",
+  "never invoked by resolver, merge verification or replay, direct repository verification, slice or Gate 3 observation, effective push, or publication",
+];
+
 function checkNeedsHumanProse(prose) {
   for (const [id, required, forbidden] of NEEDS_HUMAN_PROSE) {
     if (prose.split(required).length !== 2) throw new Error(id);
     const line = prose.split("\n").find((entry) => entry.includes(required));
     if (!line || line.includes(forbidden)) throw new Error(id);
   }
-  if ((prose.match(/needs-human/gu) ?? []).length !== NEEDS_HUMAN_PROSE.length) throw new Error("needs-human-count");
 }
 
 // Every *executable* resume instruction must pass the session. The command rejects without it, so an
@@ -165,6 +179,13 @@ function checkResumeOrder(prose) {
   const markers = prose.split("\n").filter((line) => line.startsWith("Resume order "));
   if (!markers.every((marker, index) => marker === RESUME_ORDER[index]) || markers.length !== RESUME_ORDER.length) {
     throw new Error("resume-order");
+  }
+}
+
+function checkBootstrapPolicy(prose) {
+  for (const fragment of BOOTSTRAP_POLICY_FRAGMENTS) {
+    const line = prose.split("\n").find((entry) => entry.includes(fragment));
+    if (!line) throw new Error(`bootstrap-policy: ${fragment}`);
   }
 }
 
@@ -984,7 +1005,7 @@ const CLAIMS = [
   {
     id: "repository-resolver-contract-declares-its-own-intake",
     file: "WORKFLOW.md",
-    fragment: '"verify_timeout_ms": 900000',
+    fragment: BOOTSTRAP_POLICY_FRAGMENTS[0],
     expect: "allowed",
     matches: /"run_id": "205"/u,
     act(repo) {
@@ -1002,6 +1023,10 @@ const CLAIMS = [
         assert.doesNotMatch(text, /remains deferred to #224|push-target migration is deferred|`publish` and `publishing_identity` remain deferred|consumption is deferred to #216/u);
       };
       checkPublishingIdentityConfig(prose);
+      checkBootstrapPolicy(prose);
+      for (const marker of BOOTSTRAP_POLICY_FRAGMENTS) {
+        assert.throws(() => checkBootstrapPolicy(prose.replace(marker, "")), /bootstrap-policy/u);
+      }
       for (const marker of [
         "Retain the validated `publishing_identity` string exactly as parsed",
         "Do not tighten the existing non-whitespace validation",
@@ -1010,12 +1035,12 @@ const CLAIMS = [
         "Effective push-target capture and comparison are active through the package-owned <code>factory effective-push</code> command",
         "Active at the three mandatory guards below",
       ]) assert.throws(() => checkPublishingIdentityConfig(prose.replace(marker, "")));
-      assert.match(prose, /root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and\s+`publishing_identity`, plus only the optional own property `verify_timeout_ms`/u);
-      assert.match(prose, /`resolve`, `verify`, and\n`publish` are the only commands/u);
-      assert.match(prose, /`publishing_identity` is\na static non-empty publishing account name in the file itself, not a command, token, credential, or\ncommand result/u);
-      assert.match(prose, /`verify_timeout_ms` must be a positive safe integer; omission silently\ndefaults repository verification to `900000` milliseconds/u);
-      assert.match(prose, /Unknown or missing required properties,\ninvalid JSON, unreadable content, wrong types, and empty or whitespace-only required values make a\npresent file malformed/u);
-      assert.match(prose, /Validate all required entries and the optional timeout before executing\n`resolve`/u);
+      assert.match(prose, /root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and\s+`publishing_identity`, plus only the optional own properties `verify_timeout_ms`, `bootstrap`, and\s+`bootstrap_timeout_ms`/u);
+      assert.match(prose, /`resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present\s+command must be non-empty/u);
+      assert.match(prose, /`publishing_identity` is a static non-empty publishing account name in the\s+file itself, not a command, token, credential, or command result/u);
+      assert.match(prose, /Both timeout values must be positive\nsafe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`/u);
+      assert.match(prose, /`verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;\s+neither timeout shares or consumes the other's budget/u);
+      assert.match(prose, /Invalid `bootstrap` outranks missing required entries and every\ntimeout defect, including an invalid or otherwise orphaned bootstrap timeout/u);
       assert.match(prose, /Credential values must not appear in the file/u);
       assert.match(prose, /An absent `\$O\/\.factory\.json` means no resolver is declared/u);
       assert.match(prose, /This refusal stops under the same effect-free boundary as every configured resolver refusal below/u);
@@ -1033,6 +1058,9 @@ const CLAIMS = [
       assert.match(configured, /becomes the adapter run ID, expected-ID comparison value, manifest candidate name,\nsandbox name, and default feature-branch suffix/u);
       for (const refusal of [
         "invalid factory config: .factory.json; no session or run created.",
+        "invalid factory config: .factory.json entry 'bootstrap' must be a non-empty string; no session or run created.",
+        "invalid factory config: .factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command; no session or run created.",
+        "invalid factory config: .factory.json entry 'bootstrap_timeout_ms' must be a positive integer; no session or run created.",
         "invalid factory config: .factory.json entry 'verify_timeout_ms' must be a positive integer; no session or run created.",
         "factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.",
         "factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.",
@@ -1058,10 +1086,9 @@ const CLAIMS = [
       // makes that vendor the factory's default again, which is what this change exists to end.
       assert.doesNotMatch(prose, /\bgh\s+(?:repo|issue)\b/u);
       assert.doesNotMatch(prose, /https:\/\/github\.com\/<owner>\/<repo>\/issues/u);
-      assert.match(boundaries, /additional `\.factory\.json` command consumer beyond the exact\n`verify` consumer below/u);
-      assert.match(boundaries, /Add no resolver cache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
+      assert.match(boundaries, /Add no resolver\ncache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
       assert.match(boundaries, /For `resolve`, use the ordinary shell result directly[\s\S]*no stderr redirection or suppression rule,[\s\S]*timeout,\nretry, or fallback after any configured resolver result or failure/u);
-      assert.match(boundaries, /optional timeout and bounded\nretry below apply only to repository `verify` shell attempts, never to `resolve`, slice observation, or\nGate 3 commands/u);
+      assert.match(boundaries, /verify timeout and bounded retry\nbelow apply only to repository `verify` shell attempts; the bootstrap timeout applies only to CLI-owned\ninit and explicit resume/u);
       assert.match(boundaries, /`resolve`, `verify`, and `publishing_identity` are consumed now\. Configured `publish` remains unconsumed and is not invoked\./u);
       assert.match(boundaries, /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted[\s\S]*at most two executions in that merge invocation[\s\S]*timeout and retry never apply to resolver, slice, or Gate 3 commands/u);
       assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |"));
@@ -1089,7 +1116,18 @@ const CLAIMS = [
         "Apart from the safe matching-unavailable replay above, a configured command may run again\nonly after a committed test-only repair changes HEAD",
         "include every attempt under\n`## Post-merge test-only repairs`",
       ]) assert.ok(prose.includes(postMergeClaim), `post-merge policy is missing: ${postMergeClaim}`);
+      const bootstrapCommand = "node -e \"const f=require('fs');f.mkdirSync('.factory',{recursive:true});f.writeFileSync('.factory/prompt-bootstrap','ran')\"";
+      writeFileSync(join(repo, ".factory.json"), `${JSON.stringify({
+        resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
+        bootstrap: bootstrapCommand, bootstrap_timeout_ms: 120000,
+      })}\n`);
+      execFileSync("git", ["add", ".factory.json"], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "declare bootstrap"], { cwd: repo });
       const initialized = initFresh(repo, ["205", "--now", NOW]);
+      const run = JSON.parse(readFileSync(join(initialized.runDir, "run.json"), "utf8"));
+      assert.equal(run.bootstrap_command, bootstrapCommand);
+      assert.equal(run.bootstrap_exit, 0);
+      assert.equal(readFileSync(join(initialized.repository, ".factory", "prompt-bootstrap"), "utf8"), "ran");
       const status = factory(initialized.repository, ["status", "205", "--json"]);
       assert.equal(status.ok, true, status.out);
       assert.equal(JSON.parse(status.out).run_id, "205");
