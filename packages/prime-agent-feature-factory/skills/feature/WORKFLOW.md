@@ -136,6 +136,22 @@ Enter the parked stop with factory terminal R needs-human --reason TEXT; leave i
 For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
 Report top-level needs-human as parked with its reason and explicit factory resume command.
 Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
+A park that asks a question about the request itself -- a contradiction between criteria, a scope lock,
+or a pinned constraint -- is not fixed by resuming. Resume continues from the existing manifest and
+`status.next`; it does not re-resolve the issue, re-read `ISSUE_PAYLOAD`, or regenerate the story or
+brief, so an edited issue body cannot reach the artifacts a retained run will keep using. The supported
+route is: record the decision in the issue body, then have the operator remove the retained sandbox
+directory, then launch the issue again. Removing the sandbox takes the manifest with it -- the control
+plane lives inside -- so the deterministic run id is free and `factory init` creates a genuinely new run
+that reads the edited body at Gate 1. There is no CLI transition for this: `terminal` refuses a parked
+run, and `factory init` refuses while either manifest candidate exists, so a relaunch without the removal
+reselects the parked run instead of replacing it. OPERATING.md carries the command and its cost --
+everything held only in that sandbox is lost, including merged slices whose branches were never pushed,
+so push anything worth keeping first.
+Resume is for external causes -- a timeout, an outage, credentials, an unclean tree -- where the run's own
+artifacts are still correct.
+State that route in the park reason, because a decision recorded only in a host session or a sandbox
+artifact is lost with that sandbox, and the replacement run asks the same question again.
 
 Every platform uses this exact gate artifact map:
 
@@ -781,6 +797,51 @@ afterwards:
 
 Present the brief **and** the plan — the waves, each slice's paths and acceptance criteria, and any
 serialized hotspots. The engineer approves the parallelization plan, not just the brief.
+
+#### Satisfiability, before the gate opens
+
+Before requesting the Brief gate, state that every acceptance criterion is simultaneously satisfiable
+with every scope lock and every pinned external constraint, naming each pair you checked and the
+evidence. A criterion that cannot hold alongside a lock, a pinned dependency version, or another
+criterion is a defect in the issue, not work to attempt: park with `needs-human`, name both sides, and
+stop. **Do not choose one side silently.**
+
+The operative word is *simultaneously*. Criteria that are each reasonable alone are how this fails; the
+defect lives in the pair, and nothing else in this workflow ever compares them. Three pairings, one for
+each way it has happened:
+
+| pairing | how it looked |
+| --- | --- |
+| criterion × criterion | "publishes with no prepared environment" beside "the factory acquires no credentials" — publishing unprepared *requires* selecting a credential |
+| criterion × scope lock | a required lock field beside a lock forbidding changes to the only reader that would accept it |
+| criterion × pinned constraint | one message chunk carrying an ordered list, against a pinned schema accepting exactly one element |
+
+Two of those three cannot be settled from the issue text alone — one needed the reader's code, one needed
+the pinned dependency's schema — which is why this runs after research rather than at intake, and why
+the check names evidence rather than asserting a conclusion. "I verified satisfiability" is a claim;
+naming the pair and the line that decides it is a check.
+
+An unsatisfiable brief does not present as confusion. It presents as an agent expanding scope to find a
+route that does not exist, which is expensive and looks like diligence: one run reached "URL-specific
+transport config, remote helpers, hooks, and ref-expanding push settings" while searching, and exhausted
+its attempts without seeding a slice. Naming the fault as the issue's stops the search.
+
+**This is instruction, not enforcement, and the difference matters.** Nothing machine-checks that the
+check happened. No artifact records the pairs, no transition refuses an unchecked brief, and a driver that
+skips this paragraph can approve Gate 2 with the whole suite green. The assertions that accompany it pin
+these sentences against deletion and prove nothing about behaviour.
+
+It is written down anyway because the failure it addresses is expensive and repeated: three runs stopped on
+contradictions nobody had compared, one after a slice had merged. And the risk it names is real — quietly
+satisfying the easier criterion yields a green suite, an approving review, and a merged change that does
+not do what the issue said. That is a false green, which is exactly the category this repository spends
+production lines to enforce against. **Enforcing it would need the named pairs and their evidence recorded
+in the brief artifact, and the gate refusing approval without them.** That is a schema and transition
+change, and it is not in this instruction.
+
+**When decomposing, keep a module and any test that asserts an exact closed inventory over it in one
+slice.** A change to the module must update that inventory atomically, and a slice cannot edit a path it
+does not own, so splitting the pair across slices leaves no legal move once paths are seeded.
 
 Open the Brief gate while slices are still empty and present the reviewed artifacts. The human loop is
 `pending` → `changes` → revise → `pending` → re-present → decision. A `changes` decision keeps slices

@@ -120,6 +120,10 @@ const NEEDS_HUMAN_PROSE = [
   ["publication-record", "This publication repair-record needs-human remains blocking, and envelope resume does not clear it.", "envelope resume erases publication repair"],
   ["handoff", "Completed handoff remains final, while top-level needs-human is parked and requires explicit factory resume.", "needs-human is excluded from resume"],
   ["autonomous-failure", "Autonomous gate failure parks top-level needs-human; quiesce and unlock before a later explicit factory resume.", "autonomous gate failure is final"],
+  // The satisfiability check's park. `forbidden` is the drift that matters: an unsatisfiable brief
+  // is only caught if the run stops, and "and continue" on this line would invert the rule while
+  // leaving every word of the requirement in place.
+  ["satisfiability-park", "not work to attempt: park with `needs-human`, name both sides, and", "and continue"],
   ["bounded-loop", "A bounded loop parks top-level needs-human; explicit resume may repark it if the external cause remains unfixed.", "bounded-loop needs-human cannot resume"],
 ];
 
