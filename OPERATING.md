@@ -57,8 +57,9 @@ required values, and invalid timeout values make a present file malformed. All r
 optional timeout are validated before an entry is used. A command may name credentials supplied through
 its inherited environment, but credential values must not appear in the file.
 
-`resolve`, `verify`, and `publishing_identity` are consumed today;
-only `publish` remains deferred to #224. After mode admission, `resolve` runs as one ordinary shell step with its
+`resolve`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
+Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
+After mode admission, `resolve` runs as one ordinary shell step with its
 configured string submitted unchanged, exact cwd `O`, the inherited environment plus `FACTORY_INPUT`,
 and no positional argument or structured stdin. `FACTORY_INPUT` is the exact admitted request remainder,
 including its original whitespace and bytes. Exit zero with no stdout means the input was not recognized;
@@ -104,16 +105,14 @@ The entries have these execution contracts:
 | entry | input and return contract | failure meaning | status |
 | --- | --- | --- | --- |
 | `verify` | The unchanged string runs as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio; no structured stdin or factory payload. Each attempt gets the full configured timeout. Stdout and stderr are visible, informational, and unparsed rather than captured or persisted. | Numeric child exit status is authoritative. Zero succeeds; non-zero means repository verification failed; no numeric status is unavailable. | Invoked after each newly recorded merge with at most two executions per merge or replay invocation. Direct committed test-only repair observation remains one execution. |
-| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked; existing push and PR behavior remains unchanged. Push-target publication is deferred to #224. |
+| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by `factory effective-push`. |
 | `publishing_identity` | No runtime input; retain the raw validated string exactly as parsed, without trimming, normalization, case-folding, or reserialization. | A missing, non-string, or whitespace-only identity makes the config malformed; the observed login is compared exactly and case-sensitively. | Active in every mode at exactly three guards; absent config preserves existing behavior. |
 
 Publishing identity is checked immediately after verified post-lock ownership, or immediately after an
 explicit resume is verified running with the same fresh owner and before reconciliation or other work;
 immediately before `git push`, after effective push-target equality; and immediately before
 `gh pr create`, after the push is known successful. No operation may intervene across any guard
-boundary. There is no separate guard before `factory pr`. This adds no config key or syntax, run status,
-or factory command, and existing push, `gh pr create`, `factory pr`, Gate 3, merge, and approval semantics
-remain unchanged.
+boundary. There is no separate guard before `factory pr`. `publishing_identity` itself adds no config key or syntax, run status, or factory command. The independent `factory effective-push` command adds no state or flag. Existing push, `gh pr create`, `factory pr`, Gate 3, merge, and approval semantics remain unchanged.
 
 Before each guard, inherited `GH_TOKEN` must exist and contain at least one character. Missing or empty
 parks identity as unobservable without invoking `gh`, the network, stored authentication, credential

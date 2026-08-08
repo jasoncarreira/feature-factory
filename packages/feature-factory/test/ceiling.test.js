@@ -29,7 +29,7 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
   "init", "status", "amend-paths", "resume", "lock", "heartbeat", "gate", "step", "terminal",
-  "slices-seed", "slice", "observe", "validator", "pr",
+  "slices-seed", "slice", "observe", "validator", "pr", "effective-push",
 ];
 
 const RUN_JSON_KEYS = [
@@ -108,6 +108,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
+    assert.deepEqual(COMMANDS["effective-push"], []);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
     // The workflow is the authoritative host-neutral instruction set, and nothing checked it against the CLI
@@ -119,6 +120,37 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.equal(markdown.startsWith("---\n"), false, "WORKFLOW.md is not a platform skill");
     for (const platformToken of ["OpenCode", "feature_background", "run-orchestrator", "FACTORY_SESSION_ID", "--background"]) {
       assert.equal(markdown.includes(platformToken), false, `WORKFLOW.md must stay host-neutral: ${platformToken}`);
+    }
+    // These are instruction, and this pins them against silent deletion — nothing more. It cannot
+    // prove a run performs the satisfiability check or records a decision where the next run reads
+    // it; only a future run parking correctly on a contradictory brief shows that. Said plainly
+    // because a presence assertion reads like coverage and is not.
+    //
+    // Each fragment sits on one line in the raw markdown. One spanning a line wrap could never
+    // match, and would fail for a reason unrelated to the rule it guards.
+    for (const instruction of [
+      // Three of the four runs that stopped on their own brief stopped on a contradiction between
+      // two criteria, a criterion and a scope lock, or a criterion and a pinned dependency.
+      // Nothing in this workflow compared them before this.
+      "is a defect in the issue, not work to attempt",
+      // The risk the instruction names, and the reason it is worth writing down even unenforced:
+      // silently satisfying the easier criterion yields a green suite and a merged change that does
+      // not do what the issue asked. Enforcing it would need the pairs recorded in the brief
+      // artifact and the gate refusing without them, which is a schema change and is not here.
+      "Do not choose one side silently",
+      // A module split from the test asserting an exact inventory over it leaves no legal move once
+      // paths are seeded, because a slice may not edit a path it does not own.
+      "asserts an exact closed inventory over it in one",
+      // A brief-level contradiction cannot be fixed by resuming: resume continues from the existing
+      // manifest and never re-reads the issue, so the edited body cannot reach a retained run's
+      // artifacts. The route is record, abandon, replace — and this pins that it says so.
+      "The supported",
+      "route is: record the decision in the issue body, then have the operator remove the retained sandbox",
+      // The reason the removal is load-bearing rather than incidental: without it a relaunch
+      // reselects the parked run, because the run id is deterministic and init refuses to collide.
+      "reselects the parked run instead of replacing it",
+    ]) {
+      assert.ok(markdown.includes(instruction), `WORKFLOW.md no longer instructs: ${instruction}`);
     }
     const admissionIndex = markdown.indexOf("## Mode admission");
     const operatingModesIndex = markdown.indexOf("## Operating modes");
@@ -146,10 +178,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.equal(markdown.includes("Only when the invocation explicitly requests it."), false);
     assert.equal(markdown.includes("Never infer it from vague wording."), false);
     // Join shell continuations so one command is one string, then read only code — fenced
-    // blocks and inline spans — so prose cannot be mistaken for an invocation.
+    // blocks, effective-push's indented command sites, and inline spans — so prose cannot be mistaken for an invocation.
     const text = markdown.replace(/\\\n\s*/gu, " ");
     const snippets = [];
     for (const [, body] of text.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)) snippets.push(...body.split("\n"));
+    for (const [, body] of text.matchAll(/^ {4}(factory effective-push .+)$/gmu)) snippets.push(body);
     for (const [, body] of text.matchAll(/`([^`\n]+)`/gu)) snippets.push(body);
 
     // Not anchored at the start of the snippet: an invocation quoted mid-sentence inside a
@@ -661,10 +694,31 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // attempt overwrites. Run 216's test-verifier was rejected twice and approved on the third,
     // and both reasons had to be inferred from commit subjects. Roughly half of these lines are the
     // reasoning for why an archive is create-only and why a failed archive must not fail the step.
-    // 3433 -> 3590 for run 257: a parked, exact-owner path amendment appends audited ownership while
-    // seed admission stays empty and the slices family freshly observes the authorized session.
-    assert.equal(total, 3590, "reviewed parked path amendment landed at 3590 production lines");
-    assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
+    // 3433 -> 3509 for issue #224: one private shell-free effective-push mechanism validates its
+    // positional contract, freshly observes and aligns targets, and emits only cause-free refusals.
+    // 3509 -> 3526 on review: the target comparison read a utf8-decoded string, and Node maps
+    // every distinct invalid byte sequence to the same U+FFFD. Two unequal targets could
+    // therefore compare equal while `git push` used the original raw bytes -- a sandbox
+    // publishing somewhere the operator never approved, from a guard that reported a match.
+    // A local-path remote on Unix may legitimately carry non-UTF-8 bytes, so it is reachable.
+    // Capture now keeps bytes and compares them, and bootstrap refuses a target that would
+    // not survive the utf8 round trip argv requires rather than configuring something else.
+    // 3526 -> 3530 on the second review round: the byte comparison stripped every trailing LF, so a
+    // target that itself ends in LF reduced to the same bytes as one that does not -- `path\n\n` and
+    // `path\n` both became `path`, and two unequal targets compared equal. Git contributes exactly
+    // one record terminator, so exactly one is removed and its absence fails closed. That is the
+    // same defect class as the utf8 decoding it replaced, reintroduced one layer down while fixing it.
+    // 3530 -> 3687 merging run 257 into #224's landed total: a parked, exact-owner path amendment
+    // appends audited ownership while seed admission stays empty and the slices family freshly observes
+    // the authorized session. It exists because a wrong slice plan otherwise kills the run outright --
+    // mimir 1390 blocked with a module and its exact-inventory test in different slices and no legal
+    // move, and `blocked` is final.
+    //
+    assert.equal(total, 3687, "run 257 merged with #224 lands at 3687 production lines");
+    // 3600 -> 3700, authorized by Jason. #224 and run 257 were each authorized against 3600 and
+    // neither exceeded it alone; merged they land at 3687. The growth is a command, its transition
+    // contract and a schema key, not padding.
+    assert.ok(total <= 3700, `production source is ${total} lines; the tripwire is 3700`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

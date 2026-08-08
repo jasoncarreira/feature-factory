@@ -136,6 +136,22 @@ Enter the parked stop with factory terminal R needs-human --reason TEXT; leave i
 For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
 Report top-level needs-human as parked with its reason and explicit factory resume command.
 Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
+A park that asks a question about the request itself -- a contradiction between criteria, a scope lock,
+or a pinned constraint -- is not fixed by resuming. Resume continues from the existing manifest and
+`status.next`; it does not re-resolve the issue, re-read `ISSUE_PAYLOAD`, or regenerate the story or
+brief, so an edited issue body cannot reach the artifacts a retained run will keep using. The supported
+route is: record the decision in the issue body, then have the operator remove the retained sandbox
+directory, then launch the issue again. Removing the sandbox takes the manifest with it -- the control
+plane lives inside -- so the deterministic run id is free and `factory init` creates a genuinely new run
+that reads the edited body at Gate 1. There is no CLI transition for this: `terminal` refuses a parked
+run, and `factory init` refuses while either manifest candidate exists, so a relaunch without the removal
+reselects the parked run instead of replacing it. OPERATING.md carries the command and its cost --
+everything held only in that sandbox is lost, including merged slices whose branches were never pushed,
+so push anything worth keeping first.
+Resume is for external causes -- a timeout, an outage, credentials, an unclean tree -- where the run's own
+artifacts are still correct.
+State that route in the park reason, because a decision recorded only in a host session or a sandbox
+artifact is lost with that sandbox, and the replacement run asks the same question again.
 
 Every platform uses this exact gate artifact map:
 
@@ -308,11 +324,11 @@ Do not create, write, merge, archive, or package `.factory.json`. It remains ope
 committed, so every clone and sandbox carries it, and refused by the privileged-path policy, so a run
 cannot widen its own configuration. It lived under the gitignored `.factory/` run directory until that proved unusable —
 `.factory/` is gitignored, so the file could not be committed and never reached a sandbox clone, which
-made the `verify` and deferred `publish` entries impossible and left this repository unable to resolve
-a reference from a fresh checkout. Add no helper module,
-command runner, parser service, repository-config execution in the integration package except the exact
+made the `verify` and unconsumed `publish` entries impossible and left this repository unable to resolve
+a reference from a fresh checkout. For configured resolver execution, add no helper module,
+command runner, parser service, additional `.factory.json` command consumer beyond the exact
 `verify` consumer below, plugin bridge,
-transport, protocol, or new CLI command. Add no resolver cache, payload handoff, manifest or session
+transport, protocol, or CLI command. Add no resolver cache, payload handoff, manifest or session
 field, generated asset, or `run.json` key. If a host adapter transfers execution to another run
 driver, that driver independently derives its own payload through this same policy; the adapter does
 not forward or persist the resolver payload. A configured resolver must therefore be deterministic and read-only.
@@ -329,12 +345,14 @@ retry below apply only to repository `verify` shell attempts, never to `resolve`
 Gate 3 commands. Do not change platform placement, background-tool, title-association, host-session, or
 publication behavior. `story-reader` remains lookup-free and capability-free beyond its existing generic read tools.
 
-`resolve`, `verify`, and `publishing_identity` are consumed now. Only `publish` remains deferred to #224:
+`resolve`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
+
+Effective push-target capture and comparison are active through the package-owned <code>factory effective-push</code> command; they are not deferred to configured `publish`.
 
 | Entry | Declared input | Return shape | Failure meaning | Current behavior |
 |---|---|---|---|---|
 | `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status means unavailable | Invoked after each newly recorded merge through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
-| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |
+| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |
 | `publishing_identity` | No runtime input; retain the raw validated config string for this driver invocation | Exact case-sensitive string compared with the observed login | Missing, non-string, or whitespace-only makes the config malformed; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; absent config preserves existing behavior. |
 
 #### Remaining intake classification
@@ -519,27 +537,30 @@ git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
 
 ### Effective push proof
 
-Disable command tracing before any effective-target operation and do not restore it until both captured
-values are out of scope. Capture through exactly
-`LC_ALL=C git -C <repository> remote get-url --push origin`; never read raw `remote.origin.url`.
-Never persist, log, echo, normalize, interpolate into a cause, or otherwise expose a captured target.
+The package-owned command captures, configures when authorized, recaptures, and compares without a
+shell. Never persist a captured target, write it to the manifest or an artifact, log or echo it, or
+interpolate it into a refusal message or an error's cause chain.
+
+These are the bounded properties actually implemented, and the boundary is worth stating exactly.
+`bootstrap` configures the sandbox with `git config`, which places the target in that child's argv,
+where process inspection can read it while the command runs. There is no non-argv route: `git config`
+has no stdin-based setter, and `git remote set-url` and `git -c` are argv too. So this is **not** a
+guarantee that a captured target is never observable — only that the factory does not persist, log, or
+attach it to a diagnostic. It holds because these targets carry no credential: the measured operator
+target is a plain URL, and the token reaches git through the credential helper. If that ever changes,
+the argv transport has to be solved before this guard can be trusted with a credential-bearing value.
 
 Classify bootstrap-pending only by directly validated state: run status `running`; `created_at` exactly
 equals `updated_at`; gates, steps, and slices are empty; validator, terminal result, PR URL, and plan
-digest are null; and qualified status reports lock state exactly `absent`. Only that class may
-idempotently apply the operator's captured effective target to the sandbox remote before recapturing
-both sides:
+digest are null; and qualified status reports lock state exactly `absent`. Bind
+`EFFECTIVE_PUSH_OPERATION` to `bootstrap` only for that class and to `check` for an active resume, then
+invoke the same package mechanism:
 
-```sh
-set +x
-OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-git -C "$RUN_REPO" config --replace-all remote.origin.pushurl "$OPERATOR_PUSH"
-CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"
-```
+    factory effective-push "$EFFECTIVE_PUSH_OPERATION" "$O" "$RUN_REPO"
 
-An active resume skips the configuration command and only performs the two current lookups. Every
-lookup must succeed with nonempty output, and the two current shell strings must be exactly equal.
+Bootstrap configures the sandbox and freshly recaptures both targets before comparing. An active resume
+uses `check`, performs two fresh captures, and never changes remote configuration. Both lookups must
+succeed and return nonempty output, and the freshly captured strings must be exactly equal.
 Use only these refusal messages:
 
 ```text
@@ -549,8 +570,8 @@ factory sandbox: sandbox effective push target does not match operator target; s
 ```
 
 The failure names only the side or mismatch class and exact `RUN_REPO`; it never contains either target.
-Suppress target-operation stdout, stderr, and argv from operator-visible errors as well as logs; map a
-configuration failure to the sandbox-unavailable refusal without attaching its cause.
+The package discards target-operation stdout, stderr, and subprocess errors; configuration failure maps
+to the sandbox-unavailable refusal without a cause.
 On any capture, configuration, recapture, or equality failure, retain all repository and control-plane
 state, permit only `factory status "$R" --json --repo "$RUN_REPO"`, and stop before branch handling,
 lock claim or steal, dispatch, transition, push, forge command, or further publication.
@@ -784,9 +805,14 @@ The first successful seed is the **ratification point** for two decisions:
 
 - `paths` — the original ownership prefix every later merge is judged against. Amend the unseeded plan
   at Gate 2 whenever possible. After seeding, insufficient scope parks the run; only the optional
-  operator-authorized `amend-paths` procedure in Resume order 6 may append ownership to an unmerged
-  slice. The seeded prefix is immutable, amendments are durable history, and resume itself never amends
-  or reseeds anything.
+  `amend-paths` procedure in Resume order 6 may append ownership to an unmerged slice. The seeded prefix
+  is immutable, amendments are durable history, and resume itself never amends or reseeds anything.
+  An amendment is **audited, not authorized**: it requires a parked run and a freshly verified owning
+  session, but a driver holding that lock can park itself, so the record — added paths, verbatim reason,
+  session and timestamp — is what makes growth attributable rather than prevented. What still binds is
+  unchanged: every merge is judged against the amended set, proved against its own reviewed commit, and
+  followed by repository verification. Another unmerged slice may already own an appended path; the
+  per-merge proof and verification are what keep that safe.
 - `test_plan` — the exact executable commands authorized to prove the slice. Each non-empty entry is
   one complete, independently sufficient command string that must be supplied verbatim as one
   `--test-cmd` value. A slice with a non-empty `test_plan` is not `review_ready` until one ratified
@@ -798,6 +824,51 @@ The first successful seed is the **ratification point** for two decisions:
 
 Present the brief **and** the plan — the waves, each slice's paths and acceptance criteria, and any
 serialized hotspots. The engineer approves the parallelization plan, not just the brief.
+
+#### Satisfiability, before the gate opens
+
+Before requesting the Brief gate, state that every acceptance criterion is simultaneously satisfiable
+with every scope lock and every pinned external constraint, naming each pair you checked and the
+evidence. A criterion that cannot hold alongside a lock, a pinned dependency version, or another
+criterion is a defect in the issue, not work to attempt: park with `needs-human`, name both sides, and
+stop. **Do not choose one side silently.**
+
+The operative word is *simultaneously*. Criteria that are each reasonable alone are how this fails; the
+defect lives in the pair, and nothing else in this workflow ever compares them. Three pairings, one for
+each way it has happened:
+
+| pairing | how it looked |
+| --- | --- |
+| criterion × criterion | "publishes with no prepared environment" beside "the factory acquires no credentials" — publishing unprepared *requires* selecting a credential |
+| criterion × scope lock | a required lock field beside a lock forbidding changes to the only reader that would accept it |
+| criterion × pinned constraint | one message chunk carrying an ordered list, against a pinned schema accepting exactly one element |
+
+Two of those three cannot be settled from the issue text alone — one needed the reader's code, one needed
+the pinned dependency's schema — which is why this runs after research rather than at intake, and why
+the check names evidence rather than asserting a conclusion. "I verified satisfiability" is a claim;
+naming the pair and the line that decides it is a check.
+
+An unsatisfiable brief does not present as confusion. It presents as an agent expanding scope to find a
+route that does not exist, which is expensive and looks like diligence: one run reached "URL-specific
+transport config, remote helpers, hooks, and ref-expanding push settings" while searching, and exhausted
+its attempts without seeding a slice. Naming the fault as the issue's stops the search.
+
+**This is instruction, not enforcement, and the difference matters.** Nothing machine-checks that the
+check happened. No artifact records the pairs, no transition refuses an unchecked brief, and a driver that
+skips this paragraph can approve Gate 2 with the whole suite green. The assertions that accompany it pin
+these sentences against deletion and prove nothing about behaviour.
+
+It is written down anyway because the failure it addresses is expensive and repeated: three runs stopped on
+contradictions nobody had compared, one after a slice had merged. And the risk it names is real — quietly
+satisfying the easier criterion yields a green suite, an approving review, and a merged change that does
+not do what the issue said. That is a false green, which is exactly the category this repository spends
+production lines to enforce against. **Enforcing it would need the named pairs and their evidence recorded
+in the brief artifact, and the gate refusing approval without them.** That is a schema and transition
+change, and it is not in this instruction.
+
+**When decomposing, keep a module and any test that asserts an exact closed inventory over it in one
+slice.** A change to the module must update that inventory atomically, and a slice cannot edit a path it
+does not own, so splitting the pair across slices leaves no legal move once paths are seeded.
 
 Open the Brief gate while slices are still empty and present the reviewed artifacts. The human loop is
 `pending` → `changes` → revise → `pending` → re-present → decision. A `changes` decision keeps slices
@@ -1374,8 +1445,8 @@ Immediately before any publication effect, read the delivery intent from the sel
 then, for a sandbox-selected run, repeat the operator exact-ref-absent and sandbox
 branch-provenance/ancestry gate from Step 0. Use the status response's exact recorded branch for that
 gate. A collision or provenance failure stops
-before push, `gh`, or `factory pr` and retains all state. After those checks, disable command tracing and
-recapture the operator and selected-run effective push targets without changing either remote:
+before push, `gh`, or `factory pr` and retains all state. After those checks, invoke the package-owned
+fresh comparison without changing either remote:
 
 Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as
 `PR_BASE`; never infer, shorten, normalize, or substitute either value. Bind both before target
@@ -1384,16 +1455,39 @@ recapture, and do not rebind or re-observe them between target equality and push
 ```sh
 factory status "$R" --json --repo "$RUN_REPO"
 git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"
-set +x
-CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"
-CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"
 ```
 
-Both lookups must succeed and return nonempty output, and their shell strings must be exactly equal.
-Step 6 only compares and never runs `git config` or otherwise reconfigures a remote. Never persist, log,
-echo, normalize, interpolate into a cause, or expose either target. Use the same three exact redacted
-refusal messages from Step 0. A lookup failure or mismatch leaves `RUN_REPO` intact, permits status only,
-and blocks every publication effect.
+Step 6 effective-push refusal parks differently from Step 0: Step 0 remains status-only with an unchanged manifest; Step 6 follows the procedure below.
+
+Treat a nonzero result from the command below as an effective-push refusal only when stdout is empty and stderr
+is exactly one fixed Step 0 refusal followed by exactly one LF. Remove only that LF and bind
+`PRE_QUOTING_REASON` to the resulting already-redacted ASCII refusal; never include child diagnostics,
+subprocess output, a target, or an error cause. Before any other operation, quiesce every builder, tool,
+background task, and heartbeat call. For a running autonomous envelope, and identically for every other
+mode at this boundary, encode `PRE_QUOTING_REASON` as one deterministic POSIX shell token by surrounding
+the complete reason with single quotes and replacing every literal `'` with the exact shell sequence
+`'\''`. Submit the encoded token as the sole `--reason` argument to the exact terminal parking command
+defined in Publishing identity enforcement above.
+
+The token is transport only: never persist it, place the reason in double quotes, interpolate it as
+unquoted shell syntax, use command substitution, `eval`, a temporary file, or environment indirection.
+Require qualified status to show the exact parked top-level status produced by that command, a terminal
+reason byte-for-byte equal to `PRE_QUOTING_REASON`, and the same verified `SESSION_ID` owner. Release only that owner with
+`factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"`, then require final qualified
+status to prove the lock absent with null owner. Apart from the required envelope status, timestamp, and
+terminal result, retain every prior state field, the sandbox, and repository.
+Perform no publishing-identity observation, push, `gh` command, `factory pr`, Step 7 handoff, cleanup, or
+other effect. If parking, reason or owner verification, release, or unlock verification fails, report
+only `Outcome: retained-lock-error` with no parked-success or resumability claim.
+
+    factory effective-push check "$O" "$RUN_REPO"
+
+Both lookups must succeed and return nonempty output, and their captured bytes must be exactly equal.
+Step 6 only compares and never reconfigures a remote, so no argv here carries a target. Never persist
+either target, write it to the manifest or an artifact, log or echo it, or interpolate it into a refusal
+message or an error's cause chain — the same bounded properties stated in Step 0, and for the same reason:
+this is not a claim that a target is unobservable. Use the same three exact redacted refusal messages
+from Step 0.
 
 With `DECLARED_PUBLISHING_IDENTITY`, immediately after exact target equality and before the unchanged
 push, run the same ordinary host observation under its exact cwd, environment, no-stdin, direct-result,

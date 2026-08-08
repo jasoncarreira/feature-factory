@@ -174,10 +174,11 @@ Gate 3 always performs its own fresh integrated `test-verifier` observation at t
 the existing command mode. It overwrites the canonical evidence independently and never shares,
 substitutes, or optimizes from post-merge evidence, even when the head has not moved.
 
-`resolve`, `verify`, and `publishing_identity` are consumed now; only `publish` remains deferred to #224.
+`resolve`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
+Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
 The validated raw `publishing_identity` is retained exactly as parsed, without trimming, normalization,
 case-folding, or reserialization. A missing, non-string, or whitespace-only identity makes a present
-config malformed. This consumer adds no config key or syntax, run status, or factory command.
+config malformed. `publishing_identity` itself adds no config key or syntax, run status, or factory command. The independent `factory effective-push` command adds no state or flag.
 
 With a present valid config, every mode checks that identity at exactly three boundaries: immediately
 after verified post-lock ownership, or immediately after an explicit resume is verified running with
@@ -244,10 +245,11 @@ factory observe <run-id> <subject> --worktree W --base SHA [--test-cmd CMD] [--c
 factory validator <run-id> --report REF
 factory pr <run-id> --url URL
 factory terminal <run-id> <completed|blocked|partial|needs-human> --reason TEXT
+factory effective-push <bootstrap|check> <operator-repository> <sandbox-repository>
 ```
 
-The usage lines above keep the compact advertised command shape. Every command also accepts
-`--repo PATH` and `--json`; unknown flags are errors.
+The usage lines above keep the compact advertised command shape. State commands also accept `--repo
+PATH` and `--json`; `effective-push` accepts no options. Unknown flags are errors.
 
 For a fresh run, call init with the canonical operator checkout `O` as `--repo O`. Init derives the
 single destination `S = O/.factory-sandboxes/<run-id>`, pre-reserves an empty `S`, makes exactly one
@@ -268,11 +270,11 @@ reused, retried, or deleted during bootstrap or refusal. Resume a valid sandbox 
 `--repo S`; surface invalid state instead of replacing it. `O/.factory/<run-id>` is supported only as
 a legacy direct-run location, resumed with `--repo O`, and is never migrated or backfilled by init.
 
-After selecting a fresh or resumed sandbox, the orchestrator proves the effective push targets match
-and establishes feature-branch provenance. Branch creation or recovery and provenance checks finish
-before a lock is claimed or an agent is dispatched. A push-target mismatch reports only the mismatch
-and `S`; neither effective target is printed, persisted, or included in an error cause, and the sandbox
-is retained.
+After selecting a fresh or resumed sandbox, the orchestrator invokes the package-owned effective-push
+guard and establishes feature-branch provenance. `bootstrap` aligns the fresh sandbox, recaptures both
+targets, and compares them; `check` freshly captures and compares without configuration.
+Branch creation or recovery and provenance checks finish before a lock is claimed or an agent is dispatched. A
+push-target mismatch reports only the mismatch and `S`; neither effective target is printed, persisted, or included in an error cause, and the sandbox is retained.
 
 Run state under `S/.factory/<run-id>/run.json` should be gitignored — if it is tracked, every slice diff
 carries manifest churn and every merge trips the privileged-path refusal.
