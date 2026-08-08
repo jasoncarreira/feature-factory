@@ -1389,9 +1389,12 @@ only `Outcome: retained-lock-error` with no parked-success or resumability claim
 
     factory effective-push check "$O" "$RUN_REPO"
 
-Both lookups must succeed and return nonempty output, and their captured strings must be exactly equal.
-Step 6 only compares and never reconfigures a remote. Never persist, log, echo, interpolate into a cause,
-or expose either target. Use the same three exact redacted refusal messages from Step 0.
+Both lookups must succeed and return nonempty output, and their captured bytes must be exactly equal.
+Step 6 only compares and never reconfigures a remote, so no argv here carries a target. Never persist
+either target, write it to the manifest or an artifact, log or echo it, or interpolate it into a refusal
+message or an error's cause chain — the same bounded properties stated in Step 0, and for the same reason:
+this is not a claim that a target is unobservable. Use the same three exact redacted refusal messages
+from Step 0.
 
 With `DECLARED_PUBLISHING_IDENTITY`, immediately after exact target equality and before the unchanged
 push, run the same ordinary host observation under its exact cwd, environment, no-stdin, direct-result,

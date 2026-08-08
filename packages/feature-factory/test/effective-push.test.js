@@ -493,6 +493,14 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
     "Production source ceiling: <landed count> / 3600",
   ], "Step 6 compare/publication");
+  // Step 6 carried its own copy of the generic non-disclosure claim, and it survived the first
+  // narrowing because only the Step 0 sentence was rewritten. Pinned in the Step 6 slice, not the
+  // fresh-request slice, so the assertion fails for drift here rather than passing on a match
+  // elsewhere in the file.
+  for (const fragment of [
+    "Step 6 only compares and never reconfigures a remote, so no argv here carries a target.",
+    "either target, write it to the manifest or an artifact, log or echo it, or interpolate it into a refusal",
+  ]) required(publication, fragment, "Step 6 bounded disclosure");
   const stepSixEquality = required(publication, 'factory effective-push check "$O" "$RUN_REPO"', "Step 6 success sequence");
   const stepSixFirstIdentity = required(publication, identityCommand, "Step 6 success sequence");
   const stepSixPush = required(publication, 'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"', "Step 6 success sequence");
