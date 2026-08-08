@@ -354,23 +354,35 @@ runs were finished by hand for causes as small as a wrong number in an issue. `n
 
 ```sh
 factory lock <run-id> claim --session "$SESSION_ID" --branch <branch> --repo <sandbox>
+# Only for a verified missing-path cause on an unmerged slice:
+factory amend-paths <run-id> <slice-id> --add <path> [--add <path> ...] --reason <text> --session "$SESSION_ID" --repo <sandbox>
 factory resume <run-id> --session "$SESSION_ID" --repo <sandbox>
 ```
 
 Resume proves ownership: it refuses without a session, with no lock, with a stale one, or with a lock held
-by anyone else. Claim first, then resume. The original reason stays recorded after the stop is cleared.
+by anyone else. Claim first and verify the exact fresh owner. Ordinarily resume next. When the durable
+cause is a required nonprivileged path omitted from an existing unmerged slice, the operator may first
+verify the disclosure and run `amend-paths`; it leaves the run parked, preserves the original result,
+appends the paths in request order, and records the verbatim reason, session, and timestamp. Then invoke
+the same separate resume command. Resume itself never amends paths, changes the immutable `test_plan`, or
+reseeds. Malformed, privileged, duplicate, already-owned, replayed, and merged-slice amendments refuse
+without changing the manifest, and merge continues to refuse any unamended or privileged path. The
+original reason stays recorded after the stop is cleared.
 
-**Where the cause lives decides whether resume can help**, and only one of the two has a supported path.
+**Where the cause lives decides whether resume can help.** External causes and one narrow durable
+ownership omission have supported paths.
 
 *Outside the sandbox* — a host timeout, a service outage, missing credentials, an unclean worktree, a
 file the operator can commit — fix it and resume the retained sandbox. That is the path above, and it is
 the reason `needs-human` stopped being terminal.
 
-*Inside the sandbox* — its `bin/factory.js`, its skill, or its `.factory.json` predates the fix — and
-there is **no** supported recovery. A sandbox executes its own copy of all three; it is a clone, not a
-view, so a fix installed on the host or committed to the operator checkout never reaches it. Nor can the
-run acquire a fresh one: resume binds the retained sandbox, and `factory init` refuses outright while
-that manifest exists (`run '<id>' already exists at '<sandbox manifest>'`).
+*Inside the sandbox* — an omitted unmerged-slice ownership path may use the verified amendment above;
+this changes only authorization history, not source or factory code. If its `bin/factory.js`, skill, or
+`.factory.json` predates the needed fix, there is **no** supported recovery. A sandbox executes its own
+copy of all three; it is a clone, not a view, so a fix installed on the host or committed to the operator
+checkout never reaches it. Nor can the run acquire a fresh one: resume binds the retained sandbox, and
+`factory init` refuses outright while that manifest exists (`run '<id>' already exists at '<sandbox
+manifest>'`).
 
 The only route is to **abandon the run and start a new one**:
 

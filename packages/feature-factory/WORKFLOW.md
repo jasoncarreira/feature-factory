@@ -395,6 +395,27 @@ Resume order 7 — invoke explicit factory resume with the verified owning sessi
 Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.
 Resume order 9 — continue solely from the newly qualified status.next.
 
+When the parked cause is an insufficient ownership declaration for an existing unmerged slice, the
+operator may insert exactly one optional action after order 6 has verified the fresh exact owner and
+unchanged parked result, and before the unchanged explicit resume in order 7:
+
+```sh
+factory amend-paths "$R" "$SLICE_ID" --add "$PATH" [--add "$PATH" ...] \
+  --reason "$REASON" --session "$SESSION_ID" --repo "$RUN_REPO"
+```
+
+Use the concrete disclosed repository-relative paths in request order. The command refuses blank,
+absolute, traversing, privileged, duplicate, or already-owned paths; it does not normalize paths,
+require them to exist, or refuse because another slice owns one. It keeps the run parked and the
+terminal result unchanged, appends the additions to the slice's existing paths, and appends the exact
+reason, session, additions, and timestamp to `path_amendments`. Re-read the manifest and qualified
+status immediately: require the same fresh owner, unchanged parked status and result, the original paths
+as an unchanged prefix followed by the requested additions, and one matching history record. Any
+refusal or mismatch stops with the manifest intact. Never amend a merged slice, a privileged path, or a
+path not disclosed and verified for this recovery. Without a path omission, skip this optional action.
+In either case order 7 remains the same explicit resume command; the resume command never amends paths,
+changes `test_plan`, or reseeds the plan.
+
 When a validated present config declares `publishing_identity`, the mandatory guard below is the exact
 boundary between completion of resume order 7 and the first operation in resume order 8. Nothing may
 intervene between the verified running/same-owner result and that guard, or between a successful guard
@@ -759,12 +780,13 @@ Review it with `work-reviewer` subject `work-decomposer`: every acceptance crite
 same-wave slices are file-disjoint, and integration hotspots are serialized into different waves. Keep
 the reviewed plan unseeded until Gate 2 has presented and approved its exact contents.
 
-The first successful seed is the **ratification point** for two decisions, and neither can be changed
-afterwards:
+The first successful seed is the **ratification point** for two decisions:
 
-- `paths` — the set every later merge is judged against, so a slice that needs more scope amends the
-  unseeded plan at Gate 2 rather than quietly widening. After seeding, insufficient scope parks the run;
-  explicit resume does not amend or reseed the immutable plan, so unchanged scope may park it again.
+- `paths` — the original ownership prefix every later merge is judged against. Amend the unseeded plan
+  at Gate 2 whenever possible. After seeding, insufficient scope parks the run; only the optional
+  operator-authorized `amend-paths` procedure in Resume order 6 may append ownership to an unmerged
+  slice. The seeded prefix is immutable, amendments are durable history, and resume itself never amends
+  or reseeds anything.
 - `test_plan` — the exact executable commands authorized to prove the slice. Each non-empty entry is
   one complete, independently sufficient command string that must be supplied verbatim as one
   `--test-cmd` value. A slice with a non-empty `test_plan` is not `review_ready` until one ratified
@@ -808,7 +830,8 @@ factory slices-seed "$R" --from plan/slices.json --repo "$RUN_REPO"
 ```
 
 Never invoke `slices-seed` before Brief approval. A successful first seed is one-time: every second seed
-is refused, and the seeded `paths` and `test_plan` remain immutable.
+is refused. The seeded path prefix and `test_plan` remain immutable; a path amendment appends to the
+persisted slice and never edits or reseeds the plan.
 
 ### Failed first-seed recovery
 
@@ -1036,8 +1059,10 @@ Per slice:
    refuses a merge commit that does not have exactly two parents, and refuses one that is not the
    current head of the feature branch — record the merge before doing anything else to that branch.
    Recording a merge uses the existing `resolveWorktree` containment check, re-observes the slice's
-   changed paths, and **refuses** any path outside the seeded ownership paths or any privileged
-   control-plane path. It also requires the seeded test plan's evidence and the bound review. After
+   changed paths, and **refuses** any path outside the current persisted ownership paths — the immutable
+   seeded prefix plus any authorized amendment — or any privileged control-plane path. An unamended
+   out-of-lane path therefore remains refused. It also requires the immutable seeded test plan's evidence
+   and the bound review. After
    the atomic merged transition, the command reads optional `.factory.json`; when `verify` exists it
    runs that unchanged ordinary shell command in `INTEGRATION_WORKTREE` with inherited environment and
    stdio and writes canonical `evidence/test-verifier.json` against `BRANCH_POINT`. Each execution gets
@@ -1170,8 +1195,10 @@ nearer recorded merge independently. `exhausted` and every unresolved repair rec
 
 **Ownership disclosure.** A builder that must touch a path outside its declared set finishes the
 required work and discloses every concrete out-of-lane path with a rationale, so the reviewer decides
-whether the plan or the change is wrong. Silent out-of-lane edits are the failure this prevents;
-privileged control-plane paths are never disclosable and are always refused.
+whether the plan or the change is wrong. Silent out-of-lane edits are the failure this prevents. If the
+change is required, park `needs-human` with that diagnosis; only the verified owner may use the optional
+order-6 amendment before explicit resume. Without that durable amendment the merge still refuses
+the path. Privileged control-plane paths are never amendable or disclosable and are always refused.
 
 **A moved base is fine.** A wave's second merge lands on a base containing its sibling, and a direct
 commit to the feature branch — the test-only repair Step 5's NO-GO permits — moves it too. The merge proof

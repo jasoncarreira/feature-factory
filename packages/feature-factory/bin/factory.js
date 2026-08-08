@@ -16,7 +16,7 @@ import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvi
 import { archiveReviewAttempt } from "../state/review-archive.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { dispatchInitPublication } from "./init-publication.js";
-import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, validateRun } from "../state/schema.js";
+import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, repositoryRelativePath, validateRun } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SessionLockHeldError,
 } from "../state/session-lock.js";
@@ -24,6 +24,7 @@ import {
 export const COMMANDS = Object.freeze({
   init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
+  "amend-paths": Object.freeze(["--repo", "--add", "--reason", "--session", "--now", "--json"]),
   resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
   // No --force: `lock <id> steal` is the same operation with a name that says what it
   // does, and two spellings of "take someone else's lock" is one too many.
@@ -81,7 +82,9 @@ function parse(command, args) {
     }
     const value = args[index + 1];
     if (value === undefined || value.startsWith("--")) throw new CliError(`${arg} requires a value`);
-    flags[key(arg)] = value;
+    const flagKey = key(arg);
+    if (arg === "--add") flags[flagKey] = [...(flags[flagKey] ?? []), value];
+    else flags[flagKey] = value;
     index += 1;
   }
   return { positional, flags };
@@ -132,6 +135,40 @@ function assertRunNotParked(runDir, command) {
     throw new CliError(`factory ${command} refuses while run status is needs-human; run factory resume first`);
   }
   return run;
+}
+
+function assertFreshSessionOwner(runDir, runId, session, command) {
+  const held = inspectSessionLock(runDir);
+  if (held.state === "absent") {
+    throw new CliError(`factory ${command} requires a held session lock for run '${runId}'; claim it with 'lock ${runId} claim --session ${session}'`);
+  }
+  if (held.state === "stale") {
+    throw new CliError(`factory ${command} refuses a stale session lock for run '${runId}' (owner ${held.owner.session}, heartbeat ${held.owner.heartbeat_at}); take it with 'lock ${runId} steal --session ${session}'`);
+  }
+  if (held.owner.session !== session) {
+    throw new CliError(`run '${runId}' is held by session ${held.owner.session}, not ${session}; take it with 'lock ${runId} steal --session ${session}'`);
+  }
+  return held.owner;
+}
+
+function validatePathAdditions(slice, additions) {
+  for (const path of additions) {
+    if (!repositoryRelativePath(path)) {
+      throw new CliError(`added path '${path}' must be non-empty, repository-relative, and contain no '..' segment`);
+    }
+  }
+  const privileged = privilegedPaths(additions);
+  if (privileged.length > 0) throw new CliError(`cannot amend privileged control-plane paths: ${privileged.join(", ")}`);
+  const seen = new Set();
+  for (const path of additions) {
+    if (seen.has(path)) throw new CliError(`duplicate requested path '${path}'`);
+    seen.add(path);
+  }
+  for (const path of additions) {
+    if (unownedPaths([path], slice.paths).length === 0) {
+      throw new CliError(`slice '${slice.id}' already owns requested path '${path}'`);
+    }
+  }
 }
 
 // The integration branch's worktree and currently observed head. Three call sites asked
@@ -498,6 +535,7 @@ const HANDLERS = {
             // waived them - the CLI defeating the schema rule that was supposed to make
             // that impossible. The schema rejects a missing or non-array value.
             paths: slice.paths,
+            path_amendments: [],
             test_plan: slice.test_plan,
             evidence_ref: null,
             review_ref: null,
@@ -507,6 +545,41 @@ const HANDLERS = {
       },
     });
     return emit(flags, { run_id: runId, seeded: next.slices.length, slices: next.slices.map((slice) => slice.id) });
+  },
+
+  async ["amend-paths"](positional, flags) {
+    if (positional.length !== 2) throw new CliError("factory amend-paths requires exactly <run-id> <slice-id>");
+    const [runId, sliceId] = positional;
+    if (!Array.isArray(flags.add) || flags.add.length === 0) throw new CliError("factory amend-paths requires at least one --add <path>");
+    if (typeof flags.reason !== "string" || !flags.reason.trim()) throw new CliError("factory amend-paths requires nonblank --reason <text>");
+    if (typeof flags.session !== "string" || !flags.session.trim()) throw new CliError("factory amend-paths requires nonblank --session <id>");
+    const runDir = runDirFor(flags, runId);
+    const current = readRun(runDir);
+    if (current.status !== "needs-human") {
+      throw new CliError(`factory amend-paths requires current status needs-human; found '${current.status}'`);
+    }
+    assertFreshSessionOwner(runDir, runId, flags.session, "amend-paths");
+    const at = stamp(flags);
+    const reobservers = new Map([["slices", async () => ({
+      authorized_session: assertFreshSessionOwner(runDir, runId, flags.session, "amend-paths").session,
+    })]]);
+    const next = await transition(runDir, {
+      participants: [{ familyId: "envelope", mode: "amend-paths" }, { familyId: "slices", mode: "amend-paths" }],
+      reobservers,
+      apply: (state) => {
+        if (state.status !== "needs-human") throw new CliError(`factory amend-paths requires current status needs-human; found '${state.status}'`);
+        const existing = state.slices.find((slice) => slice.id === sliceId);
+        if (!existing) throw new CliError(`unknown slice '${sliceId}'`);
+        if (existing.status === "merged") throw new CliError(`slice '${sliceId}' is already merged`);
+        validatePathAdditions(existing, flags.add);
+        const amendment = { added_paths: [...flags.add], reason: flags.reason, session: flags.session, at };
+        const row = { ...existing, paths: [...existing.paths, ...flags.add], path_amendments: [...(existing.path_amendments ?? []), amendment] };
+        return { ...state, updated_at: at, slices: state.slices.map((slice) => (slice.id === sliceId ? row : slice)) };
+      },
+    });
+    const row = next.slices.find((slice) => slice.id === sliceId);
+    return emit(flags, { run_id: runId, slice: sliceId, status: next.status,
+      terminal_result: next.terminal_result, amendment: row.path_amendments.at(-1) });
   },
 
   async slice([runId, sliceId, status], flags) {
@@ -944,16 +1017,7 @@ const HANDLERS = {
     // parked run would both believe they own it, which is the single-writer invariant the lock
     // exists for. So the caller must already hold a fresh lock: claim, then verify, then resume.
     if (!flags.session) throw new CliError("factory resume requires --session <session-id>");
-    const held = inspectSessionLock(runDir);
-    if (held.state === "absent") {
-      throw new CliError(`factory resume requires a held session lock for run '${runId}'; claim it with 'lock ${runId} claim --session ${flags.session}'`);
-    }
-    if (held.state === "stale") {
-      throw new CliError(`factory resume refuses a stale session lock for run '${runId}' (owner ${held.owner.session}, heartbeat ${held.owner.heartbeat_at}); take it with 'lock ${runId} steal --session ${flags.session}'`);
-    }
-    if (held.owner.session !== flags.session) {
-      throw new CliError(`run '${runId}' is held by session ${held.owner.session}, not ${flags.session}; take it with 'lock ${runId} steal --session ${flags.session}'`);
-    }
+    assertFreshSessionOwner(runDir, runId, flags.session, "resume");
     const at = stamp(flags);
     const next = await transition(runDir, {
       participants: [{ familyId: "envelope", mode: "resume-needs-human" }],
@@ -1177,6 +1241,7 @@ function usage() {
 
   factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
+  factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID [--now ISO]
   factory resume <run-id> --session ID [--now ISO]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID

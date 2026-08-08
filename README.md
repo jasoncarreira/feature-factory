@@ -226,12 +226,13 @@ install, or repair credentials.
 
 ## The CLI
 
-Thirteen commands. Every one that changes state is a single checked transition, and an unknown flag is
+Fourteen commands. Every one that changes state is a single checked transition, and an unknown flag is
 an error rather than a silently ignored typo.
 
 ```
 factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
 factory status <run-id> [--json]
+factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID
 factory resume <run-id> --session ID [--now ISO]
 factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
 factory heartbeat <run-id> --session ID
@@ -296,8 +297,8 @@ A current `needs-human` run is parked and explicitly resumable; only `completed`
 3. Complete the existing effective-push proof.
 4. Accept the feature branch only after provenance, worktree binding, seed ancestry, cleanliness or recovery, and every existing operator-ref recheck passes in order.
 5. Immediately before claiming, rerun the final operator exact-ref-absent guard.
-6. Claim with the current host session or perform a justified steal, then verify fresh ownership, parked status, and the deeply unchanged result.
-7. Run `factory resume <run-id> --session ID --repo S`, then verify running status, unchanged historical result, the real next action, and the same fresh owner.
+6. Claim with the current host session or perform a justified steal, then verify fresh ownership, parked status, and the deeply unchanged result. If verified missing ownership on an unmerged slice caused the stop, optionally run `factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID --repo S` and verify the same parked result, owner, original path prefix, ordered additions, and matching history.
+7. Run `factory resume <run-id> --session ID --repo S`, then verify running status, unchanged historical result, the real next action, and the same fresh owner. Resume itself never amends paths, changes `test_plan`, or reseeds.
 8. Run only existing post-lock reconciliation for any already-recorded merge, including its evidence and repository verification.
 9. Continue solely from the newly qualified `status.next`, never from the pre-resume read or reason text.
 
@@ -306,6 +307,14 @@ slice, observe, validator, terminal-rewrite, and PR command refuses before effec
 `status` and `updated_at`; no manifest key is added. A resumed recorded merge replays the existing
 clean-head and retry-safety checks before progression, and unresolved repair-journal records remain
 publication blockers. An unfixed cause may park the run again with the same reason.
+
+`amend-paths` is the one optional parked mutation. It requires the exact fresh owning session and an
+existing unmerged slice, keeps status and terminal result unchanged, and appends nonempty lexical
+repository-relative paths plus a durable record containing the ordered additions, verbatim reason,
+session, and timestamp. It does not normalize or require path existence, and another slice may own the
+same path. Malformed, absolute, traversing, privileged, duplicate, target-already-owned, replayed, and
+merged-slice requests refuse atomically. The seeded prefix and `test_plan` remain immutable, no reseed is
+available, and merge still refuses unamended or privileged paths.
 
 The orchestrator creates the external draft PR with the recorded values before recording its URL:
 
@@ -326,7 +335,8 @@ Enforced, not suggested. Each is a mechanism with a test that fails when the mec
 - A review must record the 40-character commit it judged, and is refused against any other head.
 - A merge must be a two-parent merge that contributed exactly the reviewed paths, with content on
   those paths identical to the reviewed commit.
-- A slice may only change paths it declared, and never a privileged control-plane path.
+- A slice may only change its seeded paths plus authorized durable amendments, and never an unamended or
+  privileged control-plane path.
 - Evidence must be observed on a clean worktree that did not move while the tests ran.
 - Whether a slice may ship untested is ratified in its `test_plan` at seeding — there is no flag
   that waives tests at observation time.
