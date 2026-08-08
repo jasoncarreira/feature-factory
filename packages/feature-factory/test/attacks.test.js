@@ -460,6 +460,7 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       evidence_ref: null, review_ref: null, merge_commit: null,
     });
     const amendment = { added_paths: ["docs/api.md"], reason: "verified", session: "owner-a", at: LATER };
+    const authorized = () => new Map([["slices", async () => ({ authorized_session: "owner-a" })]]);
     const append = (state) => ({
       ...state,
       updated_at: LATER,
@@ -468,14 +469,14 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       } : entry),
     });
     for (const [label, apply, pattern, reobservers] of [
-      ["missing history", (state) => ({ ...state, updated_at: LATER, slices: [{ ...state.slices[0], paths: [...state.slices[0].paths, "docs/api.md"] }] }), /append one history record/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
-      ["missing paths", (state) => ({ ...state, updated_at: LATER, slices: [{ ...state.slices[0], path_amendments: [amendment] }] }), /must exist in slice paths/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
-      ["mismatched history", (state) => ({ ...append(state), slices: [{ ...append(state).slices[0], path_amendments: [{ ...amendment, added_paths: ["docs/api.md", "other.ts"] }], paths: [...state.slices[0].paths, "other.ts", "docs/api.md"] }] }), /history must match/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
-      ["other slice field", (state) => ({ ...append(state), slices: [{ ...append(state).slices[0], test_plan: [] }] }), /cannot change slice 'be' test_plan/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
-      ["two slices", (state) => ({ ...append(state), slices: append(state).slices.map((entry, index) => index === 1 ? { ...entry, attempts: 2 } : entry) }), /must change exactly one slice/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
-      ["other top-level field", (state) => ({ ...append(state), gates: {} }), /cannot change run\.gates/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
+      ["missing history", (state) => ({ ...state, updated_at: LATER, slices: [{ ...state.slices[0], paths: [...state.slices[0].paths, "docs/api.md"] }] }), /append one history record/u, authorized()],
+      ["missing paths", (state) => ({ ...state, updated_at: LATER, slices: [{ ...state.slices[0], path_amendments: [amendment] }] }), /must exist in slice paths/u, authorized()],
+      ["mismatched history", (state) => ({ ...append(state), slices: [{ ...append(state).slices[0], path_amendments: [{ ...amendment, added_paths: ["docs/api.md", "other.ts"] }], paths: [...state.slices[0].paths, "other.ts", "docs/api.md"] }] }), /history must match/u, authorized()],
+      ["other slice field", (state) => ({ ...append(state), slices: [{ ...append(state).slices[0], test_plan: [] }] }), /cannot change slice 'be' test_plan/u, authorized()],
+      ["two slices", (state) => ({ ...append(state), slices: append(state).slices.map((entry, index) => index === 1 ? { ...entry, attempts: 2 } : entry) }), /must change exactly one slice/u, authorized()],
+      ["other top-level field", (state) => ({ ...append(state), gates: {} }), /cannot change run\.gates/u, authorized()],
       ["no owner observer", append, /requires a session-owner observer/u, new Map()],
-      ["wrong observed owner", append, /requires exact observed session ownership/u, new Map([["envelope", async () => ({ session: "other" })]])],
+      ["wrong observed owner", append, /requires exact observed session ownership/u, new Map([["slices", async () => ({ authorized_session: "other" })]])],
     ]) {
       const f = fixture(`amend-forgery-${label.replaceAll(" ", "-")}`, {
         status: "needs-human", terminal_result: result, slices: label === "two slices" ? [slice(), slice("fe")] : [slice()],
@@ -498,7 +499,7 @@ describe("family contracts refuse transitions the schema alone would allow", () 
     try {
       const next = await transition(direct.runDir, {
         participants: [{ familyId: "envelope", mode: "amend-paths" }, { familyId: "slices", mode: "amend-paths" }],
-        reobservers: new Map([["envelope", async () => ({ session: "owner-a" })]]),
+        reobservers: authorized(),
         apply: append,
       });
       assert.deepEqual(next.slices[0].paths, ["be/", "docs/api.md"]);
@@ -507,15 +508,64 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       assert.deepEqual(next.terminal_result, result);
     } finally { rmSync(direct.root, { recursive: true, force: true }); }
 
-    const ordinary = fixture("amend-ordinary-mode", { slices: [slice()] });
+    for (const status of ["running", "completed", "partial", "blocked"]) {
+      const terminalResult = status === "running" ? null : { status, reason: "final" };
+      const notParked = fixture(`amend-from-${status}`, { status, terminal_result: terminalResult, slices: [slice()] });
+      try {
+        const before = bytes(notParked.runDir);
+        await assert.rejects(() => transition(notParked.runDir, {
+          participants: [{ familyId: "envelope", mode: "amend-paths" }, { familyId: "slices", mode: "amend-paths" }],
+          reobservers: authorized(), apply: append,
+        }), new RegExp(`amend-paths requires current status needs-human; found '${status}'`, "u"), status);
+        assert.equal(bytes(notParked.runDir), before, status);
+      } finally { rmSync(notParked.root, { recursive: true, force: true }); }
+    }
+
+    const priorAmendment = { added_paths: ["docs/old.md"], reason: "prior", session: "owner-a", at: NOW };
+    const historied = () => ({ ...slice(), paths: ["be/", "docs/old.md"], path_amendments: [priorAmendment] });
+    const appendHistory = (state, { paths = [...state.slices[0].paths, "docs/api.md"], history = [...state.slices[0].path_amendments, amendment], updatedAt = LATER } = {}) => ({
+      ...state, updated_at: updatedAt, slices: [{ ...state.slices[0], paths, path_amendments: history }],
+    });
+    for (const [label, overrides, apply, pattern] of [
+      ["merged target", { slices: [{ ...slice(), status: "merged", base_ref: SHA_A, merge_commit: "c".repeat(40) }] }, append, /already merged/u],
+      ["seeded prefix removal", { slices: [historied()] }, (state) => appendHistory(state, { paths: ["docs/old.md", "docs/api.md"] }), /must append paths/u],
+      ["seeded prefix reordering", { slices: [historied()] }, (state) => appendHistory(state, { paths: ["docs/old.md", "be/", "docs/api.md"] }), /must append paths/u],
+      ["prior history rewrite", { slices: [historied()] }, (state) => appendHistory(state, { history: [{ ...priorAmendment, reason: "rewritten" }, amendment] }), /append one history record/u],
+      ["non-forward timestamp", { slices: [slice()] }, (state) => ({ ...append(state), updated_at: NOW, slices: [{ ...append(state).slices[0], path_amendments: [{ ...amendment, at: NOW }] }] }), /must move updated_at forwards/u],
+      ["mismatched timestamp", { slices: [slice()] }, (state) => ({ ...append(state), slices: [{ ...append(state).slices[0], path_amendments: [{ ...amendment, at: NOW }] }] }), /history must match.*updated_at/u],
+    ]) {
+      const f = fixture(`amend-invariant-${label.replaceAll(" ", "-")}`, { status: "needs-human", terminal_result: result, ...overrides });
+      try {
+        const before = bytes(f.runDir);
+        await assert.rejects(() => transition(f.runDir, {
+          participants: [{ familyId: "envelope", mode: "amend-paths" }, { familyId: "slices", mode: "amend-paths" }],
+          reobservers: authorized(), apply,
+        }), pattern, label);
+        assert.equal(bytes(f.runDir), before, label);
+      } finally { rmSync(f.root, { recursive: true, force: true }); }
+    }
+
+    const forgedSeed = fixture("forged-seed-history", { slices: [] });
+    try {
+      const before = bytes(forgedSeed.runDir);
+      await assert.rejects(() => transition(forgedSeed.runDir, {
+        participants: [{ familyId: "slices", mode: "seed" }],
+        apply: (state) => ({ ...state, updated_at: LATER, slices: [{
+          ...slice(), paths: ["be/", "docs/api.md"], path_amendments: [amendment],
+        }] }),
+      }), /path_amendments must start empty/u);
+      assert.equal(bytes(forgedSeed.runDir), before);
+    } finally { rmSync(forgedSeed.root, { recursive: true, force: true }); }
+
+    const ordinary = fixture("amend-ordinary-mode", { slices: [{ ...slice(), paths: ["be/", "docs/api.md"] }] });
     try {
       const before = bytes(ordinary.runDir);
       await assert.rejects(() => transition(ordinary.runDir, {
         participants: [{ familyId: "slices", mode: "record" }],
         apply: (state) => ({ ...state, updated_at: LATER, slices: [{
-          ...state.slices[0], paths: [...state.slices[0].paths, "docs/api.md"], path_amendments: [amendment],
+          ...state.slices[0], path_amendments: [amendment],
         }] }),
-      }), /paths cannot change in record/u);
+      }), /path_amendments cannot change in record/u);
       assert.equal(bytes(ordinary.runDir), before);
     } finally { rmSync(ordinary.root, { recursive: true, force: true }); }
   });

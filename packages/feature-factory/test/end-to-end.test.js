@@ -124,14 +124,14 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
 
 const cleanupProject = ({ operator }) => rmSync(operator, { recursive: true, force: true });
 
-// Build the slice, optionally touching an extra path, and return its head.
-function buildSlice(repo, { extra = null, extraContent = "extra\n" } = {}) {
+// Build the slice, optionally touching extra paths, and return its head.
+function buildSlice(repo, { extra = null, extraContent = "extra\n", extras = [] } = {}) {
   const basePoint = git(repo, "rev-parse", "HEAD");
   git(repo, "checkout", "-q", "-b", "slice");
   writeFileSync(join(repo, "src", "app", "thing.ts"), "slice\n");
-  if (extra) {
-    mkdirSync(join(repo, dirname(extra)), { recursive: true });
-    writeFileSync(join(repo, extra), extraContent);
+  for (const item of [...(extra ? [{ path: extra, content: extraContent }] : []), ...extras]) {
+    mkdirSync(join(repo, dirname(item.path)), { recursive: true });
+    writeFileSync(join(repo, item.path), item.content ?? "extra\n");
   }
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "slice work");
@@ -587,9 +587,10 @@ describe("end to end — a merge is refused through the real CLI", () => {
   });
 
   it("refuses a slice that changed a path it does not own", () => {
-    const p = upToReview("unowned", { extra: "src/other/sneak.ts" }, {
+    const companionPaths = ["test/module.integration.test.js", "test/module.unit.test.js"];
+    const p = upToReview("unowned", { extras: companionPaths.map((path) => ({ path })) }, {
       additionalSlices: [{
-        id: "be-other", stack: "backend", paths: ["shared/"], depends_on: [],
+        id: "be-other", stack: "backend", paths: [companionPaths[0]], depends_on: [],
         acceptance: ["AC2"], test_plan: [],
       }],
     });
@@ -600,9 +601,9 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const before = readFileSync(join(p.runDir, "run.json"), "utf8");
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, false, "the merge must be refused");
-      assert.match(merged.stderr, /changed paths it does not own: src\/other\/sneak\.ts/u);
+      assert.match(merged.stderr, /changed paths it does not own: test\/module\.integration\.test\.js, test\/module\.unit\.test\.js/u);
       assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), before, "run.json must be untouched");
-      const runningRefusal = factory(p.repo, ["amend-paths", RUN, "be-thing", "--add", "src/other/sneak.ts",
+      const runningRefusal = factory(p.repo, ["amend-paths", RUN, "be-thing", "--add", companionPaths[0],
         "--reason", "not parked", "--session", "session-b", "--now", NOW(5)]);
       assert.equal(runningRefusal.ok, false);
       assert.match(runningRefusal.stderr, /requires current status needs-human; found 'running'/u);
@@ -611,26 +612,29 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const reason = "  reviewer verified the omitted ownership  ";
       assert.equal(factory(p.repo, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW(5)]).ok, true);
       const parked = readFileSync(join(p.runDir, "run.json"), "utf8");
-      const amendment = ["amend-paths", RUN, "be-thing", "--add", "src/other/sneak.ts",
-        "--add", "shared/not-created.ts", "--reason", reason, "--session", "session-b", "--now", NOW(7)];
+      const amendment = ["amend-paths", RUN, "be-thing", "--add", companionPaths[0],
+        "--add", companionPaths[1], "--reason", reason, "--session", "session-b", "--now", NOW(7)];
       assert.equal(factory(p.repo, ["lock", RUN, "claim", "--session", "session-b", "--branch", "feature"]).ok, true);
 
-      for (const [label, args, pattern] of [
+      for (const [label, args, pattern, absentPattern] of [
         ["arity", ["amend-paths", RUN], /requires exactly <run-id> <slice-id>/u],
         ["missing add", ["amend-paths", RUN, "be-thing", "--reason", reason, "--session", "session-b"], /requires at least one --add/u],
-        ["blank reason", ["amend-paths", RUN, "be-thing", "--add", "src/other/sneak.ts", "--reason", "   ", "--session", "session-b"], /requires nonblank --reason/u],
-        ["blank session", ["amend-paths", RUN, "be-thing", "--add", "src/other/sneak.ts", "--reason", reason, "--session", "   "], /requires nonblank --session/u],
+        ["blank reason", ["amend-paths", RUN, "be-thing", "--add", companionPaths[0], "--reason", "   ", "--session", "session-b"], /requires nonblank --reason/u],
+        ["blank session", ["amend-paths", RUN, "be-thing", "--add", companionPaths[0], "--reason", reason, "--session", "   "], /requires nonblank --session/u],
         ["malformed blank", ["amend-paths", RUN, "be-thing", "--add", "", "--reason", reason, "--session", "session-b"], /must be non-empty/u],
         ["external absolute", ["amend-paths", RUN, "be-thing", "--add", "/tmp/outside", "--reason", reason, "--session", "session-b"], /repository-relative/u],
         ["traversal", ["amend-paths", RUN, "be-thing", "--add", "src/../outside", "--reason", reason, "--session", "session-b"], /contain no '\.\.' segment/u],
-        ["privileged", ["amend-paths", RUN, "be-thing", "--add", ".factory.json", "--reason", reason, "--session", "session-b"], /cannot amend privileged/u],
-        ["duplicate", ["amend-paths", RUN, "be-thing", "--add", "src/other/sneak.ts", "--add", "src/other/sneak.ts", "--reason", reason, "--session", "session-b"], /duplicate requested path/u],
+        ...[".factory", ".factory/run.json", ".git", ".git/config", ".gitignore", ".factory.json"].map((path) =>
+          [`privileged ${path}`, ["amend-paths", RUN, "be-thing", "--add", path, "--reason", reason, "--session", "session-b"], /cannot amend privileged/u]),
+        ["privilege before duplicate", ["amend-paths", RUN, "be-thing", "--add", ".git", "--add", ".git", "--reason", reason, "--session", "session-b"], /cannot amend privileged/u, /duplicate requested path/u],
+        ["duplicate", ["amend-paths", RUN, "be-thing", "--add", companionPaths[0], "--add", companionPaths[0], "--reason", reason, "--session", "session-b"], /duplicate requested path/u],
         ["already owned exact", ["amend-paths", RUN, "be-thing", "--add", "src/app/", "--reason", reason, "--session", "session-b"], /already owns requested path/u],
         ["already owned boundary", ["amend-paths", RUN, "be-thing", "--add", "src/app/thing.ts", "--reason", reason, "--session", "session-b"], /already owns requested path/u],
       ]) {
         const refused = factory(p.repo, args);
         assert.equal(refused.ok, false, label);
         assert.match(refused.stderr, pattern, label);
+        if (absentPattern) assert.doesNotMatch(refused.stderr, absentPattern, label);
         assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), parked, label);
       }
 
@@ -658,16 +662,16 @@ describe("end to end — a merge is refused through the real CLI", () => {
         status: "needs-human",
         terminal_result: { status: "needs-human", reason },
         amendment: {
-          added_paths: ["src/other/sneak.ts", "shared/not-created.ts"],
+          added_paths: companionPaths,
           reason,
           session: "session-b",
           at: new Date(NOW(7)).toISOString(),
         },
       });
       let durable = runJson(p.runDir);
-      assert.deepEqual(durable.slices[0].paths, ["src/app/", "src/other/sneak.ts", "shared/not-created.ts"]);
+      assert.deepEqual(durable.slices[0].paths, ["src/app/", ...companionPaths]);
       assert.deepEqual(durable.slices[0].path_amendments, [amended.out.amendment]);
-      assert.deepEqual(durable.slices[1].paths, ["shared/"]);
+      assert.deepEqual(durable.slices[1].paths, [companionPaths[0]]);
       assert.equal(durable.status, "needs-human");
       assert.deepEqual(durable.terminal_result, { status: "needs-human", reason });
       const amendedBytes = readFileSync(join(p.runDir, "run.json"), "utf8");
@@ -692,6 +696,29 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.match(mergedRefusal.stderr, /slice 'be-thing' is already merged/u);
       assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), mergedBytes);
     } finally { cleanupProject(p); }
+
+    const unamended = upToReview("unamended-control", { extra: "test/unamended.test.js" });
+    try {
+      const mergeCommit = mergeIntoFeature(unamended.repo);
+      const before = readFileSync(join(unamended.runDir, "run.json"), "utf8");
+      const refused = factory(unamended.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+      assert.equal(refused.ok, false);
+      assert.match(refused.stderr, /changed paths it does not own: test\/unamended\.test\.js/u);
+      assert.equal(readFileSync(join(unamended.runDir, "run.json"), "utf8"), before);
+    } finally { cleanupProject(unamended); }
+
+    const privilegedOwned = project("privileged-owned", { paths: ["src/app/", ".factory.json"] });
+    try {
+      assert.equal(factory(privilegedOwned.repo, ["terminal", RUN, "needs-human", "--reason", "precedence", "--now", NOW(2)]).ok, true);
+      assert.equal(factory(privilegedOwned.repo, ["lock", RUN, "claim", "--session", "session-c", "--branch", "feature"]).ok, true);
+      const before = readFileSync(join(privilegedOwned.runDir, "run.json"), "utf8");
+      const refused = factory(privilegedOwned.repo, ["amend-paths", RUN, "be-thing", "--add", ".factory.json",
+        "--reason", "precedence", "--session", "session-c", "--now", NOW(3)]);
+      assert.equal(refused.ok, false);
+      assert.match(refused.stderr, /cannot amend privileged/u);
+      assert.doesNotMatch(refused.stderr, /already owns requested path/u);
+      assert.equal(readFileSync(join(privilegedOwned.runDir, "run.json"), "utf8"), before);
+    } finally { cleanupProject(privilegedOwned); }
   });
 
   it("governs manifests through seeded ownership while .gitignore stays privileged", () => {

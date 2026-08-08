@@ -224,7 +224,7 @@ function pathAmendments(errors, slice, path) {
     for (const key of ["reason", "session"]) required(errors, amendment, key, amendmentPath);
     pattern(errors, amendment, "at", ISO, amendmentPath);
     if (!Array.isArray(amendment.added_paths) || amendment.added_paths.length === 0
-      || !amendment.added_paths.every((entry) => stringValue(entry) && repositoryRelativePath(entry))) {
+      || !amendment.added_paths.every((entry) => repositoryRelativePath(entry))) {
       errors.push({ path: `${amendmentPath}.added_paths`, message: "must be a non-empty array of repository-relative paths without '..'" });
       return;
     }
@@ -324,6 +324,6 @@ function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function repositoryRelativePath(value) {
-  return !value.startsWith("/") && !value.split("/").includes("..");
+export function repositoryRelativePath(value) {
+  return stringValue(value) && !value.startsWith("/") && !value.split("/").includes("..");
 }

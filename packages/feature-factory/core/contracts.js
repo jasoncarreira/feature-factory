@@ -20,20 +20,6 @@ async function callRegisteredObserver({ observe, ...rest }) {
   if (typeof observe === "function") await observe(rest);
 }
 
-async function observeEnvelope(args) {
-  if (args.mode === "amend-paths" && typeof args.observe !== "function") {
-    throw new Error("amend-paths requires a session-owner observer");
-  }
-  if (args.mode !== "amend-paths") return callRegisteredObserver(args);
-  const observed = await args.observe({
-    current: args.current, candidate: args.candidate, state: args.state, nextState: args.nextState,
-  });
-  const prior = args.state.slices;
-  const changed = args.nextState.slices.find((slice, index) => !isDeepStrictEqual(slice, prior[index]));
-  const session = changed?.path_amendments?.at(-1)?.session;
-  if (!observed || observed.session !== session) throw new Error("amend-paths requires exact observed session ownership");
-}
-
 function contract({ id, project, validateTransition, reobserve }) {
   return Object.freeze({
     id,
@@ -51,7 +37,7 @@ function contract({ id, project, validateTransition, reobserve }) {
 // ---------------------------------------------------------------------------
 const envelope = contract({
   id: "envelope",
-  reobserve: observeEnvelope,
+  reobserve: callRegisteredObserver,
   project: (state) => ({
     run_id: state.run_id,
     status: state.status,
@@ -232,7 +218,16 @@ const steps = contract({
 // undefined and this guard threw before checking anything. It read as enforcement
 // and was dead. The end-to-end test caught it; the unit tests could not, because
 // they called the path helpers directly and never went through the hook.
-async function refuseUnownedMerge({ mode, current, candidate, observe }) {
+async function reobserveSlices({ mode, current, candidate, observe }) {
+  if (mode === "amend-paths") {
+    if (typeof observe !== "function") throw new Error("amend-paths requires a session-owner observer");
+    const changed = candidate.find((slice, index) => !isDeepStrictEqual(slice, current[index]));
+    const observed = await observe(changed);
+    if (observed?.authorized_session !== changed?.path_amendments?.at(-1)?.session) {
+      throw new Error("amend-paths requires exact observed session ownership");
+    }
+    return;
+  }
   if (mode !== "merge") return;
   const priorSlices = Array.isArray(current) ? current : [];
   const nextSlices = Array.isArray(candidate) ? candidate : [];
@@ -264,7 +259,7 @@ async function refuseUnownedMerge({ mode, current, candidate, observe }) {
 
 const slices = contract({
   id: "slices",
-  reobserve: refuseUnownedMerge,
+  reobserve: reobserveSlices,
   project: (state) => (state.slices ?? []).map((slice) => ({ ...slice })),
   validateTransition: ({ mode, before, after, candidate }) => {
     if (mode === "amend-paths") {
@@ -301,7 +296,12 @@ const slices = contract({
     const priorById = new Map(before.map((slice) => [slice.id, slice]));
     for (const slice of after) {
       const prior = priorById.get(slice.id);
-      if (!prior) continue; // seeding from plan/slices.json
+      if (!prior) {
+        if (mode === "seed" && !isDeepStrictEqual(slice.path_amendments, [])) {
+          throw new Error(`seeded slice '${slice.id}' path_amendments must start empty`);
+        }
+        continue;
+      }
       // Finding 3: base_ref was replaceable on every update, so supplying the slice
       // head as its own base made the diff empty and every ownership check vacuous.
       // It is the branch point, which is a fact about the past: writable once, then

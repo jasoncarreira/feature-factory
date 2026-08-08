@@ -232,8 +232,8 @@ an error rather than a silently ignored typo.
 ```
 factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
 factory status <run-id> [--json]
-factory resume <run-id> --session ID [--now ISO]
 factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID
+factory resume <run-id> --session ID [--now ISO]
 factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
 factory heartbeat <run-id> --session ID
 factory gate <run-id> <story|brief|pre_pr> <pending|approved|changes|stop> [--artifact REF]

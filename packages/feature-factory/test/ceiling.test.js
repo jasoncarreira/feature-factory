@@ -28,7 +28,7 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
-  "init", "status", "resume", "amend-paths", "lock", "heartbeat", "gate", "step", "terminal",
+  "init", "status", "amend-paths", "resume", "lock", "heartbeat", "gate", "step", "terminal",
   "slices-seed", "slice", "observe", "validator", "pr",
 ];
 
@@ -101,6 +101,7 @@ const proseFiles = sourceFiles(pkg, [], PROSE_EXTENSIONS);
 describe("ceiling — scope cannot grow without editing this file", () => {
   it("exposes exactly the declared CLI commands, and the skill invokes only those", () => {
     assert.deepEqual(Object.keys(COMMANDS).sort(), [...CLI_COMMANDS].sort());
+    assert.deepEqual(Object.keys(COMMANDS).slice(0, 4), ["init", "status", "amend-paths", "resume"]);
     assert.deepEqual(COMMANDS.init, [
       "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode",
       "--max-parallel-slices", "--max-retries", "--now", "--json",
@@ -197,6 +198,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     }
     assert.deepEqual(unknown, [], "the skill documents a command or flag the CLI does not accept");
     const cliSource = readFileSync(join(pkg, "bin", "factory.js"), "utf8");
+    assert.ok(cliSource.indexOf("  factory amend-paths <run-id>") < cliSource.indexOf("  factory resume <run-id>"));
     const initPublicationSource = readFileSync(join(pkg, "bin", "init-publication.js"), "utf8");
     const readme = readFileSync(resolve(pkg, "..", "..", "README.md"), "utf8");
     assert.ok(COMMANDS.init.includes("--pr-base"));
@@ -659,9 +661,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // attempt overwrites. Run 216's test-verifier was rejected twice and approved on the third,
     // and both reasons had to be inferred from commit subjects. Roughly half of these lines are the
     // reasoning for why an archive is create-only and why a failed archive must not fail the step.
-    // 3433 -> 3588 for run 257: a parked, exact-owner path amendment appends audited ownership to one
-    // unmerged slice while preserving the seed, test plan, envelope, and merge proof.
-    assert.equal(total, 3588, "parked path amendment landed at 3588 production lines");
+    // 3433 -> 3590 for run 257: a parked, exact-owner path amendment appends audited ownership while
+    // seed admission stays empty and the slices family freshly observes the authorized session.
+    assert.equal(total, 3590, "reviewed parked path amendment landed at 3590 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 

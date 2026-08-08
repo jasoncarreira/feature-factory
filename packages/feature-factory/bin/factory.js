@@ -16,7 +16,7 @@ import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvi
 import { archiveReviewAttempt } from "../state/review-archive.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { dispatchInitPublication } from "./init-publication.js";
-import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, validateRun } from "../state/schema.js";
+import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, repositoryRelativePath, validateRun } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SessionLockHeldError,
 } from "../state/session-lock.js";
@@ -24,8 +24,8 @@ import {
 export const COMMANDS = Object.freeze({
   init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
-  resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
   "amend-paths": Object.freeze(["--repo", "--add", "--reason", "--session", "--now", "--json"]),
+  resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
   // No --force: `lock <id> steal` is the same operation with a name that says what it
   // does, and two spellings of "take someone else's lock" is one too many.
   lock: Object.freeze(["--repo", "--session", "--branch", "--ttl-ms", "--now", "--json"]),
@@ -153,7 +153,7 @@ function assertFreshSessionOwner(runDir, runId, session, command) {
 
 function validatePathAdditions(slice, additions) {
   for (const path of additions) {
-    if (!path.trim() || path.startsWith("/") || path.split("/").includes("..")) {
+    if (!repositoryRelativePath(path)) {
       throw new CliError(`added path '${path}' must be non-empty, repository-relative, and contain no '..' segment`);
     }
   }
@@ -560,7 +560,9 @@ const HANDLERS = {
     }
     assertFreshSessionOwner(runDir, runId, flags.session, "amend-paths");
     const at = stamp(flags);
-    const reobservers = new Map([["envelope", async () => assertFreshSessionOwner(runDir, runId, flags.session, "amend-paths")]]);
+    const reobservers = new Map([["slices", async () => ({
+      authorized_session: assertFreshSessionOwner(runDir, runId, flags.session, "amend-paths").session,
+    })]]);
     const next = await transition(runDir, {
       participants: [{ familyId: "envelope", mode: "amend-paths" }, { familyId: "slices", mode: "amend-paths" }],
       reobservers,
@@ -1239,8 +1241,8 @@ function usage() {
 
   factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
-  factory resume <run-id> --session ID [--now ISO]
   factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID [--now ISO]
+  factory resume <run-id> --session ID [--now ISO]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID
   factory gate <run-id> <${GATE_NAMES.join("|")}> <${GATE_STATUSES.join("|")}> [--artifact REF]
