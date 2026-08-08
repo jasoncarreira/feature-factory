@@ -8,6 +8,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { CONTROL_PLANE } from "../state/schema.js";
 
 export const DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS = 900000;
+export const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 900000;
 
 export const EVIDENCE_KEYS = Object.freeze([
   "subject", "run_id", "attempt", "branch", "base_ref", "worktree", "status", "blocked_reason",
@@ -74,6 +75,26 @@ export function observeCleanliness(worktree, options = {}) {
   if (!probe.ok) return { clean: false, reason: "worktree state could not be observed", entries: [] };
   const entries = probe.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
   return { clean: entries.length === 0, reason: entries.length === 0 ? null : "worktree has uncommitted changes", entries };
+}
+
+export function runBootstrap(worktree, command, timeoutMs = DEFAULT_BOOTSTRAP_TIMEOUT_MS, { runner = spawnSync } = {}) {
+  const result = runner(command, [], {
+    cwd: worktree, shell: true, env: process.env, timeout: timeoutMs,
+    stdio: ["inherit", process.stderr, process.stderr],
+  });
+  return Number.isSafeInteger(result?.status) && result.status >= 0 ? result.status : null;
+}
+
+export function observeTrackedCleanliness(worktree, options = {}) {
+  const top = git(worktree, ["rev-parse", "--show-toplevel"], options);
+  const probes = [
+    git(worktree, ["--literal-pathspecs", "diff", "--name-only", "-z"], options),
+    git(worktree, ["--literal-pathspecs", "diff", "--cached", "--name-only", "-z"], options),
+  ];
+  if (!top.ok || realpathSync(resolve(worktree, top.stdout.trim())) !== realpathSync(worktree)
+    || probes.some((probe) => !probe.ok)) return { observed: false, entries: [] };
+  const entries = [...new Set(probes.flatMap((probe) => probe.stdout.split("\0").filter(Boolean)))].sort();
+  return { observed: true, entries };
 }
 
 export function observeAncestry(worktree, ancestor, descendant, options = {}) {

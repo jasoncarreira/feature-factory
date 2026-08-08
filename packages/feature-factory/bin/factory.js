@@ -8,10 +8,11 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "nod
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { readFileSync } from "node:fs";
 import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
-import { buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, unownedPaths } from "../observe/index.js";
+import { buildEvidence, DEFAULT_BOOTSTRAP_TIMEOUT_MS, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { archiveReviewAttempt } from "../state/review-archive.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
@@ -153,6 +154,13 @@ function assertFreshSessionOwner(runDir, runId, session, command) {
   return held.owner;
 }
 
+function sameSessionOwner(runDir, bound) {
+  const held = inspectSessionLock(runDir);
+  if (held.state !== "fresh" || Date.parse(held.owner.heartbeat_at) < Date.parse(bound.heartbeat_at)) return false;
+  return ["session", "run_id", "branch", "claimed_at", "pid"]
+    .every((keyName) => isDeepStrictEqual(held.owner[keyName], bound[keyName]));
+}
+
 function validatePathAdditions(slice, additions) {
   for (const path of additions) {
     if (!repositoryRelativePath(path)) {
@@ -222,7 +230,7 @@ function requireIntegrationWorktree(repo, run, suppliedWorktree) {
   return { worktree: committed, head: headSha };
 }
 
-function readRepositoryVerify(worktree, { optional = false } = {}) {
+function readRepositoryConfig(worktree, { optional = false } = {}) {
   let bytes;
   try {
     bytes = readFileSync(join(worktree, ".factory.json"), "utf8");
@@ -237,11 +245,22 @@ function readRepositoryVerify(worktree, { optional = false } = {}) {
     throw new RepositoryConfigError("invalid .factory.json");
   }
   const requiredKeys = ["publish", "publishing_identity", "resolve", "verify"];
-  const allowedKeys = [...requiredKeys, "verify_timeout_ms"];
+  const allowedKeys = [...requiredKeys, "verify_timeout_ms", "bootstrap", "bootstrap_timeout_ms"];
   // False-green enforcement: config must not silently select a different repository proof.
   if (!config || typeof config !== "object" || Array.isArray(config)
     || Object.keys(config).some((keyName) => !allowedKeys.includes(keyName))) {
     throw new RepositoryConfigError("invalid .factory.json");
+  }
+  const hasBootstrap = Object.hasOwn(config, "bootstrap");
+  const hasBootstrapTimeout = Object.hasOwn(config, "bootstrap_timeout_ms");
+  if (hasBootstrap && (typeof config.bootstrap !== "string" || !config.bootstrap.trim())) {
+    throw new RepositoryConfigError("invalid .factory.json: entry 'bootstrap' must be a non-empty string");
+  }
+  if (!hasBootstrap && hasBootstrapTimeout) {
+    throw new RepositoryConfigError("invalid .factory.json: entry 'bootstrap_timeout_ms' requires a declared bootstrap command");
+  }
+  if (hasBootstrapTimeout && (!Number.isSafeInteger(config.bootstrap_timeout_ms) || config.bootstrap_timeout_ms <= 0)) {
+    throw new RepositoryConfigError("invalid .factory.json: entry 'bootstrap_timeout_ms' must be a positive integer");
   }
   if (Object.hasOwn(config, "verify_timeout_ms")
     && (!Number.isSafeInteger(config.verify_timeout_ms) || config.verify_timeout_ms <= 0)) {
@@ -250,7 +269,21 @@ function readRepositoryVerify(worktree, { optional = false } = {}) {
   if (requiredKeys.some((keyName) => typeof config[keyName] !== "string" || !config[keyName].trim())) {
     throw new RepositoryConfigError("invalid .factory.json");
   }
-  return { command: config.verify, timeoutMs: config.verify_timeout_ms ?? DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS };
+  const parsed = { command: config.verify, timeoutMs: config.verify_timeout_ms ?? DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS };
+  return hasBootstrap ? { ...parsed, bootstrapCommand: config.bootstrap,
+    bootstrapTimeoutMs: config.bootstrap_timeout_ms ?? DEFAULT_BOOTSTRAP_TIMEOUT_MS } : parsed;
+}
+
+function bootstrapOutcome(worktree, config, phase) {
+  const exit = runBootstrap(worktree, config.bootstrapCommand, config.bootstrapTimeoutMs);
+  const tracked = observeTrackedCleanliness(worktree);
+  let refusal = null;
+  if (!tracked.observed) refusal = `factory config entry 'bootstrap' could not observe tracked paths after ${phase}`;
+  else if (tracked.entries.length) refusal = `factory config entry 'bootstrap' left tracked paths dirty after ${phase}: ${tracked.entries.map(JSON.stringify).join(", ")}`;
+  else if (exit !== 0) refusal = exit === null
+    ? `factory config entry 'bootstrap' failed during ${phase}; exit status unavailable`
+    : `factory config entry 'bootstrap' failed during ${phase} with exit status ${exit}`;
+  return { exit, refusal };
 }
 
 function branchPoint(run) {
@@ -407,7 +440,7 @@ async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit }) {
   }
   let verify;
   try {
-    verify = readRepositoryVerify(integration.worktree, { optional: true });
+    verify = readRepositoryConfig(integration.worktree, { optional: true });
   } catch (error) {
     if (error instanceof RepositoryConfigError) {
       throw new CliError(`factory config entry 'verify' unavailable after recorded merge ${mergeCommit}: ${error.message}; merged slice remains recorded; stop before advancing.`);
@@ -628,7 +661,7 @@ const HANDLERS = {
         }
         let verify;
         try {
-          verify = readRepositoryVerify(integration.worktree, { optional: true });
+          verify = readRepositoryConfig(integration.worktree, { optional: true });
         } catch (error) {
           if (error instanceof RepositoryConfigError) {
             throw new CliError(`factory config entry 'verify' unavailable after recorded merge ${existing.merge_commit}: ${error.message}; merged slice remains recorded; stop before advancing.`);
@@ -785,7 +818,7 @@ const HANDLERS = {
       const expectedBase = branchPoint(run);
       if (flags.base !== expectedBase) throw new CliError(`--base must equal the first seeded root slice base_ref ${expectedBase}`);
       try {
-        repositoryVerify = readRepositoryVerify(worktree);
+        repositoryVerify = readRepositoryConfig(worktree);
       } catch (error) {
         if (error instanceof RepositoryConfigError) throw new CliError(error.message);
         throw error;
@@ -1014,7 +1047,8 @@ const HANDLERS = {
     if (positional.length !== 1) throw new CliError("factory resume requires exactly one <run-id>");
     const [runId] = positional;
     const runDir = runDirFor(flags, runId);
-    const current = readRun(runDir);
+    const boundRunBytes = readFileSync(join(runDir, "run.json"));
+    const current = validateRun(JSON.parse(boundRunBytes.toString("utf8")));
     if (current.status !== "needs-human") {
       throw new CliError(`factory resume requires current status needs-human; found '${current.status}'`);
     }
@@ -1024,17 +1058,39 @@ const HANDLERS = {
     // parked run would both believe they own it, which is the single-writer invariant the lock
     // exists for. So the caller must already hold a fresh lock: claim, then verify, then resume.
     if (!flags.session) throw new CliError("factory resume requires --session <session-id>");
-    assertFreshSessionOwner(runDir, runId, flags.session, "resume");
+    const boundOwner = assertFreshSessionOwner(runDir, runId, flags.session, "resume");
     const at = stamp(flags);
+    if (Date.parse(at) <= Date.parse(current.updated_at)) throw new CliError("resume-needs-human must move updated_at forwards");
+    const repo = resolve(flags.repo ?? process.cwd());
+    const config = readRepositoryConfig(repo, { optional: true });
+    const outcome = config?.bootstrapCommand ? bootstrapOutcome(repo, config, "resume") : null;
+    const currentBytes = outcome ? readFileSync(join(runDir, "run.json")) : boundRunBytes;
+    if (outcome && !currentBytes.equals(boundRunBytes)) {
+      try { validateRun(JSON.parse(currentBytes.toString("utf8"))); } catch {
+        throw new CliError("factory resume bootstrap refused: current run state cannot be qualified because run.json bytes changed while bootstrap ran");
+      }
+      throw new CliError("factory resume bootstrap refused: run.json bytes changed while bootstrap ran; current state was preserved");
+    }
+    if (outcome && !sameSessionOwner(runDir, boundOwner)) {
+      throw new CliError("factory resume bootstrap refused: factory.lock is absent, stale, or no longer names the same owner; current state and owner were preserved");
+    }
+    const success = outcome?.refusal == null;
+    const assertBinding = ({ state }) => {
+      if (!isDeepStrictEqual(state, current)) throw new CliError("factory resume bootstrap refused: run.json bytes changed while bootstrap ran; current state was preserved");
+      if (!sameSessionOwner(runDir, boundOwner)) throw new CliError("factory resume bootstrap refused: factory.lock is absent, stale, or no longer names the same owner; current state and owner were preserved");
+    };
     const next = await transition(runDir, {
-      participants: [{ familyId: "envelope", mode: "resume-needs-human" }],
-      apply: (state) => {
-        if (state.status !== "needs-human") {
-          throw new CliError(`factory resume requires current status needs-human; found '${state.status}'`);
+      participants: [{ familyId: "envelope", mode: success ? "resume-needs-human" : "record-bootstrap" }],
+      ...(outcome ? { reobservers: new Map([["envelope", assertBinding]]), finalGuard: ({ state }) => {
+        if (!readFileSync(join(runDir, "run.json")).equals(boundRunBytes) || !isDeepStrictEqual(state, current)) {
+          throw new CliError("factory resume bootstrap refused: run.json bytes changed while bootstrap ran; current state was preserved");
         }
-        return { ...state, status: "running", updated_at: at };
-      },
+        if (!sameSessionOwner(runDir, boundOwner)) throw new CliError("factory resume bootstrap refused: factory.lock is absent, stale, or no longer names the same owner; current state and owner were preserved");
+      } } : {}),
+      apply: (state) => ({ ...state, ...(success ? { status: "running" } : {}), updated_at: at,
+        ...(outcome ? { bootstrap_command: config.bootstrapCommand, bootstrap_exit: outcome.exit } : {}) }),
     });
+    if (outcome?.refusal) throw new CliError(`${outcome.refusal}; run remains needs-human and its historical terminal result is preserved`);
     return emit(flags, {
       run_id: runId, status: next.status, terminal_result: next.terminal_result, next: nextAction(next),
     });
@@ -1141,9 +1197,16 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
     prBase = observed.ok ? observed.stdout.trim() : "";
     if (!prBase) throw new CliError(`could not observe a symbolic branch in PR base worktree '${candidate.worktree}' for sandbox '${S}'; pass --pr-base <branch> explicitly; sandbox was retained`);
   }
+  const config = readRepositoryConfig(S, { optional: true });
+  let bootstrapEvidence = {};
+  if (config?.bootstrapCommand) {
+    const outcome = bootstrapOutcome(S, config, "init");
+    if (outcome.refusal) throw new CliError(`${outcome.refusal}; sandbox '${S}' was retained; run.json is absent`);
+    bootstrapEvidence = { bootstrap_command: config.bootstrapCommand, bootstrap_exit: outcome.exit };
+  }
   let run;
   try {
-    run = validateRun({ ...candidate, pr_base: prBase });
+    run = validateRun({ ...candidate, pr_base: prBase, ...bootstrapEvidence });
   } catch (error) {
     throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
   }
