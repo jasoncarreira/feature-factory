@@ -25,9 +25,10 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // twelve commands; `validator` and `pr` are not built yet, so they are absent here
 // and adding them will be another visible diff.
 // All twelve commands BUILD-PLAN-SMALL.md declares are built. Issue #243 authorizes the thirteenth:
-// explicit resume is the sole transition that clears a parked needs-human stop.
+// explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
+// one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
-  "init", "status", "resume", "lock", "heartbeat", "gate", "step", "terminal",
+  "init", "status", "resume", "amend-paths", "lock", "heartbeat", "gate", "step", "terminal",
   "slices-seed", "slice", "observe", "validator", "pr",
 ];
 
@@ -105,6 +106,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
+    assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
     // The workflow is the authoritative host-neutral instruction set, and nothing checked it against the CLI
@@ -657,7 +659,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // attempt overwrites. Run 216's test-verifier was rejected twice and approved on the third,
     // and both reasons had to be inferred from commit subjects. Roughly half of these lines are the
     // reasoning for why an archive is create-only and why a failed archive must not fail the step.
-    assert.equal(total, 3433, "retaining review attempts landed at 3433 production lines");
+    // 3433 -> 3588 for run 257: a parked, exact-owner path amendment appends audited ownership to one
+    // unmerged slice while preserving the seed, test plan, envelope, and merge proof.
+    assert.equal(total, 3588, "parked path amendment landed at 3588 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 
@@ -695,6 +699,6 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // effective push, state relocation, and terminal handoff.
     // Issue #187 removed terminal-handoff AC20's duplicate guard; issue #234 raises 87 -> 88 for the
     // real-CLI command-authorization regression. This remains the sole executable call-site budget.
-    assert.ok(count <= 88, `${count} tests; the budget is 88`);
+    assert.equal(count, 88, `the approved catalogue has exactly 88 call sites; found ${count}`);
   });
 });

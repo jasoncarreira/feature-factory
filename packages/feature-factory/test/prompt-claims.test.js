@@ -113,6 +113,7 @@ const NEEDS_HUMAN_PROSE = [
   ["repair-planned-transition", "`planned → committed|needs-human`", "factory resume resolves the repair-record"],
   ["repair-committed-transition", "`committed → verified|failed|exhausted|needs-human`", "factory resume resolves the repair-record"],
   ["repair-guard", "This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication.", "envelope resume authorizes this repair-record"],
+  ["path-amendment", "park `needs-human` with that diagnosis; only the verified owner may use the optional", "resume silently widens ownership"],
   ["generic-stop", "Use terminal needs-human only to park a running envelope; use explicit factory resume after the cause is fixed.", "terminal needs-human is a final outcome"],
   ["generic-retention", "A top-level needs-human sandbox stays retained while parked and continues only after explicit factory resume.", "retained needs-human cannot continue"],
   ["gate-three-repair", "A Gate 3 repair-record needs-human remains unresolved because envelope resume does not clear it.", "envelope resume satisfies Gate 3 repair"],
@@ -184,6 +185,32 @@ const CLAIMS = [
       const after = JSON.parse(readFileSync(path, "utf8")).slices
         .map(({ paths, test_plan: testPlan }) => ({ paths, test_plan: testPlan }));
       assert.deepEqual(after, before);
+      return result;
+    },
+  },
+  {
+    id: "parked-owner-may-amend-before-separate-resume",
+    file: "agents/work-decomposer.md",
+    fragment: "`amend-paths` recovery may append the concrete paths and durable reason before a separate explicit",
+    expect: "allowed",
+    matches: /status: needs-human[\s\S]*added_paths/u,
+    act(repo) {
+      const { repository, runDir } = seeded(repo);
+      const reason = "  verified omitted path  ";
+      assert.equal(factory(repository, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW]).ok, true);
+      assert.equal(factory(repository, ["lock", RUN, "claim", "--session", "session-a"]).ok, true);
+      const result = factory(repository, ["amend-paths", RUN, "s1", "--add", "docs/api.md", "--add", "shared/not-created.ts",
+        "--reason", reason, "--session", "session-a", "--now", "2026-07-30T12:01:00Z"]);
+      assert.equal(result.ok, true, result.out);
+      const parked = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+      assert.deepEqual(parked.slices[0].paths, ["src/", "docs/api.md", "shared/not-created.ts"]);
+      assert.deepEqual(parked.slices[0].path_amendments[0], {
+        added_paths: ["docs/api.md", "shared/not-created.ts"], reason, session: "session-a", at: "2026-07-30T12:01:00.000Z",
+      });
+      assert.deepEqual(parked.slices[0].test_plan, PLAN.slices[0].test_plan);
+      assert.equal(factory(repository, ["resume", RUN, "--session", "session-a", "--now", "2026-07-30T12:02:00Z"]).ok, true);
+      const resumed = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+      assert.deepEqual(resumed.slices[0].path_amendments, parked.slices[0].path_amendments);
       return result;
     },
   },

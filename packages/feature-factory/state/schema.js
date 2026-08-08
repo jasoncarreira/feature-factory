@@ -50,8 +50,9 @@ export const SLICE_KEYS = Object.freeze([
   // tests is a decision the decompose gate makes: a nonempty test_plan means an observed
   // green run is required, and an empty one is an approved exemption. Empty by omission
   // is not possible, because the field is required.
-  "paths", "test_plan", "base_ref", "evidence_ref", "review_ref", "merge_commit",
+  "paths", "path_amendments", "test_plan", "base_ref", "evidence_ref", "review_ref", "merge_commit",
 ]);
+const PATH_AMENDMENT_KEYS = Object.freeze(["added_paths", "reason", "session", "at"]);
 
 export const VALIDATOR_VERDICTS = Object.freeze(["GO", "GO-WITH-NITS", "NO-GO"]);
 // reviewed_head is the fourth field, justified by attack 4: a verdict that does not
@@ -187,11 +188,12 @@ function slices(errors, value) {
     }
     if (!Array.isArray(slice.paths) || slice.paths.length === 0 || !slice.paths.every((entry) => stringValue(entry))) {
       errors.push({ path: `${path}.paths`, message: "must be a non-empty array of paths" });
-    } else if (slice.paths.some((entry) => entry.startsWith("/") || entry.split("/").includes(".."))) {
+    } else if (slice.paths.some((entry) => !repositoryRelativePath(entry))) {
       // A declared path that escapes the repository would make ownership
       // unenforceable, so it is refused at admission rather than at merge.
       errors.push({ path: `${path}.paths`, message: "must be repository-relative without '..'" });
     }
+    pathAmendments(errors, slice, path);
     if (!Array.isArray(slice.depends_on)) {
       errors.push({ path: `${path}.depends_on`, message: "must be an array" });
     } else {
@@ -204,6 +206,32 @@ function slices(errors, value) {
     // nothing to bind to.
     if (slice.status === "merged" && !SHA.test(String(slice.merge_commit))) {
       errors.push({ path: `${path}.merge_commit`, message: "is required when a slice is merged" });
+    }
+  });
+}
+
+function pathAmendments(errors, slice, path) {
+  if (slice.path_amendments === undefined) return;
+  if (!Array.isArray(slice.path_amendments)) {
+    errors.push({ path: `${path}.path_amendments`, message: "must be an array" });
+    return;
+  }
+  const recorded = new Set();
+  const currentPaths = Array.isArray(slice.paths) ? slice.paths : [];
+  slice.path_amendments.forEach((amendment, index) => {
+    const amendmentPath = `${path}.path_amendments[${index}]`;
+    if (!object(errors, amendment, amendmentPath, PATH_AMENDMENT_KEYS)) return;
+    for (const key of ["reason", "session"]) required(errors, amendment, key, amendmentPath);
+    pattern(errors, amendment, "at", ISO, amendmentPath);
+    if (!Array.isArray(amendment.added_paths) || amendment.added_paths.length === 0
+      || !amendment.added_paths.every((entry) => stringValue(entry) && repositoryRelativePath(entry))) {
+      errors.push({ path: `${amendmentPath}.added_paths`, message: "must be a non-empty array of repository-relative paths without '..'" });
+      return;
+    }
+    for (const added of amendment.added_paths) {
+      if (recorded.has(added)) errors.push({ path: `${amendmentPath}.added_paths`, message: `duplicate recorded path '${added}'` });
+      recorded.add(added);
+      if (!currentPaths.includes(added)) errors.push({ path: `${amendmentPath}.added_paths`, message: `recorded path '${added}' must exist in slice paths` });
     }
   });
 }
@@ -294,4 +322,8 @@ function isRecord(value) {
 
 function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function repositoryRelativePath(value) {
+  return !value.startsWith("/") && !value.split("/").includes("..");
 }

@@ -68,7 +68,7 @@ function repositoryVerifyTrace(operator, command) {
 }
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], verify = null, verifyTimeout = undefined, configBytes = null } = {}) {
+function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], additionalSlices = [], verify = null, verifyTimeout = undefined, configBytes = null } = {}) {
   const operator = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(operator, "init", "-q", "-b", "main");
   git(operator, "config", "user.email", "t@example.com");
@@ -110,7 +110,10 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
   const repo = selected.repository;
   const runDir = selected.runDir;
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({
-    slices: [{ id: "be-thing", stack: "backend", paths, depends_on: [], acceptance: ["AC1"], test_plan: testPlan }],
+    slices: [
+      { id: "be-thing", stack: "backend", paths, depends_on: [], acceptance: ["AC1"], test_plan: testPlan },
+      ...additionalSlices,
+    ],
   }, null, 2));
   if (seed) {
     approveEarlyGates(repo, NOW(1));
@@ -584,14 +587,110 @@ describe("end to end — a merge is refused through the real CLI", () => {
   });
 
   it("refuses a slice that changed a path it does not own", () => {
-    const p = upToReview("unowned", { extra: "src/other/sneak.ts" });
+    const p = upToReview("unowned", { extra: "src/other/sneak.ts" }, {
+      additionalSlices: [{
+        id: "be-other", stack: "backend", paths: ["shared/"], depends_on: [],
+        acceptance: ["AC2"], test_plan: [],
+      }],
+    });
     try {
+      assert.deepEqual(runJson(p.runDir).slices.map((slice) => slice.path_amendments), [[], []],
+        "every newly seeded slice starts with empty amendment history");
       const mergeCommit = mergeIntoFeature(p.repo);
       const before = readFileSync(join(p.runDir, "run.json"), "utf8");
       const merged = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       assert.equal(merged.ok, false, "the merge must be refused");
       assert.match(merged.stderr, /changed paths it does not own: src\/other\/sneak\.ts/u);
       assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), before, "run.json must be untouched");
+      const runningRefusal = factory(p.repo, ["amend-paths", RUN, "be-thing", "--add", "src/other/sneak.ts",
+        "--reason", "not parked", "--session", "session-b", "--now", NOW(5)]);
+      assert.equal(runningRefusal.ok, false);
+      assert.match(runningRefusal.stderr, /requires current status needs-human; found 'running'/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), before);
+
+      const reason = "  reviewer verified the omitted ownership  ";
+      assert.equal(factory(p.repo, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW(5)]).ok, true);
+      const parked = readFileSync(join(p.runDir, "run.json"), "utf8");
+      const amendment = ["amend-paths", RUN, "be-thing", "--add", "src/other/sneak.ts",
+        "--add", "shared/not-created.ts", "--reason", reason, "--session", "session-b", "--now", NOW(7)];
+      assert.equal(factory(p.repo, ["lock", RUN, "claim", "--session", "session-b", "--branch", "feature"]).ok, true);
+
+      for (const [label, args, pattern] of [
+        ["arity", ["amend-paths", RUN], /requires exactly <run-id> <slice-id>/u],
+        ["missing add", ["amend-paths", RUN, "be-thing", "--reason", reason, "--session", "session-b"], /requires at least one --add/u],
+        ["blank reason", ["amend-paths", RUN, "be-thing", "--add", "src/other/sneak.ts", "--reason", "   ", "--session", "session-b"], /requires nonblank --reason/u],
+        ["blank session", ["amend-paths", RUN, "be-thing", "--add", "src/other/sneak.ts", "--reason", reason, "--session", "   "], /requires nonblank --session/u],
+        ["malformed blank", ["amend-paths", RUN, "be-thing", "--add", "", "--reason", reason, "--session", "session-b"], /must be non-empty/u],
+        ["external absolute", ["amend-paths", RUN, "be-thing", "--add", "/tmp/outside", "--reason", reason, "--session", "session-b"], /repository-relative/u],
+        ["traversal", ["amend-paths", RUN, "be-thing", "--add", "src/../outside", "--reason", reason, "--session", "session-b"], /contain no '\.\.' segment/u],
+        ["privileged", ["amend-paths", RUN, "be-thing", "--add", ".factory.json", "--reason", reason, "--session", "session-b"], /cannot amend privileged/u],
+        ["duplicate", ["amend-paths", RUN, "be-thing", "--add", "src/other/sneak.ts", "--add", "src/other/sneak.ts", "--reason", reason, "--session", "session-b"], /duplicate requested path/u],
+        ["already owned exact", ["amend-paths", RUN, "be-thing", "--add", "src/app/", "--reason", reason, "--session", "session-b"], /already owns requested path/u],
+        ["already owned boundary", ["amend-paths", RUN, "be-thing", "--add", "src/app/thing.ts", "--reason", reason, "--session", "session-b"], /already owns requested path/u],
+      ]) {
+        const refused = factory(p.repo, args);
+        assert.equal(refused.ok, false, label);
+        assert.match(refused.stderr, pattern, label);
+        assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), parked, label);
+      }
+
+      assert.equal(factory(p.repo, ["lock", RUN, "release", "--session", "session-b"]).ok, true);
+      const absentOwner = factory(p.repo, amendment);
+      assert.equal(absentOwner.ok, false);
+      assert.match(absentOwner.stderr, /requires a held session lock/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), parked);
+      assert.equal(factory(p.repo, ["lock", RUN, "claim", "--session", "old-owner", "--branch", "feature", "--now", "2020-01-01T00:00:00Z"]).ok, true);
+      const staleOwner = factory(p.repo, amendment.map((value) => value === "session-b" ? "old-owner" : value));
+      assert.equal(staleOwner.ok, false);
+      assert.match(staleOwner.stderr, /refuses a stale session lock/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), parked);
+      assert.equal(factory(p.repo, ["lock", RUN, "steal", "--session", "session-b", "--branch", "feature"]).ok, true);
+      const wrongOwner = factory(p.repo, amendment.map((value) => value === "session-b" ? "other-owner" : value));
+      assert.equal(wrongOwner.ok, false);
+      assert.match(wrongOwner.stderr, /held by session session-b, not other-owner/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), parked);
+
+      const amended = factory(p.repo, amendment);
+      assert.equal(amended.ok, true, amended.stderr);
+      assert.deepEqual(amended.out, {
+        run_id: RUN,
+        slice: "be-thing",
+        status: "needs-human",
+        terminal_result: { status: "needs-human", reason },
+        amendment: {
+          added_paths: ["src/other/sneak.ts", "shared/not-created.ts"],
+          reason,
+          session: "session-b",
+          at: new Date(NOW(7)).toISOString(),
+        },
+      });
+      let durable = runJson(p.runDir);
+      assert.deepEqual(durable.slices[0].paths, ["src/app/", "src/other/sneak.ts", "shared/not-created.ts"]);
+      assert.deepEqual(durable.slices[0].path_amendments, [amended.out.amendment]);
+      assert.deepEqual(durable.slices[1].paths, ["shared/"]);
+      assert.equal(durable.status, "needs-human");
+      assert.deepEqual(durable.terminal_result, { status: "needs-human", reason });
+      const amendedBytes = readFileSync(join(p.runDir, "run.json"), "utf8");
+      const replayedAmendment = factory(p.repo, amendment);
+      assert.equal(replayedAmendment.ok, false);
+      assert.match(replayedAmendment.stderr, /already owns requested path/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), amendedBytes);
+
+      const resumed = factory(p.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(8)]);
+      assert.equal(resumed.ok, true, resumed.stderr);
+      durable = runJson(p.runDir);
+      assert.deepEqual(durable.slices[0].path_amendments, [amended.out.amendment], "resume preserves amendment history");
+      assert.deepEqual(durable.slices[0].test_plan, [PASSING_TEST_COMMAND]);
+      const recovered = factory(p.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(9)]);
+      assert.equal(recovered.ok, true, recovered.stderr);
+      assert.equal(runJson(p.runDir).slices[0].status, "merged");
+      assert.equal(factory(p.repo, ["terminal", RUN, "needs-human", "--reason", "late widening", "--now", NOW(10)]).ok, true);
+      const mergedBytes = readFileSync(join(p.runDir, "run.json"), "utf8");
+      const mergedRefusal = factory(p.repo, ["amend-paths", RUN, "be-thing", "--add", "late/path.ts",
+        "--reason", "late widening", "--session", "session-b", "--now", NOW(11)]);
+      assert.equal(mergedRefusal.ok, false);
+      assert.match(mergedRefusal.stderr, /slice 'be-thing' is already merged/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), mergedBytes);
     } finally { cleanupProject(p); }
   });
 

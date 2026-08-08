@@ -142,6 +142,31 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
       { status: "needs-human", reason: "external cause" });
     assert.deepEqual(validateRun(baseRun({ status: "needs-human", terminal_result: { status: "needs-human", reason: "external cause" } })).terminal_result,
       { status: "needs-human", reason: "external cause" });
+    const amendedSlice = {
+      id: "be", stack: "backend", depends_on: [], status: "pending", worktree: null, branch: null,
+      attempts: 1, paths: ["src/", "docs/api.md"], test_plan: ["npm test"], base_ref: null,
+      evidence_ref: null, review_ref: null, merge_commit: null,
+      path_amendments: [{ added_paths: ["docs/api.md"], reason: "  verified omission  ", session: "owner-a", at: LATER }],
+    };
+    assert.equal(validateRun(baseRun({ slices: [amendedSlice] })).slices[0].path_amendments[0].reason,
+      "  verified omission  ");
+    const legacySlice = structuredClone(amendedSlice);
+    delete legacySlice.path_amendments;
+    assert.equal(Object.hasOwn(validateRun(baseRun({ slices: [legacySlice] })).slices[0], "path_amendments"), false);
+    for (const [mutate, pattern] of [
+      [(slice) => { slice.path_amendments[0].unexpected = true; }, /unknown keys: unexpected/u],
+      [(slice) => { slice.path_amendments[0].reason = "  "; }, /reason: must be a non-empty string/u],
+      [(slice) => { slice.path_amendments[0].session = ""; }, /session: must be a non-empty string/u],
+      [(slice) => { slice.path_amendments[0].at = "later"; }, /at: must match/u],
+      [(slice) => { slice.path_amendments[0].added_paths = []; }, /must be a non-empty array/u],
+      [(slice) => { slice.path_amendments[0].added_paths = ["../outside"]; }, /repository-relative paths/u],
+      [(slice) => { slice.path_amendments[0].added_paths = ["missing.ts"]; }, /must exist in slice paths/u],
+      [(slice) => { slice.path_amendments.push({ ...slice.path_amendments[0] }); }, /duplicate recorded path/u],
+    ]) {
+      const invalid = structuredClone(amendedSlice);
+      mutate(invalid);
+      assert.throws(() => validateRun(baseRun({ slices: [invalid] })), pattern);
+    }
 
     const malformed = malformedRun();
     assert.throws(() => validateRun(malformed), new RegExp(`unknown keys: ${REMOVED_KEY}`, "u"));
@@ -428,5 +453,70 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       assert.deepEqual(next.terminal_result, result);
       assert.deepEqual(Object.keys(next), Object.keys(parked.run));
     } finally { rmSync(parked.root, { recursive: true, force: true }); }
+
+    const slice = (id = "be") => ({
+      id, stack: "backend", depends_on: [], status: "pending", worktree: null, branch: null,
+      attempts: 1, paths: [`${id}/`], path_amendments: [], test_plan: ["npm test"], base_ref: null,
+      evidence_ref: null, review_ref: null, merge_commit: null,
+    });
+    const amendment = { added_paths: ["docs/api.md"], reason: "verified", session: "owner-a", at: LATER };
+    const append = (state) => ({
+      ...state,
+      updated_at: LATER,
+      slices: state.slices.map((entry, index) => index === 0 ? {
+        ...entry, paths: [...entry.paths, ...amendment.added_paths], path_amendments: [amendment],
+      } : entry),
+    });
+    for (const [label, apply, pattern, reobservers] of [
+      ["missing history", (state) => ({ ...state, updated_at: LATER, slices: [{ ...state.slices[0], paths: [...state.slices[0].paths, "docs/api.md"] }] }), /append one history record/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
+      ["missing paths", (state) => ({ ...state, updated_at: LATER, slices: [{ ...state.slices[0], path_amendments: [amendment] }] }), /must exist in slice paths/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
+      ["mismatched history", (state) => ({ ...append(state), slices: [{ ...append(state).slices[0], path_amendments: [{ ...amendment, added_paths: ["docs/api.md", "other.ts"] }], paths: [...state.slices[0].paths, "other.ts", "docs/api.md"] }] }), /history must match/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
+      ["other slice field", (state) => ({ ...append(state), slices: [{ ...append(state).slices[0], test_plan: [] }] }), /cannot change slice 'be' test_plan/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
+      ["two slices", (state) => ({ ...append(state), slices: append(state).slices.map((entry, index) => index === 1 ? { ...entry, attempts: 2 } : entry) }), /must change exactly one slice/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
+      ["other top-level field", (state) => ({ ...append(state), gates: {} }), /cannot change run\.gates/u, new Map([["envelope", async () => ({ session: "owner-a" })]])],
+      ["no owner observer", append, /requires a session-owner observer/u, new Map()],
+      ["wrong observed owner", append, /requires exact observed session ownership/u, new Map([["envelope", async () => ({ session: "other" })]])],
+    ]) {
+      const f = fixture(`amend-forgery-${label.replaceAll(" ", "-")}`, {
+        status: "needs-human", terminal_result: result, slices: label === "two slices" ? [slice(), slice("fe")] : [slice()],
+      });
+      try {
+        const before = bytes(f.runDir);
+        await assert.rejects(() => transition(f.runDir, {
+          participants: [{ familyId: "envelope", mode: "amend-paths" }, { familyId: "slices", mode: "amend-paths" }],
+          reobservers,
+          apply,
+        }), (error) => {
+          assert.match(`${error.message}\n${error.cause?.message ?? ""}`, pattern, label);
+          return true;
+        });
+        assert.equal(bytes(f.runDir), before, label);
+      } finally { rmSync(f.root, { recursive: true, force: true }); }
+    }
+
+    const direct = fixture("amend-direct-ok", { status: "needs-human", terminal_result: result, slices: [slice()] });
+    try {
+      const next = await transition(direct.runDir, {
+        participants: [{ familyId: "envelope", mode: "amend-paths" }, { familyId: "slices", mode: "amend-paths" }],
+        reobservers: new Map([["envelope", async () => ({ session: "owner-a" })]]),
+        apply: append,
+      });
+      assert.deepEqual(next.slices[0].paths, ["be/", "docs/api.md"]);
+      assert.deepEqual(next.slices[0].path_amendments, [amendment]);
+      assert.equal(next.status, "needs-human");
+      assert.deepEqual(next.terminal_result, result);
+    } finally { rmSync(direct.root, { recursive: true, force: true }); }
+
+    const ordinary = fixture("amend-ordinary-mode", { slices: [slice()] });
+    try {
+      const before = bytes(ordinary.runDir);
+      await assert.rejects(() => transition(ordinary.runDir, {
+        participants: [{ familyId: "slices", mode: "record" }],
+        apply: (state) => ({ ...state, updated_at: LATER, slices: [{
+          ...state.slices[0], paths: [...state.slices[0].paths, "docs/api.md"], path_amendments: [amendment],
+        }] }),
+      }), /paths cannot change in record/u);
+      assert.equal(bytes(ordinary.runDir), before);
+    } finally { rmSync(ordinary.root, { recursive: true, force: true }); }
   });
 });
