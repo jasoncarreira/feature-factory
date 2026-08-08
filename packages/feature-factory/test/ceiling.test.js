@@ -117,6 +117,30 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     for (const platformToken of ["OpenCode", "feature_background", "run-orchestrator", "FACTORY_SESSION_ID", "--background"]) {
       assert.equal(markdown.includes(platformToken), false, `WORKFLOW.md must stay host-neutral: ${platformToken}`);
     }
+    // These are instruction, and this pins them against silent deletion — nothing more. It cannot
+    // prove a run performs the satisfiability check or records a decision where the next run reads
+    // it; only a future run parking correctly on a contradictory brief shows that. Said plainly
+    // because a presence assertion reads like coverage and is not.
+    //
+    // Each fragment sits on one line in the raw markdown. One spanning a line wrap could never
+    // match, and would fail for a reason unrelated to the rule it guards.
+    for (const instruction of [
+      // Three of the four runs that stopped on their own brief stopped on a contradiction between
+      // two criteria, a criterion and a scope lock, or a criterion and a pinned dependency.
+      // Nothing in this workflow compared them before this.
+      "is a defect in the issue, not work to attempt",
+      // The clause that makes it enforcement rather than advice: silently satisfying the easier
+      // criterion yields a green suite and a merged change that does not do what the issue asked.
+      "Do not choose one side silently",
+      // A module split from the test asserting an exact inventory over it leaves no legal move once
+      // paths are seeded, because a slice may not edit a path it does not own.
+      "asserts an exact closed inventory over it in one",
+      // A decision living only in a host session or a sandbox artifact dies with that sandbox, and
+      // the replacement run asks the same question again.
+      "the resolution belongs in the issue body before any",
+    ]) {
+      assert.ok(markdown.includes(instruction), `WORKFLOW.md no longer instructs: ${instruction}`);
+    }
     const admissionIndex = markdown.indexOf("## Mode admission");
     const operatingModesIndex = markdown.indexOf("## Operating modes");
     const intakeIndex = markdown.indexOf("## Step 0 — Intake, run id, lock, manifest");

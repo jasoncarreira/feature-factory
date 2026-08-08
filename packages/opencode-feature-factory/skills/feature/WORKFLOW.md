@@ -136,6 +136,10 @@ Enter the parked stop with factory terminal R needs-human --reason TEXT; leave i
 For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
 Report top-level needs-human as parked with its reason and explicit factory resume command.
 Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
+A park that asks a question must also state that the resolution belongs in the issue body before any
+relaunch, because a run reads that body once at Gate 1 and neither comments nor mid-run edits reach it.
+A decision recorded only in a host session or a sandbox artifact is lost when that sandbox is discarded,
+and the replacement run asks the same question again.
 
 Every platform uses this exact gate artifact map:
 
@@ -776,6 +780,43 @@ afterwards:
 
 Present the brief **and** the plan — the waves, each slice's paths and acceptance criteria, and any
 serialized hotspots. The engineer approves the parallelization plan, not just the brief.
+
+#### Satisfiability, before the gate opens
+
+Before requesting the Brief gate, state that every acceptance criterion is simultaneously satisfiable
+with every scope lock and every pinned external constraint, naming each pair you checked and the
+evidence. A criterion that cannot hold alongside a lock, a pinned dependency version, or another
+criterion is a defect in the issue, not work to attempt: park with `needs-human`, name both sides, and
+stop. **Do not choose one side silently.**
+
+The operative word is *simultaneously*. Criteria that are each reasonable alone are how this fails; the
+defect lives in the pair, and nothing else in this workflow ever compares them. Three pairings, one for
+each way it has happened:
+
+| pairing | how it looked |
+| --- | --- |
+| criterion × criterion | "publishes with no prepared environment" beside "the factory acquires no credentials" — publishing unprepared *requires* selecting a credential |
+| criterion × scope lock | a required lock field beside a lock forbidding changes to the only reader that would accept it |
+| criterion × pinned constraint | one message chunk carrying an ordered list, against a pinned schema accepting exactly one element |
+
+Two of those three cannot be settled from the issue text alone — one needed the reader's code, one needed
+the pinned dependency's schema — which is why this runs after research rather than at intake, and why
+the check names evidence rather than asserting a conclusion. "I verified satisfiability" is a claim;
+naming the pair and the line that decides it is a check.
+
+An unsatisfiable brief does not present as confusion. It presents as an agent expanding scope to find a
+route that does not exist, which is expensive and looks like diligence: one run reached "URL-specific
+transport config, remote helpers, hooks, and ref-expanding push settings" while searching, and exhausted
+its attempts without seeding a slice. Naming the fault as the issue's stops the search.
+
+This is enforcement rather than instruction because of the last sentence. Faced with a contradiction, the
+cheap move is to satisfy the easier criterion and quietly drop the other — which yields a green suite, an
+approving review, and a merged change that does not do what the issue said. That is a false green, and it
+is the one this gate is placed to prevent.
+
+**When decomposing, keep a module and any test that asserts an exact closed inventory over it in one
+slice.** A change to the module must update that inventory atomically, and a slice cannot edit a path it
+does not own, so splitting the pair across slices leaves no legal move once paths are seeded.
 
 Open the Brief gate while slices are still empty and present the reviewed artifacts. The human loop is
 `pending` → `changes` → revise → `pending` → re-present → decision. A `changes` decision keeps slices
