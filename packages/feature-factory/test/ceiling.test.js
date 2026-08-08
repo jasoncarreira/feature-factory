@@ -25,9 +25,10 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // twelve commands; `validator` and `pr` are not built yet, so they are absent here
 // and adding them will be another visible diff.
 // All twelve commands BUILD-PLAN-SMALL.md declares are built. Issue #243 authorizes the thirteenth:
-// explicit resume is the sole transition that clears a parked needs-human stop.
+// explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
+// one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
-  "init", "status", "resume", "lock", "heartbeat", "gate", "step", "terminal",
+  "init", "status", "amend-paths", "resume", "lock", "heartbeat", "gate", "step", "terminal",
   "slices-seed", "slice", "observe", "validator", "pr", "effective-push",
 ];
 
@@ -100,11 +101,13 @@ const proseFiles = sourceFiles(pkg, [], PROSE_EXTENSIONS);
 describe("ceiling — scope cannot grow without editing this file", () => {
   it("exposes exactly the declared CLI commands, and the skill invokes only those", () => {
     assert.deepEqual(Object.keys(COMMANDS).sort(), [...CLI_COMMANDS].sort());
+    assert.deepEqual(Object.keys(COMMANDS).slice(0, 4), ["init", "status", "amend-paths", "resume"]);
     assert.deepEqual(COMMANDS.init, [
       "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode",
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
+    assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS["effective-push"], []);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
@@ -228,6 +231,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     }
     assert.deepEqual(unknown, [], "the skill documents a command or flag the CLI does not accept");
     const cliSource = readFileSync(join(pkg, "bin", "factory.js"), "utf8");
+    assert.ok(cliSource.indexOf("  factory amend-paths <run-id>") < cliSource.indexOf("  factory resume <run-id>"));
     const initPublicationSource = readFileSync(join(pkg, "bin", "init-publication.js"), "utf8");
     const readme = readFileSync(resolve(pkg, "..", "..", "README.md"), "utf8");
     assert.ok(COMMANDS.init.includes("--pr-base"));
@@ -704,8 +708,17 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // `path\n` both became `path`, and two unequal targets compared equal. Git contributes exactly
     // one record terminator, so exactly one is removed and its absence fails closed. That is the
     // same defect class as the utf8 decoding it replaced, reintroduced one layer down while fixing it.
-    assert.equal(total, 3530, "single-terminator effective-push parsing landed at 3530 production lines");
-    assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
+    // 3530 -> 3687 merging run 257 into #224's landed total: a parked, exact-owner path amendment
+    // appends audited ownership while seed admission stays empty and the slices family freshly observes
+    // the authorized session. It exists because a wrong slice plan otherwise kills the run outright --
+    // mimir 1390 blocked with a module and its exact-inventory test in different slices and no legal
+    // move, and `blocked` is final.
+    //
+    assert.equal(total, 3687, "run 257 merged with #224 lands at 3687 production lines");
+    // 3600 -> 3700, authorized by Jason. #224 and run 257 were each authorized against 3600 and
+    // neither exceeded it alone; merged they land at 3687. The growth is a command, its transition
+    // contract and a schema key, not padding.
+    assert.ok(total <= 3700, `production source is ${total} lines; the tripwire is 3700`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
@@ -742,6 +755,6 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // effective push, state relocation, and terminal handoff.
     // Issue #187 removed terminal-handoff AC20's duplicate guard; issue #234 raises 87 -> 88 for the
     // real-CLI command-authorization regression. This remains the sole executable call-site budget.
-    assert.ok(count <= 88, `${count} tests; the budget is 88`);
+    assert.equal(count, 88, `the approved catalogue has exactly 88 call sites; found ${count}`);
   });
 });

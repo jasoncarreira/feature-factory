@@ -43,16 +43,21 @@ An independently-implementable unit of the brief with:
   decision somebody made rather than one that happened. Commands use the existing shell-free whitespace
   tokenizer: do not rely on pipelines, shell expansion, environment assignment, or quote-aware parsing.
 
-**`paths` and `test_plan` are ratified when the plan is seeded and cannot be changed afterwards.**
-Every later ownership check judges against the paths recorded then, and the test waiver cannot be
-granted after the fact.
+**The original `paths` prefix and `test_plan` are ratified when the plan is seeded and cannot be changed
+afterwards.** Every later ownership check judges against the current persisted paths. The seeded prefix
+is immutable; only the `amend-paths` procedure may append a durable path amendment to an unmerged slice,
+and the test waiver can never be granted after the fact. That amendment is audited rather than authorized:
+it requires a parked run and a freshly verified owning session, and the owning driver can create both, so
+plan for correct ownership at Gate 2 rather than treating amendment as a routine escape.
 
-There is no amend-and-reseed path — `factory slices-seed` refuses a second seed and both fields are
-immutable once written, by design. If a slice turns out to need scope the plan did not give it, the
-run parks with `factory terminal <run-id> needs-human --reason "<what the plan got wrong>"`. Explicit
-resume does not amend or reseed the immutable plan. If the scope has not become sufficient through an
-external correction, the same check parks the intact run again with the same reason. That is expensive,
-which is the point: get the boundaries right here, where it costs a re-read rather than a run.
+There is no amend-and-reseed path — `factory slices-seed` refuses a second seed and `test_plan` plus the
+original path prefix are immutable, by design. If a slice turns out to need required nonprivileged scope
+the plan did not give it, the run parks with `factory terminal <run-id> needs-human --reason "<what the plan got wrong>"`.
+After the operator verifies the claim and exact lock ownership, the optional
+`amend-paths` recovery may append the concrete paths and durable reason before a separate explicit
+resume. Resume itself does not amend or reseed anything, and an unamended or privileged path still fails
+the merge. That recovery is expensive, which is the point: get the boundaries right here, where it costs
+a re-read rather than a run.
 - **`depends_on`** — the slice ids whose output this slice genuinely consumes.
 
 ## Rules (the reviewer checks these before Gate 2)

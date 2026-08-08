@@ -123,7 +123,9 @@ sandbox and validate its manifest and containment; run the post-selection exact-
 complete effective-push proof; accept branch provenance, worktree binding, seed ancestry, cleanliness,
 recovery, and every operator-ref recheck; rerun the final exact-ref guard immediately before claim;
 claim or justifiably steal and verify fresh ownership plus the unchanged parked result; run
-`factory resume <run-id> --session <id> --repo <sandbox>` and verify running status, unchanged historical result, real
+an optional `factory amend-paths <run-id> <slice-id> --add <path> [--add <path> ...] --reason <text>
+--session <id> --repo <sandbox>` only when the verified cause is missing ownership on an unmerged slice;
+then run `factory resume <run-id> --session <id> --repo <sandbox>` and verify running status, unchanged historical result, real
 next action, and the same owner; replay only existing post-lock reconciliation for an already-recorded
 merge; then continue solely from the newly qualified `status.next`.
 
@@ -133,6 +135,14 @@ resume. Resume changes only `status` and `updated_at`; it preserves the original
 progress. A resumed recorded merge still traverses the existing clean-head, retry-safety, evidence, and
 repository-verification path. An unresolved repair-journal record is separate and remains
 publication-blocking. If the cause was not fixed, the run may park again with the same reason.
+
+The optional amendment runs while the status remains `needs-human`, after fresh exact owner
+verification and before resume. It appends repository-relative, nonprivileged paths in request order and
+records their verbatim reason, session, and timestamp in `path_amendments`; the original path prefix and
+`test_plan` stay immutable. It never resolves or requires path existence, and another slice may already
+own the same path. Duplicate, target-already-owned, malformed, privileged, replayed, or merged-slice
+requests refuse atomically. Resume never amends or reseeds. A merge continues to refuse every unamended
+or privileged changed path.
 
 `resolve`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.

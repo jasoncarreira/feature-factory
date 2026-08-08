@@ -51,6 +51,22 @@ const envelope = contract({
   }),
   validateTransition: ({ mode, before, after, current, candidate }) => {
     if (before.status === "needs-human") {
+      if (mode === "amend-paths") {
+        if (after.status !== "needs-human") throw new Error("amend-paths must preserve parked status");
+        if (!isDeepStrictEqual(after.terminal_result, before.terminal_result)) {
+          throw new Error("amend-paths must preserve terminal_result");
+        }
+        if (Date.parse(after.updated_at) <= Date.parse(before.updated_at)) {
+          throw new Error("amend-paths must move updated_at forwards");
+        }
+        for (const key of Object.keys(before).filter((key) => key !== "updated_at")) {
+          if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`amend-paths cannot change envelope.${key}`);
+        }
+        for (const key of Object.keys(current).filter((key) => !Object.hasOwn(before, key) && key !== "slices")) {
+          if (!isDeepStrictEqual(current[key], candidate[key])) throw new Error(`amend-paths cannot change run.${key}`);
+        }
+        return;
+      }
       if (mode !== "resume-needs-human") throw new Error("a needs-human run must be resumed before any transition");
       if (after.status !== "running") throw new Error("resume-needs-human must change status to running");
       if (!isDeepStrictEqual(after.terminal_result, before.terminal_result)) {
@@ -67,6 +83,7 @@ const envelope = contract({
       }
       return;
     }
+    if (mode === "amend-paths") throw new Error(`amend-paths requires current status needs-human; found '${before.status}'`);
     if (mode === "resume-needs-human") throw new Error(`resume-needs-human requires current status needs-human; found '${before.status}'`);
     // Identity is immutable for the life of a run. Nothing legitimate renames a
     // run, and allowing it would let a transition retarget another run's record.
@@ -201,7 +218,16 @@ const steps = contract({
 // undefined and this guard threw before checking anything. It read as enforcement
 // and was dead. The end-to-end test caught it; the unit tests could not, because
 // they called the path helpers directly and never went through the hook.
-async function refuseUnownedMerge({ mode, current, candidate, observe }) {
+async function reobserveSlices({ mode, current, candidate, observe }) {
+  if (mode === "amend-paths") {
+    if (typeof observe !== "function") throw new Error("amend-paths requires a session-owner observer");
+    const changed = candidate.find((slice, index) => !isDeepStrictEqual(slice, current[index]));
+    const observed = await observe(changed);
+    if (observed?.authorized_session !== changed?.path_amendments?.at(-1)?.session) {
+      throw new Error("amend-paths requires exact observed session ownership");
+    }
+    return;
+  }
   if (mode !== "merge") return;
   const priorSlices = Array.isArray(current) ? current : [];
   const nextSlices = Array.isArray(candidate) ? candidate : [];
@@ -233,13 +259,49 @@ async function refuseUnownedMerge({ mode, current, candidate, observe }) {
 
 const slices = contract({
   id: "slices",
-  reobserve: refuseUnownedMerge,
+  reobserve: reobserveSlices,
   project: (state) => (state.slices ?? []).map((slice) => ({ ...slice })),
-  validateTransition: ({ before, after, candidate }) => {
+  validateTransition: ({ mode, before, after, candidate }) => {
+    if (mode === "amend-paths") {
+      if (before.length !== after.length) throw new Error("amend-paths cannot add or remove slices");
+      const changed = after.map((slice, index) => ({ slice, index }))
+        .filter(({ slice, index }) => !isDeepStrictEqual(slice, before[index]));
+      if (changed.length !== 1) throw new Error("amend-paths must change exactly one slice");
+      const { slice, index } = changed[0];
+      const prior = before[index];
+      if (prior.id !== slice.id) throw new Error("amend-paths cannot reorder or replace slices");
+      if (prior.status === "merged") throw new Error(`slice '${prior.id}' is already merged`);
+      for (const key of new Set([...Object.keys(prior), ...Object.keys(slice)])) {
+        if (!["paths", "path_amendments"].includes(key) && !isDeepStrictEqual(prior[key], slice[key])) {
+          throw new Error(`amend-paths cannot change slice '${prior.id}' ${key}`);
+        }
+      }
+      const priorPaths = prior.paths ?? [];
+      const addedPaths = slice.paths?.slice(priorPaths.length) ?? [];
+      if (addedPaths.length === 0 || !isDeepStrictEqual(slice.paths.slice(0, priorPaths.length), priorPaths)) {
+        throw new Error(`amend-paths must append paths to slice '${prior.id}'`);
+      }
+      const priorHistory = prior.path_amendments ?? [];
+      const nextHistory = slice.path_amendments;
+      if (!Array.isArray(nextHistory) || nextHistory.length !== priorHistory.length + 1
+        || !isDeepStrictEqual(nextHistory.slice(0, priorHistory.length), priorHistory)) {
+        throw new Error(`amend-paths must append one history record to slice '${prior.id}'`);
+      }
+      const amendment = nextHistory.at(-1);
+      if (!isDeepStrictEqual(amendment.added_paths, addedPaths) || amendment.at !== candidate.updated_at) {
+        throw new Error(`amend-paths history must match slice '${prior.id}' path additions and updated_at`);
+      }
+      return;
+    }
     const priorById = new Map(before.map((slice) => [slice.id, slice]));
     for (const slice of after) {
       const prior = priorById.get(slice.id);
-      if (!prior) continue; // seeding from plan/slices.json
+      if (!prior) {
+        if (mode === "seed" && !isDeepStrictEqual(slice.path_amendments, [])) {
+          throw new Error(`seeded slice '${slice.id}' path_amendments must start empty`);
+        }
+        continue;
+      }
       // Finding 3: base_ref was replaceable on every update, so supplying the slice
       // head as its own base made the diff empty and every ownership check vacuous.
       // It is the branch point, which is a fact about the past: writable once, then
@@ -247,13 +309,11 @@ const slices = contract({
       if (prior.base_ref && slice.base_ref !== prior.base_ref) {
         throw new Error(`slice '${slice.id}' base_ref is immutable once recorded`);
       }
-      // The gate ratified these two at seeding. Widening `paths` afterwards would make
-      // every ownership check judge against a set nobody approved; emptying `test_plan`
-      // afterwards would waive the tests after the fact. Both were only immutable by the
-      // CLI declining to write them, which is not the same as being immutable.
-      for (const field of ["paths", "test_plan"]) {
+      // Enforcement: only amend-paths may append authorized ownership and its audit record;
+      // every other transition keeps ownership, history, and the ratified test plan immutable.
+      for (const field of ["paths", "path_amendments", "test_plan"]) {
         if (JSON.stringify(prior[field]) !== JSON.stringify(slice[field])) {
-          throw new Error(`slice '${slice.id}' ${field} is ratified at seeding and cannot change`);
+          throw new Error(`slice '${slice.id}' ${field} cannot change in ${mode ?? "an undeclared mode"}`);
         }
       }
       if (slice.attempts < prior.attempts) throw new Error(`slice '${slice.id}' attempts cannot decrease`);
