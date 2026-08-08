@@ -140,9 +140,16 @@ A park that asks a question about the request itself -- a contradiction between 
 or a pinned constraint -- is not fixed by resuming. Resume continues from the existing manifest and
 `status.next`; it does not re-resolve the issue, re-read `ISSUE_PAYLOAD`, or regenerate the story or
 brief, so an edited issue body cannot reach the artifacts a retained run will keep using. The supported
-route is to record the decision in the issue body, abandon this run, and launch a replacement that reads
-it at Gate 1. Resume is for external causes -- a timeout, an outage, credentials, an unclean tree -- where
-the run's own artifacts are still correct.
+route is: record the decision in the issue body, then have the operator remove the retained sandbox
+directory, then launch the issue again. Removing the sandbox takes the manifest with it -- the control
+plane lives inside -- so the deterministic run id is free and `factory init` creates a genuinely new run
+that reads the edited body at Gate 1. There is no CLI transition for this: `terminal` refuses a parked
+run, and `factory init` refuses while either manifest candidate exists, so a relaunch without the removal
+reselects the parked run instead of replacing it. OPERATING.md carries the command and its cost --
+everything held only in that sandbox is lost, including merged slices whose branches were never pushed,
+so push anything worth keeping first.
+Resume is for external causes -- a timeout, an outage, credentials, an unclean tree -- where the run's own
+artifacts are still correct.
 State that route in the park reason, because a decision recorded only in a host session or a sandbox
 artifact is lost with that sandbox, and the replacement run asks the same question again.
 

@@ -141,7 +141,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // manifest and never re-reads the issue, so the edited body cannot reach a retained run's
       // artifacts. The route is record, abandon, replace — and this pins that it says so.
       "The supported",
-      "route is to record the decision in the issue body, abandon this run, and launch a replacement",
+      "route is: record the decision in the issue body, then have the operator remove the retained sandbox",
+      // The reason the removal is load-bearing rather than incidental: without it a relaunch
+      // reselects the parked run, because the run id is deterministic and init refuses to collide.
+      "reselects the parked run instead of replacing it",
     ]) {
       assert.ok(markdown.includes(instruction), `WORKFLOW.md no longer instructs: ${instruction}`);
     }
