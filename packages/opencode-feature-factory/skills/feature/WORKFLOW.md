@@ -217,19 +217,28 @@ The optional repository-owned file is `$O/.factory.json`:
   "verify": "<non-empty shell command>",
   "publish": "<non-empty shell command>",
   "publishing_identity": "<non-empty account name>",
-  "verify_timeout_ms": 900000
+  "verify_timeout_ms": 900000,
+  "bootstrap": "<non-empty shell command>",
+  "bootstrap_timeout_ms": 900000
 }
 ```
 
 The root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and
-`publishing_identity`, plus only the optional own property `verify_timeout_ms`. `resolve`, `verify`, and
-`publish` are the only commands and must each be a non-empty command string. `publishing_identity` is
-a static non-empty publishing account name in the file itself, not a command, token, credential, or
-command result. If present, `verify_timeout_ms` must be a positive safe integer; omission silently
-defaults repository verification to `900000` milliseconds. Unknown or missing required properties,
-invalid JSON, unreadable content, wrong types, and empty or whitespace-only required values make a
-present file malformed. Validate all required entries and the optional timeout before executing
-`resolve`. Retain the validated `publishing_identity` string exactly as parsed, without trimming,
+`publishing_identity`, plus only the optional own properties `verify_timeout_ms`, `bootstrap`, and
+`bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
+command must be non-empty. `publishing_identity` is a static non-empty publishing account name in the
+file itself, not a command, token, credential, or command result. Both timeout values must be positive
+safe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`.
+`verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;
+neither timeout shares or consumes the other's budget.
+
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
+
+The two bootstrap keys are known keys. Invalid `bootstrap` outranks missing required entries and every
+timeout defect, including an invalid or otherwise orphaned bootstrap timeout. An orphaned
+`bootstrap_timeout_ms` outranks its own invalid shape, and a valid bootstrap with an invalid timeout
+names only `bootstrap_timeout_ms`. Validate this order before executing `resolve`.
+Retain the validated `publishing_identity` string exactly as parsed, without trimming,
 normalizing, case-folding, or reserializing it, as `DECLARED_PUBLISHING_IDENTITY` for this driver
 invocation. Do not tighten the existing non-whitespace validation to the observed-login grammar.
 Credential values must not appear in the file; command strings may refer only to credentials supplied
@@ -242,8 +251,14 @@ and refuse exactly:
 
 > invalid factory config: .factory.json; no session or run created.
 
-An invalid present `verify_timeout_ms` instead refuses exactly:
+The named config refusals are exactly:
 
+> invalid factory config: .factory.json entry 'bootstrap' must be a non-empty string; no session or run created.
+>
+> invalid factory config: .factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command; no session or run created.
+>
+> invalid factory config: .factory.json entry 'bootstrap_timeout_ms' must be a positive integer; no session or run created.
+>
 > invalid factory config: .factory.json entry 'verify_timeout_ms' must be a positive integer; no session or run created.
 
 This refusal stops under the same effect-free boundary as every configured resolver refusal below.
@@ -326,9 +341,8 @@ cannot widen its own configuration. It lived under the gitignored `.factory/` ru
 `.factory/` is gitignored, so the file could not be committed and never reached a sandbox clone, which
 made the `verify` and unconsumed `publish` entries impossible and left this repository unable to resolve
 a reference from a fresh checkout. For configured resolver execution, add no helper module,
-command runner, parser service, additional `.factory.json` command consumer beyond the exact
-`verify` consumer below, plugin bridge,
-transport, protocol, or CLI command. Add no resolver cache, payload handoff, manifest or session
+command runner, parser service, plugin bridge, transport, protocol, or CLI command. Add no resolver
+cache, payload handoff, manifest or session
 field, generated asset, or `run.json` key. If a host adapter transfers execution to another run
 driver, that driver independently derives its own payload through this same policy; the adapter does
 not forward or persist the resolver payload. A configured resolver must therefore be deterministic and read-only.
@@ -340,20 +354,32 @@ against the expected canonical ID before any CLI effect. The adapter never trans
 
 For `resolve`, use the ordinary shell result directly. Add no stderr redirection or suppression rule,
 separate capture policy, output channel, buffering, truncation, redaction, output-size limit, timeout,
-retry, or fallback after any configured resolver result or failure. The optional timeout and bounded
-retry below apply only to repository `verify` shell attempts, never to `resolve`, slice observation, or
-Gate 3 commands. Do not change platform placement, background-tool, title-association, host-session, or
-publication behavior. `story-reader` remains lookup-free and capability-free beyond its existing generic read tools.
+retry, or fallback after any configured resolver result or failure. The verify timeout and bounded retry
+below apply only to repository `verify` shell attempts; the bootstrap timeout applies only to CLI-owned
+init and explicit resume. Neither applies to `resolve`, slice observation, or Gate 3 commands. Do not
+change platform placement, background-tool, title-association, host-session, or publication behavior.
+`story-reader` remains lookup-free and capability-free beyond its existing generic read tools.
 
 `resolve`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
+
+Configured `bootstrap` is consumed only by CLI-owned fresh init and explicit resume; the workflow consumer validates it but never executes it itself.
 
 Effective push-target capture and comparison are active through the package-owned <code>factory effective-push</code> command; they are not deferred to configured `publish`.
 
 | Entry | Declared input | Return shape | Failure meaning | Current behavior |
 |---|---|---|---|---|
+| `bootstrap` | Exact configured string as one shell command with `shell: true`, inherited environment and stdin, cwd exactly the selected sandbox, and child stdout and stderr both routed to CLI stderr. Each execution receives its own `bootstrap_timeout_ms`, independently `900000` when omitted. | Numeric exit status or unavailable `null`; output is visible on CLI stderr and never parsed | Clean zero succeeds; dirty or unobservable tracked state outranks unavailable or nonzero exit | Invoked by the CLI once during configured fresh init and again on every explicit configured resume; never invoked by resolver, merge verification or replay, direct repository verification, slice or Gate 3 observation, effective push, or publication. |
 | `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status means unavailable | Invoked after each newly recorded merge through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
 | `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |
 | `publishing_identity` | No runtime input; retain the raw validated config string for this driver invocation | Exact case-sensitive string compared with the observed login | Missing, non-string, or whitespace-only makes the config malformed; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; absent config preserves existing behavior. |
+
+When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.
+
+Bootstrap cleanliness examines tracked worktree and index paths only; untracked dependency output is ignored.
+
+Bootstrap has an independent `900000` millisecond default and budget; it does not change resolver, verify, configured publish, effective-push, push, PR, or Gate 3 behavior.
+
+A successful configured attempt stores the exact command in `bootstrap_command` and the numeric result in paired `bootstrap_exit`; status output remains unchanged.
 
 #### Remaining intake classification
 
@@ -412,6 +438,10 @@ Resume order 6 — claim with the current host session or perform a justified ex
 Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.
 Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.
 Resume order 9 — continue solely from the newly qualified status.next.
+
+For configured order 7, the CLI binds the exact raw `run.json` bytes, the validated parked manifest, a forward `updated_at`, and the exact fresh owner before running bootstrap while durable status remains `needs-human`. It reruns the command on every explicit resume. Before transition and again immediately before rename, it requires byte-identical `run.json`, semantic equality with the bound manifest, and the same owner with a nondecreasing heartbeat. Every factory-mediated claim, force-steal, refresh, and release holds `run-json.lock`, so owner writes serialize with the final manifest guard.
+
+A clean zero records the command and exit `0`, advances `updated_at`, and changes status to `running` while preserving progress and the historical terminal result. An ordinary failure with intact bindings records the exact command and integer or `null` result, advances `updated_at`, remains `needs-human`, preserves progress and the historical result, and refuses; a later explicit resume reruns bootstrap. Changed or malformed manifest bytes, or an absent, stale, or different owner, are binding loss rather than ordinary failure: preserve current bytes and ownership, add no bootstrap evidence, and do not unpark.
 
 When the parked cause is an insufficient ownership declaration for an existing unmerged slice, the
 operator may insert exactly one optional action after order 6 has verified the fresh exact owner and
@@ -518,13 +548,23 @@ INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORK
 
 The init request pre-reserves the deterministic sandbox, performs exactly one
 `git clone --local -- O S`, completes the physical containment proof, and only then publishes
-`run.json`. The skill does not construct or prove the sandbox. A refused or uncertain init retains its
+`run.json`. Before publication, it observes the PR base and lets the CLI parse and, when declared,
+execute the cloned sandbox's bootstrap. The CLI submits the exact command unchanged with `shell: true`, inherited environment and
+stdin, and cwd exactly `S`; child stdout and stderr both route to CLI stderr so `init --json` stdout stays
+exactly one response object. It observes tracked worktree and index paths after every execution and
+refuses unobservable state before dirty paths, then dirty paths before unavailable or nonzero exit.
+Only clean numeric zero publishes paired manifest evidence and makes the run usable before any gate or
+slice work. The skill does not construct or prove the sandbox. It never executes bootstrap itself. A failed, timed-out,
+dirty, or unobservable configured init emits no JSON stdout and leaves `run.json` absent.
+A refused or uncertain init retains its
 reported state and path for inspection; do not substitute another destination or repeat init. Only a
 successful JSON response selects paths. Bind `RUN_REPO` from its exact canonical `sandbox_path`,
 `RUN_DIR` from its exact absolute `run_dir`, `FEATURE_BRANCH` from its exact `branch`, the integration
 worktree by resolving its exact `worktree` under `RUN_REPO`, and `PR_BASE` from its exact `pr_base`.
 Then bind `RUN_MANIFEST` and `SLICE_ROOT` from those returned roots as above. Reject a missing, extra,
 relative, escaping, mismatched, or unobservable response value.
+
+A configured fresh-init failure retains the deterministic sandbox, emits no init JSON stdout, and leaves `run.json` absent.
 
 Immediately after fresh selection, and immediately after every sandbox resume selection, recheck
 `FEATURE_REF` in `O` with the same exact ref-absent requirement. This post-selection guard runs before

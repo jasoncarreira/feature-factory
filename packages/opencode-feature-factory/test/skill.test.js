@@ -16,5 +16,15 @@ describe("OpenCode skill adapter", () => {
     assert.match(skill, /feature_background/u);
     assert.match(skill, /FACTORY_SESSION_ID/u);
     assert.deepEqual(bundledWorkflow, canonicalWorkflow);
+    const workflow = bundledWorkflow.toString("utf8");
+    const firstMatch = "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.";
+    const noOp = "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.";
+    const checkBootstrapPolicy = (text) => {
+      if (!text.includes(firstMatch)) throw new Error("bootstrap-first-match");
+      if (!text.includes(noOp)) throw new Error("bootstrap-absence-no-op");
+    };
+    checkBootstrapPolicy(workflow);
+    assert.throws(() => checkBootstrapPolicy(workflow.replace(firstMatch, "")), /bootstrap-first-match/u);
+    assert.throws(() => checkBootstrapPolicy(workflow.replace(noOp, "")), /bootstrap-absence-no-op/u);
   });
 });
