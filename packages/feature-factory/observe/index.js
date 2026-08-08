@@ -78,23 +78,25 @@ export function observeCleanliness(worktree, options = {}) {
 }
 
 export function runBootstrap(worktree, command, timeoutMs = DEFAULT_BOOTSTRAP_TIMEOUT_MS, { runner = spawnSync } = {}) {
-  const result = runner(command, [], {
-    cwd: worktree, shell: true, env: process.env, timeout: timeoutMs,
-    stdio: ["inherit", process.stderr, process.stderr],
-  });
-  return Number.isSafeInteger(result?.status) && result.status >= 0 ? result.status : null;
+  try {
+    const result = runner(command, [], {
+      cwd: worktree, shell: true, env: process.env, timeout: timeoutMs, stdio: ["inherit", process.stderr, process.stderr],
+    });
+    return Number.isSafeInteger(result?.status) && result.status >= 0 ? result.status : null;
+  } catch { return null; }
 }
 
 export function observeTrackedCleanliness(worktree, options = {}) {
-  const top = git(worktree, ["rev-parse", "--show-toplevel"], options);
-  const probes = [
-    git(worktree, ["--literal-pathspecs", "diff", "--name-only", "-z"], options),
-    git(worktree, ["--literal-pathspecs", "diff", "--cached", "--name-only", "-z"], options),
-  ];
-  if (!top.ok || realpathSync(resolve(worktree, top.stdout.trim())) !== realpathSync(worktree)
-    || probes.some((probe) => !probe.ok)) return { observed: false, entries: [] };
-  const entries = [...new Set(probes.flatMap((probe) => probe.stdout.split("\0").filter(Boolean)))].sort();
-  return { observed: true, entries };
+  try {
+    const top = git(worktree, ["rev-parse", "--show-toplevel"], options);
+    const probes = [
+      git(worktree, ["--literal-pathspecs", "diff", "--name-only", "-z"], options),
+      git(worktree, ["--literal-pathspecs", "diff", "--cached", "--name-only", "-z"], options),
+    ];
+    if (!top.ok || realpathSync(resolve(worktree, top.stdout.trim())) !== realpathSync(worktree)
+      || probes.some((probe) => !probe.ok)) return { observed: false, entries: [] };
+    return { observed: true, entries: [...new Set(probes.flatMap((probe) => probe.stdout.split("\0").filter(Boolean)))].sort() };
+  } catch { return { observed: false, entries: [] }; }
 }
 
 export function observeAncestry(worktree, ancestor, descendant, options = {}) {

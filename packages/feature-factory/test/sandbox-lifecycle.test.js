@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { dispatchInit } from "../bin/factory.js";
-import { runBootstrap } from "../observe/index.js";
+import { observeTrackedCleanliness, runBootstrap } from "../observe/index.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -142,6 +142,16 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.deepEqual({ dev: statSync(sandboxObject).dev, ino: statSync(sandboxObject).ino }, { dev: statSync(sourceObject).dev, ino: statSync(sourceObject).ino });
     for (const path of ["plan", "artifacts", "evidence", "reviews"]) assert.equal(realpathSync(join(result.response.run_dir, path)), join(result.response.run_dir, path));
     assert.equal(realpathSync(join(sandbox, ".factory", "worktrees", runId)), join(sandbox, ".factory", "worktrees", runId));
+    assert.equal(runBootstrap(sandbox, "accepted\0command", 1000, { runner: () => { throw new TypeError("spawn rejected argv"); } }), null);
+    let canonicalizationProbes = 0;
+    const canonicalizationFailure = observeTrackedCleanliness(sandbox, { runner: (_command, args) => {
+      canonicalizationProbes += 1;
+      return { status: 0, stdout: args.includes("rev-parse") ? join(root, "missing-top-level") : "", stderr: "" };
+    } });
+    assert.deepEqual(canonicalizationFailure, { observed: false, entries: [] });
+    assert.equal(canonicalizationProbes, 3, "all Git probes complete before top-level canonicalization is classified");
+    assert.deepEqual(observeTrackedCleanliness(sandbox, { runner: () => { throw new Error("Git probe failed"); } }),
+      { observed: false, entries: [] });
 
     const failedSource = operator(root, "clone-failure");
     const failedRecord = recorder(join(root, "failure-recorder"));
@@ -377,6 +387,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       { name: "dirty", command: "node -e \"require('fs').writeFileSync('tracked dirty.txt','changed');process.exit(7)\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u },
       { name: "staged", command: "node -e \"require('fs').writeFileSync('tracked dirty.txt','staged');require('child_process').execFileSync('git',['add','tracked dirty.txt'])\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u },
       { name: "unobservable", command: "node -e \"require('fs').renameSync('.git','.git-gone');process.exit(7)\"", timeout: 120000, match: /could not observe tracked paths after init/u },
+      { name: "throw", command: "bootstrap-throw-secret\0", timeout: 120000, match: /failed during init; exit status unavailable/u, hidden: "bootstrap-throw-secret" },
       { name: "exit", command: "node -e \"process.exit(7)\"", timeout: 120000, match: /failed during init with exit status 7/u },
       { name: "timeout", command: "node -e \"setTimeout(()=>{},10000)\"", timeout: 20, match: /failed during init; exit status unavailable/u },
     ];
@@ -393,6 +404,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       assert.equal(observed.ok, false, row.name);
       assert.equal(observed.stdout, "", row.name);
       assert.match(observed.stderr, row.match, row.name);
+      if (row.hidden) assert.doesNotMatch(observed.stderr, new RegExp(row.hidden, "u"), "spawn refusals must not expose command text");
       assert.match(observed.stderr, /sandbox .* was retained; run\.json is absent/u, row.name);
       assert.equal(existsSync(join(failedBootstrapSource, ".factory-sandboxes", `bootstrap-${row.name}`, ".factory", `bootstrap-${row.name}`, "run.json")), false);
     }
