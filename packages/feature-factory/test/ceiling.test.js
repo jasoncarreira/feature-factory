@@ -117,6 +117,37 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     for (const platformToken of ["OpenCode", "feature_background", "run-orchestrator", "FACTORY_SESSION_ID", "--background"]) {
       assert.equal(markdown.includes(platformToken), false, `WORKFLOW.md must stay host-neutral: ${platformToken}`);
     }
+    // These are instruction, and this pins them against silent deletion — nothing more. It cannot
+    // prove a run performs the satisfiability check or records a decision where the next run reads
+    // it; only a future run parking correctly on a contradictory brief shows that. Said plainly
+    // because a presence assertion reads like coverage and is not.
+    //
+    // Each fragment sits on one line in the raw markdown. One spanning a line wrap could never
+    // match, and would fail for a reason unrelated to the rule it guards.
+    for (const instruction of [
+      // Three of the four runs that stopped on their own brief stopped on a contradiction between
+      // two criteria, a criterion and a scope lock, or a criterion and a pinned dependency.
+      // Nothing in this workflow compared them before this.
+      "is a defect in the issue, not work to attempt",
+      // The risk the instruction names, and the reason it is worth writing down even unenforced:
+      // silently satisfying the easier criterion yields a green suite and a merged change that does
+      // not do what the issue asked. Enforcing it would need the pairs recorded in the brief
+      // artifact and the gate refusing without them, which is a schema change and is not here.
+      "Do not choose one side silently",
+      // A module split from the test asserting an exact inventory over it leaves no legal move once
+      // paths are seeded, because a slice may not edit a path it does not own.
+      "asserts an exact closed inventory over it in one",
+      // A brief-level contradiction cannot be fixed by resuming: resume continues from the existing
+      // manifest and never re-reads the issue, so the edited body cannot reach a retained run's
+      // artifacts. The route is record, abandon, replace — and this pins that it says so.
+      "The supported",
+      "route is: record the decision in the issue body, then have the operator remove the retained sandbox",
+      // The reason the removal is load-bearing rather than incidental: without it a relaunch
+      // reselects the parked run, because the run id is deterministic and init refuses to collide.
+      "reselects the parked run instead of replacing it",
+    ]) {
+      assert.ok(markdown.includes(instruction), `WORKFLOW.md no longer instructs: ${instruction}`);
+    }
     const admissionIndex = markdown.indexOf("## Mode admission");
     const operatingModesIndex = markdown.indexOf("## Operating modes");
     const intakeIndex = markdown.indexOf("## Step 0 — Intake, run id, lock, manifest");
