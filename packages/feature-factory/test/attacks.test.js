@@ -13,6 +13,7 @@ import { coordinateRunJsonTransition } from "../core/write-core.js";
 import { readRun } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { validateRun } from "../state/schema.js";
+import { claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock } from "../state/session-lock.js";
 
 const NOW = "2026-07-30T12:00:00.000Z";
 const LATER = "2026-07-30T12:05:00.000Z";
@@ -142,6 +143,16 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
       { status: "needs-human", reason: "external cause" });
     assert.deepEqual(validateRun(baseRun({ status: "needs-human", terminal_result: { status: "needs-human", reason: "external cause" } })).terminal_result,
       { status: "needs-human", reason: "external cause" });
+    const bootstrapped = validateRun(baseRun({ bootstrap_command: "npm ci", bootstrap_exit: 0 }));
+    assert.deepEqual({ command: bootstrapped.bootstrap_command, exit: bootstrapped.bootstrap_exit }, { command: "npm ci", exit: 0 });
+    assert.equal(Object.hasOwn(validateRun(baseRun()), "bootstrap_command"), false, "legacy absence remains valid");
+    for (const [overrides, pattern] of [
+      [{ bootstrap_command: "npm ci" }, /present exactly when bootstrap_exit/u],
+      [{ bootstrap_exit: 0 }, /present exactly when bootstrap_exit/u],
+      [{ bootstrap_command: " ", bootstrap_exit: 0 }, /must be a non-empty string/u],
+      [{ bootstrap_command: "npm ci", bootstrap_exit: -1 }, /must be a non-negative integer/u],
+      [{ bootstrap_command: "npm ci", bootstrap_exit: 1.5 }, /must be a non-negative integer/u],
+    ]) assert.throws(() => validateRun(baseRun(overrides)), pattern);
     const amendedSlice = {
       id: "be", stack: "backend", depends_on: [], status: "pending", worktree: null, branch: null,
       attempts: 1, paths: ["src/", "docs/api.md"], test_plan: ["npm test"], base_ref: null,
@@ -206,6 +217,30 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
       releaseHolder?.();
       await holder?.catch(() => {});
       rmSync(f.root, { recursive: true, force: true });
+    }
+
+    for (const [name, operation, after] of [
+      ["claim", (runDir) => claimSessionLock(runDir, { session: "owner-b", runId: "app-1", branch: "branch" }), async (attempt) => assert.rejects(attempt, /held by session owner-a/u)],
+      ["force-steal", (runDir) => claimSessionLock(runDir, { session: "owner-b", runId: "app-1", branch: "branch", force: true }), async (attempt) => assert.equal((await attempt).session, "owner-b")],
+      ["heartbeat", (runDir) => refreshSessionLock(runDir, { session: "owner-a", now: Date.parse(LATER) }), async (attempt) => assert.equal((await attempt).heartbeat_at, LATER)],
+      ["release", (runDir) => releaseSessionLock(runDir, { session: "owner-a" }), async (attempt) => assert.equal((await attempt).released, true)],
+    ]) {
+      const locked = fixture(`owner-operation-${name}`);
+      let releaseOperation;
+      let markOperationHeld;
+      const releaseLock = new Promise((resolve) => { releaseOperation = resolve; });
+      const lockHeld = new Promise((resolve) => { markOperationHeld = resolve; });
+      const ownerAt = new Date().toISOString();
+      writeFileSync(join(locked.runDir, "factory.lock"), `${JSON.stringify({ session: "owner-a", run_id: "app-1", branch: "branch", claimed_at: ownerAt, heartbeat_at: ownerAt })}\n`);
+      const holder = withRunJsonLock(locked.runDir, async () => { markOperationHeld(); await releaseLock; });
+      await lockHeld;
+      const attempt = operation(locked.runDir);
+      const pending = Symbol("pending");
+      assert.equal(await Promise.race([attempt.then(() => "settled", () => "settled"), new Promise((resolve) => setTimeout(() => resolve(pending), 25))]), pending, name);
+      releaseOperation();
+      await holder;
+      await after(attempt);
+      rmSync(locked.root, { recursive: true, force: true });
     }
   });
 });
@@ -316,6 +351,11 @@ describe("attack 11 — a concurrent writer changes run.json mid-transition", ()
           return validateRun(state);
         },
         reobservers: new Map([["envelope", async () => events.push("reobserver")]]),
+        finalGuard: ({ state, candidate: guardedCandidate }) => {
+          events.push("final guard");
+          assert.equal(state.updated_at, NOW);
+          assert.equal(guardedCandidate.updated_at, LATER);
+        },
       });
       assert.deepEqual(events, [
         "initial validation",
@@ -323,9 +363,36 @@ describe("attack 11 — a concurrent writer changes run.json mid-transition", ()
         "first CAS validation",
         "reobserver",
         "second CAS validation",
+        "final guard",
       ]);
       assert.equal(candidate.pr_url, "https://example.test/pr/ordered");
       assert.deepEqual(readRun(f.runDir), candidate);
+
+      const before = bytes(f.runDir);
+      for (const finalGuard of [() => { throw new Error("final refusal"); }, () => Promise.resolve()]) {
+        await assert.rejects(() => coordinateRunJsonTransition(f.runDir, {
+          contracts: FAMILY_CONTRACTS, descriptor: descriptor((state) => ({ ...state, issue_key: "guarded" })),
+          validateRun, finalGuard,
+        }), (error) => /final refusal|must be synchronous/u.test(`${error.message}\n${error.cause?.message ?? ""}`));
+        assert.equal(bytes(f.runDir), before);
+      }
+      const ownerAt = new Date().toISOString();
+      writeFileSync(join(f.runDir, "factory.lock"), `${JSON.stringify({ session: "owner-a", run_id: "app-1", branch: "branch", claimed_at: ownerAt, heartbeat_at: ownerAt })}\n`);
+      let competitor;
+      let competitorSettled = false;
+      const guarded = await coordinateRunJsonTransition(f.runDir, {
+        contracts: FAMILY_CONTRACTS,
+        descriptor: descriptor((state) => ({ ...state, issue_key: "published-before-turnover" })),
+        validateRun,
+        finalGuard: () => {
+          competitor = claimSessionLock(f.runDir, { session: "owner-b", runId: "app-1", branch: "branch" });
+          competitor.then(() => { competitorSettled = true; }, () => { competitorSettled = true; });
+          assert.equal(competitorSettled, false, "owner turnover remains pending behind run-json.lock at the final seam");
+        },
+      });
+      assert.equal(guarded.issue_key, "published-before-turnover");
+      await assert.rejects(competitor, /held by session owner-a/u);
+      assert.equal(inspectSessionLock(f.runDir).owner.session, "owner-a");
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 });
@@ -348,6 +415,7 @@ describe("family contracts refuse transitions the schema alone would allow", () 
     // decision verifiable — the factory cannot tell a human's approval from an agent's, both being the
     // same command — it makes the recorded intent durable.
     ["mode cannot change after init", (state) => ({ ...state, mode: "autonomous", updated_at: LATER }), /envelope\.mode is immutable/u],
+    ["bootstrap evidence changes only during bootstrap resume", (state) => ({ ...state, bootstrap_exit: 0, updated_at: LATER }), /may change only during bootstrap resume/u, { bootstrap_command: "npm ci", bootstrap_exit: 7 }],
     ["updated_at cannot move backwards", (state) => ({ ...state, updated_at: "2026-07-29T00:00:00.000Z" }), /cannot move backwards/u],
     ["a gate cannot open already approved", (state) => ({ ...state, updated_at: LATER, gates: { ...state.gates, brief: { status: "approved", at: LATER, artifact: null } } }), /must open as pending/u],
     ["a decided gate cannot be re-decided", (state) => ({ ...state, updated_at: LATER, gates: { story: { status: "approved", at: LATER, artifact: "artifacts/story.md" } } }), null],
@@ -443,7 +511,7 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       } finally { rmSync(notParked.root, { recursive: true, force: true }); }
     }
 
-    const parked = fixture("resume-ok", { status: "needs-human", terminal_result: result });
+    const parked = fixture("resume-ok", { status: "needs-human", terminal_result: result, bootstrap_command: "npm ci", bootstrap_exit: 7 });
     try {
       const next = await transition(parked.runDir, {
         participants: [{ familyId: "envelope", mode: "resume-needs-human" }],
@@ -451,6 +519,7 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       });
       assert.equal(next.status, "running");
       assert.deepEqual(next.terminal_result, result);
+      assert.deepEqual({ command: next.bootstrap_command, exit: next.bootstrap_exit }, { command: "npm ci", exit: 7 });
       assert.deepEqual(Object.keys(next), Object.keys(parked.run));
     } finally { rmSync(parked.root, { recursive: true, force: true }); }
 

@@ -127,7 +127,7 @@ describe("atomic writer", () => {
 
         const realRunDir = join(sandboxPath, ".factory", "real-publication");
         mkdirSync(realRunDir);
-        const realCandidate = candidate("real-publication");
+        const realCandidate = { ...candidate("real-publication"), bootstrap_command: "npm ci", bootstrap_exit: 0 };
         const published = await dispatchInitPublication({ runDir: realRunDir, sandboxPath, candidate: realCandidate });
         assert.deepEqual(published, { observedRun: realCandidate });
         assert.equal(readFileSync(join(realRunDir, "run.json"), "utf8"), `${JSON.stringify(realCandidate, null, 2)}\n`);

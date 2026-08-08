@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { dispatchInit } from "../bin/factory.js";
+import { observeTrackedCleanliness, runBootstrap } from "../observe/index.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -75,17 +76,16 @@ process.exit(result.status === null ? 1 : result.status);
 }
 
 function invoke(repository, args, record, extra = {}) {
-  try {
-    const command = [CLI, ...args, ...(args.includes("--repo") ? [] : ["--repo", repository])];
-    const stdout = execFileSync(process.execPath, command, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, PATH: `${record.bin}:${process.env.PATH}`, GIT_LOG: record.log, REAL_GIT, ...extra },
-    });
-    return { ok: true, stdout, response: args.includes("--json") ? JSON.parse(stdout) : null };
-  } catch (error) {
-    return { ok: false, stderr: String(error.stderr ?? error.message) };
-  }
+  const command = [CLI, ...args, ...(args.includes("--repo") ? [] : ["--repo", repository])];
+  const result = spawnSync(process.execPath, command, {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, PATH: `${record.bin}:${process.env.PATH}`, GIT_LOG: record.log, REAL_GIT, ...extra },
+  });
+  const stdout = String(result.stdout ?? "");
+  const stderr = String(result.stderr ?? result.error?.message ?? "");
+  return result.status === 0
+    ? { ok: true, stdout, stderr, response: args.includes("--json") ? JSON.parse(stdout) : null }
+    : { ok: false, stdout, stderr };
 }
 
 function events(record) {
@@ -132,6 +132,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.equal(result.response.sandbox_path, sandbox);
     assert.equal(result.response.run_dir, join(sandbox, ".factory", runId));
     assert.equal(realpathSync(sandbox), sandbox);
+    assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(result.response.run_dir, "run.json"), "utf8")), "bootstrap_command"), false);
     assert.equal(clones(record).length, 1);
     assert.deepEqual(clones(record)[0].args, ["clone", "--local", "--", realpathSync(source), sandbox]);
     assert.deepEqual({ exists: clones(record)[0].exists, empty: clones(record)[0].empty }, { exists: true, empty: true });
@@ -141,6 +142,16 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.deepEqual({ dev: statSync(sandboxObject).dev, ino: statSync(sandboxObject).ino }, { dev: statSync(sourceObject).dev, ino: statSync(sourceObject).ino });
     for (const path of ["plan", "artifacts", "evidence", "reviews"]) assert.equal(realpathSync(join(result.response.run_dir, path)), join(result.response.run_dir, path));
     assert.equal(realpathSync(join(sandbox, ".factory", "worktrees", runId)), join(sandbox, ".factory", "worktrees", runId));
+    assert.equal(runBootstrap(sandbox, "accepted\0command", 1000, { runner: () => { throw new TypeError("spawn rejected argv"); } }), null);
+    let canonicalizationProbes = 0;
+    const canonicalizationFailure = observeTrackedCleanliness(sandbox, { runner: (_command, args) => {
+      canonicalizationProbes += 1;
+      return { status: 0, stdout: args.includes("rev-parse") ? join(root, "missing-top-level") : "", stderr: "" };
+    } });
+    assert.deepEqual(canonicalizationFailure, { observed: false, entries: [] });
+    assert.equal(canonicalizationProbes, 3, "all Git probes complete before top-level canonicalization is classified");
+    assert.deepEqual(observeTrackedCleanliness(sandbox, { runner: () => { throw new Error("Git probe failed"); } }),
+      { observed: false, entries: [] });
 
     const failedSource = operator(root, "clone-failure");
     const failedRecord = recorder(join(root, "failure-recorder"));
@@ -352,6 +363,95 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     mkdirSync(malformedRoot);
     assert.throws(() => seedLegacyRun(malformedRoot, "malformed", { mode: "invalid", pr_base: undefined }), /run\.mode/u);
     assert.equal(existsSync(join(malformedRoot, ".factory")), false);
+
+    const configuredCommand = "node -e \"const f=require('fs');if(f.existsSync('.factory/configured-bootstrap/run.json'))process.exit(9);f.appendFileSync('bootstrap-count','x');f.writeFileSync('bootstrap-cwd',process.cwd());f.mkdirSync('node_modules',{recursive:true});console.log('bootstrap-out');console.error('bootstrap-err')\"";
+    const configuredSource = operator(root, "configured-bootstrap", (repository) => {
+      writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
+        resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
+        bootstrap: configuredCommand, bootstrap_timeout_ms: 120000,
+      }, null, 2)}\n`);
+    });
+    const configuredRecord = recorder(join(root, "configured-recorder"));
+    const configured = invoke(configuredSource, ["init", "configured-bootstrap", "--now", NOW, "--json"], configuredRecord);
+    assert.equal(configured.ok, true, configured.stderr);
+    assert.deepEqual(JSON.parse(configured.stdout), configured.response, "init --json stdout remains exactly one JSON object");
+    assert.match(configured.stderr, /bootstrap-out/u);
+    assert.match(configured.stderr, /bootstrap-err/u);
+    assert.equal(readFileSync(join(configured.response.sandbox_path, "bootstrap-count"), "utf8"), "x");
+    assert.equal(readFileSync(join(configured.response.sandbox_path, "bootstrap-cwd"), "utf8"), configured.response.sandbox_path);
+    assert.equal(existsSync(join(configured.response.sandbox_path, "node_modules")), true, "untracked dependency output is compatible");
+    assert.deepEqual(Object.fromEntries(Object.entries(JSON.parse(readFileSync(join(configured.response.run_dir, "run.json"), "utf8")))
+      .filter(([key]) => key.startsWith("bootstrap_"))), { bootstrap_command: configuredCommand, bootstrap_exit: 0 });
+
+    const failureCases = [
+      { name: "dirty", command: "node -e \"require('fs').writeFileSync('tracked dirty.txt','changed');process.exit(7)\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u },
+      { name: "staged", command: "node -e \"require('fs').writeFileSync('tracked dirty.txt','staged');require('child_process').execFileSync('git',['add','tracked dirty.txt'])\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u },
+      { name: "unobservable", command: "node -e \"require('fs').renameSync('.git','.git-gone');process.exit(7)\"", timeout: 120000, match: /could not observe tracked paths after init/u },
+      { name: "throw", command: "bootstrap-throw-secret\0", timeout: 120000, match: /failed during init; exit status unavailable/u, hidden: "bootstrap-throw-secret" },
+      { name: "exit", command: "node -e \"process.exit(7)\"", timeout: 120000, match: /failed during init with exit status 7/u },
+      { name: "timeout", command: "node -e \"setTimeout(()=>{},10000)\"", timeout: 20, match: /failed during init; exit status unavailable/u },
+    ];
+    for (const row of failureCases) {
+      const failedBootstrapSource = operator(root, `bootstrap-${row.name}`, (repository) => {
+        writeFileSync(join(repository, "tracked dirty.txt"), "clean\n");
+        writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
+          resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
+          bootstrap: row.command, bootstrap_timeout_ms: row.timeout,
+        })}\n`);
+      });
+      const failedBootstrapRecord = recorder(join(root, `bootstrap-${row.name}-recorder`));
+      const observed = invoke(failedBootstrapSource, ["init", `bootstrap-${row.name}`, "--now", NOW, "--json"], failedBootstrapRecord);
+      assert.equal(observed.ok, false, row.name);
+      assert.equal(observed.stdout, "", row.name);
+      assert.match(observed.stderr, row.match, row.name);
+      if (row.hidden) assert.doesNotMatch(observed.stderr, new RegExp(row.hidden, "u"), "spawn refusals must not expose command text");
+      assert.match(observed.stderr, /sandbox .* was retained; run\.json is absent/u, row.name);
+      assert.equal(existsSync(join(failedBootstrapSource, ".factory-sandboxes", `bootstrap-${row.name}`, ".factory", `bootstrap-${row.name}`, "run.json")), false);
+    }
+
+    const configCases = [
+      { name: "unknown", patch: { unexpected: true, bootstrap: 7, bootstrap_timeout_ms: 0 }, named: [] },
+      { name: "invalid-both", patch: { resolve: null, bootstrap: 7, bootstrap_timeout_ms: 0 }, named: ["bootstrap"] },
+      { name: "invalid-with-timeout", patch: { bootstrap: " ", bootstrap_timeout_ms: 10 }, named: ["bootstrap"] },
+      { name: "orphan", patch: { bootstrap_timeout_ms: 10 }, named: ["bootstrap_timeout_ms"] },
+      { name: "invalid-orphan", patch: { bootstrap_timeout_ms: 0 }, named: ["bootstrap_timeout_ms"] },
+      { name: "invalid-timeout", patch: { bootstrap: "true", bootstrap_timeout_ms: 0 }, named: ["bootstrap_timeout_ms"] },
+    ];
+    for (const row of configCases) {
+      const configSource = operator(root, `config-${row.name}`, (repository) => writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
+        resolve: "true", verify: "true", publish: "true", publishing_identity: "test", ...row.patch,
+      })}\n`));
+      const configRecord = recorder(join(root, `config-${row.name}-recorder`));
+      const observed = invoke(configSource, ["init", `config-${row.name}`, "--now", NOW], configRecord);
+      assert.equal(observed.ok, false, row.name);
+      assert.deepEqual([...observed.stderr.matchAll(/entry '([^']+)'/gu)].map((match) => match[1]), row.named, row.name);
+    }
+
+    const resolutionCommand = "node bootstrap.js";
+    const resolutionSource = operator(root, "resolution", (repository) => {
+      writeFileSync(join(repository, "bootstrap.js"), "const f=require('fs'),c=require('child_process');f.writeFileSync('pre-resolution',require.resolve('workspace-only'));f.mkdirSync('node_modules/workspace-only',{recursive:true});f.writeFileSync('node_modules/workspace-only/index.js','module.exports=\\\"sandbox\\\"');f.writeFileSync('post-resolution',c.execFileSync(process.execPath,['-p',\"require.resolve('workspace-only')\"],{encoding:'utf8'}).trim());\n");
+      writeFileSync(join(repository, "verify.js"), "const p=require('path');if(!require.resolve('workspace-only').startsWith(process.cwd()+p.sep)||require('workspace-only')!=='sandbox')process.exit(1);\n");
+      writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "node verify.js", publish: "true", publishing_identity: "test", bootstrap: resolutionCommand })}\n`);
+    });
+    mkdirSync(join(resolutionSource, "node_modules", "workspace-only"), { recursive: true });
+    writeFileSync(join(resolutionSource, "node_modules", "workspace-only", "index.js"), "module.exports='parent';\n");
+    const resolutionRecord = recorder(join(root, "resolution-recorder"));
+    const resolution = invoke(resolutionSource, ["init", "resolution", "--now", NOW, "--json"], resolutionRecord);
+    assert.equal(resolution.ok, true, resolution.stderr);
+    assert.equal(readFileSync(join(resolution.response.sandbox_path, "pre-resolution"), "utf8").startsWith(`${realpathSync(resolutionSource)}/node_modules/`), true);
+    assert.equal(readFileSync(join(resolution.response.sandbox_path, "post-resolution"), "utf8").startsWith(`${resolution.response.sandbox_path}/node_modules/`), true);
+    execFileSync(process.execPath, [join(resolution.response.sandbox_path, "verify.js")], { cwd: resolution.response.sandbox_path });
+    const bootstrapSpawns = [];
+    for (const timeoutMs of [undefined, 123456]) {
+      assert.equal(runBootstrap(resolution.response.sandbox_path, "declared command", timeoutMs, {
+        runner: (command, args, options) => { bootstrapSpawns.push({ command, args, options }); return { status: 0 }; },
+      }), 0);
+    }
+    assert.deepEqual(bootstrapSpawns.map(({ command, args, options }) => ({ command, args, timeout: options.timeout, shell: options.shell,
+      cwd: options.cwd, stdout: options.stdio[1], stderr: options.stdio[2] })), [
+      { command: "declared command", args: [], timeout: 900000, shell: true, cwd: resolution.response.sandbox_path, stdout: process.stderr, stderr: process.stderr },
+      { command: "declared command", args: [], timeout: 123456, shell: true, cwd: resolution.response.sandbox_path, stdout: process.stderr, stderr: process.stderr },
+    ]);
 
     const initSource = readFileSync(join(pkg, "bin", "factory.js"), "utf8");
     const dispatchBody = initSource.slice(initSource.indexOf("export async function dispatchInit"), initSource.indexOf("\nfunction preflightInit"));

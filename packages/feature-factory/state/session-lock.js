@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { rm } from "node:fs/promises";
+import { withRunJsonLock } from "../core/run-lock.js";
 
 export const SESSION_LOCK_FILE = "factory.lock";
 export const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
@@ -49,40 +50,46 @@ export function inspectSessionLock(runDir, { now = Date.now(), ttlMs = DEFAULT_S
 }
 
 export async function claimSessionLock(runDir, { session, runId, branch, now, ttlMs, force = false } = {}) {
-  if (!session) throw new Error("factory lock requires a session id");
-  const at = new Date(now ?? Date.now()).toISOString();
-  const observed = inspectSessionLock(runDir, { now: now ?? Date.now(), ttlMs });
-  if (observed.state === "fresh" && observed.owner.session !== session && !force) {
-    throw new SessionLockHeldError(observed.owner);
-  }
-  const owner = {
-    session,
-    run_id: runId,
-    branch: branch ?? null,
-    // Re-claiming your own lock preserves when you first took it.
-    claimed_at: observed.owner?.session === session ? observed.owner.claimed_at : at,
-    heartbeat_at: at,
-  };
-  await writeProtectedJsonAtomic(runDir, SESSION_LOCK_FILE, owner);
-  return { ...owner, stolen_from: observed.state === "stale" || force ? observed.owner : null };
+  return withRunJsonLock(runDir, async () => {
+    if (!session) throw new Error("factory lock requires a session id");
+    const at = new Date(now ?? Date.now()).toISOString();
+    const observed = inspectSessionLock(runDir, { now: now ?? Date.now(), ttlMs });
+    if (observed.state === "fresh" && observed.owner.session !== session && !force) {
+      throw new SessionLockHeldError(observed.owner);
+    }
+    const owner = {
+      session,
+      run_id: runId,
+      branch: branch ?? null,
+      // Re-claiming your own lock preserves when you first took it.
+      claimed_at: observed.owner?.session === session ? observed.owner.claimed_at : at,
+      heartbeat_at: at,
+    };
+    await writeProtectedJsonAtomic(runDir, SESSION_LOCK_FILE, owner);
+    return { ...owner, stolen_from: observed.state === "stale" || force ? observed.owner : null };
+  });
 }
 
 export async function refreshSessionLock(runDir, { session, now } = {}) {
-  const owner = readSessionLock(runDir);
-  if (!owner) throw new Error("no factory.lock to refresh");
-  // Refreshing someone else's lock would silently extend a run you do not own.
-  if (session && owner.session !== session) throw new SessionLockHeldError(owner);
-  const next = { ...owner, heartbeat_at: new Date(now ?? Date.now()).toISOString() };
-  await writeProtectedJsonAtomic(runDir, SESSION_LOCK_FILE, next);
-  return next;
+  return withRunJsonLock(runDir, async () => {
+    const owner = readSessionLock(runDir);
+    if (!owner) throw new Error("no factory.lock to refresh");
+    // Refreshing someone else's lock would silently extend a run you do not own.
+    if (session && owner.session !== session) throw new SessionLockHeldError(owner);
+    const next = { ...owner, heartbeat_at: new Date(now ?? Date.now()).toISOString() };
+    await writeProtectedJsonAtomic(runDir, SESSION_LOCK_FILE, next);
+    return next;
+  });
 }
 
 export async function releaseSessionLock(runDir, { session } = {}) {
-  const owner = readSessionLock(runDir);
-  if (!owner) return { released: false, reason: "absent" };
-  if (session && owner.session !== session) throw new SessionLockHeldError(owner);
-  await rm(join(runDir, SESSION_LOCK_FILE), { force: true });
-  return { released: true, reason: null };
+  return withRunJsonLock(runDir, async () => {
+    const owner = readSessionLock(runDir);
+    if (!owner) return { released: false, reason: "absent" };
+    if (session && owner.session !== session) throw new SessionLockHeldError(owner);
+    await rm(join(runDir, SESSION_LOCK_FILE), { force: true });
+    return { released: true, reason: null };
+  });
 }
 
 function isValidLock(value) {

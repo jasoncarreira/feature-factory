@@ -40,7 +40,7 @@ const RUN_JSON_KEYS = [
   // read, which is the standard a durable field has to meet. plan_digest meets it: the seed reads
   // it and refuses on mismatch, which is the only thing binding the plan a human approved to the
   // one that gets ratified.
-  "mode", "terminal_result", "plan_digest",
+  "mode", "terminal_result", "plan_digest", "bootstrap_command", "bootstrap_exit",
 ];
 
 const FAMILIES = ["envelope", "gates", "steps", "slices", "verdict"];
@@ -480,7 +480,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 19, "nineteen: the inherited fifteen plus mode, terminal_result, pr_base, and plan_digest");
+    assert.equal(RUN_KEYS.length, 21, "twenty-one: the prior nineteen plus bootstrap command and exit evidence");
   });
 
   it("registers exactly the declared families", () => {
@@ -714,11 +714,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // mimir 1390 blocked with a module and its exact-inventory test in different slices and no legal
     // move, and `blocked` is final.
     //
-    assert.equal(total, 3687, "run 257 merged with #224 lands at 3687 production lines");
+    // 3687 -> 3800 (#248): declared sandbox bootstrap, byte-exact resume binding, and serialized
+    // session-owner writes close dependency-resolution false greens and resume publication races.
+    assert.equal(total, 3800, "issue #248 lands at 3800 production lines");
     // 3600 -> 3700, authorized by Jason. #224 and run 257 were each authorized against 3600 and
     // neither exceeded it alone; merged they land at 3687. The growth is a command, its transition
     // contract and a schema key, not padding.
-    assert.ok(total <= 3700, `production source is ${total} lines; the tripwire is 3700`);
+    assert.ok(total <= 3800, `production source is ${total} lines; the tripwire is 3800`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

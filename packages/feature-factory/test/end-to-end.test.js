@@ -68,7 +68,7 @@ function repositoryVerifyTrace(operator, command) {
 }
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], additionalSlices = [], verify = null, verifyTimeout = undefined, configBytes = null } = {}) {
+function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], additionalSlices = [], verify = null, verifyTimeout = undefined, bootstrap = undefined, bootstrapTimeout = undefined, bootstrapMarker = null, publish = "true", configBytes = null } = {}) {
   const operator = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(operator, "init", "-q", "-b", "main");
   git(operator, "config", "user.email", "t@example.com");
@@ -84,9 +84,11 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
   else if (verify !== null) {
     const config = {
       resolve: "true", verify: typeof verify === "function" ? verify(operator) : verify,
-      publish: "true", publishing_identity: "factory-test",
+      publish, publishing_identity: "factory-test",
     };
     if (verifyTimeout !== undefined) config.verify_timeout_ms = verifyTimeout;
+    if (bootstrap !== undefined) config.bootstrap = typeof bootstrap === "function" ? bootstrap(operator) : bootstrap;
+    if (bootstrapTimeout !== undefined) config.bootstrap_timeout_ms = bootstrapTimeout;
     writeFileSync(join(operator, ".factory.json"), `${JSON.stringify(config, null, 2)}\n`);
   }
   git(operator, "add", "-A");
@@ -109,6 +111,7 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
   }
   const repo = selected.repository;
   const runDir = selected.runDir;
+  if (bootstrapMarker) rmSync(join(repo, bootstrapMarker), { force: true });
   writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({
     slices: [
       { id: "be-thing", stack: "backend", paths, depends_on: [], acceptance: ["AC1"], test_plan: testPlan },
@@ -223,8 +226,14 @@ describe("end to end — a merge is refused through the real CLI", () => {
     const green = upToReview("clean-config", undefined, {
       verify: (operator) => `node -e "require('fs').appendFileSync('${join(operator, "verify-count")}','x')"`,
       verifyTimeout: 120001,
+      bootstrap: "node -e \"require('fs').writeFileSync('.factory/excluded-bootstrap-marker','ran')\"",
+      bootstrapMarker: ".factory/excluded-bootstrap-marker",
+      publish: "node -e \"require('fs').writeFileSync('excluded-publish-marker','ran')\"",
     });
     try {
+      assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "slice observation must not bootstrap");
+      execFileSync(process.execPath, [CLI, "effective-push", "check", green.operator, green.repo]);
+      assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "effective-push must not execute config bootstrap");
       const mergeCommit = mergeIntoFeature(green.repo);
       const configuredCommand = JSON.parse(readFileSync(join(green.repo, ".factory.json"), "utf8")).verify;
       const configuredTrace = repositoryVerifyTrace(green.operator, configuredCommand);
@@ -241,10 +250,17 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(Object.hasOwn(evidence, "verify_timeout_ms"), false);
       assert.equal(Object.hasOwn(runJson(green.runDir), "verify_timeout_ms"), false);
       assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x");
+      assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "post-merge verify must not bootstrap");
+      assert.equal(recordValidator(green.repo, green.runDir, mergeCommit, "GO", NOW(4)).ok, true);
+      assert.equal(approveGate(green.repo, "pre_pr", NOW(4)).ok, true);
+      assert.equal(factory(green.repo, ["pr", RUN, "--url", "https://example.test/pr/bootstrap-exclusion", "--now", NOW(4)]).ok, true);
+      assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "Gate 3 and publication must not bootstrap or run configured publish");
+      assert.equal(existsSync(join(green.repo, "excluded-publish-marker")), false, "factory pr must leave configured publish to the workflow");
       const before = readFileSync(join(green.runDir, "run.json"), "utf8");
       const replay = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(5)]);
       assert.equal(replay.ok, true, replay.stderr);
       assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x", "same-SHA replay must not execute verify");
+      assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "same-SHA replay must not bootstrap");
       assert.equal(readFileSync(join(green.runDir, "run.json"), "utf8"), before, "same-SHA replay must not update the run");
       writeFileSync(join(green.repo, "src", "app", "after-merge.ts"), "moved\n");
       git(green.repo, "add", "-A");
@@ -314,7 +330,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       }, "an omitted timeout must reach the repository shell spawn as exactly 900000");
     } finally { cleanupProject(defaultTimeout); }
 
-    const malformed = upToReview("malformed-config", undefined, { configBytes: "{\"resolve\":\"true\"}\n" });
+    const malformed = upToReview("malformed-config", undefined, { configBytes: "{\"resolve\":\"true\"}\n", legacy: true });
     try {
       const mergeCommit = mergeIntoFeature(malformed.repo);
       const merged = factory(malformed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
@@ -326,7 +342,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     const unexpected = upToReview("unexpected-config-entry", undefined, { configBytes: `${JSON.stringify({
       resolve: "true", verify: "node -e \"require('fs').writeFileSync('unexpected-verify-ran','x')\"",
       publish: "true", publishing_identity: "factory-test", unexpected: true,
-    }, null, 2)}\n` });
+    }, null, 2)}\n`, legacy: true });
     try {
       const mergeCommit = mergeIntoFeature(unexpected.repo);
       const merged = factory(unexpected.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
@@ -343,8 +359,8 @@ describe("end to end — a merge is refused through the real CLI", () => {
         verify_timeout_ms: value,
       }, null, 2)}\n`;
       const invalid = index === 0
-        ? upToReview(`invalid-timeout-${index}`, undefined, { configBytes })
-        : project(`invalid-timeout-${index}`, { configBytes });
+        ? upToReview(`invalid-timeout-${index}`, undefined, { configBytes, legacy: true })
+        : project(`invalid-timeout-${index}`, { configBytes, legacy: true });
       try {
         if (index !== 0) {
           buildSlice(invalid.repo);
@@ -365,6 +381,32 @@ describe("end to end — a merge is refused through the real CLI", () => {
           assert.equal(runJson(invalid.runDir).slices[0].status, "merged");
         }
       } finally { cleanupProject(invalid); }
+    }
+
+    const bootstrapConfigCases = [
+      { name: "unknown", patch: { unexpected: true, bootstrap: 7, bootstrap_timeout_ms: 0 }, named: [] },
+      { name: "invalid-both", patch: { resolve: null, bootstrap: 7, bootstrap_timeout_ms: 0 }, named: ["bootstrap"] },
+      { name: "invalid-orphan-shape", patch: { bootstrap: " ", bootstrap_timeout_ms: 10 }, named: ["bootstrap"] },
+      { name: "orphan", patch: { bootstrap_timeout_ms: 10 }, named: ["bootstrap_timeout_ms"] },
+      { name: "invalid-orphan", patch: { bootstrap_timeout_ms: 0 }, named: ["bootstrap_timeout_ms"] },
+      { name: "invalid-timeout", patch: { bootstrap: "true", bootstrap_timeout_ms: 0 }, named: ["bootstrap_timeout_ms"] },
+      { name: "both-absent", patch: {}, named: null },
+      { name: "valid", patch: { bootstrap: "node -e \"require('fs').writeFileSync('direct-bootstrap-marker','ran')\"" }, named: null },
+    ];
+    for (const row of bootstrapConfigCases) {
+      const configBytes = `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", publishing_identity: "test", ...row.patch })}\n`;
+      const configured = project(`bootstrap-config-${row.name}`, { configBytes, legacy: true });
+      try {
+        const activated = factory(configured.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "feature", "--now", NOW(2)]);
+        assert.equal(activated.ok, true, activated.stderr);
+        const observed = factory(configured.repo, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", activated.out.base_ref, "--repository-verify", "--now", NOW(3)]);
+        if (row.named === null) assert.equal(observed.ok, true, observed.stderr);
+        else {
+          assert.equal(observed.ok, false, row.name);
+          assert.deepEqual([...observed.stderr.matchAll(/entry '([^']+)'/gu)].map((match) => match[1]), row.named, row.name);
+        }
+        assert.equal(existsSync(join(configured.repo, "direct-bootstrap-marker")), false, "direct repository verification must not bootstrap");
+      } finally { cleanupProject(configured); }
     }
 
     const retry = upToReview("verify-retry", undefined, {
@@ -584,6 +626,90 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(factory(unfixed.repo, ["lock", RUN, "release", "--session", "session-b"]).ok, true);
       assert.equal(factory(unfixed.repo, ["status", RUN]).out.lock, "absent");
     } finally { cleanupProject(unfixed); }
+
+    const configuredResume = project("configured-resume");
+    try {
+      const command = "node -e \"const f=require('fs'),m=f.existsSync('bootstrap-fail')?f.readFileSync('bootstrap-fail','utf8'):'';f.appendFileSync('bootstrap-resume-count','x');if(m==='exit')process.exit(7);if(m==='timeout')setTimeout(()=>{},10000)\"";
+      writeFileSync(join(configuredResume.repo, ".factory.json"), `${JSON.stringify({
+        resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
+        bootstrap: command, bootstrap_timeout_ms: 500,
+      })}\n`);
+      git(configuredResume.repo, "add", ".factory.json");
+      git(configuredResume.repo, "commit", "-q", "-m", "declare bootstrap");
+      assert.equal(factory(configuredResume.repo, ["terminal", RUN, "needs-human", "--reason", "bootstrap recovery", "--now", NOW(3)]).ok, true);
+      assert.equal(factory(configuredResume.repo, ["lock", RUN, "claim", "--session", "bootstrap-owner", "--branch", "feature"]).ok, true);
+      writeFileSync(join(configuredResume.repo, "bootstrap-fail"), "exit");
+      const staleRequest = factory(configuredResume.repo, ["resume", RUN, "--session", "bootstrap-owner", "--now", NOW(3)]);
+      assert.equal(staleRequest.ok, false);
+      assert.match(staleRequest.stderr, /resume-needs-human must move updated_at forwards/u);
+      assert.equal(existsSync(join(configuredResume.repo, "bootstrap-resume-count")), false, "updated_at is proven forward before bootstrap runs");
+      const failedExit = factory(configuredResume.repo, ["resume", RUN, "--session", "bootstrap-owner", "--now", NOW(4)]);
+      assert.equal(failedExit.ok, false);
+      assert.match(failedExit.stderr, /failed during resume with exit status 7; run remains needs-human and its historical terminal result is preserved/u);
+      assert.deepEqual({ status: runJson(configuredResume.runDir).status, command: runJson(configuredResume.runDir).bootstrap_command,
+        exit: runJson(configuredResume.runDir).bootstrap_exit, result: runJson(configuredResume.runDir).terminal_result }, {
+        status: "needs-human", command, exit: 7, result: { status: "needs-human", reason: "bootstrap recovery" },
+      });
+      writeFileSync(join(configuredResume.repo, "bootstrap-fail"), "timeout");
+      const timedOut = factory(configuredResume.repo, ["resume", RUN, "--session", "bootstrap-owner", "--now", NOW(5)]);
+      assert.equal(timedOut.ok, false);
+      assert.match(timedOut.stderr, /exit status unavailable; run remains needs-human/u);
+      assert.equal(runJson(configuredResume.runDir).bootstrap_exit, null);
+      rmSync(join(configuredResume.repo, "bootstrap-fail"));
+      const recovered = factory(configuredResume.repo, ["resume", RUN, "--session", "bootstrap-owner", "--now", NOW(6)]);
+      assert.equal(recovered.ok, true, recovered.stderr);
+      assert.equal(runJson(configuredResume.runDir).bootstrap_exit, 0);
+      assert.equal(runJson(configuredResume.runDir).bootstrap_command, command);
+      assert.equal(Object.hasOwn(factory(configuredResume.repo, ["status", RUN]).out, "bootstrap_command"), false, "status response stays compatible");
+      assert.equal(readFileSync(join(configuredResume.repo, "bootstrap-resume-count"), "utf8"), "xxx", "every explicit resume reruns bootstrap");
+    } finally { cleanupProject(configuredResume); }
+
+    const bound = project("bound-resume");
+    try {
+      writeFileSync(join(bound.repo, "bootstrap-race.js"), [
+        "const f=require('fs'),c=require('child_process'),p='.factory/app-1/run.json';",
+        "const m=f.existsSync('bootstrap-mode')?f.readFileSync('bootstrap-mode','utf8'):'';",
+        "if(m==='equivalent')f.writeFileSync(p,JSON.stringify(JSON.parse(f.readFileSync(p,'utf8')))+'\\n');",
+        "if(m==='valid'){const r=JSON.parse(f.readFileSync(p,'utf8'));r.issue_key='changed';f.writeFileSync(p,JSON.stringify(r,null,2)+'\\n')} ",
+        "if(m==='malformed')f.writeFileSync(p,'{malformed\\n');",
+        "if(m==='heartbeat')c.execFileSync(process.execPath,[process.env.FACTORY_TEST_CLI,'heartbeat','app-1','--session','owner-a','--repo',process.cwd(),'--json'],{stdio:'inherit'});",
+        "if(m==='owner')c.execFileSync(process.execPath,[process.env.FACTORY_TEST_CLI,'lock','app-1','steal','--session','owner-b','--branch','feature','--repo',process.cwd(),'--json'],{stdio:'inherit'});",
+      ].join("\n"));
+      writeFileSync(join(bound.repo, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", publishing_identity: "test", bootstrap: "node bootstrap-race.js" })}\n`);
+      git(bound.repo, "add", ".factory.json", "bootstrap-race.js");
+      git(bound.repo, "commit", "-q", "-m", "declare race bootstrap");
+      assert.equal(factory(bound.repo, ["terminal", RUN, "needs-human", "--reason", "bound", "--now", NOW(3)]).ok, true);
+      assert.equal(factory(bound.repo, ["lock", RUN, "claim", "--session", "owner-a", "--branch", "feature"]).ok, true);
+      writeFileSync(join(bound.repo, "bootstrap-mode"), "heartbeat");
+      assert.equal(factory(bound.repo, ["resume", RUN, "--session", "owner-a", "--now", NOW(4)], { env: { ...process.env, FACTORY_TEST_CLI: CLI } }).ok, true,
+        "a forward heartbeat from the same stable owner remains bound");
+      assert.equal(factory(bound.repo, ["terminal", RUN, "needs-human", "--reason", "bound again", "--now", NOW(5)]).ok, true);
+      const original = readFileSync(join(bound.runDir, "run.json"), "utf8");
+      for (const [mode, pattern] of [
+        ["equivalent", /run\.json bytes changed while bootstrap ran; current state was preserved/u],
+        ["valid", /run\.json bytes changed while bootstrap ran; current state was preserved/u],
+        ["malformed", /current run state cannot be qualified because run\.json bytes changed while bootstrap ran/u],
+      ]) {
+        writeFileSync(join(bound.repo, "bootstrap-mode"), mode);
+        const refused = factory(bound.repo, ["resume", RUN, "--session", "owner-a", "--now", NOW(6)], { env: { ...process.env, FACTORY_TEST_CLI: CLI } });
+        assert.equal(refused.ok, false, mode);
+        assert.match(refused.stderr, pattern, mode);
+        const expected = mode === "malformed" ? "{malformed\n" : mode === "equivalent"
+          ? `${JSON.stringify(JSON.parse(original))}\n`
+          : `${JSON.stringify({ ...JSON.parse(original), issue_key: "changed" }, null, 2)}\n`;
+        assert.equal(readFileSync(join(bound.runDir, "run.json"), "utf8"), expected, `${mode} bytes must be preserved exactly`);
+        assert.equal(JSON.parse(readFileSync(join(bound.runDir, "factory.lock"), "utf8")).session, "owner-a");
+        writeFileSync(join(bound.runDir, "run.json"), original);
+      }
+      writeFileSync(join(bound.repo, "bootstrap-mode"), "owner");
+      const ownerRefusal = factory(bound.repo, ["resume", RUN, "--session", "owner-a", "--now", NOW(7)], { env: { ...process.env, FACTORY_TEST_CLI: CLI } });
+      assert.equal(ownerRefusal.ok, false);
+      assert.match(ownerRefusal.stderr, /factory\.lock is absent, stale, or no longer names the same owner/u);
+      assert.equal(readFileSync(join(bound.runDir, "run.json"), "utf8"), original);
+      assert.equal(JSON.parse(readFileSync(join(bound.runDir, "factory.lock"), "utf8")).session, "owner-b");
+      rmSync(join(bound.repo, "bootstrap-mode"));
+      assert.equal(factory(bound.repo, ["resume", RUN, "--session", "owner-b", "--now", NOW(8)]).ok, true);
+    } finally { cleanupProject(bound); }
   });
 
   it("refuses a slice that changed a path it does not own", () => {
