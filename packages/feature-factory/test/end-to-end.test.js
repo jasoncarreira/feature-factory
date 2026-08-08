@@ -389,7 +389,16 @@ describe("end to end — a merge is refused through the real CLI", () => {
       { name: "invalid-orphan-shape", patch: { bootstrap: " ", bootstrap_timeout_ms: 10 }, named: ["bootstrap"] },
       { name: "orphan", patch: { bootstrap_timeout_ms: 10 }, named: ["bootstrap_timeout_ms"] },
       { name: "invalid-orphan", patch: { bootstrap_timeout_ms: 0 }, named: ["bootstrap_timeout_ms"] },
-      { name: "invalid-timeout", patch: { bootstrap: "true", bootstrap_timeout_ms: 0 }, named: ["bootstrap_timeout_ms"] },
+      // Each timeout shape must lose only to a valid declared bootstrap, not to another
+      // timeout or required-field rule. These are negative controls for the parser order.
+      ...[
+        ["zero", 0], ["negative", -1], ["fractional", 1.5], ["string", "900000"],
+        ["null", null], ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+      ].map(([name, bootstrap_timeout_ms]) => ({
+        name: `invalid-timeout-${name}`,
+        patch: { bootstrap: "true", bootstrap_timeout_ms },
+        named: ["bootstrap_timeout_ms"],
+      })),
       { name: "both-absent", patch: {}, named: null },
       { name: "valid", patch: { bootstrap: "node -e \"require('fs').writeFileSync('direct-bootstrap-marker','ran')\"" }, named: null },
     ];
@@ -629,12 +638,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
 
     const configuredResume = project("configured-resume");
     try {
-      const command = "node -e \"const f=require('fs'),m=f.existsSync('bootstrap-fail')?f.readFileSync('bootstrap-fail','utf8'):'';f.appendFileSync('bootstrap-resume-count','x');if(m==='exit')process.exit(7);if(m==='timeout')setTimeout(()=>{},10000)\"";
+      const command = "node -e \"const f=require('fs'),c=require('child_process'),m=f.existsSync('bootstrap-fail')?f.readFileSync('bootstrap-fail','utf8'):'';f.appendFileSync('bootstrap-resume-count','x');if(m==='dirty')f.writeFileSync('tracked-bootstrap.txt','dirty');if(m==='staged'){f.writeFileSync('tracked-bootstrap.txt','staged');c.execFileSync('git',['add','tracked-bootstrap.txt'])}if(m==='unobservable')f.renameSync('.git','.git-gone');if(m==='exit')process.exit(7);if(m==='timeout')setTimeout(()=>{},10000)\"";
       writeFileSync(join(configuredResume.repo, ".factory.json"), `${JSON.stringify({
         resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
         bootstrap: command, bootstrap_timeout_ms: 500,
       })}\n`);
-      git(configuredResume.repo, "add", ".factory.json");
+      writeFileSync(join(configuredResume.repo, "tracked-bootstrap.txt"), "clean\n");
+      git(configuredResume.repo, "add", ".factory.json", "tracked-bootstrap.txt");
       git(configuredResume.repo, "commit", "-q", "-m", "declare bootstrap");
       assert.equal(factory(configuredResume.repo, ["terminal", RUN, "needs-human", "--reason", "bootstrap recovery", "--now", NOW(3)]).ok, true);
       assert.equal(factory(configuredResume.repo, ["lock", RUN, "claim", "--session", "bootstrap-owner", "--branch", "feature"]).ok, true);
@@ -655,13 +665,45 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(timedOut.ok, false);
       assert.match(timedOut.stderr, /exit status unavailable; run remains needs-human/u);
       assert.equal(runJson(configuredResume.runDir).bootstrap_exit, null);
+      // These three rows exercise the configured CLI resume path rather than the cleanliness
+      // helper alone. The historical result and owner are isolating controls: an unpark or
+      // ownership rewrite would make the refusal look correct while violating recovery safety.
+      for (const [mode, diagnostic] of [
+        ["dirty", /left tracked paths dirty after resume: "tracked-bootstrap\.txt"/u],
+        ["staged", /left tracked paths dirty after resume: "tracked-bootstrap\.txt"/u],
+      ]) {
+        writeFileSync(join(configuredResume.repo, "bootstrap-fail"), mode);
+        const refused = factory(configuredResume.repo, ["resume", RUN, "--session", "bootstrap-owner", "--now", NOW(mode === "dirty" ? 6 : 7)]);
+        assert.equal(refused.ok, false, mode);
+        assert.match(refused.stderr, diagnostic, mode);
+        const parked = runJson(configuredResume.runDir);
+        assert.deepEqual({ status: parked.status, result: parked.terminal_result, command: parked.bootstrap_command, exit: parked.bootstrap_exit }, {
+          status: "needs-human", result: { status: "needs-human", reason: "bootstrap recovery" }, command, exit: 0,
+        }, mode);
+        assert.equal(JSON.parse(readFileSync(join(configuredResume.runDir, "factory.lock"), "utf8")).session, "bootstrap-owner", mode);
+        // Resetting each deliberate negative control lets the next row prove its own tracked
+        // state (worktree versus index) rather than inheriting the prior failure.
+        git(configuredResume.repo, "reset", "--", "tracked-bootstrap.txt");
+        git(configuredResume.repo, "checkout", "--", "tracked-bootstrap.txt");
+      }
       rmSync(join(configuredResume.repo, "bootstrap-fail"));
-      const recovered = factory(configuredResume.repo, ["resume", RUN, "--session", "bootstrap-owner", "--now", NOW(6)]);
+      const recovered = factory(configuredResume.repo, ["resume", RUN, "--session", "bootstrap-owner", "--now", NOW(8)]);
       assert.equal(recovered.ok, true, recovered.stderr);
       assert.equal(runJson(configuredResume.runDir).bootstrap_exit, 0);
       assert.equal(runJson(configuredResume.runDir).bootstrap_command, command);
       assert.equal(Object.hasOwn(factory(configuredResume.repo, ["status", RUN]).out, "bootstrap_command"), false, "status response stays compatible");
-      assert.equal(readFileSync(join(configuredResume.repo, "bootstrap-resume-count"), "utf8"), "xxx", "every explicit resume reruns bootstrap");
+      assert.equal(readFileSync(join(configuredResume.repo, "bootstrap-resume-count"), "utf8"), "xxxxx", "every eligible explicit resume reruns bootstrap");
+      assert.equal(factory(configuredResume.repo, ["terminal", RUN, "needs-human", "--reason", "bootstrap observation", "--now", NOW(9)]).ok, true);
+      writeFileSync(join(configuredResume.repo, "bootstrap-fail"), "unobservable");
+      const unobservable = factory(configuredResume.repo, ["resume", RUN, "--session", "bootstrap-owner", "--now", NOW(10)]);
+      assert.equal(unobservable.ok, false);
+      assert.match(unobservable.stderr, /could not observe tracked paths after resume; run remains needs-human and its historical terminal result is preserved/u);
+      const unobservableRun = runJson(configuredResume.runDir);
+      assert.deepEqual({ status: unobservableRun.status, result: unobservableRun.terminal_result, command: unobservableRun.bootstrap_command, exit: unobservableRun.bootstrap_exit }, {
+        status: "needs-human", result: { status: "needs-human", reason: "bootstrap observation" }, command, exit: 0,
+      });
+      assert.equal(JSON.parse(readFileSync(join(configuredResume.runDir, "factory.lock"), "utf8")).session, "bootstrap-owner");
+      assert.equal(readFileSync(join(configuredResume.repo, "bootstrap-resume-count"), "utf8"), "xxxxxx", "an unobservable tracked-state attempt still executes exactly once");
     } finally { cleanupProject(configuredResume); }
 
     const bound = project("bound-resume");
@@ -673,7 +715,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         "if(m==='valid'){const r=JSON.parse(f.readFileSync(p,'utf8'));r.issue_key='changed';f.writeFileSync(p,JSON.stringify(r,null,2)+'\\n')} ",
         "if(m==='malformed')f.writeFileSync(p,'{malformed\\n');",
         "if(m==='heartbeat')c.execFileSync(process.execPath,[process.env.FACTORY_TEST_CLI,'heartbeat','app-1','--session','owner-a','--repo',process.cwd(),'--json'],{stdio:'inherit'});",
-        "if(m==='owner')c.execFileSync(process.execPath,[process.env.FACTORY_TEST_CLI,'lock','app-1','steal','--session','owner-b','--branch','feature','--repo',process.cwd(),'--json'],{stdio:'inherit'});",
+        "if(m==='owner'){c.execFileSync(process.execPath,[process.env.FACTORY_TEST_CLI,'lock','app-1','steal','--session','owner-b','--branch','feature','--repo',process.cwd(),'--json'],{stdio:'inherit'});f.writeFileSync('owner-replacement-lock-bytes',f.readFileSync('.factory/app-1/factory.lock'))}",
       ].join("\n"));
       writeFileSync(join(bound.repo, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", publishing_identity: "test", bootstrap: "node bootstrap-race.js" })}\n`);
       git(bound.repo, "add", ".factory.json", "bootstrap-race.js");
@@ -699,16 +741,83 @@ describe("end to end — a merge is refused through the real CLI", () => {
           : `${JSON.stringify({ ...JSON.parse(original), issue_key: "changed" }, null, 2)}\n`;
         assert.equal(readFileSync(join(bound.runDir, "run.json"), "utf8"), expected, `${mode} bytes must be preserved exactly`);
         assert.equal(JSON.parse(readFileSync(join(bound.runDir, "factory.lock"), "utf8")).session, "owner-a");
+        if (mode === "malformed") {
+          assert.doesNotMatch(refused.stderr, /run remains needs-human|resumability|resumable/u,
+            "an unqualified malformed replacement must not be described as a parked resumable run");
+        }
         writeFileSync(join(bound.runDir, "run.json"), original);
       }
+      // This preload changes bytes only on factory resume's third synchronous run.json read:
+      // the final guard. The earlier bound-byte read, post-bootstrap check, and both async CAS
+      // reads therefore all pass; removing the wired final guard makes this resume incorrectly
+      // publish. It is deliberately not the write-core unit seam.
+      const finalHook = join(bound.repo, "final-bootstrap-binding-hook.cjs");
+      const finalMutation = `${JSON.stringify({ ...JSON.parse(original), issue_key: "changed-at-final-guard" }, null, 2)}\n`;
+      writeFileSync(finalHook, [
+        'const fs=require("node:fs"),{syncBuiltinESMExports}=require("node:module");',
+        'const originalRead=fs.readFileSync;let reads=0;',
+        'fs.readFileSync=function(path,...args){',
+        ' if(String(path)===process.env.FACTORY_FINAL_RUN_JSON&&++reads===3){',
+        '  if(process.env.FACTORY_FINAL_MUTATION)fs.writeFileSync(path,process.env.FACTORY_FINAL_MUTATION);',
+        '  if(process.env.FACTORY_FINAL_COMPETITOR_WORKER)require("node:child_process").spawn(process.execPath,[process.env.FACTORY_FINAL_COMPETITOR_WORKER],{stdio:"ignore",env:{...process.env,NODE_OPTIONS:""}});',
+        ' }',
+        ' return originalRead.call(this,path,...args);',
+        '};syncBuiltinESMExports();',
+      ].join("\n"));
+      rmSync(join(bound.repo, "bootstrap-mode"));
+      const finalRefusal = factory(bound.repo, ["resume", RUN, "--session", "owner-a", "--now", NOW(7)], {
+        env: {
+          ...process.env, FACTORY_TEST_CLI: CLI, FACTORY_FINAL_RUN_JSON: join(bound.runDir, "run.json"),
+          FACTORY_FINAL_MUTATION: finalMutation,
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${finalHook}`].filter(Boolean).join(" "),
+        },
+      });
+      assert.equal(finalRefusal.ok, false);
+      assert.match(finalRefusal.stderr, /run\.json bytes changed while bootstrap ran; current state was preserved/u);
+      assert.equal(readFileSync(join(bound.runDir, "run.json"), "utf8"), finalMutation,
+        "the real resume final guard must preserve a byte mutation injected after both CAS reads");
+      assert.equal(JSON.parse(readFileSync(join(bound.runDir, "factory.lock"), "utf8")).session, "owner-a");
+      writeFileSync(join(bound.runDir, "run.json"), original);
+      // Spawn the competing factory operation from that same final-guard read. The worker marks
+      // its attempted acquisition before calling `lock claim`; its later refusal against owner A
+      // is the negative control that distinguishes lock serialization from a late successful claim.
+      const competitorWorker = join(bound.repo, "final-guard-competitor.cjs");
+      const competitorReady = join(bound.repo, "final-guard-competitor-ready");
+      const competitorResult = join(bound.repo, "final-guard-competitor-result.json");
+      writeFileSync(competitorWorker, [
+        'const fs=require("node:fs"),{spawnSync}=require("node:child_process");',
+        'fs.writeFileSync(process.env.FACTORY_FINAL_COMPETITOR_READY,"attempting");',
+        'const result=spawnSync(process.execPath,[process.env.FACTORY_TEST_CLI,"lock","app-1","claim","--session","owner-b","--branch","feature","--repo",process.env.FACTORY_FINAL_REPO,"--json"],{encoding:"utf8",env:{...process.env,NODE_OPTIONS:""}});',
+        'fs.writeFileSync(process.env.FACTORY_FINAL_COMPETITOR_RESULT,JSON.stringify({status:result.status,stderr:String(result.stderr??"")}));',
+      ].join("\n"));
+      const finalPublication = factory(bound.repo, ["resume", RUN, "--session", "owner-a", "--now", NOW(8)], {
+        env: {
+          ...process.env, FACTORY_TEST_CLI: CLI, FACTORY_FINAL_RUN_JSON: join(bound.runDir, "run.json"),
+          FACTORY_FINAL_COMPETITOR_WORKER: competitorWorker, FACTORY_FINAL_COMPETITOR_READY: competitorReady,
+          FACTORY_FINAL_COMPETITOR_RESULT: competitorResult, FACTORY_FINAL_REPO: bound.repo,
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${finalHook}`].filter(Boolean).join(" "),
+        },
+      });
+      assert.equal(finalPublication.ok, true, finalPublication.stderr);
+      assert.equal(readFileSync(competitorReady, "utf8"), "attempting");
+      const competing = JSON.parse(readFileSync(competitorResult, "utf8"));
+      assert.notEqual(competing.status, 0, "a final-seam competitor must remain blocked through owner A publication");
+      assert.match(competing.stderr, /held by session owner-a/u);
+      assert.equal(runJson(bound.runDir).status, "running");
+      assert.equal(JSON.parse(readFileSync(join(bound.runDir, "factory.lock"), "utf8")).session, "owner-a");
+      assert.equal(factory(bound.repo, ["terminal", RUN, "needs-human", "--reason", "bound after final seam", "--now", NOW(9)]).ok, true);
+      const beforeOwnerTurnover = readFileSync(join(bound.runDir, "run.json"), "utf8");
       writeFileSync(join(bound.repo, "bootstrap-mode"), "owner");
-      const ownerRefusal = factory(bound.repo, ["resume", RUN, "--session", "owner-a", "--now", NOW(7)], { env: { ...process.env, FACTORY_TEST_CLI: CLI } });
+      const ownerRefusal = factory(bound.repo, ["resume", RUN, "--session", "owner-a", "--now", NOW(10)], { env: { ...process.env, FACTORY_TEST_CLI: CLI } });
       assert.equal(ownerRefusal.ok, false);
       assert.match(ownerRefusal.stderr, /factory\.lock is absent, stale, or no longer names the same owner/u);
-      assert.equal(readFileSync(join(bound.runDir, "run.json"), "utf8"), original);
+      assert.equal(readFileSync(join(bound.runDir, "run.json"), "utf8"), beforeOwnerTurnover,
+        "pre-transition owner turnover must preserve the current parked manifest bytes");
       assert.equal(JSON.parse(readFileSync(join(bound.runDir, "factory.lock"), "utf8")).session, "owner-b");
+      assert.equal(readFileSync(join(bound.runDir, "factory.lock"), "utf8"), readFileSync(join(bound.repo, "owner-replacement-lock-bytes"), "utf8"),
+        "pre-transition owner turnover must preserve the exact replacement lock bytes");
       rmSync(join(bound.repo, "bootstrap-mode"));
-      assert.equal(factory(bound.repo, ["resume", RUN, "--session", "owner-b", "--now", NOW(8)]).ok, true);
+      assert.equal(factory(bound.repo, ["resume", RUN, "--session", "owner-b", "--now", NOW(11)]).ok, true);
     } finally { cleanupProject(bound); }
   });
 

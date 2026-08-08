@@ -364,7 +364,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.throws(() => seedLegacyRun(malformedRoot, "malformed", { mode: "invalid", pr_base: undefined }), /run\.mode/u);
     assert.equal(existsSync(join(malformedRoot, ".factory")), false);
 
-    const configuredCommand = "node -e \"const f=require('fs');if(f.existsSync('.factory/configured-bootstrap/run.json'))process.exit(9);f.appendFileSync('bootstrap-count','x');f.writeFileSync('bootstrap-cwd',process.cwd());f.mkdirSync('node_modules',{recursive:true});console.log('bootstrap-out');console.error('bootstrap-err')\"";
+    const configuredCommand = "node -e \"const f=require('fs');if(f.existsSync('.factory/configured-bootstrap/run.json'))process.exit(9);f.appendFileSync('bootstrap-count','x');f.writeFileSync('bootstrap-cwd',process.cwd());f.writeFileSync('bootstrap-env',process.env.FACTORY_BOOTSTRAP_ENV_MARKER??'');f.writeFileSync('bootstrap-stdin',f.readFileSync(0,'utf8'));f.mkdirSync('node_modules',{recursive:true});console.log('bootstrap-out');console.error('bootstrap-err')\"";
     const configuredSource = operator(root, "configured-bootstrap", (repository) => {
       writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
         resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
@@ -372,24 +372,40 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       }, null, 2)}\n`);
     });
     const configuredRecord = recorder(join(root, "configured-recorder"));
-    const configured = invoke(configuredSource, ["init", "configured-bootstrap", "--now", NOW, "--json"], configuredRecord);
+    // Unlike the default invoke helper this gives the CLI a concrete stdin marker. Bootstrap
+    // can only copy it when its child uses inherited fd 0, and the environment marker likewise
+    // distinguishes inherited process.env from a reconstructed environment.
+    const configuredProcess = spawnSync(process.execPath, [CLI, "init", "configured-bootstrap", "--now", NOW, "--json", "--repo", configuredSource], {
+      encoding: "utf8", input: "bootstrap-stdin-marker\n", stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env, PATH: `${configuredRecord.bin}:${process.env.PATH}`, GIT_LOG: configuredRecord.log, REAL_GIT,
+        FACTORY_BOOTSTRAP_ENV_MARKER: "bootstrap-environment-marker",
+      },
+    });
+    const configured = {
+      ok: configuredProcess.status === 0,
+      stdout: String(configuredProcess.stdout ?? ""), stderr: String(configuredProcess.stderr ?? configuredProcess.error?.message ?? ""),
+      response: JSON.parse(String(configuredProcess.stdout ?? "")),
+    };
     assert.equal(configured.ok, true, configured.stderr);
     assert.deepEqual(JSON.parse(configured.stdout), configured.response, "init --json stdout remains exactly one JSON object");
     assert.match(configured.stderr, /bootstrap-out/u);
     assert.match(configured.stderr, /bootstrap-err/u);
     assert.equal(readFileSync(join(configured.response.sandbox_path, "bootstrap-count"), "utf8"), "x");
     assert.equal(readFileSync(join(configured.response.sandbox_path, "bootstrap-cwd"), "utf8"), configured.response.sandbox_path);
+    assert.equal(readFileSync(join(configured.response.sandbox_path, "bootstrap-env"), "utf8"), "bootstrap-environment-marker");
+    assert.equal(readFileSync(join(configured.response.sandbox_path, "bootstrap-stdin"), "utf8"), "bootstrap-stdin-marker\n");
     assert.equal(existsSync(join(configured.response.sandbox_path, "node_modules")), true, "untracked dependency output is compatible");
     assert.deepEqual(Object.fromEntries(Object.entries(JSON.parse(readFileSync(join(configured.response.run_dir, "run.json"), "utf8")))
       .filter(([key]) => key.startsWith("bootstrap_"))), { bootstrap_command: configuredCommand, bootstrap_exit: 0 });
 
     const failureCases = [
-      { name: "dirty", command: "node -e \"require('fs').writeFileSync('tracked dirty.txt','changed');process.exit(7)\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u },
-      { name: "staged", command: "node -e \"require('fs').writeFileSync('tracked dirty.txt','staged');require('child_process').execFileSync('git',['add','tracked dirty.txt'])\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u },
-      { name: "unobservable", command: "node -e \"require('fs').renameSync('.git','.git-gone');process.exit(7)\"", timeout: 120000, match: /could not observe tracked paths after init/u },
-      { name: "throw", command: "bootstrap-throw-secret\0", timeout: 120000, match: /failed during init; exit status unavailable/u, hidden: "bootstrap-throw-secret" },
-      { name: "exit", command: "node -e \"process.exit(7)\"", timeout: 120000, match: /failed during init with exit status 7/u },
-      { name: "timeout", command: "node -e \"setTimeout(()=>{},10000)\"", timeout: 20, match: /failed during init; exit status unavailable/u },
+      { name: "dirty", command: "node -e \"const f=require('fs');f.appendFileSync('bootstrap-attempt-count','x');f.writeFileSync('tracked dirty.txt','changed');process.exit(7)\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u, attempts: 1 },
+      { name: "staged", command: "node -e \"const f=require('fs');f.appendFileSync('bootstrap-attempt-count','x');f.writeFileSync('tracked dirty.txt','staged');require('child_process').execFileSync('git',['add','tracked dirty.txt'])\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u, attempts: 1 },
+      { name: "unobservable", command: "node -e \"const f=require('fs');f.appendFileSync('bootstrap-attempt-count','x');f.renameSync('.git','.git-gone');process.exit(7)\"", timeout: 120000, match: /could not observe tracked paths after init/u, attempts: 1 },
+      { name: "throw", command: "bootstrap-throw-secret\0", timeout: 120000, match: /failed during init; exit status unavailable/u, hidden: "bootstrap-throw-secret", attempts: 0 },
+      { name: "exit", command: "node -e \"require('fs').appendFileSync('bootstrap-attempt-count','x');process.exit(7)\"", timeout: 120000, match: /failed during init with exit status 7/u, attempts: 1 },
+      { name: "timeout", command: "node -e \"require('fs').appendFileSync('bootstrap-attempt-count','x');setTimeout(()=>{},10000)\"", timeout: 1000, match: /failed during init; exit status unavailable/u, attempts: 1 },
     ];
     for (const row of failureCases) {
       const failedBootstrapSource = operator(root, `bootstrap-${row.name}`, (repository) => {
@@ -407,6 +423,9 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       if (row.hidden) assert.doesNotMatch(observed.stderr, new RegExp(row.hidden, "u"), "spawn refusals must not expose command text");
       assert.match(observed.stderr, /sandbox .* was retained; run\.json is absent/u, row.name);
       assert.equal(existsSync(join(failedBootstrapSource, ".factory-sandboxes", `bootstrap-${row.name}`, ".factory", `bootstrap-${row.name}`, "run.json")), false);
+      const attempts = join(failedBootstrapSource, ".factory-sandboxes", `bootstrap-${row.name}`, "bootstrap-attempt-count");
+      assert.equal(existsSync(attempts), row.attempts === 1, `${row.name}: executable bootstrap must leave one attempt marker`);
+      if (row.attempts === 1) assert.equal(readFileSync(attempts, "utf8"), "x", `${row.name}: bootstrap failure and timeout have no retry`);
     }
 
     const configCases = [
