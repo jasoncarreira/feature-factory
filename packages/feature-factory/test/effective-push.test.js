@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { enforceEffectivePushTarget } from "../core/effective-push.js";
+import { describeError } from "../bin/factory.js";
 import { validateRun } from "../state/schema.js";
 import { initFresh } from "./init-fixture.js";
 
@@ -22,6 +24,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   const fresh = skill.slice(freshStart, gateOneStart);
   const gateThree = skill.slice(gateThreeStart, publicationStart);
   const publication = skill.slice(publicationStart, summaryStart);
+  const effectiveProof = fresh.slice(fresh.indexOf("### Effective push proof"), fresh.indexOf("### Feature branch provenance and crash recovery"));
   const summary = skill.slice(summaryStart);
   const required = (section, fragment, trace) => {
     const index = section.indexOf(fragment);
@@ -33,6 +36,11 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     assert.deepEqual(positions, [...positions].sort((left, right) => left - right), `${trace} operations are out of order`);
   };
   const occurrences = (section, fragment) => section.split(fragment).length - 1;
+  const fencedShBlocks = (source) => [...source.matchAll(/```sh\n([\s\S]*?)```/gu)].map((match) => ({
+    index: match.index,
+    body: match[1],
+    operations: match[1].split("\n").map((line) => line.trim()).filter(Boolean),
+  }));
   const command = (name, args, options = {}) => spawnSync(name, args, {
     encoding: "utf8",
     env: { ...process.env, LC_ALL: "C", ...options.env },
@@ -100,35 +108,216 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     visit(root, ".", entries);
     return entries;
   };
-  const effectiveTarget = (repository) => {
-    const result = gitResult(repository, "remote", "get-url", "--push", "origin");
-    return result.status === 0 && result.stdout.trim() ? { ok: true, value: result.stdout.trim() } : { ok: false };
-  };
-  const compareOnly = (operator, sandbox) => {
-    const operatorTarget = effectiveTarget(operator);
-    if (!operatorTarget.ok) return { ok: false, message: `factory sandbox: operator effective push target unavailable; sandbox retained at ${sandbox}` };
-    const sandboxTarget = effectiveTarget(sandbox);
-    if (!sandboxTarget.ok) return { ok: false, message: `factory sandbox: sandbox effective push target unavailable at ${sandbox}` };
-    if (sandboxTarget.value !== operatorTarget.value) {
-      return { ok: false, message: `factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${sandbox}` };
-    }
-    return { ok: true };
-  };
-  const configureAndCompare = (operator, sandbox, afterConfigure = () => {}) => {
+  const childResult = (stdout = "") => ({ status: 0, signal: null, stdout, stderr: "" });
+  const invokeEffectivePush = (positionals, outcomes) => {
     const events = [];
-    const operatorTarget = effectiveTarget(operator);
-    events.push("operator-capture");
-    if (!operatorTarget.ok) return { ...compareOnly(operator, sandbox), events };
-    const configured = gitResult(sandbox, "config", "--replace-all", "remote.origin.pushurl", operatorTarget.value);
-    events.push("sandbox-configure");
-    if (configured.status !== 0) {
-      return { ok: false, message: `factory sandbox: sandbox effective push target unavailable at ${sandbox}`, events };
+    let error = null;
+    try {
+      enforceEffectivePushTarget(positionals, {
+        spawnSync(name, args, options) {
+          events.push({ name, args, options });
+          const outcome = outcomes[events.length - 1];
+          if (typeof outcome === "function") return outcome();
+          return outcome;
+        },
+      });
+    } catch (caught) {
+      error = caught;
     }
-    afterConfigure();
-    const compared = compareOnly(operator, sandbox);
-    events.push("operator-recapture", "sandbox-recapture", "compare");
-    return { ...compared, events };
+    return { events, error };
   };
+  const assertChildOptions = (events) => {
+    for (const event of events) {
+      assert.equal(event.name, "git");
+      assert.equal(event.options.shell, false);
+      // No encoding: stdout must stay bytes. Decoding to utf8 maps every distinct invalid
+      // byte sequence to the same U+FFFD, so two unequal targets could compare equal here
+      // while `git push` used the original raw bytes. This assertion previously pinned
+      // `"utf8"` — it pinned the defect.
+      assert.equal(event.options.encoding, undefined,
+        "the target comparison must read bytes, not a lossily decoded string");
+      assert.deepEqual(event.options.stdio, ["ignore", "pipe", "pipe"]);
+      assert.equal(event.options.env.LC_ALL, "C");
+      assert.equal(event.options.env.PATH, process.env.PATH);
+    }
+  };
+  const effectivePushProgram = (...args) => spawnSync(process.execPath, [cli, "effective-push", ...args], {
+    encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const arityMessage = "factory effective-push: expected exactly three positional arguments: <bootstrap|check> <operator-repository> <sandbox-repository>";
+  const emptyMessage = "factory effective-push: positional arguments must be non-empty";
+  const operationMessage = "factory effective-push: operation must be bootstrap or check";
+  for (const [positionals, message] of [
+    [[], arityMessage],
+    [["check", "operator"], arityMessage],
+    [["check", "operator", "sandbox", "extra"], arityMessage],
+    [["", "operator", "sandbox"], emptyMessage],
+    [["check", "", "sandbox"], emptyMessage],
+    [["check", "operator", ""], emptyMessage],
+    [["check", "operator", 1], emptyMessage],
+    [["CHECK", "operator", "sandbox"], operationMessage],
+  ]) {
+    const observed = invokeEffectivePush(positionals, []);
+    assert.equal(observed.events.length, 0);
+    assert.equal(observed.error?.message, message);
+    assert.equal(observed.error?.cause, undefined);
+  }
+
+  const initialTarget = "https://initial-user:initial-token@example.invalid/org/repository.git";
+  const currentTarget = "https://current-user:current-token@example.invalid/org/repository.git";
+  const bootstrapCalls = invokeEffectivePush(["bootstrap", "operator", "sandbox"], [
+    childResult(`${initialTarget}\n`),
+    { ...childResult("ignored-output"), stderr: "ignored-diagnostic" },
+    // Both carry exactly one git record terminator. These previously read `\n\n` and a bare
+    // target, which only compared equal because the parser stripped every trailing LF.
+    childResult(`${currentTarget}\n`),
+    childResult(`${currentTarget}\n`),
+  ]);
+  assert.equal(bootstrapCalls.error, null);
+  assert.equal(bootstrapCalls.events.length, 4);
+  assert.deepEqual(bootstrapCalls.events.map(({ args }) => args), [
+    ["-C", "operator", "remote", "get-url", "--push", "origin"],
+    ["-C", "sandbox", "config", "--replace-all", "remote.origin.pushurl", initialTarget],
+    ["-C", "operator", "remote", "get-url", "--push", "origin"],
+    ["-C", "sandbox", "remote", "get-url", "--push", "origin"],
+  ]);
+  assertChildOptions(bootstrapCalls.events);
+
+  const checkCalls = invokeEffectivePush(["check", "operator", "sandbox"], [
+    // One terminator each. The second previously omitted it, and only matched because the
+    // parser stripped every trailing LF rather than git's single record terminator.
+    childResult(`${currentTarget}\n`), childResult(`${currentTarget}\n`),
+  ]);
+  assert.equal(checkCalls.error, null);
+  assert.equal(checkCalls.events.length, 2);
+  assert.equal(checkCalls.events.some(({ args }) => args.includes("config")), false);
+  assertChildOptions(checkCalls.events);
+
+  // Parsing removes exactly one git-added record terminator and preserves every byte before it.
+  // The previous table paired DIFFERENT raw outputs that should "normalize" to one target, and
+  // that tolerance is the defect: `repo\n\n` and `repo\n` reduced to the same target while the
+  // push used unequal bytes. Only identical bytes can match now, so each pair here is identical.
+  for (const [stdout, expected] of [
+    ["ssh://example/repo\n", "ssh://example/repo"],
+    ["ssh://example/repo\n\n", "ssh://example/repo\n"],
+    ["ssh://example/repo\r\n", "ssh://example/repo\r"],
+    ["ssh://example/repo\npath\n", "ssh://example/repo\npath"],
+    ["ssh://example/repo \t\n", "ssh://example/repo \t"],
+  ]) {
+    const normalized = invokeEffectivePush(["check", "operator", "sandbox"], [
+      childResult(stdout), childResult(`${expected}\n`),
+    ]);
+    assert.equal(normalized.error, null, JSON.stringify({ stdout, expected }));
+    assert.equal(normalized.events.length, 2);
+  }
+  // The reason the strip is exactly one: a target that itself ends in LF must not equal the same
+  // target without it. A greedy strip reduced both to the same bytes and accepted the pair.
+  const trailingLfTarget = invokeEffectivePush(["check", "operator", "sandbox"], [
+    childResult("ssh://example/repo\n\n"), childResult("ssh://example/repo\n"),
+  ]);
+  assert.equal(trailingLfTarget.error?.message,
+    "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at sandbox",
+    "a target ending in LF must not compare equal to the same target without it");
+  // Fail closed when git's terminator is absent: that is not the output shape being parsed, so
+  // guessing at it would be inventing a target rather than reading one.
+  for (const stdout of ["ssh://example/repo", "ssh://example/repo\r", "", "\r", "\n"]) {
+    const normalizedEmpty = invokeEffectivePush(["check", "operator", "sandbox"], [childResult(stdout)]);
+    assert.equal(normalizedEmpty.events.length, 1);
+    assert.equal(normalizedEmpty.error?.message, "factory sandbox: operator effective push target unavailable; sandbox retained at sandbox");
+  }
+
+  const diagnosticTarget = "https://diagnostic-user:diagnostic-token@example.invalid/private.git";
+  const diagnosticCause = new Error(`nested ${diagnosticTarget}`);
+  const unavailableResults = [
+    () => { throw new Error(`thrown ${diagnosticTarget}`, { cause: diagnosticCause }); },
+    { ...childResult(diagnosticTarget), error: new Error(`result ${diagnosticTarget}`, { cause: diagnosticCause }) },
+    { ...childResult(diagnosticTarget), status: null, signal: "SIGTERM", stderr: diagnosticTarget },
+    { ...childResult(diagnosticTarget), status: null, stderr: diagnosticTarget },
+    { ...childResult(diagnosticTarget), status: 7, stderr: diagnosticTarget },
+    // A Buffer stdout used to count as "unavailable", because capture required a string.
+    // Bytes are now the normal case, so that row asserted the lossy-decode defect itself.
+    // Exactly the terminator and nothing else, so the target is empty. This read `"\n\n"` while
+    // the parser stripped every trailing LF; under single-terminator parsing that is a one-byte
+    // target, not an absent one.
+    childResult("\n"),
+  ];
+  for (const unavailable of unavailableResults) {
+    const operatorFailure = invokeEffectivePush(["check", "operator", "sandbox"], [unavailable]);
+    assert.equal(operatorFailure.events.length, 1);
+    assert.equal(operatorFailure.error?.message, "factory sandbox: operator effective push target unavailable; sandbox retained at sandbox");
+    assert.equal(operatorFailure.error?.cause, undefined);
+    assert.equal(describeError(operatorFailure.error).includes(diagnosticTarget), false);
+    const sandboxFailure = invokeEffectivePush(["check", "operator", "sandbox"], [
+      childResult(`${currentTarget}\n`), unavailable,
+    ]);
+    assert.equal(sandboxFailure.events.length, 2);
+    assert.equal(sandboxFailure.error?.message, "factory sandbox: sandbox effective push target unavailable at sandbox");
+    assert.equal(sandboxFailure.error?.cause, undefined);
+    assert.equal(describeError(sandboxFailure.error).includes(diagnosticTarget), false);
+  }
+
+  const configFailures = [
+    () => { throw new Error(`config ${diagnosticTarget}`, { cause: diagnosticCause }); },
+    { status: undefined, signal: null, error: new Error(diagnosticTarget), stdout: diagnosticTarget, stderr: diagnosticTarget },
+    { status: null, signal: "SIGTERM", stdout: diagnosticTarget, stderr: diagnosticTarget },
+    { status: 9, signal: null, stdout: diagnosticTarget, stderr: diagnosticTarget },
+  ];
+  for (const unavailable of configFailures) {
+    const configFailure = invokeEffectivePush(["bootstrap", "operator", "sandbox"], [
+      childResult(`${initialTarget}\n`), unavailable,
+    ]);
+    assert.equal(configFailure.events.length, 2);
+    assert.equal(configFailure.error?.message, "factory sandbox: sandbox effective push target unavailable at sandbox");
+    assert.equal(configFailure.error?.cause, undefined);
+    assert.equal(describeError(configFailure.error).includes(diagnosticTarget), false);
+  }
+
+  for (const [outcomes, calls, message] of [
+    [[childResult(`${initialTarget}\n`), childResult(), childResult("\n")], 3,
+      "factory sandbox: operator effective push target unavailable; sandbox retained at sandbox"],
+    [[childResult(`${initialTarget}\n`), childResult(), childResult(`${currentTarget}\n`), childResult("\n")], 4,
+      "factory sandbox: sandbox effective push target unavailable at sandbox"],
+    [[childResult(`${initialTarget}\n`), childResult(), childResult(`${currentTarget}\n`), childResult(`${initialTarget}\n`)], 4,
+      "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at sandbox"],
+  ]) {
+    const stopped = invokeEffectivePush(["bootstrap", "operator", "sandbox"], outcomes);
+    assert.equal(stopped.events.length, calls);
+    assert.equal(stopped.error?.message, message);
+  }
+  const checkMismatch = invokeEffectivePush(["check", "operator", "sandbox"], [
+    childResult(`${initialTarget}\n`), childResult(`${currentTarget}\n`),
+  ]);
+  assert.equal(checkMismatch.events.length, 2);
+  assert.equal(checkMismatch.error?.message, "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at sandbox");
+  assert.equal(checkMismatch.error?.cause, undefined);
+  // Two DIFFERENT invalid UTF-8 targets. Decoded as utf8 both become the same U+FFFD string
+  // and this comparison passes, while `git push` would use the original unequal bytes — a
+  // sandbox publishing to a target the operator never approved. Byte comparison refuses.
+  // A local-path remote on Unix can legitimately hold non-UTF-8 bytes, so this is reachable.
+  const invalidA = Buffer.concat([Buffer.from("ssh://host/"), Buffer.from([0xff]), Buffer.from("\n")]);
+  const invalidB = Buffer.concat([Buffer.from("ssh://host/"), Buffer.from([0xfe]), Buffer.from("\n")]);
+  assert.equal(invalidA.toString("utf8"), invalidB.toString("utf8"),
+    "the premise: utf8 decoding collapses these two distinct targets to one string");
+  const undecodableMismatch = invokeEffectivePush(["check", "operator", "sandbox"], [
+    childResult(invalidA), childResult(invalidB),
+  ]);
+  assert.equal(undecodableMismatch.error?.message,
+    "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at sandbox",
+    "distinct invalid UTF-8 targets must not compare equal");
+  // Equal raw bytes still match, so the byte comparison did not simply refuse everything.
+  const undecodableMatch = invokeEffectivePush(["check", "operator", "sandbox"], [
+    childResult(Buffer.from(invalidA)), childResult(Buffer.from(invalidA)),
+  ]);
+  assert.equal(undecodableMatch.error, null, "identical raw targets must still pass");
+  // Bootstrap cannot place a non-round-tripping target in argv without altering it, so it
+  // refuses rather than configuring something other than what it captured.
+  const unrepresentable = invokeEffectivePush(["bootstrap", "operator", "sandbox"], [
+    childResult(invalidA),
+  ]);
+  assert.equal(unrepresentable.error?.message,
+    "factory sandbox: operator effective push target is not representable for configuration; sandbox retained at sandbox");
   const featureLog = (repository, branch) => {
     const raw = git(repository, "rev-parse", "--git-path", `logs/refs/heads/${branch}`);
     const path = isAbsolute(raw) ? raw : resolve(repository, raw);
@@ -208,8 +397,8 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "successful JSON response selects paths",
     "Immediately after fresh selection",
     "### Effective push proof",
-    'git -C "$RUN_REPO" config --replace-all remote.origin.pushurl "$OPERATOR_PUSH"',
-    "the two current shell strings must be exactly equal",
+    'factory effective-push "$EFFECTIVE_PUSH_OPERATION" "$O" "$RUN_REPO"',
+    "the freshly captured strings must be exactly equal",
     "### Feature branch provenance and crash recovery",
     'git -C "$INTEGRATION_WORKTREE" switch --no-track -c "$FEATURE_BRANCH" "$SEED_HEAD"',
     "Immediately before claiming or stealing a lock",
@@ -228,9 +417,14 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "The skill does not construct or prove the sandbox.",
     "created_at` exactly\nequals `updated_at`",
     "qualified status reports lock state exactly `absent`",
-    "An active resume skips the configuration command",
-    "Never persist, log, echo, normalize, interpolate into a cause",
-    "Suppress target-operation stdout, stderr, and argv",
+    "uses `check`, performs two fresh captures, and never changes remote configuration",
+    // The bounded properties, not a generic non-disclosure claim. `bootstrap` necessarily puts the
+    // target in a child's argv, so "never otherwise expose" was false; these four are what holds.
+    "Never persist a captured target, write it to the manifest or an artifact, log or echo it, or",
+    "interpolate it into a refusal message or an error's cause chain.",
+    // And the boundary must stay stated, so the next reader does not re-derive the wider claim.
+    "There is no non-argv route:",
+    "discards target-operation stdout, stderr, and subprocess errors",
     "oldest raw line",
     "forty-zero old OID",
     "branch: Created from <seed-oid>",
@@ -239,7 +433,14 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "Never recreate a progressed run's branch.",
   ]) required(fresh, fragment, "ratified skill policy");
   assert.equal(occurrences(fresh, 'git -C "$O" show-ref --verify --quiet "$FEATURE_REF"'), 4);
-  assert.equal(occurrences(fresh, "config --replace-all remote.origin.pushurl"), 1);
+  const effectivePushSites = skill.split("\n").map((line) => line.trim())
+    .filter((line) => line.startsWith("factory effective-push "));
+  assert.deepEqual(effectivePushSites, [
+    'factory effective-push "$EFFECTIVE_PUSH_OPERATION" "$O" "$RUN_REPO"',
+    'factory effective-push check "$O" "$RUN_REPO"',
+  ]);
+  assert.doesNotMatch(skill, /remote get-url --push|remote\.origin\.pushurl|OPERATOR_PUSH|CURRENT_OPERATOR_PUSH|CURRENT_RUN_PUSH/u);
+  assert.doesNotMatch(skill, /(?:test\s+|\[\s*)["']?\$[A-Z_]*PUSH/u);
   assert.doesNotMatch(fresh, /git clone --local "\$O"|--no-hardlinks|hardlink clone|\bfallback\b|copy-mode|\bstaging\b|\bretry(?:ing)?\b|alternate destination|attempt-numbered|quarantine|ownership (?:evidence|record)|rm -|rmSync|recursive removal|mkdir|pwd -P|rev-parse --absolute-git-dir/iu);
   for (const fragment of [
     "derive later paths only from the successful command response",
@@ -285,22 +486,46 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   ordered(publication, [
     'factory status "$R" --json --repo "$RUN_REPO"',
     'git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"',
-    "set +x",
-    'CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"',
-    'CURRENT_RUN_PUSH="$(LC_ALL=C git -C "$RUN_REPO" remote get-url --push origin)"',
-    "Step 6 only compares and never runs `git config`",
+    'factory effective-push check "$O" "$RUN_REPO"',
+    "Step 6 only compares and never reconfigures a remote",
     'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"',
     'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"',
     'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
     "Production source ceiling: <landed count> / 3600",
   ], "Step 6 compare/publication");
+  // Step 6 carried its own copy of the generic non-disclosure claim, and it survived the first
+  // narrowing because only the Step 0 sentence was rewritten. Pinned in the Step 6 slice, not the
+  // fresh-request slice, so the assertion fails for drift here rather than passing on a match
+  // elsewhere in the file.
+  for (const fragment of [
+    "Step 6 only compares and never reconfigures a remote, so no argv here carries a target.",
+    "either target, write it to the manifest or an artifact, log or echo it, or interpolate it into a refusal",
+  ]) required(publication, fragment, "Step 6 bounded disclosure");
+  const stepSixEquality = required(publication, 'factory effective-push check "$O" "$RUN_REPO"', "Step 6 success sequence");
+  const stepSixFirstIdentity = required(publication, identityCommand, "Step 6 success sequence");
+  const stepSixPush = required(publication, 'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"', "Step 6 success sequence");
+  assert.deepEqual([stepSixEquality, stepSixFirstIdentity, stepSixPush],
+    [...[stepSixEquality, stepSixFirstIdentity, stepSixPush]].sort((left, right) => left - right),
+    "Step 6 success must keep equality, the first identity guard, and push adjacent in that order");
+  const equalityToPush = publication.slice(stepSixEquality + 'factory effective-push check "$O" "$RUN_REPO"'.length, stepSixPush);
+  assert.deepEqual(fencedShBlocks(equalityToPush).flatMap(({ operations }) => operations), [identityCommand],
+    "Step 6 equality-to-push interval must contain only the first identity guard");
+  const distinctRefusal = "Step 6 effective-push refusal parks differently from Step 0: Step 0 remains status-only with an unchanged manifest; Step 6 follows the procedure below.";
+  required(publication, distinctRefusal, "Step 6 refusal lifecycle");
+  assert.match(publication, /nonzero result from the command below[\s\S]*stdout is empty and stderr\s+is exactly one fixed Step 0 refusal followed by exactly one LF[\s\S]*bind\s+`PRE_QUOTING_REASON` to the resulting already-redacted ASCII refusal/u);
+  assert.match(publication, /quiesce every builder, tool,\s+background task, and heartbeat call[\s\S]*surrounding\s+the complete reason with single quotes and replacing every literal `'` with the exact shell sequence\s+`'\\''`/u);
+  assert.match(publication, /exact parked top-level status produced by that command[\s\S]*reason byte-for-byte equal to `PRE_QUOTING_REASON`[\s\S]*same verified `SESSION_ID` owner[\s\S]*Release only that owner[\s\S]*lock absent with null owner/u);
+  assert.match(publication, /Perform no publishing-identity observation, push, `gh` command, `factory pr`, Step 7 handoff, cleanup, or\s+other effect/u);
+  assert.match(effectiveProof, /permit only `factory status "\$R" --json --repo "\$RUN_REPO"`[\s\S]*stop before branch handling/u);
+  assert.doesNotMatch(effectiveProof, /factory terminal|factory lock|needs-human/u);
+  assert.throws(() => required(publication.replace(distinctRefusal, ""), distinctRefusal, "Step 6 refusal lifecycle"),
+    /Step 6 refusal lifecycle contract is missing/u);
   for (const fragment of [
     "## Post-merge test-only repairs",
     "include every attempt",
     "This publication repair-record needs-human remains blocking, and envelope resume does not clear it.",
   ]) required(publication, fragment, "post-merge repair disclosure");
-  assert.equal(occurrences(publication, "config --replace-all remote.origin.pushurl"), 0);
-  assert.doesNotMatch(publication, /git -C "\$RUN_REPO" config/u);
+  assert.doesNotMatch(publication, /git -C "\$RUN_REPO" (?:config|remote get-url)/u);
   required(summary, "guarded sandbox-removal", "Step 7 exclusion");
   required(summary, "Only after all ref and archive verification succeeds", "Step 7 guard");
 
@@ -330,11 +555,6 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     assert.ok(resumeOrderSeven < resumeOrderEight && resumeOrderEight < resumeBoundary && resumeBoundary < resumePolicy,
       "identity seam resume ordering must bind verified order 7 to the guard before order-8 reconciliation");
   };
-  const fencedShBlocks = (source) => [...source.matchAll(/```sh\n([\s\S]*?)```/gu)].map((match) => ({
-    index: match.index,
-    body: match[1],
-    operations: match[1].split("\n").map((line) => line.trim()).filter(Boolean),
-  }));
   const identityGuardSites = (source) => fencedShBlocks(source)
     .filter(({ operations }) => operations.includes(identityCommand));
   const inspectIdentityOperation = (operation, allowed = []) => {
@@ -369,11 +589,10 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
       assert.deepEqual(site.operations, expectedSites[index],
         `identity guard site ${index + 1} must preserve its complete allowed operation sequence`);
     }
-    const targetCaptures = fencedShBlocks(source)
-      .filter(({ operations }) => operations.includes('CURRENT_OPERATOR_PUSH="$(LC_ALL=C git -C "$O" remote get-url --push origin)"'));
-    assert.ok(targetCaptures.length >= 1, "target capture remains a non-identity block outside all guard sites");
-    assert.equal(targetCaptures.every(({ operations }) => !operations.includes(identityCommand)), true,
-      "target capture blocks must not become identity guard sites");
+    const targetChecks = [...source.matchAll(/^    factory effective-push .+$/gmu)].map((match) => match.index);
+    assert.equal(targetChecks.length, 2, "package target checks remain outside all identity guard sites");
+    assert.equal(targetChecks.every((index) => !sites.some((site) => index >= site.index && index < site.index + site.body.length)), true,
+      "target check sites must not become identity guard sites");
   };
   const checkIdentityPolicy = (source) => {
     checkIdentitySeams(source);
@@ -641,6 +860,11 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
       ],
       reason: null,
     });
+    assert.deepEqual(allMatching.events.slice(2, 5), [
+      "effective-push-targets-exactly-equal",
+      "identity:pre-push",
+      'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"',
+    ]);
     assert.equal(markerLines().length, 3);
     assert.equal(markerLines().every((line) => line === JSON.stringify(["api", "--method", "GET", "/user", "--jq", ".login"])), true);
     const beforeAbsentConfig = markerLines();
@@ -736,15 +960,62 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
     assert.equal(realpathSync(mismatch.repository), mismatch.repository);
     assert.equal(relative(mismatch.repository, mismatch.runDir).startsWith(".."), false);
     assert.equal(operatorRefAbsent(operator, mismatchBranch), true);
+    for (const [args, message] of [
+      [[], arityMessage],
+      [["check", operator], arityMessage],
+      [["check", operator, mismatch.repository, "extra"], arityMessage],
+      [["", operator, mismatch.repository], emptyMessage],
+      [["check", "", mismatch.repository], emptyMessage],
+      [["check", operator, ""], emptyMessage],
+      [["CHECK", operator, mismatch.repository], operationMessage],
+    ]) {
+      const invalid = effectivePushProgram(...args);
+      assert.equal(invalid.status, 1);
+      assert.equal(invalid.stdout, "");
+      assert.equal(invalid.stderr, `${message}\n`);
+    }
+    const bootstrapProgram = effectivePushProgram("bootstrap", operator, mismatch.repository);
+    assert.equal(bootstrapProgram.status, 0, bootstrapProgram.stderr);
+    assert.equal(bootstrapProgram.stdout, "");
+    assert.equal(bootstrapProgram.stderr, "");
+    const checkProgram = effectivePushProgram("check", operator, mismatch.repository);
+    assert.equal(checkProgram.status, 0, checkProgram.stderr);
+    assert.equal(checkProgram.stdout, "");
+    assert.equal(checkProgram.stderr, "");
     const beforeMismatch = snapshot(mismatch.runDir);
-    const mismatchResult = configureAndCompare(operator, mismatch.repository, () => {
-      git(operator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
-    });
-    assert.equal(mismatchResult.ok, false);
-    assert.deepEqual(mismatchResult.events, ["operator-capture", "sandbox-configure", "operator-recapture", "sandbox-recapture", "compare"]);
-    assert.equal(mismatchResult.message, `factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${mismatch.repository}`);
+    const mismatchEvents = [];
+    let mismatchError;
+    try {
+      enforceEffectivePushTarget(["bootstrap", operator, mismatch.repository], {
+        spawnSync(name, args, options) {
+          mismatchEvents.push({ name, args, options });
+          const result = spawnSync(name, args, options);
+          if (mismatchEvents.length === 2) git(operator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
+          return result;
+        },
+      });
+    } catch (error) {
+      mismatchError = error;
+    }
+    assert.equal(mismatchEvents.length, 4);
+    assertChildOptions(mismatchEvents);
+    assert.equal(mismatchEvents[1].args.at(-1), secretOne);
+    assert.equal(mismatchError?.message, `factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${mismatch.repository}`);
+    assert.equal(mismatchError?.cause, undefined);
+    assert.equal(describeError(mismatchError), mismatchError.message);
+    const mismatchProgram = effectivePushProgram("check", operator, mismatch.repository);
+    assert.equal(mismatchProgram.status, 1);
+    assert.equal(mismatchProgram.stdout, "");
+    assert.equal(mismatchProgram.stderr, `${mismatchError.message}\n`);
+    const unavailableProgram = effectivePushProgram("check", join(root, "missing-operator"), mismatch.repository);
+    assert.equal(unavailableProgram.status, 1);
+    assert.equal(unavailableProgram.stdout, "");
+    assert.equal(unavailableProgram.stderr, `factory sandbox: operator effective push target unavailable; sandbox retained at ${mismatch.repository}\n`);
     for (const hidden of [secretOne, secretTwo, "operator-user", "credential-token", "other-user", "other-token", "fetch-target.git", "push-target.git"]) {
-      assert.equal(mismatchResult.message.includes(hidden), false, `refusal disclosed ${hidden}`);
+      assert.equal(mismatchError.message.includes(hidden), false, `refusal disclosed ${hidden}`);
+      assert.equal(describeError(mismatchError).includes(hidden), false, `cause chain disclosed ${hidden}`);
+      assert.equal(mismatchProgram.stderr.includes(hidden), false, `program refusal disclosed ${hidden}`);
+      assert.equal(JSON.stringify(snapshot(mismatch.runDir)).includes(hidden), false, `factory state disclosed ${hidden}`);
     }
     assert.deepEqual(snapshot(mismatch.runDir), beforeMismatch);
     assert.equal(gitResult(mismatch.repository, "show-ref", "--verify", "--quiet", `refs/heads/${mismatchBranch}`).status, 1);
@@ -757,14 +1028,14 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
 
     git(operator, "config", "--replace-all", "remote.origin.pushurl", secretOne);
     const crashBranch = "feature/crash-recovery";
-    const crash = initFresh(operator, ["crash-recovery", "--branch", crashBranch, "--pr-base", "main", "--now", "2026-08-04T12:01:00.000Z"]);
+    const crash = initFresh(operator, ["crash-recovery", "--branch", crashBranch, "--pr-base", "main", "--mode", "autonomous", "--now", "2026-08-04T12:01:00.000Z"]);
     assert.equal(gitResult(crash.repository, "config", "--get-all", "remote.origin.pushurl").status, 1);
     const crashRun = JSON.parse(readFileSync(join(crash.runDir, "run.json"), "utf8"));
     const crashStatus = factory("status", "crash-recovery", "--repo", crash.repository);
     assert.equal(bootstrapPending(crashRun, crashStatus), true);
-    assert.equal(configureAndCompare(operator, crash.repository).ok, true);
+    assert.doesNotThrow(() => enforceEffectivePushTarget(["bootstrap", operator, crash.repository]));
     const configuredTarget = git(crash.repository, "config", "--get-all", "remote.origin.pushurl");
-    assert.equal(configureAndCompare(operator, crash.repository).ok, true);
+    assert.doesNotThrow(() => enforceEffectivePushTarget(["bootstrap", operator, crash.repository]));
     assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), configuredTarget);
     assert.equal(operatorRefAbsent(operator, crashBranch), true);
     const crashCreated = createBranch(crash.repository, crashBranch);
@@ -820,16 +1091,72 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
     assert.notEqual(publicationRef, `refs/heads/${staleIntakeBranch}`);
     assert.equal(gitResult(bare, "show-ref", "--verify", "--quiet", publicationRef).status, 1);
     const activePushBefore = git(crash.repository, "config", "--get-all", "remote.origin.pushurl");
+    const stepSixSession = "step-six-owner";
+    factory("lock", "crash-recovery", "claim", "--session", stepSixSession, "--repo", crash.repository);
+    const beforeStepSixStatus = factory("status", "crash-recovery", "--repo", crash.repository);
+    assert.equal(beforeStepSixStatus.status, "running");
+    assert.equal(beforeStepSixStatus.mode, "autonomous");
+    assert.equal(beforeStepSixStatus.lock_session, stepSixSession);
+    const beforeStepSixRun = JSON.parse(readFileSync(join(crash.runDir, "run.json"), "utf8"));
+    const progressState = ({ status: _status, updated_at: _updatedAt, terminal_result: _terminalResult, ...progress }) => progress;
+    rmSync(invocationMarker, { force: true });
     git(operator, "config", "--replace-all", "remote.origin.pushurl", secretTwo);
-    assert.equal(compareOnly(operator, crash.repository).ok, false);
+    const stepSixEvents = ["effective-push:check"];
+    const stepSixRefusal = effectivePushProgram("check", operator, crash.repository);
+    const stepSixReason = `factory sandbox: sandbox effective push target does not match operator target; sandbox retained at ${crash.repository}`;
+    assert.equal(stepSixRefusal.status, 1);
+    assert.equal(stepSixRefusal.stdout, "");
+    assert.equal(stepSixRefusal.stderr, `${stepSixReason}\n`);
+    assert.match(stepSixReason, /^[\x20-\x7e]+$/u);
+    stepSixEvents.push("quiesce:builders-tools-background-heartbeats");
+    const parkedStepSix = terminalThroughShell(crash.repository, "crash-recovery", stepSixReason);
+    stepSixEvents.push("terminal:needs-human");
+    assert.equal(parkedStepSix.result.status, 0, parkedStepSix.result.stderr);
+    assert.equal(parkedStepSix.reasonToken, shellQuote(stepSixReason));
+    assert.equal((parkedStepSix.commandString.match(/--reason/gu) ?? []).length, 1);
+    assert.ok(parkedStepSix.commandString.includes(`--reason ${parkedStepSix.reasonToken} --repo`));
+    assert.equal(parkedStepSix.commandString.includes('--reason "'), false);
+    const parkedStepSixStatus = factory("status", "crash-recovery", "--repo", crash.repository);
+    stepSixEvents.push("status:parked-owner-and-reason");
+    assert.equal(parkedStepSixStatus.status, "needs-human");
+    assert.deepEqual(parkedStepSixStatus.terminal_result, { status: "needs-human", reason: stepSixReason });
+    assert.equal(parkedStepSixStatus.lock_session, stepSixSession);
+    const parkedStepSixRun = JSON.parse(readFileSync(join(crash.runDir, "run.json"), "utf8"));
+    assert.deepEqual(progressState(parkedStepSixRun), progressState(beforeStepSixRun));
+    assert.equal(parkedStepSixRun.terminal_result.reason, stepSixReason);
+    factory("lock", "crash-recovery", "release", "--session", stepSixSession, "--repo", crash.repository);
+    stepSixEvents.push("lock:release");
+    const unlockedStepSix = factory("status", "crash-recovery", "--repo", crash.repository);
+    stepSixEvents.push("status:unlocked");
+    assert.equal(unlockedStepSix.status, "needs-human");
+    assert.deepEqual(unlockedStepSix.terminal_result, parkedStepSixStatus.terminal_result);
+    assert.equal(unlockedStepSix.lock, "absent");
+    assert.equal(unlockedStepSix.lock_session, null);
+    assert.deepEqual(stepSixEvents, [
+      "effective-push:check",
+      "quiesce:builders-tools-background-heartbeats",
+      "terminal:needs-human",
+      "status:parked-owner-and-reason",
+      "lock:release",
+      "status:unlocked",
+    ]);
+    assert.equal(stepSixEvents.some((event) => /identity|push origin|gh pr|factory pr|cleanup/u.test(event)), false);
+    assert.equal(existsSync(invocationMarker), false);
+    assert.equal(gitResult(bare, "show-ref", "--verify", "--quiet", publicationRef).status, 1);
+    assert.equal(parkedStepSixRun.pr_url, null);
+    assert.equal(existsSync(join(crash.repository, "progressed.txt")), true);
+    assert.equal(existsSync(crash.repository), true);
+    for (const hidden of [secretOne, secretTwo, "operator-user", "credential-token", "other-user", "other-token"]) {
+      assert.equal(stepSixReason.includes(hidden), false);
+      assert.equal(JSON.stringify(parkedStepSixRun).includes(hidden), false);
+    }
     assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), activePushBefore);
     git(operator, "config", "--replace-all", "remote.origin.pushurl", activePushBefore);
-    assert.equal(compareOnly(operator, crash.repository).ok, true);
     assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), activePushBefore);
 
     const recreatedBranch = "feature/recreated";
     const recreated = initFresh(operator, ["recreated", "--branch", recreatedBranch, "--pr-base", "main", "--now", "2026-08-04T12:03:00.000Z"]);
-    configureAndCompare(operator, recreated.repository);
+    enforceEffectivePushTarget(["bootstrap", operator, recreated.repository]);
     const firstCreation = createBranch(recreated.repository, recreatedBranch);
     const firstRaw = readFileSync(firstCreation.log, "utf8");
     git(recreated.repository, "switch", "main");

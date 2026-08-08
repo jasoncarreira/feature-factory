@@ -15,6 +15,7 @@ import { buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady,
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { archiveReviewAttempt } from "../state/review-archive.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
+import { enforceEffectivePushTarget } from "../core/effective-push.js";
 import { dispatchInitPublication } from "./init-publication.js";
 import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, validateRun } from "../state/schema.js";
 import {
@@ -39,6 +40,7 @@ export const COMMANDS = Object.freeze({
   observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--repository-verify", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
   validator: Object.freeze(["--repo", "--report", "--now", "--json"]),
   pr: Object.freeze(["--repo", "--url", "--now", "--json"]),
+  "effective-push": Object.freeze([]),
 });
 
 const BOOLEAN_FLAGS = new Set(["--json", "--repository-verify"]);
@@ -380,6 +382,11 @@ async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit }) {
 }
 
 const HANDLERS = {
+  "effective-push"(positional) {
+    enforceEffectivePushTarget(positional);
+    return null;
+  },
+
   async validator([runId], flags) {
     if (!flags.report) throw new CliError("factory validator requires --report");
     const runDir = runDirFor(flags, runId);
@@ -1184,8 +1191,9 @@ function usage() {
   factory step <run-id> <agent> <${STEP_STATUSES.join("|")}> [--attempts N] [--review-ref REF] [--evidence-ref REF]
   factory validator <run-id> --report REF   (verdict and head come from reviews/implementation-validator.json)
   factory terminal <run-id> <${TERMINAL_STATUSES.join("|")}> --reason TEXT
+  factory effective-push <bootstrap|check> <operator-repository> <sandbox-repository>
 
-Every command takes [--repo PATH] and [--json]. Unknown options are errors.
+State commands take [--repo PATH] and [--json]. effective-push accepts no options. Unknown options are errors.
 `);
   return null;
 }

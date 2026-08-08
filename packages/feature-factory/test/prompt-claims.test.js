@@ -969,16 +969,18 @@ const CLAIMS = [
         assert.match(text, /Retain the validated `publishing_identity` string exactly as parsed, without trimming,\s+normalizing, case-folding, or reserializing it, as `DECLARED_PUBLISHING_IDENTITY` for this driver\s+invocation/u);
         assert.match(text, /Do not tighten the existing non-whitespace validation to the observed-login grammar/u);
         assert.match(text, /Do not bind `DECLARED_PUBLISHING_IDENTITY` and skip every publishing-identity\s+guard, preserving the existing behavior/u);
-        assert.match(text, /`resolve`, `verify`, and `publishing_identity` are consumed now\. Only `publish` remains deferred to #224/u);
+        assert.match(text, /`resolve`, `verify`, and `publishing_identity` are consumed now\. Configured `publish` remains unconsumed and is not invoked\./u);
+        assert.match(text, /Effective push-target capture and comparison are active through the package-owned <code>factory effective-push<\/code> command; they are not deferred to configured `publish`\./u);
         assert.match(text, /`publishing_identity` \| No runtime input; retain the raw validated config string for this driver invocation \| Exact case-sensitive string compared with the observed login[\s\S]*Active at the three mandatory guards below; absent config preserves existing behavior/u);
-        assert.doesNotMatch(text, /`publish` and `publishing_identity` remain deferred|consumption is deferred to #216/u);
+        assert.doesNotMatch(text, /remains deferred to #224|push-target migration is deferred|`publish` and `publishing_identity` remain deferred|consumption is deferred to #216/u);
       };
       checkPublishingIdentityConfig(prose);
       for (const marker of [
         "Retain the validated `publishing_identity` string exactly as parsed",
         "Do not tighten the existing non-whitespace validation",
         "Do not bind `DECLARED_PUBLISHING_IDENTITY`",
-        "Only `publish` remains deferred to #224",
+        "Configured `publish` remains unconsumed and is not invoked.",
+        "Effective push-target capture and comparison are active through the package-owned <code>factory effective-push</code> command",
         "Active at the three mandatory guards below",
       ]) assert.throws(() => checkPublishingIdentityConfig(prose.replace(marker, "")));
       assert.match(prose, /root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and\s+`publishing_identity`, plus only the optional own property `verify_timeout_ms`/u);
@@ -1029,14 +1031,20 @@ const CLAIMS = [
       // makes that vendor the factory's default again, which is what this change exists to end.
       assert.doesNotMatch(prose, /\bgh\s+(?:repo|issue)\b/u);
       assert.doesNotMatch(prose, /https:\/\/github\.com\/<owner>\/<repo>\/issues/u);
-      assert.match(boundaries, /repository-config execution in the integration package except the exact\n`verify` consumer below/u);
+      assert.match(boundaries, /additional `\.factory\.json` command consumer beyond the exact\n`verify` consumer below/u);
       assert.match(boundaries, /Add no resolver cache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
       assert.match(boundaries, /For `resolve`, use the ordinary shell result directly[\s\S]*no stderr redirection or suppression rule,[\s\S]*timeout,\nretry, or fallback after any configured resolver result or failure/u);
       assert.match(boundaries, /optional timeout and bounded\nretry below apply only to repository `verify` shell attempts, never to `resolve`, slice observation, or\nGate 3 commands/u);
-      assert.match(boundaries, /`resolve`, `verify`, and `publishing_identity` are consumed now\. Only `publish` remains deferred to #224/u);
+      assert.match(boundaries, /`resolve`, `verify`, and `publishing_identity` are consumed now\. Configured `publish` remains unconsumed and is not invoked\./u);
       assert.match(boundaries, /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted[\s\S]*at most two executions in that merge invocation[\s\S]*timeout and retry never apply to resolver, slice, or Gate 3 commands/u);
-      assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing push, `gh pr create`, and `factory pr` behavior remains unchanged; push-target migration is deferred to #224. |"));
+      assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |"));
       assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; retain the raw validated config string for this driver invocation | Exact case-sensitive string compared with the observed login | Missing, non-string, or whitespace-only makes the config malformed; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; absent config preserves existing behavior. |"));
+      const packageReadme = readFileSync(join(pkg, "README.md"), "utf8");
+      assert.match(packageReadme, /factory effective-push <bootstrap\|check> <operator-repository> <sandbox-repository>/u);
+      assert.match(packageReadme, /The command accepts exactly those three positional arguments and no options\.[\s\S]*`bootstrap` captures the\s+operator's effective push target, configures the sandbox push URL from it, then freshly captures both\s+repositories and compares them exactly\.[\s\S]*`check` freshly captures both targets and compares without\s+configuration/u);
+      assert.match(packageReadme, /Configured `publish` remains unconsumed and is not invoked\./u);
+      assert.match(packageReadme, /`publishing_identity` itself adds no config key or syntax, run status, or factory command\. The independent `factory effective-push` command adds no state or flag\./u);
+      assert.doesNotMatch(packageReadme, /#224|push-target migration is deferred|only `publish` remains deferred/u);
       assert.match(prose, /Every host adapter and run driver uses the following same\nconfigured-or-absent policy/u);
       assert.match(prose, /adapter transfers execution to another run\ndriver, that driver independently derives its own payload through this same policy/u);
       assert.match(prose, /uses its own non-empty resolver stdout unchanged as `ISSUE_PAYLOAD`, requires exact equality between its\nderived `R` and the adapter-provided expected canonical ID before its first `factory` command/u);

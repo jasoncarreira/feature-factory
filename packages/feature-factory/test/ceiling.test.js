@@ -28,7 +28,7 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // explicit resume is the sole transition that clears a parked needs-human stop.
 const CLI_COMMANDS = [
   "init", "status", "resume", "lock", "heartbeat", "gate", "step", "terminal",
-  "slices-seed", "slice", "observe", "validator", "pr",
+  "slices-seed", "slice", "observe", "validator", "pr", "effective-push",
 ];
 
 const RUN_JSON_KEYS = [
@@ -105,6 +105,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
+    assert.deepEqual(COMMANDS["effective-push"], []);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
     // The workflow is the authoritative host-neutral instruction set, and nothing checked it against the CLI
@@ -174,10 +175,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.equal(markdown.includes("Only when the invocation explicitly requests it."), false);
     assert.equal(markdown.includes("Never infer it from vague wording."), false);
     // Join shell continuations so one command is one string, then read only code — fenced
-    // blocks and inline spans — so prose cannot be mistaken for an invocation.
+    // blocks, effective-push's indented command sites, and inline spans — so prose cannot be mistaken for an invocation.
     const text = markdown.replace(/\\\n\s*/gu, " ");
     const snippets = [];
     for (const [, body] of text.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)) snippets.push(...body.split("\n"));
+    for (const [, body] of text.matchAll(/^ {4}(factory effective-push .+)$/gmu)) snippets.push(body);
     for (const [, body] of text.matchAll(/`([^`\n]+)`/gu)) snippets.push(body);
 
     // Not anchored at the start of the snippet: an invocation quoted mid-sentence inside a
@@ -688,7 +690,21 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // attempt overwrites. Run 216's test-verifier was rejected twice and approved on the third,
     // and both reasons had to be inferred from commit subjects. Roughly half of these lines are the
     // reasoning for why an archive is create-only and why a failed archive must not fail the step.
-    assert.equal(total, 3433, "retaining review attempts landed at 3433 production lines");
+    // 3433 -> 3509 for issue #224: one private shell-free effective-push mechanism validates its
+    // positional contract, freshly observes and aligns targets, and emits only cause-free refusals.
+    // 3509 -> 3526 on review: the target comparison read a utf8-decoded string, and Node maps
+    // every distinct invalid byte sequence to the same U+FFFD. Two unequal targets could
+    // therefore compare equal while `git push` used the original raw bytes -- a sandbox
+    // publishing somewhere the operator never approved, from a guard that reported a match.
+    // A local-path remote on Unix may legitimately carry non-UTF-8 bytes, so it is reachable.
+    // Capture now keeps bytes and compares them, and bootstrap refuses a target that would
+    // not survive the utf8 round trip argv requires rather than configuring something else.
+    // 3526 -> 3530 on the second review round: the byte comparison stripped every trailing LF, so a
+    // target that itself ends in LF reduced to the same bytes as one that does not -- `path\n\n` and
+    // `path\n` both became `path`, and two unequal targets compared equal. Git contributes exactly
+    // one record terminator, so exactly one is removed and its absence fails closed. That is the
+    // same defect class as the utf8 decoding it replaced, reintroduced one layer down while fixing it.
+    assert.equal(total, 3530, "single-terminator effective-push parsing landed at 3530 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 
