@@ -129,15 +129,19 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // two criteria, a criterion and a scope lock, or a criterion and a pinned dependency.
       // Nothing in this workflow compared them before this.
       "is a defect in the issue, not work to attempt",
-      // The clause that makes it enforcement rather than advice: silently satisfying the easier
-      // criterion yields a green suite and a merged change that does not do what the issue asked.
+      // The risk the instruction names, and the reason it is worth writing down even unenforced:
+      // silently satisfying the easier criterion yields a green suite and a merged change that does
+      // not do what the issue asked. Enforcing it would need the pairs recorded in the brief
+      // artifact and the gate refusing without them, which is a schema change and is not here.
       "Do not choose one side silently",
       // A module split from the test asserting an exact inventory over it leaves no legal move once
       // paths are seeded, because a slice may not edit a path it does not own.
       "asserts an exact closed inventory over it in one",
-      // A decision living only in a host session or a sandbox artifact dies with that sandbox, and
-      // the replacement run asks the same question again.
-      "the resolution belongs in the issue body before any",
+      // A brief-level contradiction cannot be fixed by resuming: resume continues from the existing
+      // manifest and never re-reads the issue, so the edited body cannot reach a retained run's
+      // artifacts. The route is record, abandon, replace — and this pins that it says so.
+      "The supported",
+      "route is to record the decision in the issue body, abandon this run, and launch a replacement",
     ]) {
       assert.ok(markdown.includes(instruction), `WORKFLOW.md no longer instructs: ${instruction}`);
     }

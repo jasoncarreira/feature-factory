@@ -136,10 +136,15 @@ Enter the parked stop with factory terminal R needs-human --reason TEXT; leave i
 For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
 Report top-level needs-human as parked with its reason and explicit factory resume command.
 Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
-A park that asks a question must also state that the resolution belongs in the issue body before any
-relaunch, because a run reads that body once at Gate 1 and neither comments nor mid-run edits reach it.
-A decision recorded only in a host session or a sandbox artifact is lost when that sandbox is discarded,
-and the replacement run asks the same question again.
+A park that asks a question about the request itself -- a contradiction between criteria, a scope lock,
+or a pinned constraint -- is not fixed by resuming. Resume continues from the existing manifest and
+`status.next`; it does not re-resolve the issue, re-read `ISSUE_PAYLOAD`, or regenerate the story or
+brief, so an edited issue body cannot reach the artifacts a retained run will keep using. The supported
+route is to record the decision in the issue body, abandon this run, and launch a replacement that reads
+it at Gate 1. Resume is for external causes -- a timeout, an outage, credentials, an unclean tree -- where
+the run's own artifacts are still correct.
+State that route in the park reason, because a decision recorded only in a host session or a sandbox
+artifact is lost with that sandbox, and the replacement run asks the same question again.
 
 Every platform uses this exact gate artifact map:
 
@@ -809,10 +814,18 @@ route that does not exist, which is expensive and looks like diligence: one run 
 transport config, remote helpers, hooks, and ref-expanding push settings" while searching, and exhausted
 its attempts without seeding a slice. Naming the fault as the issue's stops the search.
 
-This is enforcement rather than instruction because of the last sentence. Faced with a contradiction, the
-cheap move is to satisfy the easier criterion and quietly drop the other — which yields a green suite, an
-approving review, and a merged change that does not do what the issue said. That is a false green, and it
-is the one this gate is placed to prevent.
+**This is instruction, not enforcement, and the difference matters.** Nothing machine-checks that the
+check happened. No artifact records the pairs, no transition refuses an unchecked brief, and a driver that
+skips this paragraph can approve Gate 2 with the whole suite green. The assertions that accompany it pin
+these sentences against deletion and prove nothing about behaviour.
+
+It is written down anyway because the failure it addresses is expensive and repeated: three runs stopped on
+contradictions nobody had compared, one after a slice had merged. And the risk it names is real — quietly
+satisfying the easier criterion yields a green suite, an approving review, and a merged change that does
+not do what the issue said. That is a false green, which is exactly the category this repository spends
+production lines to enforce against. **Enforcing it would need the named pairs and their evidence recorded
+in the brief artifact, and the gate refusing approval without them.** That is a schema and transition
+change, and it is not in this instruction.
 
 **When decomposing, keep a module and any test that asserts an exact closed inventory over it in one
 slice.** A change to the module must update that inventory atomically, and a slice cannot edit a path it
