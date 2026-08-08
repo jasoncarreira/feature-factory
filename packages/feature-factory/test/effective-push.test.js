@@ -170,8 +170,10 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   const bootstrapCalls = invokeEffectivePush(["bootstrap", "operator", "sandbox"], [
     childResult(`${initialTarget}\n`),
     { ...childResult("ignored-output"), stderr: "ignored-diagnostic" },
-    childResult(`${currentTarget}\n\n`),
-    childResult(currentTarget),
+    // Both carry exactly one git record terminator. These previously read `\n\n` and a bare
+    // target, which only compared equal because the parser stripped every trailing LF.
+    childResult(`${currentTarget}\n`),
+    childResult(`${currentTarget}\n`),
   ]);
   assert.equal(bootstrapCalls.error, null);
   assert.equal(bootstrapCalls.events.length, 4);
@@ -184,30 +186,43 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   assertChildOptions(bootstrapCalls.events);
 
   const checkCalls = invokeEffectivePush(["check", "operator", "sandbox"], [
-    childResult(`${currentTarget}\n`), childResult(currentTarget),
+    // One terminator each. The second previously omitted it, and only matched because the
+    // parser stripped every trailing LF rather than git's single record terminator.
+    childResult(`${currentTarget}\n`), childResult(`${currentTarget}\n`),
   ]);
   assert.equal(checkCalls.error, null);
   assert.equal(checkCalls.events.length, 2);
   assert.equal(checkCalls.events.some(({ args }) => args.includes("config")), false);
   assertChildOptions(checkCalls.events);
 
-  for (const [stdout, counterpart] of [
+  // Parsing removes exactly one git-added record terminator and preserves every byte before it.
+  // The previous table paired DIFFERENT raw outputs that should "normalize" to one target, and
+  // that tolerance is the defect: `repo\n\n` and `repo\n` reduced to the same target while the
+  // push used unequal bytes. Only identical bytes can match now, so each pair here is identical.
+  for (const [stdout, expected] of [
     ["ssh://example/repo\n", "ssh://example/repo"],
-    ["ssh://example/repo\n\n", "ssh://example/repo"],
+    ["ssh://example/repo\n\n", "ssh://example/repo\n"],
     ["ssh://example/repo\r\n", "ssh://example/repo\r"],
     ["ssh://example/repo\npath\n", "ssh://example/repo\npath"],
-    ["ssh://example/repo\n\r\n", "ssh://example/repo\n\r"],
-    ["ssh://example/repo\r", "ssh://example/repo\r"],
     ["ssh://example/repo \t\n", "ssh://example/repo \t"],
-    ["\r\n", "\r"],
   ]) {
     const normalized = invokeEffectivePush(["check", "operator", "sandbox"], [
-      childResult(stdout), childResult(counterpart),
+      childResult(stdout), childResult(`${expected}\n`),
     ]);
-    assert.equal(normalized.error, null, JSON.stringify({ stdout, counterpart }));
+    assert.equal(normalized.error, null, JSON.stringify({ stdout, expected }));
     assert.equal(normalized.events.length, 2);
   }
-  for (const stdout of ["\n", "\n\n"]) {
+  // The reason the strip is exactly one: a target that itself ends in LF must not equal the same
+  // target without it. A greedy strip reduced both to the same bytes and accepted the pair.
+  const trailingLfTarget = invokeEffectivePush(["check", "operator", "sandbox"], [
+    childResult("ssh://example/repo\n\n"), childResult("ssh://example/repo\n"),
+  ]);
+  assert.equal(trailingLfTarget.error?.message,
+    "factory sandbox: sandbox effective push target does not match operator target; sandbox retained at sandbox",
+    "a target ending in LF must not compare equal to the same target without it");
+  // Fail closed when git's terminator is absent: that is not the output shape being parsed, so
+  // guessing at it would be inventing a target rather than reading one.
+  for (const stdout of ["ssh://example/repo", "ssh://example/repo\r", "", "\r", "\n"]) {
     const normalizedEmpty = invokeEffectivePush(["check", "operator", "sandbox"], [childResult(stdout)]);
     assert.equal(normalizedEmpty.events.length, 1);
     assert.equal(normalizedEmpty.error?.message, "factory sandbox: operator effective push target unavailable; sandbox retained at sandbox");
@@ -223,7 +238,10 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     { ...childResult(diagnosticTarget), status: 7, stderr: diagnosticTarget },
     // A Buffer stdout used to count as "unavailable", because capture required a string.
     // Bytes are now the normal case, so that row asserted the lossy-decode defect itself.
-    childResult("\n\n"),
+    // Exactly the terminator and nothing else, so the target is empty. This read `"\n\n"` while
+    // the parser stripped every trailing LF; under single-terminator parsing that is a one-byte
+    // target, not an absent one.
+    childResult("\n"),
   ];
   for (const unavailable of unavailableResults) {
     const operatorFailure = invokeEffectivePush(["check", "operator", "sandbox"], [unavailable]);
@@ -400,7 +418,12 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "created_at` exactly\nequals `updated_at`",
     "qualified status reports lock state exactly `absent`",
     "uses `check`, performs two fresh captures, and never changes remote configuration",
-    "Never persist, log, echo, interpolate into a cause",
+    // The bounded properties, not a generic non-disclosure claim. `bootstrap` necessarily puts the
+    // target in a child's argv, so "never otherwise expose" was false; these four are what holds.
+    "Never persist a captured target, write it to the manifest or an artifact, log or echo it, or",
+    "interpolate it into a refusal message or an error's cause chain.",
+    // And the boundary must stay stated, so the next reader does not re-derive the wider claim.
+    "There is no non-argv route:",
     "discards target-operation stdout, stderr, and subprocess errors",
     "oldest raw line",
     "forty-zero old OID",

@@ -501,7 +501,17 @@ git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
 ### Effective push proof
 
 The package-owned command captures, configures when authorized, recaptures, and compares without a
-shell. Never persist, log, echo, interpolate into a cause, or otherwise expose a captured target.
+shell. Never persist a captured target, write it to the manifest or an artifact, log or echo it, or
+interpolate it into a refusal message or an error's cause chain.
+
+These are the bounded properties actually implemented, and the boundary is worth stating exactly.
+`bootstrap` configures the sandbox with `git config`, which places the target in that child's argv,
+where process inspection can read it while the command runs. There is no non-argv route: `git config`
+has no stdin-based setter, and `git remote set-url` and `git -c` are argv too. So this is **not** a
+guarantee that a captured target is never observable — only that the factory does not persist, log, or
+attach it to a diagnostic. It holds because these targets carry no credential: the measured operator
+target is a plain URL, and the token reaches git through the credential helper. If that ever changes,
+the argv transport has to be solved before this guard can be trusted with a credential-bearing value.
 
 Classify bootstrap-pending only by directly validated state: run status `running`; `created_at` exactly
 equals `updated_at`; gates, steps, and slices are empty; validator, terminal result, PR URL, and plan

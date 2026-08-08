@@ -668,7 +668,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // A local-path remote on Unix may legitimately carry non-UTF-8 bytes, so it is reachable.
     // Capture now keeps bytes and compares them, and bootstrap refuses a target that would
     // not survive the utf8 round trip argv requires rather than configuring something else.
-    assert.equal(total, 3526, "byte-exact effective-push comparison landed at 3526 production lines");
+    // 3526 -> 3530 on the second review round: the byte comparison stripped every trailing LF, so a
+    // target that itself ends in LF reduced to the same bytes as one that does not -- `path\n\n` and
+    // `path\n` both became `path`, and two unequal targets compared equal. Git contributes exactly
+    // one record terminator, so exactly one is removed and its absence fails closed. That is the
+    // same defect class as the utf8 decoding it replaced, reintroduced one layer down while fixing it.
+    assert.equal(total, 3530, "single-terminator effective-push parsing landed at 3530 production lines");
     assert.ok(total <= 3600, `production source is ${total} lines; the tripwire is 3600`);
   });
 

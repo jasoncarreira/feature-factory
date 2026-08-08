@@ -31,9 +31,13 @@ function capture(run, repository) {
     || result.status !== 0 || result.stdout === null || result.stdout === undefined) return null;
   // A test double may still hand back a string; normalise to bytes either way.
   const raw = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(String(result.stdout), "utf8");
-  let end = raw.length;
-  while (end > 0 && raw[end - 1] === 0x0a) end -= 1;   // strip only the intended LF bytes
-  const target = raw.subarray(0, end);
+  // Exactly one LF, because git contributes exactly one record terminator. Stripping every
+  // trailing LF would make a target that itself ends in LF indistinguishable from one that
+  // does not: operator bytes `path\n` are emitted as `path\n\n` and sandbox bytes `path` as
+  // `path\n`, and a greedy strip reduces both to `path` and accepts two unequal targets.
+  // Absent terminator means this is not the output shape being parsed, so fail closed.
+  if (raw.length === 0 || raw[raw.length - 1] !== 0x0a) return null;
+  const target = raw.subarray(0, raw.length - 1);
   return target.length > 0 ? Buffer.from(target) : null;
 }
 
