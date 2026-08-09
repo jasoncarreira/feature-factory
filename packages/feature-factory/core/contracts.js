@@ -48,6 +48,8 @@ const envelope = contract({
     created_at: state.created_at,
     updated_at: state.updated_at,
     terminal_result: state.terminal_result ?? null,
+    bootstrap_command: state.bootstrap_command,
+    bootstrap_exit: state.bootstrap_exit,
   }),
   validateTransition: ({ mode, before, after, current, candidate }) => {
     if (before.status === "needs-human") {
@@ -67,15 +69,16 @@ const envelope = contract({
         }
         return;
       }
-      if (mode !== "resume-needs-human") throw new Error("a needs-human run must be resumed before any transition");
-      if (after.status !== "running") throw new Error("resume-needs-human must change status to running");
+      if (!["resume-needs-human", "record-bootstrap"].includes(mode)) throw new Error("a needs-human run must be resumed before any transition");
+      const targetStatus = mode === "resume-needs-human" ? "running" : "needs-human";
+      if (after.status !== targetStatus) throw new Error(`${mode} must change status to ${targetStatus}`);
       if (!isDeepStrictEqual(after.terminal_result, before.terminal_result)) {
         throw new Error("resume-needs-human must preserve terminal_result");
       }
       if (Date.parse(after.updated_at) <= Date.parse(before.updated_at)) {
         throw new Error("resume-needs-human must move updated_at forwards");
       }
-      for (const key of Object.keys(before).filter((key) => !["status", "updated_at"].includes(key))) {
+      for (const key of Object.keys(before).filter((key) => !["status", "updated_at", "bootstrap_command", "bootstrap_exit"].includes(key))) {
         if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`resume-needs-human cannot change envelope.${key}`);
       }
       for (const key of Object.keys(current).filter((key) => !Object.hasOwn(before, key))) {
@@ -84,11 +87,14 @@ const envelope = contract({
       return;
     }
     if (mode === "amend-paths") throw new Error(`amend-paths requires current status needs-human; found '${before.status}'`);
-    if (mode === "resume-needs-human") throw new Error(`resume-needs-human requires current status needs-human; found '${before.status}'`);
+    if (["resume-needs-human", "record-bootstrap"].includes(mode)) throw new Error(`${mode} requires current status needs-human; found '${before.status}'`);
     // Identity is immutable for the life of a run. Nothing legitimate renames a
     // run, and allowing it would let a transition retarget another run's record.
     for (const key of ["run_id", "created_at", "pr_base", "mode"]) {
       if (before[key] !== after[key]) throw new Error(`envelope.${key} is immutable`);
+    }
+    for (const key of ["bootstrap_command", "bootstrap_exit"]) {
+      if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`envelope.${key} may change only during bootstrap resume`);
     }
     if (Date.parse(after.updated_at) < Date.parse(before.updated_at)) {
       throw new Error("envelope.updated_at cannot move backwards");

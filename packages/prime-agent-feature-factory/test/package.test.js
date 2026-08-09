@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 
 const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const skill = readFileSync(new URL("../skills/feature/SKILL.md", import.meta.url), "utf8");
+const workflow = readFileSync(new URL("../skills/feature/WORKFLOW.md", import.meta.url), "utf8");
+const canonicalWorkflow = readFileSync(new URL("../../feature-factory/WORKFLOW.md", import.meta.url), "utf8");
 
 describe("Prime package contract", () => {
   it("declares a conventional Prime package with only runtime factory state dependency", () => {
@@ -28,5 +30,15 @@ describe("Prime package contract", () => {
     assert.match(skill, /receiver_role="parent"/u);
     assert.match(skill, /never hand-write `run\.json`/u);
     assert.match(skill, /Reject `--background` before any run effect/u);
+    assert.equal(workflow, canonicalWorkflow);
+    const firstMatch = "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.";
+    const noOp = "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.";
+    const checkBootstrapPolicy = (text) => {
+      if (!text.includes(firstMatch)) throw new Error("bootstrap-first-match");
+      if (!text.includes(noOp)) throw new Error("bootstrap-absence-no-op");
+    };
+    checkBootstrapPolicy(workflow);
+    assert.throws(() => checkBootstrapPolicy(workflow.replace(firstMatch, "")), /bootstrap-first-match/u);
+    assert.throws(() => checkBootstrapPolicy(workflow.replace(noOp, "")), /bootstrap-absence-no-op/u);
   });
 });

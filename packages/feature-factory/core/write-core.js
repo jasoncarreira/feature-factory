@@ -13,6 +13,7 @@ export async function coordinateRunJsonTransition(runDir, options) {
     validateRun,
     reobservers = new Map(),
     atomicWriteHooks,
+    finalGuard,
   } = options ?? {};
   const registry = contractRegistry(contracts);
   const participants = participantRegistry(descriptor, registry);
@@ -66,8 +67,13 @@ export async function coordinateRunJsonTransition(runDir, options) {
           // reobservers did. Comparing only once left a window: a reobserver - or a
           // concurrent writer running while one awaited - could commit a valid
           // record after the check, and this rename would silently overwrite it.
-          // Nothing may run between this line and the rename.
-          assertUnchanged(deepFreeze(await readRunState(runDir, validateRun)), initial);
+          // Only the synchronous final guard may run between this line and the rename.
+          const finalObserved = deepFreeze(await readRunState(runDir, validateRun));
+          assertUnchanged(finalObserved, initial);
+          if (typeof finalGuard === "function") {
+            const guarded = finalGuard({ state: finalObserved, candidate });
+            if (guarded && typeof guarded.then === "function") throw new Error("final commit guard must be synchronous");
+          }
           await rename(source, destination);
         },
       },

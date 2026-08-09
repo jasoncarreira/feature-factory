@@ -93,20 +93,25 @@ resolved Git top level:
   "verify": "<non-empty shell command>",
   "publish": "<non-empty shell command>",
   "publishing_identity": "<non-empty account name>",
-  "verify_timeout_ms": 900000
+  "verify_timeout_ms": 900000,
+  "bootstrap": "<non-empty shell command>",
+  "bootstrap_timeout_ms": 900000
 }
 ```
 
-The root has four required properties and only one optional property, `verify_timeout_ms`. `resolve`,
-`verify`, and `publish` are non-empty command strings. `publishing_identity` is a static non-empty account
-name, not a command, token, credential, or command result. When present, `verify_timeout_ms` must be a
-positive safe integer; omission silently defaults it to `900000`. Every required entry and the optional
-timeout are validated before use; a present invalid, unreadable, incomplete, wrong-type, whitespace-only,
-or unknown-property config refuses closed. An invalid timeout is reported as `.factory.json entry
-'verify_timeout_ms' must be a positive integer`. The file is operator-owned, committed, and protected as
-a privileged path: a run cannot create, write, merge, archive, package, or repair it.
+The root has four required properties and three optional properties: `verify_timeout_ms`, `bootstrap`,
+and `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and a present `bootstrap` are non-empty command
+strings. `publishing_identity` is a static non-empty account name, not a command, token, credential, or
+command result. Both timeouts are positive safe integers. `bootstrap_timeout_ms` requires `bootstrap`.
+Each omitted timeout independently defaults to `900000`; neither shares the other's budget. The file is
+operator-owned, committed, and protected as a privileged path: a run cannot create, write, merge,
+archive, package, or repair it.
 
-`resolve` and `verify` are consumed now. `resolve` runs as one ordinary shell step with the configured string submitted
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
+
+The named forms are `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
+
+`resolve`, `bootstrap`, and `verify` are consumed now. `resolve` runs as one ordinary shell step with the configured string submitted
 unchanged, repository-root cwd, inherited environment plus the exact admitted request in
 `FACTORY_INPUT`, and no positional argument or structured stdin. Empty stdout means the input was not
 recognized. Non-empty stdout is the direct,
@@ -126,6 +131,18 @@ resolver contract adds no bridge, parser service, command runner, capture or std
 channel or size policy, buffering, truncation, redaction, timeout, retry, cache, payload transport, or
 session behavior.
 
+### Sandbox bootstrap
+
+Only the CLI executes configured `bootstrap`: once during fresh init after clone, containment, and PR-base observation but before manifest publication, and again on every explicit resume while the run remains parked. The exact configured string runs unchanged with `shell: true`, inherited environment and stdin, cwd exactly the selected sandbox, and child stdout and stderr both routed to CLI stderr. Init JSON stdout therefore remains exactly one response object. Bootstrap has its own configured timeout or independent `900000` millisecond default, with no retry and no use of the verify budget.
+
+After every attempt, the CLI checks tracked worktree and index paths only and ignores untracked dependency output. Unobservable tracked state refuses before dirty tracked paths; dirty paths refuse before unavailable or nonzero exit, and diagnostics name exact repository-relative paths. A clean numeric zero stores paired `bootstrap_command` and `bootstrap_exit` manifest evidence. The command is exact; the exit is a non-negative integer or `null`. Ordinary transitions preserve the pair, and status output does not expose it.
+
+A failed, timed-out, dirty, or unobservable fresh init emits no JSON stdout, retains the deterministic sandbox, and leaves `run.json` absent. Configured resume first binds exact raw manifest bytes, validated parked state, a forward timestamp, and the exact fresh owner. Clean zero records evidence and unparks while preserving progress and the historical terminal result. Ordinary failure with intact bindings records integer or `null` evidence, advances the timestamp, remains `needs-human`, preserves progress and the historical result, and refuses so a later explicit resume reruns bootstrap. Byte mutation or owner loss preserves current state and ownership, records no evidence, and does not unpark. Factory claim, force-steal, heartbeat refresh, and release serialize with resume publication through `run-json.lock`.
+
+When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.
+
+Bootstrap never runs during resolver intake, merge verification or replay, direct repository verification, slice observation, Gate 3, effective push, configured publication, push, or PR creation. Existing resolver, verify, configured-publish, effective-push, push, PR, and Gate 3 behavior is unchanged.
+
 After a slice merge is successfully and atomically recorded, `verify` starts in the exact recorded
 integration worktree. The configured string is submitted unchanged as one ordinary shell command with
 that worktree as cwd and the process environment and stdio inherited. Stdout and stderr remain visible,
@@ -139,7 +156,7 @@ canonical `evidence/test-verifier.json` schema, bound to the current merged head
 root base.
 
 If `.factory.json` is absent, intake still declares no resolver and recognizes or fetches no reference;
-after a recorded merge, absence silently preserves the previous merge response and progression, with no
+init and resume perform no bootstrap; after a recorded merge, absence silently preserves the previous merge response and progression, with no
 repository command, evidence write, or new output. A post-record verification failure does not roll back
 or rewrite the merged row or its slice evidence and review. It stops before the next wave. Production
 defects, repair-journal exhaustion, dirty or moved replay safety failures, invalid config, unobservable
@@ -305,8 +322,9 @@ A current `needs-human` run is parked and explicitly resumable; only `completed`
 9. Continue solely from the newly qualified `status.next`, never from the pre-resume read or reason text.
 
 While parked, status and lock qualification remain available, but every effectful gate, step, seed,
-slice, observe, validator, terminal-rewrite, and PR command refuses before effects. Resume changes only
-`status` and `updated_at`; no manifest key is added. A resumed recorded merge replays the existing
+slice, observe, validator, terminal-rewrite, and PR command refuses before effects. Without configured
+bootstrap, resume changes only `status` and `updated_at`; with it, resume also records paired
+`bootstrap_command` and `bootstrap_exit` under byte- and owner-bound publication. A resumed recorded merge replays the existing
 clean-head and retry-safety checks before progression, and unresolved repair-journal records remain
 publication blockers. An unfixed cause may park the run again with the same reason.
 

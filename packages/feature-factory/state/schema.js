@@ -18,6 +18,7 @@ export const RUN_KEYS = Object.freeze([
   // Digest of the plan bytes the brief gate approved, so the seed ratifies that plan and not a
   // later edit of the same filename. See the check in `slices-seed`.
   "plan_digest",
+  "bootstrap_command", "bootstrap_exit",
 ]);
 
 export const RUN_STATUSES = Object.freeze(["running", "completed", "blocked", "partial", "needs-human"]);
@@ -109,6 +110,12 @@ export function validateRun(run) {
   for (const key of ["created_at", "updated_at"]) pattern(errors, run, key, ISO, "run");
   for (const key of ["max_parallel_slices", "max_retries"]) positiveInt(errors, run, key, "run");
   for (const key of ["issue_key", "pr_base", "pr_url", "plan_digest"]) optionalString(errors, run, key, "run");
+  if (Object.hasOwn(run, "bootstrap_command") !== Object.hasOwn(run, "bootstrap_exit")) {
+    errors.push({ path: "run.bootstrap_command", message: "must be present exactly when bootstrap_exit is present" });
+  } else if (Object.hasOwn(run, "bootstrap_command")) {
+    required(errors, run, "bootstrap_command", "run");
+    if (run.bootstrap_exit !== null) nonNegativeInt(errors, run, "bootstrap_exit", "run");
+  }
 
   gates(errors, run.gates);
   steps(errors, run.steps);
