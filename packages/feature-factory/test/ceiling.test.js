@@ -329,9 +329,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // sat on opposite sides of a dependency edge, so the rule earns a presence assertion even though
     // nothing can enforce it. Each fragment sits on one line in the raw markdown.
     for (const [agent, fragment] of [
-      ["work-decomposer", "The slice that changes an interface owns every caller, fixture and test of it."],
+      ["work-decomposer", "A slice owns every caller, fixture and test its change invalidates."],
+        ["work-decomposer", "The trigger is invalidation, not change."],
       ["work-decomposer", "If you cannot satisfy this, merge the two slices rather than ordering them."],
-      ["work-reviewer", "A plan that leaves them to a dependent slice is a"],
+      ["work-reviewer", "check that the same slice owns those call sites, fixtures"],
     ]) {
       assert.ok(byName.get(agent)?.includes(fragment),
         `${agent}.md must keep the interface-ownership rule: ${fragment}`);

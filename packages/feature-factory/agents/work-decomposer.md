@@ -100,11 +100,16 @@ a re-read rather than a run.
    or inside an isolated child process, and it becomes the second. Leaving the form to the builder is how
    one file ends up with the same claim written twice, once robustly and once not.
 
-7. **The slice that changes an interface owns every caller, fixture and test of it.** Ownership follows
-   the change, not the topic. If a slice alters a function's signature, its return shape, its sync/async
-   nature, or the contract of a module other code imports, then the existing call sites, their fixtures
-   and their tests belong to **that** slice — even when they read as another slice's subject matter. Use
-   `amend-paths` to take out-of-lane paths if the seeded plan missed them.
+7. **A slice owns every caller, fixture and test its change invalidates.** Ownership follows the change,
+   not the topic. If a slice alters a signature, a return shape, sync/async nature, or a module contract
+   other code imports, **and existing call sites, fixtures or tests must migrate as a result**, then those
+   belong to **that** slice — even when they read as another slice's subject matter. Use `amend-paths` to
+   take out-of-lane paths if the seeded plan missed them.
+
+   The trigger is invalidation, not change. A backward-compatible change requires none of this: adding a
+   defaulted optional parameter, or an added field on a returned object, leaves every existing caller,
+   fixture and test passing unmodified, and there is nothing to co-own. Apply this rule when the old
+   contract stops working, not whenever an interface is touched.
 
    This is rule 6 in reverse. Rule 6 forbids a slice from depending on the **absence** of what a later
    slice owns; this forbids depending on a later slice to **repair what your change breaks**. Both close
