@@ -8,6 +8,7 @@ import test from "node:test";
 import { dispatchInit } from "../bin/factory.js";
 import { git as observeGit, observeTrackedCleanliness, proveInitContainment, runBootstrap } from "../observe/index.js";
 import { dispatchInitPublication } from "../bin/init-publication.js";
+import { FAMILY_CONTRACTS } from "../core/contracts.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -133,7 +134,13 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.equal(result.response.sandbox_path, sandbox);
     assert.equal(result.response.run_dir, join(sandbox, ".factory", runId));
     assert.equal(realpathSync(sandbox), sandbox);
-    assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(result.response.run_dir, "run.json"), "utf8")), "bootstrap_command"), false);
+    const defaultRun = JSON.parse(readFileSync(join(result.response.run_dir, "run.json"), "utf8"));
+    assert.equal(Object.hasOwn(defaultRun, "bootstrap_command"), false);
+    assert.equal(defaultRun.pr_draft, true);
+    const defaultJsonStatus = invoke(result.response.sandbox_path, ["status", runId, "--json"], record);
+    assert.equal(defaultJsonStatus.response.pr_draft, true);
+    const defaultPlainStatus = invoke(result.response.sandbox_path, ["status", runId], record);
+    assert.match(defaultPlainStatus.stdout, /^pr_draft: true$/mu);
     assert.equal(clones(record).length, 1);
     assert.deepEqual(clones(record)[0].args, ["clone", "--local", "--", realpathSync(source), sandbox]);
     assert.deepEqual({ exists: clones(record)[0].exists, empty: clones(record)[0].empty }, { exists: true, empty: true });
@@ -363,7 +370,18 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.equal(fresh.runDir, join(fresh.sandboxPath, ".factory", "fixture"));
     const legacySource = operator(root, "legacy");
     const legacy = seedLegacyRun(legacySource, "legacy", { branch: "main", pr_base: "main" });
-    assert.equal(JSON.parse(readFileSync(join(legacy.runDir, "run.json"), "utf8")).run_id, "legacy");
+    const legacyPath = join(legacy.runDir, "run.json");
+    assert.equal(Object.hasOwn(JSON.parse(readFileSync(legacyPath, "utf8")), "pr_draft"), false);
+    const legacyJsonStatus = invoke(legacySource, ["status", "legacy", "--json"], recorder(join(root, "legacy-status-recorder")));
+    assert.equal(legacyJsonStatus.response.pr_draft, true);
+    const legacyPlainStatus = invoke(legacySource, ["status", "legacy"], recorder(join(root, "legacy-plain-recorder")));
+    assert.match(legacyPlainStatus.stdout, /^pr_draft: true$/mu);
+    const legacyTransition = invoke(legacySource, ["gate", "legacy", "story", "pending", "--now", NOW], recorder(join(root, "legacy-transition-recorder")));
+    assert.equal(legacyTransition.ok, true, legacyTransition.stderr);
+    assert.equal(Object.hasOwn(JSON.parse(readFileSync(legacyPath, "utf8")), "pr_draft"), false);
+    const envelope = FAMILY_CONTRACTS.find(({ id }) => id === "envelope");
+    assert.throws(() => envelope.validateTransition({ before: defaultRun, after: { ...defaultRun, pr_draft: false }, mode: "open" }), /envelope\.pr_draft is immutable/u);
+    assert.equal(JSON.parse(readFileSync(legacyPath, "utf8")).run_id, "legacy");
     const missingBase = seedLegacyRun(legacySource, "legacy-missing-base", { branch: "main", pr_base: undefined });
     assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(missingBase.runDir, "run.json"), "utf8")), "pr_base"), false);
     const malformedRoot = join(root, "malformed-legacy");
@@ -512,7 +530,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     const configuredSource = operator(root, "configured-bootstrap", (repository) => {
       writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
         resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
-        bootstrap: configuredCommand, bootstrap_timeout_ms: 120000,
+        pr_draft: false, bootstrap: configuredCommand, bootstrap_timeout_ms: 120000,
       }, null, 2)}\n`);
     });
     const configuredRecord = recorder(join(root, "configured-recorder"));
@@ -540,8 +558,14 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.equal(readFileSync(join(configured.response.sandbox_path, "bootstrap-env"), "utf8"), "bootstrap-environment-marker");
     assert.equal(readFileSync(join(configured.response.sandbox_path, "bootstrap-stdin"), "utf8"), "bootstrap-stdin-marker\n");
     assert.equal(existsSync(join(configured.response.sandbox_path, "node_modules")), true, "untracked dependency output is compatible");
-    assert.deepEqual(Object.fromEntries(Object.entries(JSON.parse(readFileSync(join(configured.response.run_dir, "run.json"), "utf8")))
+    const configuredRun = JSON.parse(readFileSync(join(configured.response.run_dir, "run.json"), "utf8"));
+    assert.deepEqual(Object.fromEntries(Object.entries(configuredRun)
       .filter(([key]) => key.startsWith("bootstrap_"))), { bootstrap_command: configuredCommand, bootstrap_exit: 0 });
+    assert.equal(configuredRun.pr_draft, false);
+    const configuredJsonStatus = invoke(configured.response.sandbox_path, ["status", "configured-bootstrap", "--json"], configuredRecord);
+    assert.equal(configuredJsonStatus.response.pr_draft, false);
+    const configuredPlainStatus = invoke(configured.response.sandbox_path, ["status", "configured-bootstrap"], configuredRecord);
+    assert.match(configuredPlainStatus.stdout, /^pr_draft: false$/mu);
 
     const failureCases = [
       { name: "dirty", command: "node -e \"const f=require('fs');f.appendFileSync('bootstrap-attempt-count','x');f.writeFileSync('tracked dirty.txt','changed');process.exit(7)\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u, attempts: 1 },
@@ -579,8 +603,16 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       if (row.attempts === 1) assert.equal(readFileSync(attempts, "utf8"), "x", `${row.name}: bootstrap failure and timeout have no retry`);
     }
 
+    const truePolicySource = operator(root, "config-pr-draft-true", (repository) => writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
+      resolve: "true", verify: "true", publish: "true", publishing_identity: "test", pr_draft: true,
+    })}\n`));
+    const truePolicy = invoke(truePolicySource, ["init", "config-pr-draft-true", "--now", NOW, "--json"], recorder(join(root, "config-pr-draft-true-recorder")));
+    assert.equal(truePolicy.ok, true, truePolicy.stderr);
+    assert.equal(JSON.parse(readFileSync(join(truePolicy.response.run_dir, "run.json"), "utf8")).pr_draft, true);
+
     const configCases = [
-      { name: "unknown", patch: { unexpected: true, bootstrap: 7, bootstrap_timeout_ms: 0 }, named: [] },
+      { name: "unknown", patch: { unexpected: true, pr_draft: "draft", bootstrap: 7, bootstrap_timeout_ms: 0 }, named: [] },
+      ...[null, 0, "false", [], {}].map((pr_draft, index) => ({ name: `pr-draft-${index}`, patch: { pr_draft, resolve: null, bootstrap_timeout_ms: 0 }, named: ["pr_draft"] })),
       { name: "invalid-both", patch: { resolve: null, bootstrap: 7, bootstrap_timeout_ms: 0 }, named: ["bootstrap"] },
       { name: "invalid-with-timeout", patch: { bootstrap: " ", bootstrap_timeout_ms: 10 }, named: ["bootstrap"] },
       { name: "orphan", patch: { bootstrap_timeout_ms: 10 }, named: ["bootstrap_timeout_ms"] },
@@ -595,6 +627,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       const observed = invoke(configSource, ["init", `config-${row.name}`, "--now", NOW], configRecord);
       assert.equal(observed.ok, false, row.name);
       assert.deepEqual([...observed.stderr.matchAll(/entry '([^']+)'/gu)].map((match) => match[1]), row.named, row.name);
+      assert.equal(existsSync(join(configSource, ".factory-sandboxes", `config-${row.name}`, ".factory", `config-${row.name}`, "run.json")), false);
     }
 
     const resolutionCommand = "node bootstrap.js";

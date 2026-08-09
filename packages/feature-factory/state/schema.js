@@ -12,7 +12,7 @@ export const SCHEMA_VERSION = 1;
 export const CONTROL_PLANE = ".factory";
 
 export const RUN_KEYS = Object.freeze([
-  "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
+  "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "pr_draft", "created_at", "updated_at",
   "status", "mode", "max_parallel_slices", "max_retries",
   "gates", "steps", "slices", "validator", "terminal_result", "pr_url",
   // Digest of the plan bytes the brief gate approved, so the seed ratifies that plan and not a
@@ -110,6 +110,9 @@ export function validateRun(run) {
   for (const key of ["created_at", "updated_at"]) pattern(errors, run, key, ISO, "run");
   for (const key of ["max_parallel_slices", "max_retries"]) positiveInt(errors, run, key, "run");
   for (const key of ["issue_key", "pr_base", "pr_url", "plan_digest"]) optionalString(errors, run, key, "run");
+  if (Object.hasOwn(run, "pr_draft") && typeof run.pr_draft !== "boolean") {
+    errors.push({ path: "run.pr_draft", message: "must be a boolean" });
+  }
   if (Object.hasOwn(run, "bootstrap_command") !== Object.hasOwn(run, "bootstrap_exit")) {
     errors.push({ path: "run.bootstrap_command", message: "must be present exactly when bootstrap_exit is present" });
   } else if (Object.hasOwn(run, "bootstrap_command")) {
