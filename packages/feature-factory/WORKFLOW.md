@@ -217,6 +217,7 @@ The optional repository-owned file is `$O/.factory.json`:
   "verify": "<non-empty shell command>",
   "publish": "<non-empty shell command>",
   "publishing_identity": "<non-empty account name>",
+  "pr_draft": true,
   "verify_timeout_ms": 900000,
   "bootstrap": "<non-empty shell command>",
   "bootstrap_timeout_ms": 900000
@@ -224,16 +225,20 @@ The optional repository-owned file is `$O/.factory.json`:
 ```
 
 The root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and
-`publishing_identity`, plus only the optional own properties `verify_timeout_ms`, `bootstrap`, and
+`publishing_identity`, plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
 `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
 command must be non-empty. `publishing_identity` is a static non-empty publishing account name in the
-file itself, not a command, token, credential, or command result. Both timeout values must be positive
+file itself, not a command, token, credential, or command result. `pr_draft` must be a JSON boolean
+when present and defaults to `true` when absent. Both timeout values must be positive
 safe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`.
 `verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;
 neither timeout shares or consumes the other's budget.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
 
+Do not use the obsolete summary “Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.” because it omits the earlier `pr_draft` check.
+
+`pr_draft` is a known key, and an invalid value outranks every timeout defect and missing required entry.
 The two bootstrap keys are known keys. Invalid `bootstrap` outranks missing required entries and every
 timeout defect, including an invalid or otherwise orphaned bootstrap timeout. An orphaned
 `bootstrap_timeout_ms` outranks its own invalid shape, and a valid bootstrap with an invalid timeout
@@ -253,6 +258,8 @@ and refuse exactly:
 
 The named config refusals are exactly:
 
+> invalid factory config: .factory.json entry 'pr_draft' must be a boolean; no session or run created.
+>
 > invalid factory config: .factory.json entry 'bootstrap' must be a non-empty string; no session or run created.
 >
 > invalid factory config: .factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command; no session or run created.
@@ -379,7 +386,7 @@ Bootstrap cleanliness examines tracked worktree and index paths only; untracked 
 
 Bootstrap has an independent `900000` millisecond default and budget; it does not change resolver, verify, configured publish, effective-push, push, PR, or Gate 3 behavior.
 
-A successful configured attempt stores the exact command in `bootstrap_command` and the numeric result in paired `bootstrap_exit`; status output remains unchanged.
+A successful configured attempt stores the exact command in `bootstrap_command` and the numeric result in paired `bootstrap_exit`.
 
 #### Remaining intake classification
 
@@ -1470,7 +1477,8 @@ command; never move it earlier or present stale evidence.
 The compatibility transition name is `factory gate <run-id> pre_pr pending`; the runnable form is the
 repository-qualified command above.
 
-The publication command's recorded-value signature remains `gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`; Step 6 binds those placeholders to status output before executing it.
+The draft publication signature is `gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`.
+The ready-for-review publication signature is `gh pr create --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`.
 
 ## Step 6 — Draft PR
 
@@ -1481,9 +1489,11 @@ gate. A collision or provenance failure stops
 before push, `gh`, or `factory pr` and retains all state. After those checks, invoke the package-owned
 fresh comparison without changing either remote:
 
-Use the status response's exact recorded `branch` as `FEATURE_BRANCH` and exact recorded `pr_base` as
-`PR_BASE`; never infer, shorten, normalize, or substitute either value. Bind both before target
-recapture, and do not rebind or re-observe them between target equality and push.
+Use the status response's exact recorded `branch` as `FEATURE_BRANCH`, exact recorded `pr_base` as
+`PR_BASE`, and effective boolean `pr_draft` as `PR_DRAFT`; never infer, shorten, normalize, or
+substitute any value. Bind all three from this one status response without rereading repository config.
+A legacy manifest omission is projected as `true`. Bind before target recapture, and do not rebind or
+re-observe them between target equality and push.
 
 ```sh
 factory status "$R" --json --repo "$RUN_REPO"
@@ -1532,7 +1542,8 @@ gh api --method GET /user --jq .login
 ```
 
 Publish the fully qualified recorded feature ref from `RUN_REPO`, run `gh` from `O` with that exact head
-and base, require a draft, and record the returned URL under `RUN_REPO`. Thus sandbox runs use `S` and
+and base, select draft publication for `PR_DRAFT=true` and ready-for-review publication only for
+`PR_DRAFT=false`, and record the returned URL under `RUN_REPO`. Thus sandbox runs use `S` and
 legacy local runs use `O` through the selection already made in Step 0:
 
 ```sh
@@ -1540,7 +1551,11 @@ git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_B
 gh api --method GET /user --jq .login
 (
   cd "$O"
-  gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"
+  if [ "$PR_DRAFT" = true ]; then
+    gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"
+  else
+    gh pr create --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"
+  fi
 )
 factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"
 ```

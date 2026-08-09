@@ -494,9 +494,12 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "Step 6 only compares and never reconfigures a remote",
     'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"',
     'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"',
+    'gh pr create --base "$PR_BASE" --head "$FEATURE_BRANCH"',
     'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
     "Production source ceiling: <landed count> / 3600",
   ], "Step 6 compare/publication");
+  required(publication, "effective boolean `pr_draft` as `PR_DRAFT`", "status policy binding");
+  required(publication, "without rereading repository config", "status policy binding");
   // Step 6 carried its own copy of the generic non-disclosure claim, and it survived the first
   // narrowing because only the Step 0 sentence was rewritten. Pinned in the Step 6 slice, not the
   // fresh-request slice, so the assertion fails for drift here rather than passing on a match
@@ -577,12 +580,13 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   };
   const checkIdentityGuardSites = (source) => {
     const push = 'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"';
-    const pr = 'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"';
+    const draftPr = 'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"';
+    const readyPr = 'gh pr create --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"';
     const record = 'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"';
     const expectedSites = [
       [identityCommand],
       [identityCommand],
-      [push, identityCommand, "(", 'cd "$O"', pr, ")", record],
+      [push, identityCommand, "(", 'cd "$O"', 'if [ "$PR_DRAFT" = true ]; then', draftPr, "else", readyPr, "fi", ")", record],
     ];
     const sites = identityGuardSites(source);
     assert.equal(sites.length, 3, "identity guard sites must be exactly early, pre-push, and pre-PR");
@@ -762,7 +766,7 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
       });
       return { commandString, reasonToken, result };
     };
-    const guardedDriver = (repository, declared, observations = []) => {
+    const guardedDriver = (repository, declared, observations = [], prDraft = true) => {
       const events = [];
       let observation = 0;
       const guard = (name) => {
@@ -785,7 +789,9 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
       events.push('git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"');
       reason = guard("pre-pr-create");
       if (reason) return { events, reason };
-      events.push('gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"');
+      events.push(prDraft
+        ? 'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"'
+        : 'gh pr create --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"');
       events.push('factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"');
       return { events, reason: null };
     };
@@ -871,6 +877,14 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
     ]);
     assert.equal(markerLines().length, 3);
     assert.equal(markerLines().every((line) => line === JSON.stringify(["api", "--method", "GET", "/user", "--jq", ".login"])), true);
+    const readyForReview = guardedDriver(root, "A", [
+      { ghToken: "prepared-token" }, { ghToken: "prepared-token" }, { ghToken: "prepared-token" },
+    ], false);
+    const draftArgv = allMatching.events.find((event) => event.startsWith("gh pr create"));
+    const readyArgv = readyForReview.events.find((event) => event.startsWith("gh pr create"));
+    assert.equal(readyArgv, 'gh pr create --base "$PR_BASE" --head "$FEATURE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"');
+    assert.equal(readyArgv.includes("--draft"), false);
+    assert.deepEqual(readyArgv.split(" ").filter((arg) => arg !== "--draft"), draftArgv.split(" ").filter((arg) => arg !== "--draft"));
     const beforeAbsentConfig = markerLines();
     const absentConfig = guardedDriver(root, null);
     assert.deepEqual(absentConfig.events, allMatching.events.filter((event) => !event.startsWith("identity:")));
