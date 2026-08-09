@@ -1097,6 +1097,74 @@ const HANDLERS = {
   },
 };
 
+
+function exactOid(result) {
+  return result?.status === 0 && /^[0-9a-f]{40}\n$/u.test(result.stdout) ? result.stdout.slice(0, -1) : null;
+}
+
+function checkBranchName(repository, value, runGit) {
+  return runGit(repository, ["check-ref-format", "--branch", value])?.status === 0;
+}
+
+function exactRefState(repository, ref, runGit, description, retained = false) {
+  const result = runGit(repository, ["show-ref", "--verify", "--quiet", ref]);
+  if (result?.status === 0) return "present";
+  if (result?.status === 1) return "absent";
+  const aftermath = retained ? "; sandbox was retained; run.json is absent" : "";
+  throw new CliError(`could not observe ${description} '${ref}' in repository '${repository}'${aftermath}`);
+}
+
+function resolveExplicitSeed(sandboxPath, base, runGit) {
+  const local = `refs/heads/${base}`;
+  const remote = `refs/remotes/origin/${base}`;
+  // This is enforcement: classifying both qualified refs before either peel prevents a
+  // successful local peel from hiding an observation failure on the remote candidate.
+  const states = new Map([
+    [local, exactRefState(sandboxPath, local, runGit, "PR base ref", true)],
+    [remote, exactRefState(sandboxPath, remote, runGit, "PR base ref", true)],
+  ]);
+  const resolveRef = (ref) => {
+    if (states.get(ref) === "absent") return null;
+    const result = runGit(sandboxPath, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]);
+    if (!Number.isInteger(result?.status)) {
+      throw new CliError(`could not observe commit for PR base ref '${ref}' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+    }
+    const oid = exactOid(result);
+    if (!oid) throw new CliError(`PR base ref '${ref}' could not be peeled to one commit in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+    return oid;
+  };
+  const localOid = resolveRef(local);
+  const remoteOid = resolveRef(remote);
+  const candidates = `'${local}' or '${remote}'`;
+  if (!localOid && !remoteOid) throw new CliError(`PR base '${base}' could not be resolved from ${candidates} in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+  if (localOid && remoteOid && localOid !== remoteOid) throw new CliError(`PR base '${base}' resolves to different commits at '${local}' and '${remote}' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+  return localOid ?? remoteOid;
+}
+
+function proveInitBranch({ operatorRoot, sandboxPath, worktree, branch, seed, runGit, resolvePath }) {
+  const ref = `refs/heads/${branch}`;
+  if (exactRefState(operatorRoot, ref, runGit, "feature branch ref", true) === "present") {
+    throw new CliError(`feature branch '${branch}' appeared at '${ref}' in operator repository '${operatorRoot}' while sandbox '${sandboxPath}' was initialized; sandbox was retained; run.json is absent`);
+  }
+  const symbolic = runGit(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (symbolic?.status !== 0 || symbolic.stdout !== `${branch}\n`) throw new CliError(`sandbox feature branch '${branch}' is not the exact symbolic HEAD in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+  const branchOid = exactOid(runGit(worktree, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]));
+  const headOid = exactOid(runGit(worktree, ["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"]));
+  if (branchOid !== seed || headOid !== seed) throw new CliError(`sandbox feature branch '${branch}' or worktree HEAD moved from seed '${seed}' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+  const logResult = runGit(worktree, ["rev-parse", "--git-path", `logs/${ref}`]);
+  if (logResult?.status !== 0 || !logResult.stdout.endsWith("\n") || logResult.stdout.slice(0, -1).includes("\n")) throw new CliError(`could not observe creation reflog for feature branch '${branch}' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+  let raw;
+  try {
+    raw = readFileSync(resolvePath(worktree, logResult.stdout.slice(0, -1)), "utf8");
+  } catch {
+    throw new CliError(`could not observe creation reflog for feature branch '${branch}' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+  }
+  const match = raw.match(/^([0-9a-f]{40}) ([0-9a-f]{40}) .+\tbranch: Created from ([0-9a-f]{40})\n$/u);
+  if (!match || match[1] !== "0".repeat(40) || match[2] !== seed || match[3] !== seed) throw new CliError(`feature branch '${branch}' does not have exact one-line creation provenance from seed '${seed}' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+  const ancestry = runGit(worktree, ["merge-base", "--is-ancestor", seed, ref]);
+  if (ancestry?.status !== 0) throw new CliError(`feature branch seed '${seed}' is not a proven ancestor of '${ref}' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+}
+
 export async function dispatchInit(positional, flags, operations = INIT_OPERATIONS) {
   const candidate = preflightInit(positional, flags);
   const {
@@ -1160,6 +1228,23 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
     throw new CliError(`sandbox destination '${S}' already exists${detail}; it was not reused, changed, or deleted`);
   }
 
+  if (!checkBranchName(operatorRoot, candidate.branch, runGit)) {
+    throw new CliError(`feature branch '${candidate.branch}' is not a valid branch name; sandbox path '${S}' was not created`);
+  }
+  if (candidate.pr_base !== null && !checkBranchName(operatorRoot, candidate.pr_base, runGit)) {
+    throw new CliError(`PR base '${candidate.pr_base}' is not a valid branch name; sandbox path '${S}' was not created`);
+  }
+  const featureRef = `refs/heads/${candidate.branch}`;
+  if (exactRefState(operatorRoot, featureRef, runGit, "feature branch ref") === "present") {
+    throw new CliError(`feature branch '${candidate.branch}' already exists at '${featureRef}' in operator repository '${operatorRoot}'; restore the operator checkout to 'main', remove the colliding '${candidate.branch}' ref, and retry; sandbox path '${S}' was not created`);
+  }
+  if (candidate.pr_base !== null) {
+    const baseRef = `refs/heads/${candidate.pr_base}`;
+    if (exactRefState(operatorRoot, baseRef, runGit, "PR base ref") === "absent") {
+      throw new CliError(`PR base '${candidate.pr_base}' does not name local ref '${baseRef}' in operator repository '${operatorRoot}'; sandbox path '${S}' was not created`);
+    }
+  }
+
   try {
     const observedContainer = directoryState(C, { lstat, realpath });
     if (observedContainer.kind === "absent") mkdir(C);
@@ -1192,11 +1277,33 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
   }
 
   let prBase = candidate.pr_base;
+  let seed;
   if (prBase === null) {
     const observed = runGit(proof.configuredWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
     prBase = observed.ok ? observed.stdout.trim() : "";
     if (!prBase) throw new CliError(`could not observe a symbolic branch in PR base worktree '${candidate.worktree}' for sandbox '${S}'; pass --pr-base <branch> explicitly; sandbox was retained`);
+    seed = exactOid(runGit(proof.configuredWorktree, ["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"]));
+    if (!seed) throw new CliError(`could not observe sandbox HEAD seed in sandbox '${S}'; sandbox was retained; run.json is absent`);
+  } else {
+    seed = resolveExplicitSeed(S, prBase, runGit);
   }
+  const switched = runGit(proof.configuredWorktree, ["switch", "--no-track", "-c", candidate.branch, seed]);
+  if (switched?.status !== 0) throw new CliError(`could not create feature branch '${candidate.branch}' from seed '${seed}' in sandbox '${S}'; sandbox was retained; run.json is absent`);
+  const proveBranch = () => proveInitBranch({ operatorRoot, sandboxPath: S, worktree: proof.configuredWorktree, branch: candidate.branch, seed, runGit, resolvePath });
+  // False-green enforcement: bootstrap is an arbitrary repository-declared command, so the physical
+  // proof must be repeated after it runs and again immediately before publication. Branch, ref and
+  // reflog evidence is all readable through a `.git` that has been relocated or rebound outside the
+  // sandbox, so logical provenance alone cannot see the escape -- and publishing `run.json` for a
+  // repository whose Git administration left the sandbox is exactly the green this proof prevents.
+  const proveContainedBranch = () => {
+    try {
+      prove({ operatorRoot, sandboxPath: S, runId, worktree: candidate.worktree });
+    } catch (error) {
+      throw new CliError(`physical containment could not be re-proved for sandbox '${S}'; sandbox was retained; run.json is absent`, { cause: error });
+    }
+    proveBranch();
+  };
+  proveBranch();
   const config = readRepositoryConfig(S, { optional: true });
   let bootstrapEvidence = {};
   if (config?.bootstrapCommand) {
@@ -1204,13 +1311,14 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
     if (outcome.refusal) throw new CliError(`${outcome.refusal}; sandbox '${S}' was retained; run.json is absent`);
     bootstrapEvidence = { bootstrap_command: config.bootstrapCommand, bootstrap_exit: outcome.exit };
   }
+  proveContainedBranch();
   let run;
   try {
     run = validateRun({ ...candidate, pr_base: prBase, ...bootstrapEvidence });
   } catch (error) {
     throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
   }
-  const { observedRun } = await dispatchInitPublication({ runDir, sandboxPath: S, candidate: run });
+  const { observedRun } = await dispatchInitPublication({ runDir, sandboxPath: S, candidate: run, finalGuard: proveContainedBranch });
   return emit(flags, {
     run_id: observedRun.run_id, run_dir: runDir, sandbox_path: proof.sandboxPath,
     branch: observedRun.branch, worktree: observedRun.worktree, pr_base: observedRun.pr_base,

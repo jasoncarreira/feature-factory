@@ -358,6 +358,9 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     git(operator, "add", "operator.txt", ".gitignore");
     git(operator, "commit", "--quiet", "-m", "operator seed");
     git(operator, "switch", "--quiet", "-c", "operator-work");
+    writeFileSync(join(operator, "operator-work.txt"), "operator work\n");
+    git(operator, "add", "operator-work.txt");
+    git(operator, "commit", "--quiet", "-m", "operator work");
     git(operator, "remote", "add", "origin", operator);
     const operatorBefore = {
       branch: git(operator, "symbolic-ref", "--quiet", "--short", "HEAD"),
@@ -367,6 +370,8 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     const featureBranch = `feature/${runId}`;
     const featureRef = `refs/heads/${featureBranch}`;
     assert.equal(refAbsent(operator, featureRef), true);
+    const seedHead = git(operator, "rev-parse", "main^{commit}");
+    assert.notEqual(seedHead, operatorBefore.head, "explicit base seed must not fall back to operator HEAD");
     const initialized = initFresh(operator, [runId, "--branch", featureBranch, "--pr-base", "main"]);
     const sandbox = initialized.repository;
     assert.equal(sandbox, realpathSync(join(container, runId)));
@@ -377,9 +382,9 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     git(sandbox, "config", "--replace-all", "remote.origin.pushurl", operatorPush);
     assert.equal(git(operator, "remote", "get-url", "--push", "origin"), git(sandbox, "remote", "get-url", "--push", "origin"));
     assert.equal(refAbsent(operator, featureRef), true);
-    const seedHead = git(sandbox, "rev-parse", "HEAD^{commit}");
-    git(sandbox, "switch", "--quiet", "--no-track", "-c", featureBranch, seedHead);
     assert.equal(git(sandbox, "symbolic-ref", "--quiet", "--short", "HEAD"), featureBranch);
+    assert.equal(git(sandbox, "rev-parse", "HEAD^{commit}"), seedHead);
+    assert.equal(git(sandbox, "rev-parse", `${featureRef}^{commit}`), seedHead);
     assert.equal(refAbsent(operator, featureRef), true);
     const plane = initialized.runDir;
     const worktreeRoot = join(sandbox, ".factory", "worktrees", runId);

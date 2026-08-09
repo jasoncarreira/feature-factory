@@ -15,6 +15,25 @@ describe("OpenCode skill adapter", () => {
     assert.match(skill, /read `WORKFLOW\.md` located\nnext to this file completely/u);
     assert.match(skill, /feature_background/u);
     assert.match(skill, /FACTORY_SESSION_ID/u);
+    const grammar = [
+      /at most one exact, case-sensitive first token `--background`/u,
+      /maximal leading option prefix/u,
+      /in any\s+order/u,
+      /preserve\s+the suffix beginning there byte-for-byte/iu,
+      /`--base=x`, case or punctuation variants/u,
+      /`--base` after the first request\s+token are request content/u,
+      /missing value for --base; no run created\./u,
+      /repeated --base; no run created\./u,
+      /Duplicate copies of one mode remain idempotent/u,
+      /conflicting mode flags: --autonomous and --headless; choose one/u,
+      /only admitted\s+mode\/base options reaches the existing placement-specific missing-request refusal/u,
+      /git check-ref-format --branch <value>/u,
+      /git show-ref --verify --quiet refs\/heads\/<value>/u,
+      /before run-id allocation, config effects, context lookup, state reads,\s+tool calls, or factory invocation/u,
+      /factory init --pr-base <value>/u,
+      /for\s+no-base input, omit `--pr-base` without changing the preserved request suffix or other effects/u,
+    ];
+    for (const contract of grammar) assert.match(skill, contract);
     assert.deepEqual(bundledWorkflow, canonicalWorkflow);
     const workflow = bundledWorkflow.toString("utf8");
     const firstMatch = "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.";
