@@ -35,7 +35,7 @@ const PLAN = {
 function project(name) {
   const repo = mkdtempSync(join(tmpdir(), `ff-claim-${name}-`));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
-  git("init", "-q", "-b", "feature");
+  git("init", "-q", "-b", "main");
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "T");
   mkdirSync(join(repo, "src"), { recursive: true });
@@ -818,6 +818,7 @@ const CLAIMS = [
     matches: /pr_base: release\/1/u,
     act(repo) {
       commitConfiguredPath(repo);
+      execFileSync("git", ["branch", "release/1", "HEAD"], { cwd: repo });
       execFileSync("git", ["checkout", "-q", "--detach"], { cwd: repo });
       execFileSync("git", ["branch", "-D", "integration"], { cwd: repo });
       const initialized = initFresh(repo, [RUN, "--worktree", "configured", "--pr-base", "release/1", "--now", NOW]);
@@ -837,7 +838,7 @@ const CLAIMS = [
     matches: /could not observe a symbolic branch in PR base worktree '\.' for sandbox/u,
     act(repo) {
       execFileSync("git", ["checkout", "-q", "--detach"], { cwd: repo });
-      execFileSync("git", ["branch", "-D", "feature"], { cwd: repo });
+      execFileSync("git", ["branch", "-D", "main"], { cwd: repo });
       const result = factory(repo, ["init", RUN, "--now", NOW]);
       const sandbox = join(repo, ".factory-sandboxes", RUN);
       assert.equal(existsSync(join(sandbox, ".git")), true);
@@ -944,11 +945,11 @@ const CLAIMS = [
     file: "WORKFLOW.md",
     fragment: "Only a\nsuccessful JSON response selects paths.",
     expect: "allowed",
-    matches: /pr_base: feature/u,
+    matches: /pr_base: main/u,
     act(repo) {
       const initialized = initFresh(repo, [RUN, "--now", NOW]);
       const json = factory(initialized.repository, ["status", RUN, "--json"]);
-      assert.equal(JSON.parse(json.out).pr_base, "feature");
+      assert.equal(JSON.parse(json.out).pr_base, "main");
       return factory(initialized.repository, ["status", RUN]);
     },
   },
@@ -1017,7 +1018,7 @@ const CLAIMS = [
     file: "WORKFLOW.md",
     fragment: "gh pr create --draft --base \"<pr_base>\" --head \"<branch>\" --title \"<title>\" --body-file \"<body-file>\"",
     expect: "allowed",
-    matches: /"pr_base": "feature"/u,
+    matches: /"pr_base": "main"/u,
     act(repo) {
       const initialized = initFresh(repo, [RUN, "--now", NOW]);
       return factory(initialized.repository, ["status", RUN, "--json"]);

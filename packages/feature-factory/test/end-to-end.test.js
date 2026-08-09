@@ -106,7 +106,6 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
     assert.equal(git(fresh.repository, "remote", "get-url", "--push", "origin"), operatorPush);
     git(fresh.repository, "config", "user.email", "t@example.com");
     git(fresh.repository, "config", "user.name", "T");
-    git(fresh.repository, "switch", "-q", "--no-track", "-c", "feature", git(fresh.repository, "rev-parse", "HEAD^{commit}"));
     selected = fresh;
   }
   const repo = selected.repository;

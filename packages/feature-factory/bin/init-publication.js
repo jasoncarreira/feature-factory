@@ -12,10 +12,11 @@ const COMMITTED = new Set([
 ]);
 
 export async function dispatchInitPublication(
-  { runDir, sandboxPath, candidate },
+  { runDir, sandboxPath, candidate, finalGuard },
   { writer = writeProtectedJsonAtomic, observeTarget = observeInitTarget } = {},
 ) {
   const intendedBytes = `${JSON.stringify(candidate, null, 2)}\n`;
+  if (finalGuard) await finalGuard();
   let writerError = null;
   try {
     await writer(runDir, "run.json", candidate, { createOnly: true });
