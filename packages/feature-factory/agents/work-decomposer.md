@@ -100,6 +100,38 @@ a re-read rather than a run.
    or inside an isolated child process, and it becomes the second. Leaving the form to the builder is how
    one file ends up with the same claim written twice, once robustly and once not.
 
+7. **A slice owns every caller, fixture and test its change invalidates.** Ownership follows the change,
+   not the topic. If a slice alters a signature, a return shape, sync/async nature, or a module contract
+   other code imports, **and existing call sites, fixtures or tests must migrate as a result**, then those
+   belong to **that** slice — even when they read as another slice's subject matter. Use `amend-paths` to
+   take out-of-lane paths if the seeded plan missed them.
+
+   The trigger is invalidation, not change. A backward-compatible change requires none of this: adding a
+   defaulted optional parameter, or an added field on a returned object, leaves every existing caller,
+   fixture and test passing unmodified, and there is nothing to co-own. Apply this rule when the old
+   contract stops working, not whenever an interface is touched.
+
+   This is rule 6 in reverse. Rule 6 forbids a slice from depending on the **absence** of what a later
+   slice owns; this forbids depending on a later slice to **repair what your change breaks**. Both close
+   the same circle, and this direction closes it harder: `paths` freeze at seeding, blocked-slice ordering
+   forbids dispatching a dependent of a blocked slice, and the slice's own ratified `test_plan` includes
+   the tests it just invalidated. There is then no legal move — no retry count fixes it, because nothing
+   the slice may edit can make its suite green.
+
+   mimir 1410 lost a run this way with seven of ten slices merged. `evidence-routing` changed
+   `observe_evidence` to an async SafeGit-only interface; sixteen existing orchestrator and reattach tests
+   called the old one; only the dependent `orchestrator-publication` slice owned those callers and
+   fixtures; and it could not be dispatched while `evidence-routing` was blocked.
+
+   **If you cannot satisfy this, merge the two slices rather than ordering them.** A large merged slice is
+   the right answer and a deadlocked pair is not. Say so in `### Risks` when you merge for this reason,
+   and note that a merged slice of that size may need more than the default three attempts.
+
+   Two behaviours from that run are worth repeating when this happens anyway. Block after the first
+   attempt once the situation is structural — burning the retry budget re-deriving the same deadlock buys
+   nothing. And do not take an in-lane compatibility fallback that makes the suite green by restoring the
+   behaviour the story forbids; a green suite bought that way is the false green the plan exists to avoid.
+
 ## Working style
 
 - Read the brief's file plan; group by layer and by whether the frontend actually consumes each backend change.
