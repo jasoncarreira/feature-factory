@@ -35,7 +35,7 @@ const PLAN = {
 function project(name) {
   const repo = mkdtempSync(join(tmpdir(), `ff-claim-${name}-`));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
-  git("init", "-q", "-b", "main");
+  git("init", "-q", "-b", "feature");
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "T");
   mkdirSync(join(repo, "src"), { recursive: true });
@@ -84,7 +84,7 @@ function factory(repo, args) {
 }
 
 function seeded(operator) {
-  const initialized = initFresh(operator, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+  const initialized = initFresh(operator, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
   writeFileSync(join(initialized.runDir, "plan", "slices.json"), JSON.stringify(PLAN));
   assert.equal(decide(initialized.repository, "brief", "approved").ok, true);
   assert.equal(factory(initialized.repository, ["slices-seed", RUN, "--now", NOW]).ok, true);
@@ -278,7 +278,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /review_ready: true/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "plan", "slices.json"),
         JSON.stringify({ slices: [{ ...PLAN.slices[0], test_plan: [] }] }));
       assert.equal(decide(repository, "brief", "approved").ok, true);
@@ -316,7 +316,7 @@ const CLAIMS = [
     expect: "refused",
     matches: /test_plan: must be an array of strings/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       const { test_plan: _omitted, ...withoutTestPlan } = PLAN.slices[0];
       writeFileSync(join(runDir, "plan", "slices.json"),
         JSON.stringify({ slices: [withoutTestPlan] }));
@@ -331,7 +331,7 @@ const CLAIMS = [
     expect: "refused",
     matches: /^plan\/slices\.json must have top-level shape \{ "slices": \[\.\.\.\] \}\n$/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       const path = join(runDir, "run.json");
       writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify(PLAN.slices));
       assert.equal(decide(repository, "brief", "approved").ok, true);
@@ -349,7 +349,7 @@ const CLAIMS = [
     expect: "refused",
     matches: /^plan\/slices\.json has no slices\n$/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       const path = join(runDir, "run.json");
       writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify({ slices: [] }));
       assert.equal(decide(repository, "brief", "approved").ok, true);
@@ -367,7 +367,7 @@ const CLAIMS = [
     expect: "refused",
     matches: /^plan\/slices\.json changed since the brief gate was presented; re-present it before approving\n$/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       const plan = join(runDir, "plan", "slices.json");
       const path = join(runDir, "run.json");
       assert.equal(decide(repository, "story", "approved").ok, true);
@@ -398,7 +398,7 @@ const CLAIMS = [
     expect: "refused",
     matches: /^plan\/slices\.json is not the plan the brief gate approved\n$/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       const plan = join(runDir, "plan", "slices.json");
       const path = join(runDir, "run.json");
       // Approve plan A, then swap the file for a plan B nobody reviewed.
@@ -423,7 +423,7 @@ const CLAIMS = [
     expect: "refused",
     matches: /^slices-seed requires the Brief gate to be approved\n$/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify(PLAN));
       assert.equal(decide(repository, "story", "approved").ok, true);
       const result = factory(repository, ["slices-seed", RUN, "--now", NOW]);
@@ -441,7 +441,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"brief": "approved"[\s\S]*"slices": \[\][\s\S]*"next": "seed-slices"/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify(PLAN));
       assert.equal(decide(repository, "story", "approved").ok, true);
       assert.equal(decide(repository, "brief", "approved").ok, true);
@@ -458,7 +458,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /seeded: 1/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify(PLAN));
       assert.equal(decide(repository, "story", "approved").ok, true);
       assert.equal(decide(repository, "brief", "approved").ok, true);
@@ -474,7 +474,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /seeded: 1/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       assert.equal(decide(repository, "story", "approved").ok, true);
       const planPath = join(runDir, "plan", "slices.json");
       writeFileSync(planPath, JSON.stringify(PLAN));
@@ -497,7 +497,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /seeded: 1/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       assert.equal(decide(repository, "story", "approved").ok, true);
       const planPath = join(runDir, "plan", "slices.json");
       const presented = `${JSON.stringify(PLAN, null, 2)}\n`;
@@ -523,7 +523,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /seeded: 1/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       assert.equal(decide(repository, "story", "approved").ok, true);
       const planPath = join(runDir, "plan", "slices.json");
       const presented = JSON.stringify(PLAN);
@@ -548,7 +548,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"next": "seed-slices"/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify(PLAN));
       assert.equal(decide(repository, "story", "approved").ok, true);
       assert.equal(decide(repository, "brief", "approved").ok, true);
@@ -564,7 +564,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"story": "pending"/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "artifacts", "story.md"), "story\n");
       assert.equal(factory(repository, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]).ok, true);
       return factory(repository, ["status", RUN, "--json"]);
@@ -577,7 +577,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /gate: pre_pr\nstatus: pending/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       const artifacts = {
         story: "artifacts/story.md",
         brief: "artifacts/technical-brief.md",
@@ -609,7 +609,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /gate: story\nstatus: pending/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "artifacts", "story.md"), "story\n");
       assert.equal(factory(repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
       assert.equal(factory(repository, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]).ok, true);
@@ -632,7 +632,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"lock": "absent"[\s\S]*"story": "stop"[\s\S]*"terminal_result": null[\s\S]*"next": "stopped-at-gate:story"/u,
     act(repo) {
-      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "artifacts", "story.md"), "story\n");
       assert.equal(factory(repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
       assert.equal(factory(repository, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story.md", "--now", NOW]).ok, true);
@@ -680,7 +680,7 @@ const CLAIMS = [
     matches: /"story": "approved"/u,
     act(repo) {
       // Initialized but *not* seeded — that is the whole distinction.
-      const { repository } = initFresh(repo, [RUN, "--branch", "feature", "--worktree", ".", "--now", NOW]);
+      const { repository } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       assert.equal(decide(repository, "story", "approved").ok, true);
       assert.equal(factory(repository, ["gate", RUN, "story", "pending", "--artifact", "artifacts/story-v2.md", "--now", NOW]).ok, true);
       assert.equal(factory(repository, ["gate", RUN, "story", "approved", "--artifact", "artifacts/story-v2.md", "--now", NOW]).ok, true);
@@ -752,7 +752,7 @@ const CLAIMS = [
       }));
       factory(repository, ["slice", RUN, "s1", "review", "--evidence-ref", "evidence/s1.json",
         "--review-ref", "reviews/s1.json", "--now", NOW]);
-      execFileSync("git", ["checkout", "-q", "feature"], { cwd: repository });
+      execFileSync("git", ["checkout", "-q", "work"], { cwd: repository });
       execFileSync("git", ["merge", "-q", "--ff-only", "slice"], { cwd: repository });
       const merged = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
       return factory(repository, ["slice", RUN, "s1", "merged", "--merge-commit", merged, "--now", NOW]);
@@ -769,7 +769,7 @@ const CLAIMS = [
       assert.match(String(base), /^[0-9a-f]{40}$/u, "activation must report the base it recorded");
       // Move the branch, then re-activate. The CLI observes the *new* head, so if base_ref were
       // writable twice this would silently re-point the slice's diff baseline.
-      execFileSync("git", ["checkout", "-q", "feature"], { cwd: repository });
+      execFileSync("git", ["checkout", "-q", "work"], { cwd: repository });
       writeFileSync(join(repository, "src", "later.ts"), "later\n");
       execFileSync("git", ["add", "-A"], { cwd: repository });
       execFileSync("git", ["commit", "-q", "-m", "later"], { cwd: repository });
@@ -785,6 +785,8 @@ const CLAIMS = [
     act(repo) {
       // The whole invocation an orchestrator should need. Both required flags are gone, and what was
       // recorded is reported back so the branch it must create is not left implicit.
+      execFileSync("git", ["checkout", "-q", "-b", "main"], { cwd: repo });
+      execFileSync("git", ["branch", "-D", "feature"], { cwd: repo });
       const initialized = initFresh(repo, [RUN, "--now", NOW]);
       assert.equal(initialized.response.branch, `feature/${RUN}`);
       assert.equal(initialized.response.worktree, ".");
@@ -838,7 +840,7 @@ const CLAIMS = [
     matches: /could not observe a symbolic branch in PR base worktree '\.' for sandbox/u,
     act(repo) {
       execFileSync("git", ["checkout", "-q", "--detach"], { cwd: repo });
-      execFileSync("git", ["branch", "-D", "main"], { cwd: repo });
+      execFileSync("git", ["branch", "-D", "feature"], { cwd: repo });
       const result = factory(repo, ["init", RUN, "--now", NOW]);
       const sandbox = join(repo, ".factory-sandboxes", RUN);
       assert.equal(existsSync(join(sandbox, ".git")), true);
@@ -884,7 +886,7 @@ const CLAIMS = [
     expect: "refused",
     matches: /run 'app-1' already exists at '.*run\.json'; run status\/resume with --repo/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       const path = join(initialized.runDir, "run.json");
       const before = readFileSync(path, "utf8");
       const result = factory(repo, ["init", RUN, "--pr-base", "other", "--now", NOW]);
@@ -902,7 +904,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"valid": true[\s\S]*"next": "gate:story"/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       return factory(initialized.repository, ["status", RUN, "--json"]);
     },
   },
@@ -945,11 +947,11 @@ const CLAIMS = [
     file: "WORKFLOW.md",
     fragment: "Only a\nsuccessful JSON response selects paths.",
     expect: "allowed",
-    matches: /pr_base: main/u,
+    matches: /pr_base: feature/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       const json = factory(initialized.repository, ["status", RUN, "--json"]);
-      assert.equal(JSON.parse(json.out).pr_base, "main");
+      assert.equal(JSON.parse(json.out).pr_base, "feature");
       return factory(initialized.repository, ["status", RUN]);
     },
   },
@@ -960,7 +962,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"valid": false[\s\S]*"error": "run: unknown keys: unexpected"/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       const path = join(initialized.runDir, "run.json");
       const run = JSON.parse(readFileSync(path, "utf8"));
       run.unexpected = true;
@@ -978,7 +980,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"valid": false[\s\S]*steps/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       const path = join(initialized.runDir, "run.json");
       const run = JSON.parse(readFileSync(path, "utf8"));
       delete run.steps;
@@ -1018,9 +1020,9 @@ const CLAIMS = [
     file: "WORKFLOW.md",
     fragment: "gh pr create --draft --base \"<pr_base>\" --head \"<branch>\" --title \"<title>\" --body-file \"<body-file>\"",
     expect: "allowed",
-    matches: /"pr_base": "main"/u,
+    matches: /"pr_base": "feature"/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       return factory(initialized.repository, ["status", RUN, "--json"]);
     },
   },
@@ -1140,7 +1142,7 @@ const CLAIMS = [
       })}\n`);
       execFileSync("git", ["add", ".factory.json"], { cwd: repo });
       execFileSync("git", ["commit", "-q", "-m", "declare bootstrap"], { cwd: repo });
-      const initialized = initFresh(repo, ["205", "--now", NOW]);
+      const initialized = initFresh(repo, ["205", "--branch", "work", "--now", NOW]);
       const run = JSON.parse(readFileSync(join(initialized.runDir, "run.json"), "utf8"));
       assert.equal(run.bootstrap_command, bootstrapCommand);
       assert.equal(run.bootstrap_exit, 0);
@@ -1167,7 +1169,7 @@ const CLAIMS = [
   ].map(({ id, fragment }) => ({
     id, file: "WORKFLOW.md", fragment, expect: "allowed", matches: /"run_id": "app-1"/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       return factory(initialized.repository, ["status", RUN, "--json"]);
     },
   })),
@@ -1182,7 +1184,7 @@ const CLAIMS = [
       const policy = prose.slice(prose.indexOf("### Orderly repository-verification exhaustion"), prose.indexOf("### Post-merge finding routing and repair journal"));
       assert.match(policy, /terminalize means terminate the current `factory slice … merged` CLI invocation and\s+its enclosing run-driver invocation[\s\S]*does not mean the irreversible\s+factory terminal transition/u);
       assert.match(policy, /Await every in-flight specialist task[\s\S]*Stop\s+scheduling heartbeats and await every heartbeat already in flight[\s\S]*factory lock "\$R" release --session "\$SESSION_ID" --repo "\$RUN_REPO"[\s\S]*factory status "\$R" --json --repo "\$RUN_REPO"[\s\S]*Outcome: repository-verify-exhausted/u);
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       assert.equal(factory(initialized.repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
       assert.equal(factory(initialized.repository, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
       return factory(initialized.repository, ["status", RUN, "--json"]);
@@ -1195,7 +1197,7 @@ const CLAIMS = [
     expect: "refused",
     matches: /run 'app-1' is held by session session-a/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       assert.equal(factory(initialized.repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
       const result = factory(initialized.repository, ["lock", RUN, "release", "--session", "session-b", "--now", NOW]);
       const status = JSON.parse(factory(initialized.repository, ["status", RUN, "--json"]).out);
@@ -1214,7 +1216,7 @@ const CLAIMS = [
       const prose = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
       const policy = prose.slice(prose.indexOf("A later driver invocation repeats normal run selection"), prose.indexOf("### Post-merge finding routing and repair journal"));
       assert.match(policy, /binds `SESSION_ID` to the actual stable host-adapter identity[\s\S]*factory lock "\$R" claim --session "\$SESSION_ID" --repo "\$RUN_REPO"[\s\S]*reports that exact session as owner[\s\S]*Only then may it perform same-SHA reconciliation/u);
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       assert.equal(factory(initialized.repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
       assert.equal(factory(initialized.repository, ["lock", RUN, "release", "--session", "session-a", "--now", NOW]).ok, true);
       assert.equal(factory(initialized.repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
@@ -1235,7 +1237,7 @@ const CLAIMS = [
         "production-defect terminalization must name the full introducing merge, status, and established test or truthful suite fallback");
       assert.match(stepFour, /State that merged-slice evidence and review\s+remain preserved\./u,
         "production-defect terminalization must preserve the merged slice's evidence and review");
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       const introducingMerge = "a".repeat(40);
       const reason = `${introducingMerge} factory config entry 'verify' failed with exit status 23 in .factory.json verify suite; merged-slice evidence and review remain preserved`;
       assert.equal(factory(initialized.repository, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW]).ok, true);
@@ -1270,7 +1272,7 @@ const CLAIMS = [
       assert.match(prose, /Give the exact same stdout bytes unchanged to `story-reader` as\s+`ISSUE_PAYLOAD` and untrusted supplied normalization input/u);
       assert.match(prose, /specialist performs no external\s+lookup/u);
 
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       return factory(initialized.repository, ["status", RUN, "--json"]);
     },
   },
@@ -1281,7 +1283,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"mode": "interactive"/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       return factory(initialized.repository, ["status", RUN, "--json"]);
     },
   },
@@ -1292,7 +1294,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"mode": "autonomous"/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--mode", "autonomous", "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--mode", "autonomous", "--now", NOW]);
       return factory(initialized.repository, ["status", RUN, "--json"]);
     },
   },
@@ -1303,7 +1305,7 @@ const CLAIMS = [
     expect: "allowed",
     matches: /"status": "needs-human"[\s\S]*"mode": "headless"[\s\S]*"terminal_result": \{\s*"status": "needs-human",\s*"reason": "headless run reached a human gate"\s*\}[\s\S]*"next": "gate:story"/u,
     act(repo) {
-      const initialized = initFresh(repo, [RUN, "--mode", "headless", "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--mode", "headless", "--now", NOW]);
       assert.equal(factory(initialized.repository, ["terminal", RUN, "needs-human", "--reason", "headless run reached a human gate", "--now", NOW]).ok, true);
       const result = factory(initialized.repository, ["status", RUN, "--json"]);
       const durable = JSON.parse(result.out);
@@ -1355,7 +1357,7 @@ const CLAIMS = [
         const swapped = `${RESUME_ORDER[index + 1]}\n${RESUME_ORDER[index]}`;
         assert.throws(() => checkResumeOrder(prose.replace(pair, swapped)), /resume-order/u);
       }
-      const initialized = initFresh(repo, [RUN, "--now", NOW]);
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       return factory(initialized.repository, ["status", RUN, "--json"]);
     },
   },
