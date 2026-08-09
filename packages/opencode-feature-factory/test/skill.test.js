@@ -15,6 +15,8 @@ describe("OpenCode skill adapter", () => {
     assert.match(skill, /read `WORKFLOW\.md` located\nnext to this file completely/u);
     assert.match(skill, /feature_background/u);
     assert.match(skill, /FACTORY_SESSION_ID/u);
+    for (const fragment of ["--base <value>", "missing value for --base; no run created.", "repeated --base; no run created.",
+      "git check-ref-format --branch <value>", "refs/heads/<value>", "factory init --pr-base <value>"]) assert.match(skill, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
     assert.deepEqual(bundledWorkflow, canonicalWorkflow);
     const workflow = bundledWorkflow.toString("utf8");
     const firstMatch = "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.";

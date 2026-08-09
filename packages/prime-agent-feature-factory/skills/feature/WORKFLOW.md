@@ -547,9 +547,9 @@ INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORK
 ```
 
 The init request pre-reserves the deterministic sandbox, performs exactly one
-`git clone --local -- O S`, completes the physical containment proof, and only then publishes
-`run.json`. Before publication, it observes the PR base and lets the CLI parse and, when declared,
-execute the cloned sandbox's bootstrap. The CLI submits the exact command unchanged with `shell: true`, inherited environment and
+`git clone --local -- O S`, completes the physical containment proof, resolves the qualified seed, and
+creates and proves the recorded feature branch before it publishes `run.json`. Before publication, it
+observes the PR base and lets the CLI parse and, when declared, execute the cloned sandbox's bootstrap. The CLI submits the exact command unchanged with `shell: true`, inherited environment and
 stdin, and cwd exactly `S`; child stdout and stderr both route to CLI stderr so `init --json` stdout stays
 exactly one response object. It observes tracked worktree and index paths after every execution and
 refuses unobservable state before dirty paths, then dirty paths before unavailable or nonzero exit.
@@ -642,16 +642,8 @@ Immediately before accepting or creating the sandbox branch, recheck that `FEATU
 git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
 ```
 
-- **Bootstrap-pending, sandbox branch absent:** require the fully qualified ref and reflog absent in the
-  sandbox, and require no tracked worktree or index diff; the init-owned untracked control plane is not
-  a source change. Bind `SEED_HEAD` to that worktree's
-  verified `HEAD^{commit}` and run exactly:
-  ```sh
-  git -C "$INTEGRATION_WORKTREE" switch --no-track -c "$FEATURE_BRANCH" "$SEED_HEAD"
-  ```
-  Require exactly one raw reflog line with positive provenance, symbolic HEAD equal to
-  `FEATURE_BRANCH`, and both branch HEAD and worktree HEAD equal to `SEED_HEAD`. Recheck the operator
-  ref-absent invariant before accepting the branch.
+- **Bootstrap-pending, sandbox branch absent:** refuse. Init already created and proved the recorded
+  feature branch before bootstrap and create-only manifest publication, so absence cannot be recovered.
 - **Bootstrap-pending, sandbox branch present:** require no tracked worktree or index diff,
   symbolic HEAD exactly `FEATURE_BRANCH`, exactly one raw reflog line with positive provenance, and
   current branch/worktree HEAD equal to its new seed OID. Recheck the operator invariant before
@@ -664,8 +656,8 @@ git -C "$O" show-ref --verify --quiet "$FEATURE_REF"
 Every operator collision, worktree cleanliness failure, branch mismatch, reflog failure, or ancestry
 failure names `O`, `RUN_REPO`, and the collision class without exposing a target. It retains existing
 state and stops before lock claim or steal, dispatch, gate/step/slice transition, push, forge command,
-or publication. A bootstrap push mismatch therefore leaves the branch absent; a later invocation may
-repeat the bootstrap-pending push proof and branch-absent policy against the retained sandbox.
+or publication. A bootstrap push mismatch retains the init-created branch; a later invocation may repeat the
+bootstrap-pending push proof and branch-present policy against the retained sandbox.
 
 Immediately before claiming or stealing a lock, perform the operator exact-ref-absent check once more.
 Only after it passes may the selected run continue from qualified status `next`:

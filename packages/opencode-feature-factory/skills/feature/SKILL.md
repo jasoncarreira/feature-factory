@@ -6,10 +6,10 @@ description: >
   three approval gates and ending in a draft PR. State is durable (a per-run manifest on disk,
   written only by the `factory` CLI), evidence is observed rather than trusted from agent prose,
   high-risk steps are reviewed, and independent slices build in parallel. The compatibility shorthand
-  remains `/feature [--autonomous | --headless] <ticket key | feature idea>`.
+  remains `/feature [--autonomous | --headless] [--base <branch>] <ticket key | feature idea>`.
   The complete foreground intake is
-  `/feature [--autonomous | --headless] <ticket key | issue reference | feature idea>`; use
-  `/feature --background [--autonomous | --headless] <request>` for a dedicated host session.
+  `/feature [--autonomous | --headless] [--base <branch>] <ticket key | issue reference | feature idea>`; use
+  `/feature --background [--autonomous | --headless] [--base <branch>] <request>` for a dedicated host session.
 ---
 
 # /feature — OpenCode adapter
@@ -27,59 +27,39 @@ targets, await their results, and follow the workflow's observe-don't-trust boun
 the real owning session as `FACTORY_SESSION_ID`; use it as the workflow's required stable `SESSION_ID`
 and never synthesize a fallback.
 
-## Mode admission
+## Mode and base admission
 
-Before any intake action, including ticket, story, or design detection, branch intent, run-id
-derivation, manifest or state reads, and every `factory` command, process the raw invocation arguments
-as follows:
+Before any intake action, run-id allocation, config effect, state read, tool call, or `factory` command,
+process the raw invocation arguments as follows.
 
-First apply placement admission. Ignore leading whitespace only while locating the first token. If that
-token is not exactly and case-sensitively `--background`, preserve the entire invocation as foreground
-input. A later token, a mode token before it, casing or punctuation variants, assignment forms, and
-near misses are ordinary foreground request content. If the first token is `--background`, it is the
-outer selector. An exact terminal `--background` with no separator, or one followed only by whitespace,
-returns exactly `missing /feature request after --background; no session or run created.` before run-id
-derivation and every tool, client, state, or CLI effect. Otherwise require a following whitespace
-separator, consume the leading syntax, the selector, and exactly one separator character, and preserve
-every remaining code unit as the inner request. `--background` is placement, never a mode, and a second
-selector is inner request content.
+First apply placement admission. Ignore leading whitespace only while locating the first token. Consume
+at most one exact, case-sensitive first token `--background` and exactly one following separator; keep
+the remaining inner request bytes unchanged. If it has no following request, return exactly
+`missing /feature request after --background; no session or run created.` Assignment, case, punctuation,
+and later variants are request content. OpenCode otherwise preserves foreground placement.
 
-Apply the following mode-prefix algorithm to the foreground input or to a copy of the unchanged inner
-request. Trimming for missing-request classification and run-id derivation never changes bytes forwarded
-to a background session:
+After placement, scan the maximal leading option prefix. It may contain exact case-sensitive
+`--autonomous` and `--headless` tokens and at most one exact two-token `--base <value>` pair in any
+order. Consume only those option spans and separators. The first other token ends the prefix; preserve
+the suffix beginning there byte-for-byte for ticket detection, story or design content, resolver input,
+and run-id derivation. `--base=x`, case or punctuation variants, and `--base` after the first request
+token are request content.
 
-1. Ignore leading whitespace. The **mode prefix** is the maximal consecutive sequence of
-   whitespace-delimited tokens that are exactly and case-sensitively `--autonomous` or `--headless`.
-   The first other token ends the prefix.
-2. If both distinct flags occur in that prefix, in either order, return exactly:
-   `conflicting mode flags: --autonomous and --headless; choose one`. Return immediately, before any
-   intake, run-id derivation, state read, or CLI action. Never fall back to interactive or another
-   mode.
-3. Otherwise remove every token in the recognized prefix and its separating whitespace. Use only the
-   unchanged remainder for ticket detection, story content, design detection, branch intent, and
-   run-id derivation.
-4. Apply exactly one mapping for a new manifest:
-   - `--autonomous` maps only to `factory init --mode autonomous`.
-   - `--headless` maps only to `factory init --mode headless`.
-   - With no recognized leading mode token, omit `--mode`; existing `factory init` records
-     `interactive`.
+A prefix `--base` without a value returns exactly `missing value for --base; no run created.` A second
+prefix occurrence returns exactly `repeated --base; no run created.` Both refusals precede all effects.
+Duplicate copies of one mode remain idempotent. Both distinct modes return exactly
+`conflicting mode flags: --autonomous and --headless; choose one`. A prefix containing only admitted
+mode/base options reaches the existing placement-specific missing-request refusal.
 
-Those three compatibility phrases name init command stems, not runnable invocations. The selected
-fresh-run invocation is fully qualified in Step 0 and ends with `--repo "$RUN_REPO"`.
+For a consumed base, validate the exact value with `git check-ref-format --branch <value>` and require
+`git show-ref --verify --quiet refs/heads/<value>` in the canonical local operator repository to exit
+exactly zero. Perform both proofs before run-id allocation, config effects, or factory invocation. Refuse
+invalid syntax, an absent exact local ref, or an observation failure without creating a run. Pass the
+unchanged value only as `factory init --pr-base <value>`; omit `--pr-base` when no base was consumed.
 
-Repeated copies of one recognized flag are idempotent: remove them all and select that mode once. An
-exact mode token after the first other token is request content and neither selects nor conflicts.
-Natural-language intent, `--interactive`, capitalization variants, abbreviations, assignment or
-punctuation forms, quoted lookalikes, and near misses are request content, not selectors. Do not add a
-generic malformed-option rejection.
-
-After successful nonconflicting admission, reject an empty, whitespace-only, or mode-only foreground
-remainder with exactly `missing /feature request; no run created.` Reject the corresponding background
-remainder with exactly `missing /feature request after --background; no session or run created.` These
-rejections and a mode conflict precede run-id derivation and every tool, client, state, or CLI action.
-
-After successful nonconflicting admission, an existing manifest always resumes its immutable persisted
-mode. Invocation flags never reinitialize, compare, or mutate an existing run's mode.
+For a new manifest, `--autonomous` maps only to `factory init --mode autonomous`, `--headless` maps only
+to `factory init --mode headless`, and no admitted mode omits `--mode`. An existing manifest always
+resumes its immutable persisted mode and base. Invocation options never reinitialize or mutate it.
 
 ## Operating modes
 

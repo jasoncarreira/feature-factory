@@ -479,7 +479,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     const publicationBody = readFileSync(join(pkg, "bin", "init-publication.js"), "utf8");
     const ownedProduction = [initSource, proofBody, publicationBody].join("\n");
     assert.equal((dispatchBody.match(/\["clone", "--local", "--", operatorRoot, S\]/gu) ?? []).length, 1);
-    assert.match(dispatchBody, /await dispatchInitPublication\(\{ runDir, sandboxPath: S, candidate: run \}\)/u);
+    assert.match(dispatchBody, /await dispatchInitPublication\(\{ runDir, sandboxPath: S, candidate: run, finalGuard: proveBranch \}\)/u);
     assert.doesNotMatch(ownedProduction, /--no-hardlinks|\b(?:copyFile|cp|rm|rmSync|rmdir|unlink|unlinkSync)\s*\(|staging path|quarantine|ownership (?:record|evidence)|attempt-numbered/iu);
   } finally {
     rmSync(root, { recursive: true, force: true });

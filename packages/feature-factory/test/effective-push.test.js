@@ -400,7 +400,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     'factory effective-push "$EFFECTIVE_PUSH_OPERATION" "$O" "$RUN_REPO"',
     "the freshly captured strings must be exactly equal",
     "### Feature branch provenance and crash recovery",
-    'git -C "$INTEGRATION_WORKTREE" switch --no-track -c "$FEATURE_BRANCH" "$SEED_HEAD"',
+    "Init already created and proved the recorded",
     "Immediately before claiming or stealing a lock",
     'factory lock "$R" claim --session "$SESSION_ID" --repo "$RUN_REPO"',
     "dispatch the planned ticket",
@@ -413,7 +413,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "exact `pr_base`",
     "pre-reserves the deterministic sandbox",
     "performs exactly one\n`git clone --local -- O S`",
-    "completes the physical containment proof, and only then publishes\n`run.json`",
+    "completes the physical containment proof, resolves the qualified seed, and",
     "The skill does not construct or prove the sandbox.",
     "created_at` exactly\nequals `updated_at`",
     "qualified status reports lock state exactly `absent`",
@@ -432,6 +432,10 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "Non-bootstrap, sandbox branch absent",
     "Never recreate a progressed run's branch.",
   ]) required(fresh, fragment, "ratified skill policy");
+  const initOwnedBranch = "Init already created and proved the recorded";
+  required(fresh, initOwnedBranch, "init-owned feature branch");
+  assert.throws(() => required(fresh.replace(initOwnedBranch, ""), initOwnedBranch, "init-owned feature branch"), /contract is missing/u);
+  assert.doesNotMatch(fresh, /switch --no-track -c/u);
   assert.equal(occurrences(fresh, 'git -C "$O" show-ref --verify --quiet "$FEATURE_REF"'), 4);
   const effectivePushSites = skill.split("\n").map((line) => line.trim())
     .filter((line) => line.startsWith("factory effective-push "));
@@ -1018,7 +1022,7 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
       assert.equal(JSON.stringify(snapshot(mismatch.runDir)).includes(hidden), false, `factory state disclosed ${hidden}`);
     }
     assert.deepEqual(snapshot(mismatch.runDir), beforeMismatch);
-    assert.equal(gitResult(mismatch.repository, "show-ref", "--verify", "--quiet", `refs/heads/${mismatchBranch}`).status, 1);
+    assert.equal(gitResult(mismatch.repository, "show-ref", "--verify", "--quiet", `refs/heads/${mismatchBranch}`).status, 0);
     assert.equal(existsSync(join(mismatch.runDir, "factory.lock")), false);
     assert.equal(existsSync(mismatch.repository), true);
     assert.equal(gitResult(bare, "show-ref", "--verify", "--quiet", `refs/heads/${mismatchBranch}`).status, 1);
@@ -1038,9 +1042,9 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
     assert.doesNotThrow(() => enforceEffectivePushTarget(["bootstrap", operator, crash.repository]));
     assert.equal(git(crash.repository, "config", "--get-all", "remote.origin.pushurl"), configuredTarget);
     assert.equal(operatorRefAbsent(operator, crashBranch), true);
-    const crashCreated = createBranch(crash.repository, crashBranch);
+    const crashCreated = provenance(crash.repository, crashBranch, true);
     assert.equal(operatorRefAbsent(operator, crashBranch), true);
-    assert.equal(provenance(crash.repository, crashBranch, true).ok, true);
+    assert.equal(crashCreated.ok, true);
     assert.equal(existsSync(join(crash.runDir, "factory.lock")), false);
 
     writeFileSync(join(crash.runDir, "artifacts", "story.md"), "story\n");
@@ -1157,7 +1161,9 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
     const recreatedBranch = "feature/recreated";
     const recreated = initFresh(operator, ["recreated", "--branch", recreatedBranch, "--pr-base", "main", "--now", "2026-08-04T12:03:00.000Z"]);
     enforceEffectivePushTarget(["bootstrap", operator, recreated.repository]);
-    const firstCreation = createBranch(recreated.repository, recreatedBranch);
+    const firstProof = provenance(recreated.repository, recreatedBranch, true);
+    assert.equal(firstProof.ok, true);
+    const firstCreation = { seed: firstProof.seed, log: resolve(recreated.repository, git(recreated.repository, "rev-parse", "--git-path", `logs/refs/heads/${recreatedBranch}`)) };
     const firstRaw = readFileSync(firstCreation.log, "utf8");
     git(recreated.repository, "switch", "main");
     git(recreated.repository, "branch", "-D", recreatedBranch);
@@ -1168,26 +1174,16 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
     const raceLooseBranch = "feature/race-loose";
     assert.equal(operatorRefAbsent(operator, raceLooseBranch), true);
     git(operator, "branch", raceLooseBranch, "HEAD");
-    const raceLoose = initFresh(operator, ["race-loose", "--branch", raceLooseBranch, "--pr-base", "main", "--now", "2026-08-04T12:04:00.000Z"]);
-    const raceLooseState = snapshot(raceLoose.runDir);
+    assert.throws(() => initFresh(operator, ["race-loose", "--branch", raceLooseBranch, "--pr-base", "main", "--now", "2026-08-04T12:04:00.000Z"]), /already exists/u);
     assert.equal(operatorRefAbsent(operator, raceLooseBranch), false);
-    assert.equal(gitResult(raceLoose.repository, "config", "--get-all", "remote.origin.pushurl").status, 1);
-    assert.deepEqual(snapshot(raceLoose.runDir), raceLooseState);
-    assert.equal(existsSync(join(raceLoose.runDir, "factory.lock")), false);
+    assert.equal(existsSync(join(operator, ".factory-sandboxes", "race-loose")), false);
 
     const raceHeadBranch = "feature/race-head";
     assert.equal(operatorRefAbsent(operator, raceHeadBranch), true);
     git(operator, "switch", "-c", raceHeadBranch);
-    const raceHead = initFresh(operator, ["race-head", "--branch", raceHeadBranch, "--pr-base", "main", "--now", "2026-08-04T12:05:00.000Z"]);
-    const inheritedRefs = git(raceHead.repository, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n").sort();
-    const raceHeadState = snapshot(raceHead.runDir);
+    assert.throws(() => initFresh(operator, ["race-head", "--branch", raceHeadBranch, "--pr-base", "main", "--now", "2026-08-04T12:05:00.000Z"]), /already exists/u);
     assert.equal(operatorRefAbsent(operator, raceHeadBranch), false);
-    assert.equal(provenance(raceHead.repository, raceHeadBranch, true).ok, false);
-    assert.deepEqual(git(raceHead.repository, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n").sort(), inheritedRefs);
-    assert.equal(gitResult(raceHead.repository, "config", "--get-all", "remote.origin.pushurl").status, 1);
-    assert.deepEqual(snapshot(raceHead.runDir), raceHeadState);
-    assert.equal(existsSync(join(raceHead.runDir, "factory.lock")), false);
-    assert.equal(existsSync(raceHead.repository), true);
+    assert.equal(existsSync(join(operator, ".factory-sandboxes", "race-head")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
