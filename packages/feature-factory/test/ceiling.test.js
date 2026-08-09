@@ -323,6 +323,19 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //    proven statically — the very form the decomposer recommends. So both sides are pinned on the
     //    distinction, not merely on the prohibition: what blocks is a claim the later path invalidates.
     const byName = new Map(agentText.map(({ name, text }) => [name, text]));
+    // Instruction, not enforcement, pinned only against silent deletion: a plan deadlock blocks rather
+    // than producing a false green, and "does this slice change an interface" is not computable here.
+    // mimir 1410 lost a run at seven of ten merged slices because an interface change and its callers
+    // sat on opposite sides of a dependency edge, so the rule earns a presence assertion even though
+    // nothing can enforce it. Each fragment sits on one line in the raw markdown.
+    for (const [agent, fragment] of [
+      ["work-decomposer", "The slice that changes an interface owns every caller, fixture and test of it."],
+      ["work-decomposer", "If you cannot satisfy this, merge the two slices rather than ordering them."],
+      ["work-reviewer", "A plan that leaves them to a dependent slice is a"],
+    ]) {
+      assert.ok(byName.get(agent)?.includes(fragment),
+        `${agent}.md must keep the interface-ownership rule: ${fragment}`);
+    }
     // Enforcement: these checks prevent false-green drift in shipped agent contracts.
     const forbiddenAgentTerms = /jira|atlassian|figma|logrocket|confluence|cloudid|tracker[ _-]?key|context7|get_best_practices|search_documentation|find_examples/giu;
     // Enforcement: the declaration above IS the guard, so the declaration itself must be pinned.
