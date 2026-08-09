@@ -718,7 +718,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // session-owner writes close dependency-resolution false greens and resume publication races.
     // 3800 -> 3895 (#259): init validates qualified operator refs, resolves an exact sandbox seed,
     // creates the feature branch, and proves its binding and one-line provenance through publication.
-    assert.equal(total, 3895, "issue #259 lands at 3895 production lines");
+    assert.equal(total, 3896, "issue #259 lands at 3896 production lines");
     assert.ok(total <= 4000, `production source is ${total} lines; the tripwire is 4000`);
   });
 

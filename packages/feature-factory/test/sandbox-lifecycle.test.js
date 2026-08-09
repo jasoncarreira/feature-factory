@@ -262,10 +262,16 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     const completeSource = operator(root, "complete-scalars");
     mkdirSync(join(completeSource, ".factory-sandboxes"));
     const completeRecord = recorder(join(root, "complete-recorder"));
+    const completeHeadBefore = execFileSync(REAL_GIT, ["symbolic-ref", "HEAD"], { cwd: completeSource });
+    const completeRefsBefore = execFileSync(REAL_GIT, ["for-each-ref", "--sort=refname", "--format=%(refname) %(objectname)"], { cwd: completeSource });
     const complete = invoke(completeSource, [
       "init", "complete-scalars", "--branch", "custom/branch", "--worktree", ".", "--pr-base", "main",
       "--issue", "ISSUE-1", "--mode", "autonomous", "--max-parallel-slices", "1", "--max-retries", "1", "--now", NOW, "--json",
     ], completeRecord);
+    const completeHeadAfter = execFileSync(REAL_GIT, ["symbolic-ref", "HEAD"], { cwd: completeSource });
+    const completeRefsAfter = execFileSync(REAL_GIT, ["for-each-ref", "--sort=refname", "--format=%(refname) %(objectname)"], { cwd: completeSource });
+    assert.deepEqual(completeHeadAfter, completeHeadBefore);
+    assert.deepEqual(completeRefsAfter, completeRefsBefore);
     assert.equal(complete.ok, true, complete.stderr);
     const completeRun = JSON.parse(readFileSync(join(complete.response.run_dir, "run.json"), "utf8"));
     assert.deepEqual({ branch: completeRun.branch, prBase: completeRun.pr_base, issue: completeRun.issue_key, mode: completeRun.mode, parallel: completeRun.max_parallel_slices }, {
@@ -365,9 +371,10 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.throws(() => seedLegacyRun(malformedRoot, "malformed", { mode: "invalid", pr_base: undefined }), /run\.mode/u);
     assert.equal(existsSync(join(malformedRoot, ".factory")), false);
 
-    const injectedInit = async (name, { branch = `feature/${name}`, base = "main", inject = () => null, publish = dispatchInitPublication } = {}) => {
+    const injectedInit = async (name, { branch = `feature/${name}`, base = "main", inject = () => null, prepare = () => null, publish = dispatchInitPublication } = {}) => {
       const sourceRepository = realpathSync(operator(root, `injected-${name}`));
       const sandboxPath = join(sourceRepository, ".factory-sandboxes", name);
+      prepare(sourceRepository, branch);
       const calls = [];
       const result = (status, stdout = "") => ({ ok: status === 0, status, stdout, stderr: "", argv: [] });
       const operations = {
@@ -392,29 +399,66 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       assert.equal(existsSync(observed.sandboxPath), false, row.name);
     }
 
+    const collisionName = "pre-reserved-feature";
+    const collisionBranch = `feature/${collisionName}`;
+    const featureCollision = await injectedInit(collisionName, {
+      prepare: (repository) => git(repository, "branch", collisionBranch),
+    });
+    await assert.rejects(featureCollision.promise, (error) => {
+      assert.equal(error.message, `feature branch '${collisionBranch}' already exists at 'refs/heads/${collisionBranch}' in operator repository '${featureCollision.sourceRepository}'; restore the operator checkout to 'main', remove the colliding '${collisionBranch}' ref, and retry; sandbox path '${featureCollision.sandboxPath}' was not created`);
+      return true;
+    });
+    assert.equal(existsSync(featureCollision.sandboxPath), false);
+    assert.equal(existsSync(join(featureCollision.sandboxPath, ".factory", collisionName, "run.json")), false);
+
+    const missingName = "missing-local-base";
+    const absentBaseName = "not-local";
+    const missingLocal = await injectedInit(missingName, { base: absentBaseName });
+    await assert.rejects(missingLocal.promise, (error) => {
+      assert.equal(error.message, `PR base '${absentBaseName}' does not name local ref 'refs/heads/${absentBaseName}' in operator repository '${missingLocal.sourceRepository}'; sandbox path '${missingLocal.sandboxPath}' was not created`);
+      return true;
+    });
+    assert.equal(existsSync(missingLocal.sandboxPath), false);
+    assert.equal(existsSync(join(missingLocal.sandboxPath, ".factory", missingName, "run.json")), false);
+
     const operatorRows = [
-      { name: "feature-lookup-failure", target: "feature", status: 2, match: /could not observe feature branch ref/u },
-      { name: "base-lookup-unavailable", target: "base", status: "nonnumeric", match: /could not observe PR base ref/u },
+      { name: "feature-lookup-failure", target: "feature", status: 2, description: "feature branch ref", ref: (name) => `refs/heads/feature/${name}` },
+      { name: "base-lookup-unavailable", target: "base", status: "nonnumeric", description: "PR base ref", ref: () => "refs/heads/main" },
     ];
     for (const row of operatorRows) {
       const observed = await injectedInit(row.name, { inject: ({ repository, args, sourceRepository, result }) =>
         repository === sourceRepository && args.startsWith("show-ref ")
           && ((row.target === "feature" && args.includes(`feature/${row.name}`)) || (row.target === "base" && args.endsWith("refs/heads/main")))
           ? result(row.status) : null });
-      await assert.rejects(observed.promise, row.match);
+      await assert.rejects(observed.promise, (error) => {
+        assert.equal(error.message, `could not observe ${row.description} '${row.ref(row.name)}' in repository '${observed.sourceRepository}'`);
+        return true;
+      });
       assert.equal(existsSync(observed.sandboxPath), false, row.name);
+      assert.equal(existsSync(join(observed.sandboxPath, ".factory", row.name, "run.json")), false, row.name);
     }
 
     const exactRows = [
-      { name: "exact-absence", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.startsWith("show-ref ") ? result(1) : null, match: /could not be resolved from/u },
-      { name: "unpeelable", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(7) : null, match: /could not be peeled to one commit/u },
-      { name: "malformed-peel", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(0, "not-an-oid\n") : null, match: /could not be peeled to one commit/u },
-      { name: "unavailable-peel", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(null) : null, match: /could not observe commit for PR base ref/u },
-      { name: "divergent", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.startsWith("show-ref ") ? result(0) : repository === sandboxPath && args.includes("refs/heads/main^{commit}") ? result(0, `${"1".repeat(40)}\n`) : repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(0, `${"2".repeat(40)}\n`) : null, match: /resolves to different commits/u },
+      { name: "exact-absence", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.startsWith("show-ref ") ? result(1) : null,
+        message: ({ sandboxPath }) => `PR base 'main' could not be resolved from ${["refs/heads/main", "refs/remotes/origin/main"].map((ref) => `'${ref}'`).join(" or ")} in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent` },
+      { name: "numeric-lookup-failure", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.endsWith("refs/remotes/origin/main") ? result(7) : null,
+        message: ({ sandboxPath }) => `could not observe PR base ref 'refs/remotes/origin/main' in repository '${sandboxPath}'; sandbox was retained; run.json is absent` },
+      { name: "unpeelable", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(7) : null,
+        message: ({ sandboxPath }) => `PR base ref 'refs/remotes/origin/main' could not be peeled to one commit in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent` },
+      { name: "malformed-peel", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(0, "not-an-oid\n") : null,
+        message: ({ sandboxPath }) => `PR base ref 'refs/remotes/origin/main' could not be peeled to one commit in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent` },
+      { name: "unavailable-peel", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(null) : null,
+        message: ({ sandboxPath }) => `could not observe commit for PR base ref 'refs/remotes/origin/main' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent` },
+      { name: "divergent", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.startsWith("show-ref ") ? result(0) : repository === sandboxPath && args.includes("refs/heads/main^{commit}") ? result(0, `${"1".repeat(40)}\n`) : repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(0, `${"2".repeat(40)}\n`) : null,
+        message: ({ sandboxPath }) => `PR base 'main' resolves to different commits at 'refs/heads/main' and 'refs/remotes/origin/main' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent` },
     ];
     for (const row of exactRows) {
       const observed = await injectedInit(row.name, row);
-      await assert.rejects(observed.promise, row.match);
+      await assert.rejects(observed.promise, (error) => {
+        assert.equal(error.message, row.message(observed));
+        return true;
+      });
+      assert.equal(existsSync(observed.sandboxPath), true, row.name);
       assert.equal(existsSync(join(observed.sandboxPath, ".factory", row.name, "run.json")), false, row.name);
     }
 
@@ -422,7 +466,12 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       if (repository !== sandboxPath || !args.startsWith("show-ref ")) return null;
       return args.endsWith("refs/heads/main") ? result(0) : result("nonnumeric");
     } });
-    await assert.rejects(classification.promise, /could not observe PR base ref/u);
+    await assert.rejects(classification.promise, (error) => {
+      assert.equal(error.message, `could not observe PR base ref 'refs/remotes/origin/main' in repository '${classification.sandboxPath}'; sandbox was retained; run.json is absent`);
+      return true;
+    });
+    assert.equal(existsSync(classification.sandboxPath), true);
+    assert.equal(existsSync(join(classification.sandboxPath, ".factory", "classify-before-peel", "run.json")), false);
     assert.equal(classification.calls.some(({ repository, args }) => repository === classification.sandboxPath && args.startsWith("rev-parse --verify")), false);
 
     const equalSource = realpathSync(operator(root, "injected-equal-dual"));

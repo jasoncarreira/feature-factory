@@ -1106,11 +1106,12 @@ function checkBranchName(repository, value, runGit) {
   return runGit(repository, ["check-ref-format", "--branch", value])?.status === 0;
 }
 
-function exactRefState(repository, ref, runGit, description) {
+function exactRefState(repository, ref, runGit, description, retained = false) {
   const result = runGit(repository, ["show-ref", "--verify", "--quiet", ref]);
   if (result?.status === 0) return "present";
   if (result?.status === 1) return "absent";
-  throw new CliError(`could not observe ${description} '${ref}' in repository '${repository}'`);
+  const aftermath = retained ? "; sandbox was retained; run.json is absent" : "";
+  throw new CliError(`could not observe ${description} '${ref}' in repository '${repository}'${aftermath}`);
 }
 
 function resolveExplicitSeed(sandboxPath, base, runGit) {
@@ -1119,8 +1120,8 @@ function resolveExplicitSeed(sandboxPath, base, runGit) {
   // This is enforcement: classifying both qualified refs before either peel prevents a
   // successful local peel from hiding an observation failure on the remote candidate.
   const states = new Map([
-    [local, exactRefState(sandboxPath, local, runGit, "PR base ref")],
-    [remote, exactRefState(sandboxPath, remote, runGit, "PR base ref")],
+    [local, exactRefState(sandboxPath, local, runGit, "PR base ref", true)],
+    [remote, exactRefState(sandboxPath, remote, runGit, "PR base ref", true)],
   ]);
   const resolveRef = (ref) => {
     if (states.get(ref) === "absent") return null;
@@ -1142,7 +1143,7 @@ function resolveExplicitSeed(sandboxPath, base, runGit) {
 
 function proveInitBranch({ operatorRoot, sandboxPath, worktree, branch, seed, runGit, resolvePath }) {
   const ref = `refs/heads/${branch}`;
-  if (exactRefState(operatorRoot, ref, runGit, "feature branch ref") === "present") {
+  if (exactRefState(operatorRoot, ref, runGit, "feature branch ref", true) === "present") {
     throw new CliError(`feature branch '${branch}' appeared at '${ref}' in operator repository '${operatorRoot}' while sandbox '${sandboxPath}' was initialized; sandbox was retained; run.json is absent`);
   }
   const symbolic = runGit(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
