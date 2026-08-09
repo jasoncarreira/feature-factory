@@ -44,23 +44,25 @@ resolved Git top level of the invocation checkout:
   "verify": "<non-empty shell command>",
   "publish": "<non-empty shell command>",
   "publishing_identity": "<non-empty account name>",
+  "pr_draft": true,
   "verify_timeout_ms": 900000,
   "bootstrap": "<non-empty shell command>",
   "bootstrap_timeout_ms": 900000
 }
 ```
 
-The root object has four required properties and three optional properties: `verify_timeout_ms`,
-`bootstrap`, and `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and a present `bootstrap` are
+The root object has four required properties and four optional properties: `pr_draft`,
+`verify_timeout_ms`, `bootstrap`, and `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and a present `bootstrap` are
 non-empty command strings; `publishing_identity` is a static non-empty account name, not a command, token,
-credential, or command result. Both timeouts must be positive safe integers. `bootstrap_timeout_ms`
+credential, or command result. A present `pr_draft` must be a JSON boolean and omission means `true`.
+Both timeouts must be positive safe integers. `bootstrap_timeout_ms`
 requires `bootstrap`. Each omitted timeout independently defaults to `900000` milliseconds and neither
 shares the other's budget. A command may name credentials supplied through inherited environment, but
 credential values must not appear in the file.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
 
-The named forms are `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
+The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
 
 `resolve`, `bootstrap`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
