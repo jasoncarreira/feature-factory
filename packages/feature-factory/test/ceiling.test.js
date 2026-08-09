@@ -246,8 +246,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.match(dispatchInitSource ?? "", /(?:^|\n)  const dispatchInitPublication = publish;(?:\n|$)/u,
       "dispatchInit must select publication from its operations");
     assert.match(dispatchInitSource ?? "",
-      /(?:^|\n)  const \{ observedRun \} = await dispatchInitPublication\(\{ runDir, sandboxPath: S, candidate: run, finalGuard: proveBranch \}\);(?:\n|$)/u,
-      "dispatchInit must await private publication with its derived paths and validated candidate");
+      /(?:^|\n)  const \{ observedRun \} = await dispatchInitPublication\(\{ runDir, sandboxPath: S, candidate: run, finalGuard: proveContainedBranch \}\);(?:\n|$)/u,
+      "dispatchInit must await private publication with its derived paths, validated candidate, and the containment-inclusive final guard");
     assert.match(initPublicationSource,
       /\{ writer = writeProtectedJsonAtomic, observeTarget = observeInitTarget \} = \{\},[\s\S]*?if \(finalGuard\) await finalGuard\(\);[\s\S]*?await writer\(runDir, "run\.json", candidate, \{ createOnly: true \}\)/u,
       "the private dispatcher must invoke the create-only protected writer");
@@ -718,7 +718,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // session-owner writes close dependency-resolution false greens and resume publication races.
     // 3800 -> 3896 (#259): init validates qualified operator refs, resolves an exact sandbox seed,
     // creates the feature branch, and proves its binding and one-line provenance through publication.
-    assert.equal(total, 3896, "issue #259 lands at 3896 production lines");
+    // 3896 -> 3909 on review of #263: the post-bootstrap guard re-proved branch, ref and reflog
+    // state but not physical containment, and every one of those reads answers correctly through a
+    // `.git` relocated outside the sandbox. Thirteen lines re-prove containment after bootstrap and
+    // again as the publication final guard, closing a path that published `run.json` for a
+    // repository whose Git administration had left S.
+    assert.equal(total, 3909, "issue #259 with its review remediation lands at 3909 production lines");
     assert.ok(total <= 4000, `production source is ${total} lines; the tripwire is 4000`);
   });
 

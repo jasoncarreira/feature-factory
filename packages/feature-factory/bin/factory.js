@@ -1290,6 +1290,19 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
   const switched = runGit(proof.configuredWorktree, ["switch", "--no-track", "-c", candidate.branch, seed]);
   if (switched?.status !== 0) throw new CliError(`could not create feature branch '${candidate.branch}' from seed '${seed}' in sandbox '${S}'; sandbox was retained; run.json is absent`);
   const proveBranch = () => proveInitBranch({ operatorRoot, sandboxPath: S, worktree: proof.configuredWorktree, branch: candidate.branch, seed, runGit, resolvePath });
+  // False-green enforcement: bootstrap is an arbitrary repository-declared command, so the physical
+  // proof must be repeated after it runs and again immediately before publication. Branch, ref and
+  // reflog evidence is all readable through a `.git` that has been relocated or rebound outside the
+  // sandbox, so logical provenance alone cannot see the escape -- and publishing `run.json` for a
+  // repository whose Git administration left the sandbox is exactly the green this proof prevents.
+  const proveContainedBranch = () => {
+    try {
+      prove({ operatorRoot, sandboxPath: S, runId, worktree: candidate.worktree });
+    } catch (error) {
+      throw new CliError(`physical containment could not be re-proved for sandbox '${S}'; sandbox was retained; run.json is absent`, { cause: error });
+    }
+    proveBranch();
+  };
   proveBranch();
   const config = readRepositoryConfig(S, { optional: true });
   let bootstrapEvidence = {};
@@ -1298,14 +1311,14 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
     if (outcome.refusal) throw new CliError(`${outcome.refusal}; sandbox '${S}' was retained; run.json is absent`);
     bootstrapEvidence = { bootstrap_command: config.bootstrapCommand, bootstrap_exit: outcome.exit };
   }
-  proveBranch();
+  proveContainedBranch();
   let run;
   try {
     run = validateRun({ ...candidate, pr_base: prBase, ...bootstrapEvidence });
   } catch (error) {
     throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
   }
-  const { observedRun } = await dispatchInitPublication({ runDir, sandboxPath: S, candidate: run, finalGuard: proveBranch });
+  const { observedRun } = await dispatchInitPublication({ runDir, sandboxPath: S, candidate: run, finalGuard: proveContainedBranch });
   return emit(flags, {
     run_id: observedRun.run_id, run_dir: runDir, sandbox_path: proof.sandboxPath,
     branch: observedRun.branch, worktree: observedRun.worktree, pr_base: observedRun.pr_base,

@@ -547,6 +547,13 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       { name: "dirty", command: "node -e \"const f=require('fs');f.appendFileSync('bootstrap-attempt-count','x');f.writeFileSync('tracked dirty.txt','changed');process.exit(7)\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u, attempts: 1 },
       { name: "staged", command: "node -e \"const f=require('fs');f.appendFileSync('bootstrap-attempt-count','x');f.writeFileSync('tracked dirty.txt','staged');require('child_process').execFileSync('git',['add','tracked dirty.txt'])\"", timeout: 120000, match: /left tracked paths dirty after init: "tracked dirty\.txt"/u, attempts: 1 },
       { name: "unobservable", command: "node -e \"const f=require('fs');f.appendFileSync('bootstrap-attempt-count','x');f.renameSync('.git','.git-gone');process.exit(7)\"", timeout: 120000, match: /could not observe tracked paths after init/u, attempts: 1 },
+      // Review finding on #263: the post-bootstrap guard re-proved branch/ref/reflog state but not
+      // physical containment. This bootstrap moves `.git` out of the sandbox and leaves a gitdir
+      // pointer behind, so git keeps answering every logical question correctly -- HEAD, the branch,
+      // its reflog, and tracked cleanliness are all intact and observable -- while Git administration
+      // now lives outside S. Distinct from `unobservable`, which breaks git entirely and is caught by
+      // the cleanliness check; this one is green everywhere except the physical proof.
+      { name: "gitdir", command: "node -e \"const f=require('fs'),p=require('path');f.appendFileSync('bootstrap-attempt-count','x');const out=p.join(p.dirname(process.cwd()),'escaped-'+p.basename(process.cwd()));f.renameSync('.git',out);f.writeFileSync('.git','gitdir: '+out+'\\n')\"", timeout: 120000, match: /physical containment could not be re-proved for sandbox/u, attempts: 1 },
       { name: "throw", command: "bootstrap-throw-secret\0", timeout: 120000, match: /failed during init; exit status unavailable/u, hidden: "bootstrap-throw-secret", attempts: 0 },
       { name: "exit", command: "node -e \"require('fs').appendFileSync('bootstrap-attempt-count','x');process.exit(7)\"", timeout: 120000, match: /failed during init with exit status 7/u, attempts: 1 },
       { name: "timeout", command: "node -e \"require('fs').appendFileSync('bootstrap-attempt-count','x');setTimeout(()=>{},10000)\"", timeout: 1000, match: /failed during init; exit status unavailable/u, attempts: 1 },
@@ -623,7 +630,16 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     const publicationBody = readFileSync(join(pkg, "bin", "init-publication.js"), "utf8");
     const ownedProduction = [initSource, proofBody, publicationBody].join("\n");
     assert.equal((dispatchBody.match(/\["clone", "--local", "--", operatorRoot, S\]/gu) ?? []).length, 1);
-    assert.match(dispatchBody, /await dispatchInitPublication\(\{ runDir, sandboxPath: S, candidate: run, finalGuard: proveBranch \}\)/u);
+    // The publication guard must be the containment-inclusive one. Pinning the wiring by name is
+    // what caught the #263 review finding's fix going in: `proveBranch` alone re-proves branch, ref
+    // and reflog state, all of which survive a `.git` relocated outside the sandbox.
+    assert.match(dispatchBody, /await dispatchInitPublication\(\{ runDir, sandboxPath: S, candidate: run, finalGuard: proveContainedBranch \}\)/u);
+    assert.doesNotMatch(dispatchBody, /finalGuard: proveBranch\b/u);
+    // The post-bootstrap guard is the same containment-inclusive one, and the only bare `proveBranch()`
+    // call is the pre-bootstrap one, where physical containment was proved moments earlier with only
+    // `git switch` in between.
+    assert.equal((dispatchBody.match(/^ {2}proveContainedBranch\(\);$/gmu) ?? []).length, 1);
+    assert.equal((dispatchBody.match(/^ {2}proveBranch\(\);$/gmu) ?? []).length, 1);
     assert.doesNotMatch(ownedProduction, /--no-hardlinks|\b(?:copyFile|cp|rm|rmSync|rmdir|unlink|unlinkSync)\s*\(|staging path|quarantine|ownership (?:record|evidence)|attempt-numbered/iu);
   } finally {
     rmSync(root, { recursive: true, force: true });
