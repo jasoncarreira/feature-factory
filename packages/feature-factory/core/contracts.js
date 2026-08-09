@@ -45,6 +45,7 @@ const envelope = contract({
     branch: state.branch,
     worktree: state.worktree,
     pr_base: state.pr_base,
+    pr_draft: state.pr_draft,
     created_at: state.created_at,
     updated_at: state.updated_at,
     terminal_result: state.terminal_result ?? null,
@@ -90,7 +91,7 @@ const envelope = contract({
     if (["resume-needs-human", "record-bootstrap"].includes(mode)) throw new Error(`${mode} requires current status needs-human; found '${before.status}'`);
     // Identity is immutable for the life of a run. Nothing legitimate renames a
     // run, and allowing it would let a transition retarget another run's record.
-    for (const key of ["run_id", "created_at", "pr_base", "mode"]) {
+    for (const key of ["run_id", "created_at", "pr_base", "pr_draft", "mode"]) {
       if (before[key] !== after[key]) throw new Error(`envelope.${key} is immutable`);
     }
     for (const key of ["bootstrap_command", "bootstrap_exit"]) {

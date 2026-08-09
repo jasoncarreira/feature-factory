@@ -34,7 +34,7 @@ const CLI_COMMANDS = [
 
 const RUN_JSON_KEYS = [
   // the inherited fifteen
-  "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "created_at", "updated_at",
+  "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "pr_draft", "created_at", "updated_at",
   "status", "max_parallel_slices", "max_retries", "gates", "steps", "slices", "validator", "pr_url",
   // the four justified additions. base_commit was dropped: it was written and never
   // read, which is the standard a durable field has to meet. plan_digest meets it: the seed reads
@@ -254,7 +254,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.ok(cliSource.includes("[--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET]"));
     assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json'));
     assert.ok(readme.includes("factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]"));
-    assert.ok(markdown.includes('gh pr create --draft --base "<pr_base>" --head "<branch>"'));
+    assert.ok(markdown.includes('gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"'));
+    assert.ok(markdown.includes('gh pr create --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"'));
 
     // Omissions and wrong argument *values* cannot be derived from the flag lists, so the few
     // that blocked the path are named. Each entry is one refusal a reader would otherwise hit.
@@ -480,7 +481,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 21, "twenty-one: the prior nineteen plus bootstrap command and exit evidence");
+    assert.equal(RUN_KEYS.length, 22, "twenty-two: the prior twenty-one plus immutable PR draft policy");
   });
 
   it("registers exactly the declared families", () => {
@@ -738,7 +739,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // `.git` relocated outside the sandbox. Thirteen lines re-prove containment after bootstrap and
     // again as the publication final guard, closing a path that published `run.json` for a
     // repository whose Git administration had left S.
-    assert.equal(total, 3909, "issue #259 with its review remediation lands at 3909 production lines");
+    assert.equal(total, 3918, "issue #261 with repository PR draft policy lands at 3918 production lines");
     assert.ok(total <= 4000, `production source is ${total} lines; the tripwire is 4000`);
   });
 

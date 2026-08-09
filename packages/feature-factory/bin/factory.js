@@ -245,11 +245,14 @@ function readRepositoryConfig(worktree, { optional = false } = {}) {
     throw new RepositoryConfigError("invalid .factory.json");
   }
   const requiredKeys = ["publish", "publishing_identity", "resolve", "verify"];
-  const allowedKeys = [...requiredKeys, "verify_timeout_ms", "bootstrap", "bootstrap_timeout_ms"];
+  const allowedKeys = [...requiredKeys, "pr_draft", "verify_timeout_ms", "bootstrap", "bootstrap_timeout_ms"];
   // False-green enforcement: config must not silently select a different repository proof.
   if (!config || typeof config !== "object" || Array.isArray(config)
     || Object.keys(config).some((keyName) => !allowedKeys.includes(keyName))) {
     throw new RepositoryConfigError("invalid .factory.json");
+  }
+  if (Object.hasOwn(config, "pr_draft") && typeof config.pr_draft !== "boolean") {
+    throw new RepositoryConfigError("invalid .factory.json: entry 'pr_draft' must be a boolean");
   }
   const hasBootstrap = Object.hasOwn(config, "bootstrap");
   const hasBootstrapTimeout = Object.hasOwn(config, "bootstrap_timeout_ms");
@@ -269,7 +272,8 @@ function readRepositoryConfig(worktree, { optional = false } = {}) {
   if (requiredKeys.some((keyName) => typeof config[keyName] !== "string" || !config[keyName].trim())) {
     throw new RepositoryConfigError("invalid .factory.json");
   }
-  const parsed = { command: config.verify, timeoutMs: config.verify_timeout_ms ?? DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS };
+  const parsed = { command: config.verify, timeoutMs: config.verify_timeout_ms ?? DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS,
+    prDraft: config.pr_draft ?? true };
   return hasBootstrap ? { ...parsed, bootstrapCommand: config.bootstrap,
     bootstrapTimeoutMs: config.bootstrap_timeout_ms ?? DEFAULT_BOOTSTRAP_TIMEOUT_MS } : parsed;
 }
@@ -897,6 +901,7 @@ const HANDLERS = {
       mode: run.mode,
       branch: run.branch,
       pr_base: run.pr_base ?? null,
+      pr_draft: run.pr_draft ?? true,
       lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,
       gates: Object.fromEntries(GATE_NAMES.filter((name) => run.gates[name]).map((name) => [name, run.gates[name].status])),
@@ -1314,7 +1319,7 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
   proveContainedBranch();
   let run;
   try {
-    run = validateRun({ ...candidate, pr_base: prBase, ...bootstrapEvidence });
+    run = validateRun({ ...candidate, pr_base: prBase, pr_draft: config?.prDraft ?? true, ...bootstrapEvidence });
   } catch (error) {
     throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
   }

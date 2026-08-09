@@ -143,12 +143,12 @@ const RESUME_ORDER = [
 ];
 
 const BOOTSTRAP_POLICY_FRAGMENTS = [
-  "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.",
+  "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.",
   "Configured `bootstrap` is consumed only by CLI-owned fresh init and explicit resume; the workflow consumer validates it but never executes it itself.",
   "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.",
   "Bootstrap cleanliness examines tracked worktree and index paths only; untracked dependency output is ignored.",
   "Bootstrap has an independent `900000` millisecond default and budget; it does not change resolver, verify, configured publish, effective-push, push, PR, or Gate 3 behavior.",
-  "A successful configured attempt stores the exact command in `bootstrap_command` and the numeric result in paired `bootstrap_exit`; status output remains unchanged.",
+  "A successful configured attempt stores the exact command in `bootstrap_command` and the numeric result in paired `bootstrap_exit`.",
   "A configured fresh-init failure retains the deterministic sandbox, emits no init JSON stdout, and leaves `run.json` absent.",
   "For configured order 7, the CLI binds the exact raw `run.json` bytes",
   "Every factory-mediated claim, force-steal, refresh, and release holds `run-json.lock`",
@@ -161,7 +161,7 @@ const BOOTSTRAP_POLICY_CONTRACTS = [
   ...BOOTSTRAP_POLICY_FRAGMENTS.map((fragment, index) => [
     `fragment-${index}`, fragment, (text) => text.includes(fragment),
   ]),
-  ["schema-optionals", "`publishing_identity`, plus only the optional own properties `verify_timeout_ms`, `bootstrap`, and", (text) => /root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and\s+`publishing_identity`, plus only the optional own properties `verify_timeout_ms`, `bootstrap`, and\s+`bootstrap_timeout_ms`/u.test(text)],
+  ["schema-optionals", "`publishing_identity`, plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and", (text) => /root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and\s+`publishing_identity`, plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and\s+`bootstrap_timeout_ms`/u.test(text)],
   ["command-shapes", "`bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present", (text) => /`resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present\s+command must be non-empty/u.test(text)],
   ["timeout-shape", "safe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`.", (text) => /Both timeout values must be positive\nsafe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`/u.test(text)],
   ["timeout-defaults", "`verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;", (text) => /`verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;\s+neither timeout shares or consumes the other's budget/u.test(text)],
@@ -952,6 +952,27 @@ const CLAIMS = [
       const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
       const json = factory(initialized.repository, ["status", RUN, "--json"]);
       assert.equal(JSON.parse(json.out).pr_base, "feature");
+      assert.equal(JSON.parse(json.out).pr_draft, true);
+      const plain = factory(initialized.repository, ["status", RUN]);
+      assert.match(plain.out, /^pr_draft: true$/mu);
+      return plain;
+    },
+  },
+  {
+    id: "explicit-false-status-exposes-ready-policy",
+    file: "WORKFLOW.md",
+    fragment: 'The ready-for-review publication signature is `gh pr create --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`.',
+    expect: "allowed",
+    matches: /pr_draft: false/u,
+    act(repo) {
+      writeFileSync(join(repo, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", publishing_identity: "test", pr_draft: false })}
+`);
+      execFileSync("git", ["add", ".factory.json"], { cwd: repo });
+      execFileSync("git", ["commit", "-q", "-m", "configure ready policy"], { cwd: repo });
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--now", NOW]);
+      assert.equal(Object.hasOwn(initialized.response, "pr_draft"), false);
+      const json = factory(initialized.repository, ["status", RUN, "--json"]);
+      assert.equal(JSON.parse(json.out).pr_draft, false);
       return factory(initialized.repository, ["status", RUN]);
     },
   },
@@ -1010,8 +1031,10 @@ const CLAIMS = [
       const plain = factory(repository, ["status", RUN]);
       assert.equal(plain.out.includes("pr_base:"), false);
       const result = factory(repository, ["status", RUN, "--json"]);
+      assert.equal(JSON.parse(result.out).pr_draft, true);
       assert.equal(readFileSync(path, "utf8"), before);
       assert.equal(Object.hasOwn(JSON.parse(before), "pr_base"), false);
+      assert.equal(Object.hasOwn(JSON.parse(before), "pr_draft"), false);
       return result;
     },
   },
@@ -1115,6 +1138,11 @@ const CLAIMS = [
       const packageReadme = readFileSync(join(pkg, "README.md"), "utf8");
       assert.match(packageReadme, /factory effective-push <bootstrap\|check> <operator-repository> <sandbox-repository>/u);
       assert.match(packageReadme, /The command accepts exactly those three positional arguments and no options\.[\s\S]*`bootstrap` captures the\s+operator's effective push target, configures the sandbox push URL from it, then freshly captures both\s+repositories and compares them exactly\.[\s\S]*`check` freshly captures both targets and compares without\s+configuration/u);
+      assert.match(packageReadme, /A present `pr_draft` must be a JSON boolean and omission means `true`\./u);
+      assert.match(packageReadme, /Fresh init captures the effective `pr_draft` value only after the cloned repository config validates,\s+and stores that boolean immutably in `run\.json`; init JSON and plain output do not change\./u);
+      assert.match(packageReadme, /Legacy\s+manifests without the key remain keyless and behave as `true`\. Status alone adds effective\s+`pr_draft: boolean` in JSON and `pr_draft: true\|false` in plain output\./u);
+      assert.match(packageReadme, /explicit `false` creates a ready-for-review\s+PR without `--draft`\. Publication does not reread the live config\./u);
+      assert.doesNotMatch(packageReadme, /pr_draft[^\n]*(?:override|promotion)|(?:override|promotion)[^\n]*pr_draft/iu);
       assert.match(packageReadme, /Configured `publish` remains unconsumed and is not invoked\./u);
       assert.match(packageReadme, /`publishing_identity` itself adds no config key or syntax, run status, or factory command\. The independent `factory effective-push` command adds no state or flag\./u);
       assert.doesNotMatch(packageReadme, /#224|push-target migration is deferred|only `publish` remains deferred/u);
