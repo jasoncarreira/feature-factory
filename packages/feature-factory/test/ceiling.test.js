@@ -606,15 +606,30 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Neither part is a feature, and the lines are the two checks plus the notes recording that the
     // original falsification of this pre-check's removal ran only where inodes are not reused.
     //
-    // Equality was tried here and reverted, so that the argument survives instead of being re-run.
-    // `assert.strictEqual(total, 2665)` records reductions as well as growth, which is a real gain:
-    // under `<`, trimming five lines leaves five lines of headroom nobody voted for, and the next
-    // addition spends it silently. It is not worth what it costs. A run that deletes a line
-    // incidentally then fails a lock its plan never predicted, whose file it does not own, and the
-    // cheapest way back to green is to ADD a meaningless line. Manufacturing scope to satisfy an
-    // assertion is worse than the offset equality was meant to catch, and it is the move an agent
-    // optimizing for a green suite will find first. Deletions are also far more often incidental than
-    // additions, so that friction lands squarely on the behaviour this repo wants to encourage.
+    // Equality was tried, reverted, and then deliberately restored. Recording that here, because the
+    // note used to argue against the assertion sitting immediately below it, and #225 was filed on
+    // exactly that contradiction.
+    //
+    // Why equality earns its place: `assert.equal(total, N)` records reductions as well as growth.
+    // Under `<`, trimming five lines leaves five lines of headroom nobody voted for, and the next
+    // addition spends it silently.
+    //
+    // Why it was reverted once, and the cost is real: a run that deletes a line incidentally fails a
+    // lock its plan never predicted, in a file it does not own, and the cheapest way back to green is
+    // to ADD a meaningless line. Manufacturing scope to satisfy an assertion is worse than the offset
+    // equality was meant to catch, and it is the move an agent optimizing for a green suite finds
+    // first. Deletions are also more often incidental than additions, so the friction lands on the
+    // behaviour this repository wants to encourage.
+    //
+    // What resolves it is the rule beside the assertion, not the comparison operator. **This equality
+    // is a ledger**: it records where the last run landed, not a target. Updating it to your own
+    // landed total is expected and is not a ceiling change. The `<=` tripwire below is the only cap,
+    // and only Jason widens that. CLAUDE.md carries the other half -- "Never pad or trim production
+    // code to satisfy it -- manufacturing scope to make an assertion pass is worse than the drift the
+    // assertion catches" -- so padding is forbidden by rule and caught in review, rather than made
+    // impossible by `<` at the price of silent headroom. On 2026-08-08/09 this number moved
+    // 3687 -> 3800 -> 3896 -> 3909 across four runs, each recording a landing. That traffic is the
+    // mechanism working, not drift.
     //
     // Neither comparison catches an offset. A diff that adds one line and deletes an unrelated one
     // nets zero either way; no assertion on a single total can see it. Run 175 did exactly that - it
