@@ -28,23 +28,28 @@ are unavailable, stop before creating or changing a run. Explain that the comple
 `prime-agent-feature-factory` package must be installed; never hand-write `run.json` as a fallback.
 
 The Prime adapter supports foreground `/feature [--autonomous | --headless] [--base <branch>] <request>`
-invocations. Reject `--background` before any run effect rather than pretending the foreground session
-is a dedicated background owner.
+invocations. Before allocation, configuration, context lookup, state reads, or CLI effects, ignore
+leading whitespace only to locate the first token and reject an exact case-sensitive first
+`--background`; assignment, case, punctuation, and later variants remain request content. Prime never
+allocates a background owner or applies OpenCode placement consumption.
 
-Before run-id allocation, config effects, state reads, context lookup, or factory invocation, scan the
-maximal leading option prefix. It may contain exact case-sensitive `--autonomous` and `--headless` mode
-tokens and at most one exact two-token `--base <value>` pair in any order. Consume only those spans and
-separators. Preserve the suffix beginning with the first request token byte-for-byte for resolver,
-ticket or story content, and run-id derivation. Assignment, case and punctuation variants, and any
-`--base` after the first request token are request content.
+After that placement check, scan the maximal leading option prefix. It may contain exact case-sensitive
+`--autonomous` and `--headless` mode tokens and at most one exact two-token `--base <value>` pair, with
+mode and base in either order. Consume only those option spans and their separators. Preserve the suffix
+beginning with the first request token byte-for-byte for resolver, ticket or story content, and run-id
+derivation. `--base=x`, case and punctuation variants, and any `--base` after the first request token
+are request content.
 
 A prefix `--base` without a value returns exactly `missing value for --base; no run created.` A second
-prefix occurrence returns exactly `repeated --base; no run created.` Existing duplicate-mode and
-conflicting-mode rules remain, and an option-only prefix reaches `missing /feature request; no run
-created.` For a consumed base, first validate the unchanged value with `git check-ref-format --branch
-<value>` and require exact local operator ref `refs/heads/<value>` through `git show-ref --verify
---quiet`. Syntax, absence, and observation failures are effect-free refusals. Pass the exact value only
-as `factory init --pr-base <value>` and omit `--pr-base` when absent.
+prefix occurrence returns exactly `repeated --base; no run created.` Duplicate copies of one mode are
+idempotent; both distinct modes return exactly `conflicting mode flags: --autonomous and --headless;
+choose one`. A prefix containing only admitted mode/base options reaches exactly `missing /feature
+request; no run created.` All these refusals precede run-id allocation, configuration, context lookup,
+state reads, and factory invocation. For a consumed base, validate the unchanged value with `git
+check-ref-format --branch <value>` and require exact local operator ref `refs/heads/<value>` through
+`git show-ref --verify --quiet` before those same effects. Syntax, absence, and observation failures are
+effect-free refusals. Pass the exact value only as `factory init --pr-base <value>` and, for no-base
+input, omit `--pr-base` without changing the preserved request suffix or other effects.
 
 ## Prime session ownership
 

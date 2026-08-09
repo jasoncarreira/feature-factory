@@ -232,6 +232,7 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
   const featureRef = `refs/heads/${featureBranch}`;
   git(operator, "remote", "add", "origin", operator);
   assert.equal(inspectRef(operator, featureRef).exists, false);
+  const seedHead = git(operator, "rev-parse", "main^{commit}");
   const initialized = initFresh(operator, [runId, "--branch", featureBranch, "--pr-base", "main", "--mode", mode]);
   sandbox = initialized.repository;
   assert.equal(sandbox, join(container, runId));
@@ -242,7 +243,9 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
   git(sandbox, "config", "--replace-all", "remote.origin.pushurl", operatorPush);
   assert.equal(git(operator, "remote", "get-url", "--push", "origin"), git(sandbox, "remote", "get-url", "--push", "origin"));
   assert.equal(inspectRef(operator, featureRef).exists, false);
-  git(sandbox, "switch", "--quiet", "--no-track", "-c", featureBranch, git(sandbox, "rev-parse", "HEAD^{commit}"));
+  assert.equal(git(sandbox, "symbolic-ref", "--quiet", "--short", "HEAD"), featureBranch);
+  assert.equal(git(sandbox, "rev-parse", `${featureRef}^{commit}`), seedHead);
+  assert.equal(git(sandbox, "rev-parse", "HEAD^{commit}"), seedHead);
   assert.equal(inspectRef(operator, featureRef).exists, false);
   writeFileSync(join(sandbox, "feature.txt"), "feature\n");
   git(sandbox, "add", "feature.txt");

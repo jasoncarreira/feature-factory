@@ -1116,15 +1116,20 @@ function exactRefState(repository, ref, runGit, description) {
 function resolveExplicitSeed(sandboxPath, base, runGit) {
   const local = `refs/heads/${base}`;
   const remote = `refs/remotes/origin/${base}`;
+  // This is enforcement: classifying both qualified refs before either peel prevents a
+  // successful local peel from hiding an observation failure on the remote candidate.
+  const states = new Map([
+    [local, exactRefState(sandboxPath, local, runGit, "PR base ref")],
+    [remote, exactRefState(sandboxPath, remote, runGit, "PR base ref")],
+  ]);
   const resolveRef = (ref) => {
-    const state = exactRefState(sandboxPath, ref, runGit, "PR base ref");
-    if (state === "absent") return null;
+    if (states.get(ref) === "absent") return null;
     const result = runGit(sandboxPath, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]);
-    const oid = exactOid(result);
-    if (!oid) {
-      if (result?.status === null) throw new CliError(`could not observe commit for PR base ref '${ref}' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
-      throw new CliError(`PR base ref '${ref}' could not be peeled to one commit in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
+    if (!Number.isInteger(result?.status)) {
+      throw new CliError(`could not observe commit for PR base ref '${ref}' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
     }
+    const oid = exactOid(result);
+    if (!oid) throw new CliError(`PR base ref '${ref}' could not be peeled to one commit in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
     return oid;
   };
   const localOid = resolveRef(local);

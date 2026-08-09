@@ -29,9 +29,27 @@ describe("Prime package contract", () => {
     assert.match(skill, /handle = await rlm\(prompt\)/u);
     assert.match(skill, /receiver_role="parent"/u);
     assert.match(skill, /never hand-write `run\.json`/u);
-    assert.match(skill, /Reject `--background` before any run effect/u);
-    for (const fragment of ["--base <value>", "missing value for --base; no run created.", "repeated --base; no run created.",
-      "git check-ref-format --branch", "refs/heads/<value>", "factory init --pr-base <value>"]) assert.ok(skill.includes(fragment), fragment);
+    assert.match(skill, /reject an exact case-sensitive first\s+`--background`/u);
+    const grammar = [
+      /exact case-sensitive first\s+`--background`/u,
+      /assignment, case, punctuation, and later variants remain request content/u,
+      /maximal leading option prefix/u,
+      /mode and base in either order/u,
+      /Preserve the suffix\s+beginning with the first request token byte-for-byte/u,
+      /`--base=x`, case and punctuation variants/u,
+      /`--base` after the first request token\s+are request content/u,
+      /missing value for --base; no run created\./u,
+      /repeated --base; no run created\./u,
+      /Duplicate copies of one mode are\s+idempotent/u,
+      /conflicting mode flags: --autonomous and --headless;\s+choose one/u,
+      /missing \/feature\s+request; no run created\./u,
+      /git\s+check-ref-format --branch <value>/u,
+      /git show-ref --verify\s+--quiet/u,
+      /before those same effects/u,
+      /factory init --pr-base <value>/u,
+      /for no-base\s+input, omit `--pr-base` without changing the preserved request suffix or other effects/u,
+    ];
+    for (const contract of grammar) assert.match(skill, contract);
     assert.equal(workflow, canonicalWorkflow);
     const firstMatch = "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.";
     const noOp = "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.";

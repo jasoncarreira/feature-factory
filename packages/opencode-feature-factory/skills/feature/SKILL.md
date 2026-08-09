@@ -53,9 +53,10 @@ mode/base options reaches the existing placement-specific missing-request refusa
 
 For a consumed base, validate the exact value with `git check-ref-format --branch <value>` and require
 `git show-ref --verify --quiet refs/heads/<value>` in the canonical local operator repository to exit
-exactly zero. Perform both proofs before run-id allocation, config effects, or factory invocation. Refuse
-invalid syntax, an absent exact local ref, or an observation failure without creating a run. Pass the
-unchanged value only as `factory init --pr-base <value>`; omit `--pr-base` when no base was consumed.
+exactly zero. Perform both proofs before run-id allocation, config effects, context lookup, state reads,
+tool calls, or factory invocation. Refuse invalid syntax, an absent exact local ref, or an observation
+failure without creating a run. Pass the unchanged value only as `factory init --pr-base <value>`; for
+no-base input, omit `--pr-base` without changing the preserved request suffix or other effects.
 
 For a new manifest, `--autonomous` maps only to `factory init --mode autonomous`, `--headless` maps only
 to `factory init --mode headless`, and no admitted mode omits `--mode`. An existing manifest always

@@ -1,12 +1,13 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { dispatchInit } from "../bin/factory.js";
-import { observeTrackedCleanliness, runBootstrap } from "../observe/index.js";
+import { git as observeGit, observeTrackedCleanliness, proveInitContainment, runBootstrap } from "../observe/index.js";
+import { dispatchInitPublication } from "../bin/init-publication.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -363,6 +364,100 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     mkdirSync(malformedRoot);
     assert.throws(() => seedLegacyRun(malformedRoot, "malformed", { mode: "invalid", pr_base: undefined }), /run\.mode/u);
     assert.equal(existsSync(join(malformedRoot, ".factory")), false);
+
+    const injectedInit = async (name, { branch = `feature/${name}`, base = "main", inject = () => null, publish = dispatchInitPublication } = {}) => {
+      const sourceRepository = realpathSync(operator(root, `injected-${name}`));
+      const sandboxPath = join(sourceRepository, ".factory-sandboxes", name);
+      const calls = [];
+      const result = (status, stdout = "") => ({ ok: status === 0, status, stdout, stderr: "", argv: [] });
+      const operations = {
+        cwd: () => sourceRepository, resolvePath: resolve, joinPath: join, realpath: realpathSync,
+        lstat: lstatSync, mkdir: mkdirSync, readdir: readdirSync,
+        runGit: (repository, args) => {
+          calls.push({ repository, args: args.join(" ") });
+          return inject({ repository, args: args.join(" "), sourceRepository, sandboxPath, result, calls }) ?? observeGit(repository, args);
+        },
+        prove: proveInitContainment, publish,
+      };
+      const promise = dispatchInit([name], { repo: sourceRepository, branch, prBase: base, now: NOW }, operations);
+      return { sourceRepository, sandboxPath, calls, promise };
+    };
+
+    for (const row of [
+      { name: "malformed-branch", branch: "bad..branch", match: /feature branch 'bad\.\.branch' is not a valid branch name/u },
+      { name: "malformed-base", base: "bad..base", match: /PR base 'bad\.\.base' is not a valid branch name/u },
+    ]) {
+      const observed = await injectedInit(row.name, row);
+      await assert.rejects(observed.promise, row.match);
+      assert.equal(existsSync(observed.sandboxPath), false, row.name);
+    }
+
+    const operatorRows = [
+      { name: "feature-lookup-failure", target: "feature", status: 2, match: /could not observe feature branch ref/u },
+      { name: "base-lookup-unavailable", target: "base", status: "nonnumeric", match: /could not observe PR base ref/u },
+    ];
+    for (const row of operatorRows) {
+      const observed = await injectedInit(row.name, { inject: ({ repository, args, sourceRepository, result }) =>
+        repository === sourceRepository && args.startsWith("show-ref ")
+          && ((row.target === "feature" && args.includes(`feature/${row.name}`)) || (row.target === "base" && args.endsWith("refs/heads/main")))
+          ? result(row.status) : null });
+      await assert.rejects(observed.promise, row.match);
+      assert.equal(existsSync(observed.sandboxPath), false, row.name);
+    }
+
+    const exactRows = [
+      { name: "exact-absence", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.startsWith("show-ref ") ? result(1) : null, match: /could not be resolved from/u },
+      { name: "unpeelable", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(7) : null, match: /could not be peeled to one commit/u },
+      { name: "malformed-peel", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(0, "not-an-oid\n") : null, match: /could not be peeled to one commit/u },
+      { name: "unavailable-peel", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(null) : null, match: /could not observe commit for PR base ref/u },
+      { name: "divergent", inject: ({ repository, args, sandboxPath, result }) => repository === sandboxPath && args.startsWith("show-ref ") ? result(0) : repository === sandboxPath && args.includes("refs/heads/main^{commit}") ? result(0, `${"1".repeat(40)}\n`) : repository === sandboxPath && args.includes("refs/remotes/origin/main^{commit}") ? result(0, `${"2".repeat(40)}\n`) : null, match: /resolves to different commits/u },
+    ];
+    for (const row of exactRows) {
+      const observed = await injectedInit(row.name, row);
+      await assert.rejects(observed.promise, row.match);
+      assert.equal(existsSync(join(observed.sandboxPath, ".factory", row.name, "run.json")), false, row.name);
+    }
+
+    const classification = await injectedInit("classify-before-peel", { inject: ({ repository, args, sandboxPath, result }) => {
+      if (repository !== sandboxPath || !args.startsWith("show-ref ")) return null;
+      return args.endsWith("refs/heads/main") ? result(0) : result("nonnumeric");
+    } });
+    await assert.rejects(classification.promise, /could not observe PR base ref/u);
+    assert.equal(classification.calls.some(({ repository, args }) => repository === classification.sandboxPath && args.startsWith("rev-parse --verify")), false);
+
+    const equalSource = realpathSync(operator(root, "injected-equal-dual"));
+    const equalOid = git(equalSource, "rev-parse", "main^{commit}");
+    git(equalSource, "remote", "add", "origin", equalSource);
+    const equalName = "equal-dual";
+    const equalSandbox = join(equalSource, ".factory-sandboxes", equalName);
+    const equal = await dispatchInit([equalName], { repo: equalSource, branch: `feature/${equalName}`, prBase: "main", now: NOW }, {
+      cwd: () => equalSource, resolvePath: resolve, joinPath: join, realpath: realpathSync, lstat: lstatSync,
+      mkdir: mkdirSync, readdir: readdirSync, prove: proveInitContainment, publish: dispatchInitPublication,
+      runGit: (repository, args) => repository === equalSandbox && args[0] === "show-ref"
+        ? { ok: true, status: 0, stdout: "", stderr: "" }
+        : repository === equalSandbox && args[0] === "rev-parse" && args.at(-1).endsWith("main^{commit}")
+          ? { ok: true, status: 0, stdout: `${equalOid}\n`, stderr: "" } : observeGit(repository, args),
+    });
+    assert.equal(equal.branch, `feature/${equalName}`);
+    assert.equal(git(equalSandbox, "rev-parse", "HEAD^{commit}"), equalOid);
+
+    for (const row of [
+      { name: "head", command: "git switch --detach --quiet" },
+      { name: "oid", command: "git -c user.name=Factory -c user.email=factory@example.test commit --allow-empty --quiet -m moved" },
+      { name: "reflog", command: "git reflog expire --expire=now --all" },
+    ]) {
+      const bootstrapSource = operator(root, `invariant-${row.name}`, (repository) => writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", publishing_identity: "test", bootstrap: row.command })}\n`));
+      const observed = invoke(bootstrapSource, ["init", `invariant-${row.name}`, "--pr-base", "main", "--now", NOW], recorder(join(root, `invariant-${row.name}-recorder`)));
+      assert.equal(observed.ok, false, row.name);
+      assert.match(observed.stderr, /sandbox .* was retained; run\.json is absent/u, row.name);
+    }
+
+    const raced = await injectedInit("final-race", { publish: async (input) => {
+      observeGit(dirname(dirname(input.sandboxPath)), ["branch", "feature/final-race", "main"]);
+      return dispatchInitPublication(input);
+    } });
+    await assert.rejects(raced.promise, /appeared at 'refs\/heads\/feature\/final-race'.*run\.json is absent/u);
+    assert.equal(existsSync(join(raced.sandboxPath, ".factory", "final-race", "run.json")), false);
 
     const configuredCommand = "node -e \"const f=require('fs');if(f.existsSync('.factory/configured-bootstrap/run.json'))process.exit(9);f.appendFileSync('bootstrap-count','x');f.writeFileSync('bootstrap-cwd',process.cwd());f.writeFileSync('bootstrap-env',process.env.FACTORY_BOOTSTRAP_ENV_MARKER??'');f.writeFileSync('bootstrap-stdin',f.readFileSync(0,'utf8'));f.mkdirSync('node_modules',{recursive:true});console.log('bootstrap-out');console.error('bootstrap-err')\"";
     const configuredSource = operator(root, "configured-bootstrap", (repository) => {

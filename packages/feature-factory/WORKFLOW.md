@@ -547,9 +547,10 @@ INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORK
 ```
 
 The init request pre-reserves the deterministic sandbox, performs exactly one
-`git clone --local -- O S`, completes the physical containment proof, resolves the qualified seed, and
-creates and proves the recorded feature branch before it publishes `run.json`. Before publication, it
-observes the PR base and lets the CLI parse and, when declared, execute the cloned sandbox's bootstrap. The CLI submits the exact command unchanged with `shell: true`, inherited environment and
+`git clone --local -- O S`, completes the physical containment proof, and only then publishes
+`run.json`. The prepublication sequence completes the physical containment proof, resolves the qualified seed, and
+creates and proves the recorded feature branch. It also observes the PR base and lets the CLI parse and,
+when declared, execute the cloned sandbox's bootstrap. The CLI submits the exact command unchanged with `shell: true`, inherited environment and
 stdin, and cwd exactly `S`; child stdout and stderr both route to CLI stderr so `init --json` stdout stays
 exactly one response object. It observes tracked worktree and index paths after every execution and
 refuses unobservable state before dirty paths, then dirty paths before unavailable or nonzero exit.
