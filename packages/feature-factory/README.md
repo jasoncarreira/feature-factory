@@ -31,25 +31,34 @@ resolved Git top level:
   "verify": "<non-empty shell command>",
   "publish": "<non-empty shell command>",
   "publishing_identity": "<non-empty account name>",
+  "pr_draft": true,
   "verify_timeout_ms": 900000,
   "bootstrap": "<non-empty shell command>",
   "bootstrap_timeout_ms": 900000
 }
 ```
 
-The root has four required properties and three optional properties: `verify_timeout_ms`, `bootstrap`,
-and `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and a present `bootstrap` are non-empty command
+The root has four required properties and four optional properties: `pr_draft`, `verify_timeout_ms`,
+`bootstrap`, and `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and a present `bootstrap` are non-empty command
 strings. `publishing_identity` is a static non-empty account name, not a command, token, credential, or
-command result. Both timeouts are positive safe integers. `bootstrap_timeout_ms` requires `bootstrap`.
+command result. A present `pr_draft` must be a JSON boolean and omission means `true`. Both timeouts are
+positive safe integers. `bootstrap_timeout_ms` requires `bootstrap`.
 Each omitted timeout independently defaults to `900000`; neither shares the other's budget. The file is
 operator-owned, committed, and protected as a privileged path: a run cannot create, write, merge,
 archive, package, or repair it.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
 
-The named forms are `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
+The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
 
 A present invalid, unreadable, incomplete, wrong-type, whitespace-only, or unknown-property config refuses closed.
+
+Fresh init captures the effective `pr_draft` value only after the cloned repository config validates,
+and stores that boolean immutably in `run.json`; init JSON and plain output do not change. Legacy
+manifests without the key remain keyless and behave as `true`. Status alone adds effective
+`pr_draft: boolean` in JSON and `pr_draft: true|false` in plain output. Step 6 reads that status value:
+`true` (including legacy omission) creates a draft PR, while explicit `false` creates a ready-for-review
+PR without `--draft`. Publication does not reread the live config.
 
 `resolve`, `bootstrap`, and `verify` are consumed now. `resolve` runs as one ordinary shell step with the configured string submitted
 unchanged, repository-root cwd, inherited environment plus the exact admitted request in
