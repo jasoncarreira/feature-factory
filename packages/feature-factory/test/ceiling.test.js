@@ -419,6 +419,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "work-decomposer must require a negative claim to state how it survives later slices");
     assert.match(decomposer, /Stable once it lands/u,
       "work-decomposer must keep the stable-invariant case, or a valid plan reads as contradictory");
+    // Both reviewer fragments live in the `work-decomposer` satisfiability bullet. They used to sit in
+    // the "Doc steps" bullet, which stated the same invariant a second time from the pre-merge angle --
+    // two copies of one rule, where an edit can fix one and leave the other. These assertions search the
+    // whole file rather than a bullet, so they followed the rule to its single home unchanged.
     assert.match(reviewer, /the landing of a later slice's owned path would invalidate\*\* is a BLOCKER/u,
       "work-reviewer must block on invalidation by the later path, not on negative phrasing");
     assert.match(reviewer, /must \*\*not\*\* be blocked/u,
