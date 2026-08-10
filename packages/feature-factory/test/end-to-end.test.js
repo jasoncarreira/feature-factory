@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { run as cli } from "../bin/factory.js";
 import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
 import { assertPublicationReady } from "../observe/review.js";
+import { resolveSpawnExecutable } from "../core/executable.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "factory.js");
@@ -35,7 +36,7 @@ const RUN = "app-1";
 const NOW = (minute) => `2026-07-30T12:${String(minute).padStart(2, "0")}:00Z`;
 const PASSING_TEST_COMMAND = "git --no-pager log -1 --format=%H";
 const FAILING_TEST_COMMAND = "git --no-pager grep --quiet THIS_STRING_IS_ABSENT";
-const DIRTYING_TEST_COMMAND = "node -e require('fs').writeFileSync('src/app/thing.ts','mutated')";
+const DIRTYING_TEST_COMMAND = "node -e require(String.fromCharCode(102,115)).writeFileSync(String.fromCharCode(115,114,99,47,97,112,112,47,116,104,105,110,103,46,116,115),String.fromCharCode(109,117,116,97,116,101,100))";
 
 // This is a test-only process seam. The real CLI still parses the repository config,
 // reaches buildEvidence(), and starts its shell child; the preloaded hook records the
@@ -201,6 +202,36 @@ describe("end to end — a merge is refused through the real CLI", () => {
   }
 
   it("records a clean serial merge", () => {
+    const fakeFs = (entries, insensitive = false) => {
+      const lookup = (path) => entries[insensitive ? path.toLowerCase() : path];
+      return {
+        stat: (path) => ({ isFile: () => lookup(path)?.type === "file" }),
+        access: (path) => { if (!lookup(path)?.executable) throw new Error("not executable"); },
+      };
+    };
+    for (const row of [
+      ["POSIX PATH order", "tool", { platform: "linux", cwd: "/repo", env: { PATH: "/one:/two" }, ...fakeFs({ "/two/tool": { type: "file", executable: true } }) }, "/two/tool", "POSIX PATH"],
+      ["POSIX default", "tool", { platform: "linux", cwd: "/repo", env: {}, posixDefaultPath: "/default:/fallback", ...fakeFs({ "/fallback/tool": { type: "file", executable: true } }) }, "/fallback/tool", "the POSIX default search path /default:/fallback"],
+      ["POSIX empty and relative PATH", "tool", { platform: "linux", cwd: "/repo", env: { PATH: ":tools" }, ...fakeFs({ "/repo/tools/tool": { type: "file", executable: true } }) }, "/repo/tools/tool", "POSIX PATH"],
+      ["POSIX relative direct", "./tool", { platform: "linux", cwd: "/repo", env: {}, ...fakeFs({ "/repo/tool": { type: "file", executable: true } }) }, "/repo/tool", "its direct path"],
+      ["POSIX absolute direct", "/tools/tool", { platform: "linux", cwd: "/repo", env: {}, ...fakeFs({ "/tools/tool": { type: "file", executable: true } }) }, "/tools/tool", "its direct path"],
+      ["Windows cwd without PATH", "tool", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tool.exe", "Windows cwd"],
+      ["Windows relative and empty PATH", "tool", { platform: "win32", cwd: "C:\\repo", env: { Path: ";tools" }, ...fakeFs({ "c:\\repo\\tools\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tools\\tool.exe", "Windows cwd and PATH"],
+      ["Windows exact", "tool", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool": { type: "file" } }, true) }, "C:\\repo\\tool", "Windows cwd"],
+      ["Windows direct", ".\\tool.exe", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tool.exe", "its direct path"],
+      ["Windows com before exe", "tool", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool.com": { type: "file" }, "c:\\repo\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tool.com", "Windows cwd"],
+      ["Windows extension case", "tool.ExE", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tool.ExE", "Windows cwd"],
+    ]) {
+      const [label, argv0, options, path, source] = row;
+      assert.deepEqual(resolveSpawnExecutable(argv0, options), { ok: true, path, source }, label);
+    }
+    for (const [label, argv0, options] of [
+      ["directory", "tool", { platform: "linux", cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({ "/bin/tool": { type: "directory", executable: true } }) }],
+      ["POSIX non-executable", "tool", { platform: "linux", cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({ "/bin/tool": { type: "file", executable: false } }) }],
+      ["absent", "tool", { platform: "linux", cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({}) }],
+      ...["tool.bat", "tool.cmd"].map((argv0) => [`Windows rejects ${argv0}`, argv0, { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ [`c:\\repo\\${argv0}`]: { type: "file" } }, true) }]),
+    ]) assert.equal(resolveSpawnExecutable(argv0, options).ok, false, label);
+
     const p = upToReview("clean");
     try {
       const mergeCommit = mergeIntoFeature(p.repo);
@@ -1363,6 +1394,31 @@ describe("end to end — a merge is refused through the real CLI", () => {
   // kept as the default multi-slice coverage — a single-slice fixture cannot detect a
   // proof built on "nothing lands between branch and merge".
   it("merges two file-disjoint slices from the same wave", () => {
+    const admission = project("seed-command-admission", { seed: false });
+    try {
+      const refusedEntries = [
+        ...["&&", "||", ";", "|", "&", "<", ">", "`", "$(", "'", '"', "\n"].map((token) => ({ entry: `git ${token} status`, reason: `contains refused token ${JSON.stringify(token)}` })),
+        { entry: "XDG_CONFIG_HOME=/tmp pytest tests/test_config_docs_complete.py", reason: `argv[0] "XDG_CONFIG_HOME=/tmp" did not resolve to an executable via its direct path from repository cwd ${JSON.stringify(admission.repo)}` },
+        { entry: "", stderr: "run.slices[0].test_plan: must be an array of strings; empty means tests were waived at the gate\n" },
+        { entry: "   ", stderr: "run.slices[0].test_plan: must be an array of strings; empty means tests were waived at the gate\n" },
+      ];
+      for (const { entry, reason, stderr } of refusedEntries) {
+        writeFileSync(join(admission.runDir, "plan", "slices.json"), JSON.stringify({ slices: [{
+          id: "be-thing", stack: "backend", paths: ["src/app/"], depends_on: [], acceptance: ["AC1"], test_plan: [entry],
+        }] }, null, 2));
+        assert.equal(approveGate(admission.repo, "brief", NOW(1)).ok, true);
+        const before = readFileSync(join(admission.runDir, "run.json"), "utf8");
+        const refused = factory(admission.repo, ["slices-seed", RUN, "--now", NOW(1)]);
+        const prefix = `slice 'be-thing' test_plan entry ${JSON.stringify(entry)} cannot be executed by observe as argv without a shell: `;
+        assert.equal(refused.stderr, stderr ?? `${prefix}${reason}\n`, entry);
+        assert.equal(readFileSync(join(admission.runDir, "run.json"), "utf8"), before, entry);
+        assert.deepEqual(runJson(admission.runDir).slices, [], entry);
+      }
+    } finally { cleanupProject(admission); }
+    const dollar = project("seed-command-dollar", { testPlan: ["git show $HOME"] });
+    try { assert.deepEqual(runJson(dollar.runDir).slices[0].test_plan, ["git show $HOME"]); }
+    finally { cleanupProject(dollar); }
+
     // The central case, and the one that exposes the merge proof's assumption. Both
     // slices branch from the same integration head, as the inherited wave contract specifies ("a slice worktree
     // branched from the current feature-branch HEAD"), and merges are serial. So the

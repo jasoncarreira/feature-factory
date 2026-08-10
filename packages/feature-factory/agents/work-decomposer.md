@@ -42,6 +42,7 @@ An independently-implementable unit of the brief with:
   and the wrong one everywhere else. Omitting the field is refused outright, so the waiver is always a
   decision somebody made rather than one that happened. Commands use the existing shell-free whitespace
   tokenizer: do not rely on pipelines, shell expansion, environment assignment, or quote-aware parsing.
+  `observe` executes each ratified command as argv with no shell, so every `test_plan` entry must be one directly executable command; builders may run focused suites separately.
 
 **The original `paths` prefix and `test_plan` are ratified when the plan is seeded and cannot be changed
 afterwards.** Every later ownership check judges against the current persisted paths. The seeded prefix

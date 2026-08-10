@@ -17,6 +17,7 @@ import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvi
 import { archiveReviewAttempt } from "../state/review-archive.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
+import { resolveSpawnExecutable } from "../core/executable.js";
 import { dispatchInitPublication } from "./init-publication.js";
 import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, repositoryRelativePath, validateRun } from "../state/schema.js";
 import {
@@ -97,6 +98,19 @@ const key = (flag) => flag.slice(2).replace(/-([a-z])/gu, (_match, letter) => le
 
 function planDigest(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+const REFUSED_TEST_TOKENS = Object.freeze(["&&", "||", "$(", ";", "|", "&", "<", ">", "`", "'", '"', "\n"]);
+function assertExecutableTestPlan(slices, cwd) {
+  for (const slice of slices) for (const entry of slice.test_plan) {
+    const prefix = `slice '${slice.id}' test_plan entry ${JSON.stringify(entry)} cannot be executed by observe as argv without a shell: `;
+    const refused = REFUSED_TEST_TOKENS.find((token) => entry.includes(token));
+    if (refused) throw new Error(`${prefix}contains refused token ${JSON.stringify(refused)}`);
+    const argv0 = entry.split(" ").filter(Boolean)[0];
+    if (!argv0) throw new Error(`${prefix}argv[0] is missing`);
+    const found = resolveSpawnExecutable(argv0, { cwd });
+    if (!found.ok) throw new Error(`${prefix}argv[0] ${JSON.stringify(argv0)} did not resolve to an executable via ${found.source} from repository cwd ${JSON.stringify(cwd)}`);
+  }
 }
 
 // Read when the gate is *presented*, not when it is approved. Approval-time hashing left a window:
@@ -559,7 +573,7 @@ const HANDLERS = {
           if (state.plan_digest !== planDigest(bytes)) throw new Error(`${from} is not the plan the brief gate approved`);
         }
         if (state.gates.brief?.status !== "approved") throw new Error("slices-seed requires the Brief gate to be approved");
-        return {
+        const candidate = {
           ...state,
           updated_at: at,
           slices: plan.slices.map((slice) => ({
@@ -586,6 +600,10 @@ const HANDLERS = {
             merge_commit: null,
           })),
         };
+        validateRun(candidate);
+        // Enforcement: refuse a ratified false green with no executable legal move.
+        assertExecutableTestPlan(candidate.slices, resolve(flags.repo ?? process.cwd()));
+        return candidate;
       },
     });
     return emit(flags, { run_id: runId, seeded: next.slices.length, slices: next.slices.map((slice) => slice.id) });

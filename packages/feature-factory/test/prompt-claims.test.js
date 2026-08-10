@@ -655,7 +655,7 @@ const CLAIMS = [
       assert.equal(factory(repository, ["gate", RUN, "brief", "approved", "--now", NOW]).ok, true);
       assert.equal(factory(repository, ["gate", RUN, "brief", "pending", "--now", NOW]).ok, true);
       assert.equal(readFileSync(planPath, "utf8"), presented);
-      const revised = { slices: [{ ...PLAN.slices[0], test_plan: ["revised-test"] }] };
+      const revised = { slices: [{ ...PLAN.slices[0], test_plan: ["git status --short"] }] };
       writeFileSync(planPath, JSON.stringify(revised));
       assert.equal(factory(repository, ["gate", RUN, "brief", "pending", "--artifact", "artifacts/technical-brief.md", "--now", NOW]).ok, true);
       assert.equal(factory(repository, ["gate", RUN, "brief", "approved", "--now", NOW]).ok, true);
