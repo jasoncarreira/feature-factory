@@ -8,13 +8,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as cli } from "../bin/factory.js";
 import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
 import { assertPublicationReady } from "../observe/review.js";
+import { resolveSpawnExecutable } from "../core/executable.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "factory.js");
@@ -201,6 +202,40 @@ describe("end to end — a merge is refused through the real CLI", () => {
   }
 
   it("records a clean serial merge", () => {
+    const fakeFs = (entries) => {
+      const lookup = (path) => entries[path];
+      return {
+        stat: (path) => ({ isFile: () => lookup(path)?.type === "file" }),
+        access: (path) => { if (!lookup(path)?.executable) throw new Error("not executable"); },
+      };
+    };
+    for (const row of [
+      ["POSIX PATH order", "tool", { cwd: "/repo", env: { PATH: "/one:/two" }, ...fakeFs({ "/one/tool": { type: "file", executable: true }, "/two/tool": { type: "file", executable: true } }) }, "/one/tool", "POSIX PATH"],
+      ["POSIX default", "tool", { cwd: "/repo", env: {}, posixDefaultPath: "/default:/fallback", ...fakeFs({ "/fallback/tool": { type: "file", executable: true } }) }, "/fallback/tool", "the POSIX default search path /default:/fallback"],
+      ["POSIX qualifying empty PATH", "tool", { cwd: "/repo", env: { PATH: ":tools" }, ...fakeFs({ "/repo/tool": { type: "file", executable: true }, "/repo/tools/tool": { type: "file", executable: true } }) }, "/repo/tool", "POSIX PATH"],
+      ["POSIX qualifying relative PATH", "tool", { cwd: "/repo", env: { PATH: "/miss:tools" }, ...fakeFs({ "/repo/tools/tool": { type: "file", executable: true } }) }, "/repo/tools/tool", "POSIX PATH"],
+      ["POSIX relative direct", "./tool", { cwd: "/repo", env: {}, ...fakeFs({ "/repo/tool": { type: "file", executable: true } }) }, "/repo/tool", "its direct path"],
+      ["POSIX absolute direct", "/tools/tool", { cwd: "/repo", env: {}, ...fakeFs({ "/tools/tool": { type: "file", executable: true } }) }, "/tools/tool", "its direct path"],
+    ]) {
+      const [label, argv0, options, path, source] = row;
+      assert.deepEqual(resolveSpawnExecutable(argv0, options), { ok: true, path, source }, label);
+    }
+    for (const [label, argv0, options, source] of [
+      ["directory", "tool", { cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({ "/bin/tool": { type: "directory", executable: true } }) }, "POSIX PATH"],
+      ["POSIX non-executable", "tool", { cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({ "/bin/tool": { type: "file", executable: false } }) }, "POSIX PATH"],
+      ["absent", "tool", { cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({}) }, "POSIX PATH"],
+      ["missing relative direct", "./tool", { cwd: "/repo", env: {}, ...fakeFs({}) }, "its direct path"],
+      ["missing absolute direct", "/tool", { cwd: "/repo", env: {}, ...fakeFs({}) }, "its direct path"],
+    ]) assert.deepEqual(resolveSpawnExecutable(argv0, options), { ok: false, reason: "not-executable", source }, label);
+    // The POSIX-only boundary is executable, not inferred from Linux-only CI. Without this a Windows caller
+    // would get POSIX `PATH` splitting, and the check would disagree with the very spawn it exists to
+    // predict -- relocating the mismatch rather than removing it. Refusing is the only answer a guard may
+    // give when it cannot establish its claim; `assertExecutableTestPlan` turns this into a seed refusal.
+    for (const argv0 of ["tool", "./tool", "C:\\tools\\tool.exe"]) {
+      assert.deepEqual(resolveSpawnExecutable(argv0, { platform: "win32", cwd: "C:\\repo", env: { Path: "C:\\bin" } }),
+        { ok: false, reason: "unsupported-platform", platform: "win32" }, `win32 refuses ${argv0} rather than mis-resolving it`);
+    }
+
     const p = upToReview("clean");
     try {
       const mergeCommit = mergeIntoFeature(p.repo);
@@ -1363,6 +1398,64 @@ describe("end to end — a merge is refused through the real CLI", () => {
   // kept as the default multi-slice coverage — a single-slice fixture cannot detect a
   // proof built on "nothing lands between branch and merge".
   it("merges two file-disjoint slices from the same wave", () => {
+    const admission = project("seed-command-admission", { seed: false });
+    try {
+      writeFileSync(join(admission.repo, "not-executable"), "not executable\n");
+      const refusedEntries = [
+        // Each token stands alone here, which is the only form observe cannot honour. Quote and
+        // substitution characters are deliberately absent: they are legal argv payload, and refusing them
+        // is what forced DIRTYING_TEST_COMMAND to be obfuscated before this was corrected.
+        ...["&&", "||", ";", "|", "&", "<", ">", ">>", "<<"].map((token) => ({ entry: `git ${token} status`, reason: `contains shell operator token ${JSON.stringify(token)}` })),
+        // The earliest offending token in the command is reported, not the first one in the refused list.
+        { entry: "git ; status && git", reason: 'contains shell operator token ";"' },
+        { entry: "uv run pytest -q --tb=short tests/test_acp_daemon.py && uv run pytest -q --tb=short", reason: 'contains shell operator token "&&"' },
+        { entry: "XDG_CONFIG_HOME=/tmp pytest tests/test_config_docs_complete.py", reason: `argv[0] "XDG_CONFIG_HOME=/tmp" did not resolve to an executable via its direct path from repository cwd ${JSON.stringify(admission.repo)}` },
+        { entry: "", reason: "argv[0] is missing" },
+        { entry: "   ", reason: "argv[0] is missing" },
+        { entry: "./", reason: `argv[0] "./" did not resolve to an executable via its direct path from repository cwd ${JSON.stringify(admission.repo)}` },
+        { entry: "factory-command-does-not-exist", reason: `argv[0] "factory-command-does-not-exist" did not resolve to an executable via POSIX PATH from repository cwd ${JSON.stringify(admission.repo)}` },
+        { entry: "./not-executable", reason: `argv[0] "./not-executable" did not resolve to an executable via its direct path from repository cwd ${JSON.stringify(admission.repo)}` },
+      ];
+      for (const { entry, reason } of refusedEntries) {
+        writeFileSync(join(admission.runDir, "plan", "slices.json"), JSON.stringify({ slices: [{
+          id: "be-thing", stack: "backend", paths: ["src/app/"], depends_on: [], acceptance: ["AC1"], test_plan: [entry],
+        }] }, null, 2));
+        assert.equal(approveGate(admission.repo, "brief", NOW(1)).ok, true);
+        const before = readFileSync(join(admission.runDir, "run.json"), "utf8");
+        const refused = factory(admission.repo, ["slices-seed", RUN, "--now", NOW(1)]);
+        const prefix = `slice 'be-thing' test_plan entry ${JSON.stringify(entry)} cannot be executed by observe as argv without a shell: `;
+        assert.equal(refused.stderr, `${prefix}${reason}\n`, entry);
+        assert.equal(readFileSync(join(admission.runDir, "run.json"), "utf8"), before, entry);
+        assert.deepEqual(runJson(admission.runDir).slices, [], entry);
+      }
+    } finally { cleanupProject(admission); }
+    // Positive control for the false refusal this check used to produce. Every entry below carries a
+    // character the substring scan rejected, inside an argv element where observe passes it through
+    // untouched -- `shell: false` means it is payload, not syntax. The first row is the command an earlier
+    // version of this guard forced to be rewritten as `String.fromCharCode(...)`; it has always executed.
+    for (const seedable of [
+      "node -e require('fs').writeFileSync('src/app/thing.ts','mutated')",
+      "git show $HOME",
+      "git log --format=%h&&%s",
+      "grep -E ^a|b .",
+      'node -e console.log("ok")',
+    ]) {
+      const ok = project("seed-command-payload", { testPlan: [seedable] });
+      try { assert.deepEqual(runJson(ok.runDir).slices[0].test_plan, [seedable], seedable); }
+      finally { cleanupProject(ok); }
+    }
+    const relative = project("seed-command-relative", { seed: false, testPlan: ["./seed-ok"] });
+    try {
+      writeFileSync(join(relative.repo, "seed-ok"), "#!/bin/sh\nexit 0\n");
+      chmodSync(join(relative.repo, "seed-ok"), 0o755);
+      approveEarlyGates(relative.repo, NOW(1));
+      assert.equal(factory(relative.repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
+      assert.deepEqual(runJson(relative.runDir).slices[0].test_plan, ["./seed-ok"]);
+    } finally { cleanupProject(relative); }
+    const absolute = project("seed-command-absolute", { testPlan: [process.execPath] });
+    try { assert.deepEqual(runJson(absolute.runDir).slices[0].test_plan, [process.execPath]); }
+    finally { cleanupProject(absolute); }
+
     // The central case, and the one that exposes the merge proof's assumption. Both
     // slices branch from the same integration head, as the inherited wave contract specifies ("a slice worktree
     // branched from the current feature-branch HEAD"), and merges are serial. So the

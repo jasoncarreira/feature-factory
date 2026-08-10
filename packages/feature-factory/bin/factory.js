@@ -17,6 +17,7 @@ import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvi
 import { archiveReviewAttempt } from "../state/review-archive.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
+import { resolveSpawnExecutable } from "../core/executable.js";
 import { dispatchInitPublication } from "./init-publication.js";
 import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, repositoryRelativePath, validateRun } from "../state/schema.js";
 import {
@@ -97,6 +98,28 @@ const key = (flag) => flag.slice(2).replace(/-([a-z])/gu, (_match, letter) => le
 
 function planDigest(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+// Enforcement, not instruction: an entry observe cannot execute has no legal move once seeded.
+// Whole tokens, never a substring scan -- observe spawns with `shell: false`, so a metacharacter inside an
+// argv element is inert payload, and scanning every character refuses commands that run fine. Quotes are
+// therefore absent; `>>`/`<<` are listed because token equality does not imply `>` covers them. The
+// end-to-end rows record which real command a substring scan mangled.
+const REFUSED_TEST_TOKENS = Object.freeze(["&&", "||", ";", "|", "&", "<", ">", ">>", "<<"]);
+function assertExecutableTestPlan(slices, cwd, missingOnly = false) {
+  for (const slice of slices) for (const entry of Array.isArray(slice.test_plan) ? slice.test_plan : []) {
+    if (typeof entry !== "string") continue;
+    const prefix = `slice '${slice.id}' test_plan entry ${JSON.stringify(entry)} cannot be executed by observe as argv without a shell: `;
+    const tokens = entry.split(" ").filter(Boolean);
+    const argv0 = tokens[0];
+    if (!argv0) throw new Error(`${prefix}argv[0] is missing`);
+    if (missingOnly) continue;
+    const refused = tokens.find((token) => REFUSED_TEST_TOKENS.includes(token));
+    if (refused) throw new Error(`${prefix}contains shell operator token ${JSON.stringify(refused)}`);
+    const found = resolveSpawnExecutable(argv0, { cwd });
+    if (found.reason === "unsupported-platform") throw new Error(`${prefix}argv[0] resolution is POSIX-only and cannot predict this platform's shell-free spawn (${found.platform}); seeding refuses rather than admit a command observe may fail to run`);
+    if (!found.ok) throw new Error(`${prefix}argv[0] ${JSON.stringify(argv0)} did not resolve to an executable via ${found.source} from repository cwd ${JSON.stringify(cwd)}`);
+  }
 }
 
 // Read when the gate is *presented*, not when it is approved. Approval-time hashing left a window:
@@ -559,7 +582,7 @@ const HANDLERS = {
           if (state.plan_digest !== planDigest(bytes)) throw new Error(`${from} is not the plan the brief gate approved`);
         }
         if (state.gates.brief?.status !== "approved") throw new Error("slices-seed requires the Brief gate to be approved");
-        return {
+        const candidate = {
           ...state,
           updated_at: at,
           slices: plan.slices.map((slice) => ({
@@ -586,6 +609,11 @@ const HANDLERS = {
             merge_commit: null,
           })),
         };
+        assertExecutableTestPlan(candidate.slices, resolve(flags.repo ?? process.cwd()), true);
+        validateRun(candidate);
+        // Enforcement: refuse a ratified false green with no executable legal move.
+        assertExecutableTestPlan(candidate.slices, resolve(flags.repo ?? process.cwd()));
+        return candidate;
       },
     });
     return emit(flags, { run_id: runId, seeded: next.slices.length, slices: next.slices.map((slice) => slice.id) });
