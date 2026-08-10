@@ -1502,7 +1502,7 @@ git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"
 
 Before target comparison or publication, retain the undecorated `TITLE` and `BODY_FILE` bytes and apply the following deterministic transformer; description means the exact `BODY_FILE` bytes.
 An issue key is valid exactly when it matches `^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`, and a valid key is numeric exactly when every byte is an ASCII digit.
-For every valid issue key, prepend the exact bytes `<issue_key> : ` to `TITLE` and to byte zero of `BODY_FILE`, preserving every following byte.
+For every valid issue key, prepend the exact bytes `<issue_key> : ` to `TITLE`, and prepend the exact bytes `<issue_key> :\n\n` to byte zero of `BODY_FILE`, preserving every following byte. The description marker occupies its own line followed by one blank line and carries no trailing space, so it cannot displace leading Markdown: a body beginning `## Summary` keeps that heading at line start.
 Scan only the undecorated body as LF-delimited lines; a complete line excludes LF but retains CR.
 A recognized reference is every ASCII-case-insensitive occurrence of `close|closed|closes|fix|fixed|fixes|resolve|resolved|resolves` that starts at byte zero or after a non-ASCII-word byte and is followed by zero or more ASCII spaces, then `#`, then one or more ASCII digits; tabs are not spaces.
 For a numeric key with no recognized reference, append exact bytes `\nCloses #<issue_key>\n` when the decorated body already ends LF, and otherwise append exact bytes `\n\nCloses #<issue_key>\n`.

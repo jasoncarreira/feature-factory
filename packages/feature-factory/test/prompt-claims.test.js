@@ -260,8 +260,11 @@ function transformIssuePublication({ issueKey, title, body }) {
     return { ok: true, title: originalTitle, body: originalBody };
   }
   const prefix = Buffer.from(`${issueKey} : `);
+  // The description marker is a line of its own, not a byte-zero prefix: prefixing inline destroyed
+  // leading Markdown, turning `## Summary` into plain text on this change's own PR (#272).
+  const bodyMarker = Buffer.from(`${issueKey} :\n\n`);
   const decoratedTitle = Buffer.concat([prefix, originalTitle]);
-  let decoratedBody = Buffer.concat([prefix, originalBody]);
+  let decoratedBody = Buffer.concat([bodyMarker, originalBody]);
   const references = recognizedReferences(originalBody);
   if (!/^[0-9]+$/u.test(issueKey)) {
     return references.length === 0
@@ -284,7 +287,7 @@ const PUBLICATION_FRAGMENTS = {
   close: "For a numeric key with no recognized reference, append exact bytes `\\nCloses #<issue_key>\\n` when the decorated body already ends LF",
   canonical: "For a numeric key with exactly one recognized reference, proceed only when its complete undecorated line is byte-exactly `Closes #<issue_key>` and begins after at least one LF",
   numericRefusal: "For a numeric key, refuse before target comparison or publication on duplicate references, noncanonical spelling, case, spacing, surrounding text, CRLF, or a reference to another issue.",
-  prefix: "For every valid issue key, prepend the exact bytes `<issue_key> : ` to `TITLE` and to byte zero of `BODY_FILE`, preserving every following byte.",
+  prefix: "The description marker occupies its own line followed by one blank line and carries no trailing space",
   nonnumeric: "For a valid nonnumeric key, add both prefixes and no closing reference, and refuse before target comparison or publication if the undecorated body contains any recognized reference.",
   invalid: "For an invalid or absent issue key, do not scan, refuse, prefix, or rewrite because of references; pass the original title and body bytes through exactly, and introduce no closing reference.",
   absent: "An absent `issue_key` is explicitly exempt from the title-prefix, description-prefix, and closing-reference requirements.",
@@ -297,9 +300,9 @@ function checkPublicationContract(prose) {
 }
 
 const PUBLICATION_FIXTURES = [
-  ["numeric-lf-no-reference", "270", "Ship", "Summary\n", "270 : Ship", "270 : Summary\n\nCloses #270\n", PUBLICATION_FRAGMENTS.close],
-  ["numeric-non-lf-no-reference", "270", "Ship", "Summary", "270 : Ship", "270 : Summary\n\nCloses #270\n", PUBLICATION_FRAGMENTS.close],
-  ["numeric-canonical-own-line", "270", "Ship", "Summary\nCloses #270\n", "270 : Ship", "270 : Summary\nCloses #270\n", PUBLICATION_FRAGMENTS.canonical],
+  ["numeric-lf-no-reference", "270", "Ship", "Summary\n", "270 : Ship", "270 :\n\nSummary\n\nCloses #270\n", PUBLICATION_FRAGMENTS.close],
+  ["numeric-non-lf-no-reference", "270", "Ship", "Summary", "270 : Ship", "270 :\n\nSummary\n\nCloses #270\n", PUBLICATION_FRAGMENTS.close],
+  ["numeric-canonical-own-line", "270", "Ship", "Summary\nCloses #270\n", "270 : Ship", "270 :\n\nSummary\nCloses #270\n", PUBLICATION_FRAGMENTS.canonical],
   ["numeric-first-line-canonical", "270", "Ship", "Closes #270\n", null, null, PUBLICATION_FRAGMENTS.canonical],
   ["numeric-duplicate", "270", "Ship", "Closes #270\nCloses #270\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
   ["numeric-fixes", "270", "Ship", "Fixes #270\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
@@ -307,7 +310,7 @@ const PUBLICATION_FIXTURES = [
   ["numeric-inline-surrounded", "270", "Ship", "Text (Closes #270) text\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
   ["numeric-crlf", "270", "Ship", "Summary\r\nCloses #270\r\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
   ["numeric-other-issue", "270", "Ship", "Closes #271\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
-  ["hyphenated-clean", "ABC-270", "Ship", "Summary\n", "ABC-270 : Ship", "ABC-270 : Summary\n", PUBLICATION_FRAGMENTS.prefix],
+  ["hyphenated-clean", "ABC-270", "Ship", "Summary\n", "ABC-270 : Ship", "ABC-270 :\n\nSummary\n", PUBLICATION_FRAGMENTS.prefix],
   ["hyphenated-reference", "ABC-270", "Ship", "Fixes #270\n", null, null, PUBLICATION_FRAGMENTS.nonnumeric],
   ["invalid-byte-identity", "bad_key", "Ship", "Fixes #999\n", "Ship", "Fixes #999\n", PUBLICATION_FRAGMENTS.invalid],
   ["absent-byte-identity", undefined, "Ship", "Fixes #999\n", "Ship", "Fixes #999\n", PUBLICATION_FRAGMENTS.absent],
