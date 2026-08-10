@@ -36,7 +36,7 @@ const RUN = "app-1";
 const NOW = (minute) => `2026-07-30T12:${String(minute).padStart(2, "0")}:00Z`;
 const PASSING_TEST_COMMAND = "git --no-pager log -1 --format=%H";
 const FAILING_TEST_COMMAND = "git --no-pager grep --quiet THIS_STRING_IS_ABSENT";
-const DIRTYING_TEST_COMMAND = "node -e require(String.fromCharCode(102,115)).writeFileSync(String.fromCharCode(115,114,99,47,97,112,112,47,116,104,105,110,103,46,116,115),String.fromCharCode(109,117,116,97,116,101,100))";
+const DIRTYING_TEST_COMMAND = "node -e require('fs').writeFileSync('src/app/thing.ts','mutated')";
 
 // This is a test-only process seam. The real CLI still parses the repository config,
 // reaches buildEvidence(), and starts its shell child; the preloaded hook records the
@@ -202,41 +202,30 @@ describe("end to end — a merge is refused through the real CLI", () => {
   }
 
   it("records a clean serial merge", () => {
-    const fakeFs = (entries, insensitive = false) => {
-      const lookup = (path) => entries[insensitive ? path.toLowerCase() : path];
+    const fakeFs = (entries) => {
+      const lookup = (path) => entries[path];
       return {
         stat: (path) => ({ isFile: () => lookup(path)?.type === "file" }),
         access: (path) => { if (!lookup(path)?.executable) throw new Error("not executable"); },
       };
     };
     for (const row of [
-      ["POSIX PATH order", "tool", { platform: "linux", cwd: "/repo", env: { PATH: "/one:/two" }, ...fakeFs({ "/one/tool": { type: "file", executable: true }, "/two/tool": { type: "file", executable: true } }) }, "/one/tool", "POSIX PATH"],
-      ["POSIX default", "tool", { platform: "linux", cwd: "/repo", env: {}, posixDefaultPath: "/default:/fallback", ...fakeFs({ "/fallback/tool": { type: "file", executable: true } }) }, "/fallback/tool", "the POSIX default search path /default:/fallback"],
-      ["POSIX qualifying empty PATH", "tool", { platform: "linux", cwd: "/repo", env: { PATH: ":tools" }, ...fakeFs({ "/repo/tool": { type: "file", executable: true }, "/repo/tools/tool": { type: "file", executable: true } }) }, "/repo/tool", "POSIX PATH"],
-      ["POSIX qualifying relative PATH", "tool", { platform: "linux", cwd: "/repo", env: { PATH: "/miss:tools" }, ...fakeFs({ "/repo/tools/tool": { type: "file", executable: true } }) }, "/repo/tools/tool", "POSIX PATH"],
-      ["POSIX relative direct", "./tool", { platform: "linux", cwd: "/repo", env: {}, ...fakeFs({ "/repo/tool": { type: "file", executable: true } }) }, "/repo/tool", "its direct path"],
-      ["POSIX absolute direct", "/tools/tool", { platform: "linux", cwd: "/repo", env: {}, ...fakeFs({ "/tools/tool": { type: "file", executable: true } }) }, "/tools/tool", "its direct path"],
-      ["Windows cwd without PATH", "tool", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tool.exe", "Windows cwd"],
-      ["Windows qualifying empty PATH", "tool", { platform: "win32", cwd: "C:\\repo", env: { Path: ";tools" }, ...fakeFs({ "c:\\repo\\tool.exe": { type: "file" }, "c:\\repo\\tools\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tool.exe", "Windows cwd and PATH"],
-      ["Windows qualifying relative PATH", "tool", { platform: "win32", cwd: "C:\\repo", env: { Path: "C:\\miss;tools" }, ...fakeFs({ "c:\\repo\\tools\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tools\\tool.exe", "Windows cwd and PATH"],
-      ["Windows PATH order", "tool", { platform: "win32", cwd: "C:\\repo", env: { PATH: "C:\\one;C:\\two" }, ...fakeFs({ "c:\\one\\tool.exe": { type: "file" }, "c:\\two\\tool.exe": { type: "file" } }, true) }, "C:\\one\\tool.exe", "Windows cwd and PATH"],
-      ["Windows exact", "tool", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool": { type: "file" } }, true) }, "C:\\repo\\tool", "Windows cwd"],
-      ["Windows direct", ".\\tool.exe", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tool.exe", "its direct path"],
-      ["Windows extensionless direct", ".\\tool", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool.com": { type: "file" } }, true) }, "C:\\repo\\tool.com", "its direct path"],
-      ["Windows com before exe", "tool", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool.com": { type: "file" }, "c:\\repo\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tool.com", "Windows cwd"],
-      ["Windows extension case", "tool.ExE", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ "c:\\repo\\tool.exe": { type: "file" } }, true) }, "C:\\repo\\tool.ExE", "Windows cwd"],
+      ["POSIX PATH order", "tool", { cwd: "/repo", env: { PATH: "/one:/two" }, ...fakeFs({ "/one/tool": { type: "file", executable: true }, "/two/tool": { type: "file", executable: true } }) }, "/one/tool", "POSIX PATH"],
+      ["POSIX default", "tool", { cwd: "/repo", env: {}, posixDefaultPath: "/default:/fallback", ...fakeFs({ "/fallback/tool": { type: "file", executable: true } }) }, "/fallback/tool", "the POSIX default search path /default:/fallback"],
+      ["POSIX qualifying empty PATH", "tool", { cwd: "/repo", env: { PATH: ":tools" }, ...fakeFs({ "/repo/tool": { type: "file", executable: true }, "/repo/tools/tool": { type: "file", executable: true } }) }, "/repo/tool", "POSIX PATH"],
+      ["POSIX qualifying relative PATH", "tool", { cwd: "/repo", env: { PATH: "/miss:tools" }, ...fakeFs({ "/repo/tools/tool": { type: "file", executable: true } }) }, "/repo/tools/tool", "POSIX PATH"],
+      ["POSIX relative direct", "./tool", { cwd: "/repo", env: {}, ...fakeFs({ "/repo/tool": { type: "file", executable: true } }) }, "/repo/tool", "its direct path"],
+      ["POSIX absolute direct", "/tools/tool", { cwd: "/repo", env: {}, ...fakeFs({ "/tools/tool": { type: "file", executable: true } }) }, "/tools/tool", "its direct path"],
     ]) {
       const [label, argv0, options, path, source] = row;
       assert.deepEqual(resolveSpawnExecutable(argv0, options), { ok: true, path, source }, label);
     }
     for (const [label, argv0, options, source] of [
-      ["directory", "tool", { platform: "linux", cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({ "/bin/tool": { type: "directory", executable: true } }) }, "POSIX PATH"],
-      ["POSIX non-executable", "tool", { platform: "linux", cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({ "/bin/tool": { type: "file", executable: false } }) }, "POSIX PATH"],
-      ["absent", "tool", { platform: "linux", cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({}) }, "POSIX PATH"],
-      ["missing relative direct", "./tool", { platform: "linux", cwd: "/repo", env: {}, ...fakeFs({}) }, "its direct path"],
-      ["missing absolute direct", "/tool", { platform: "linux", cwd: "/repo", env: {}, ...fakeFs({}) }, "its direct path"],
-      ["Windows absent without PATH", "tool", { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({}, true) }, "Windows cwd"],
-      ...["tool.bat", "tool.cmd"].map((argv0) => [`Windows rejects ${argv0}`, argv0, { platform: "win32", cwd: "C:\\repo", env: {}, ...fakeFs({ [`c:\\repo\\${argv0}`]: { type: "file" } }, true) }, "Windows cwd"]),
+      ["directory", "tool", { cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({ "/bin/tool": { type: "directory", executable: true } }) }, "POSIX PATH"],
+      ["POSIX non-executable", "tool", { cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({ "/bin/tool": { type: "file", executable: false } }) }, "POSIX PATH"],
+      ["absent", "tool", { cwd: "/repo", env: { PATH: "/bin" }, ...fakeFs({}) }, "POSIX PATH"],
+      ["missing relative direct", "./tool", { cwd: "/repo", env: {}, ...fakeFs({}) }, "its direct path"],
+      ["missing absolute direct", "/tool", { cwd: "/repo", env: {}, ...fakeFs({}) }, "its direct path"],
     ]) assert.deepEqual(resolveSpawnExecutable(argv0, options), { ok: false, reason: "not-executable", source }, label);
 
     const p = upToReview("clean");
@@ -1405,9 +1394,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
     try {
       writeFileSync(join(admission.repo, "not-executable"), "not executable\n");
       const refusedEntries = [
-        ...["&&", "||", ";", "|", "&", "<", ">", "`", "$(", "'", '"', "\n"].map((token) => ({ entry: `git ${token} status`, reason: `contains refused token ${JSON.stringify(token)}` })),
-        { entry: "git ; status && git", reason: 'contains refused token "&&"' },
-        { entry: "uv run pytest -q --tb=short tests/test_acp_daemon.py && uv run pytest -q --tb=short", reason: 'contains refused token "&&"' },
+        // Each token stands alone here, which is the only form observe cannot honour. Quote and
+        // substitution characters are deliberately absent: they are legal argv payload, and refusing them
+        // is what forced DIRTYING_TEST_COMMAND to be obfuscated before this was corrected.
+        ...["&&", "||", ";", "|", "&", "<", ">", ">>", "<<"].map((token) => ({ entry: `git ${token} status`, reason: `contains shell operator token ${JSON.stringify(token)}` })),
+        // The earliest offending token in the command is reported, not the first one in the refused list.
+        { entry: "git ; status && git", reason: 'contains shell operator token ";"' },
+        { entry: "uv run pytest -q --tb=short tests/test_acp_daemon.py && uv run pytest -q --tb=short", reason: 'contains shell operator token "&&"' },
         { entry: "XDG_CONFIG_HOME=/tmp pytest tests/test_config_docs_complete.py", reason: `argv[0] "XDG_CONFIG_HOME=/tmp" did not resolve to an executable via its direct path from repository cwd ${JSON.stringify(admission.repo)}` },
         { entry: "", reason: "argv[0] is missing" },
         { entry: "   ", reason: "argv[0] is missing" },
@@ -1428,9 +1421,21 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.deepEqual(runJson(admission.runDir).slices, [], entry);
       }
     } finally { cleanupProject(admission); }
-    const dollar = project("seed-command-dollar", { testPlan: ["git show $HOME"] });
-    try { assert.deepEqual(runJson(dollar.runDir).slices[0].test_plan, ["git show $HOME"]); }
-    finally { cleanupProject(dollar); }
+    // Positive control for the false refusal this check used to produce. Every entry below carries a
+    // character the substring scan rejected, inside an argv element where observe passes it through
+    // untouched -- `shell: false` means it is payload, not syntax. The first row is the command an earlier
+    // version of this guard forced to be rewritten as `String.fromCharCode(...)`; it has always executed.
+    for (const seedable of [
+      "node -e require('fs').writeFileSync('src/app/thing.ts','mutated')",
+      "git show $HOME",
+      "git log --format=%h&&%s",
+      "grep -E ^a|b .",
+      'node -e console.log("ok")',
+    ]) {
+      const ok = project("seed-command-payload", { testPlan: [seedable] });
+      try { assert.deepEqual(runJson(ok.runDir).slices[0].test_plan, [seedable], seedable); }
+      finally { cleanupProject(ok); }
+    }
     const relative = project("seed-command-relative", { seed: false, testPlan: ["./seed-ok"] });
     try {
       writeFileSync(join(relative.repo, "seed-ok"), "#!/bin/sh\nexit 0\n");

@@ -100,16 +100,22 @@ function planDigest(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
-const REFUSED_TEST_TOKENS = Object.freeze(["&&", "||", ";", "|", "&", "<", ">", "`", "$(", "'", '"', "\n"]);
+// Enforcement, not instruction: an entry observe cannot execute has no legal move once seeded.
+// Whole tokens, never a substring scan -- observe spawns with `shell: false`, so a metacharacter inside an
+// argv element is inert payload, and scanning every character refuses commands that run fine. Quotes are
+// therefore absent; `>>`/`<<` are listed because token equality does not imply `>` covers them. The
+// end-to-end rows record which real command a substring scan mangled.
+const REFUSED_TEST_TOKENS = Object.freeze(["&&", "||", ";", "|", "&", "<", ">", ">>", "<<"]);
 function assertExecutableTestPlan(slices, cwd, missingOnly = false) {
   for (const slice of slices) for (const entry of Array.isArray(slice.test_plan) ? slice.test_plan : []) {
     if (typeof entry !== "string") continue;
     const prefix = `slice '${slice.id}' test_plan entry ${JSON.stringify(entry)} cannot be executed by observe as argv without a shell: `;
-    const argv0 = entry.split(" ").filter(Boolean)[0];
+    const tokens = entry.split(" ").filter(Boolean);
+    const argv0 = tokens[0];
     if (!argv0) throw new Error(`${prefix}argv[0] is missing`);
     if (missingOnly) continue;
-    const refused = REFUSED_TEST_TOKENS.find((token) => entry.includes(token));
-    if (refused) throw new Error(`${prefix}contains refused token ${JSON.stringify(refused)}`);
+    const refused = tokens.find((token) => REFUSED_TEST_TOKENS.includes(token));
+    if (refused) throw new Error(`${prefix}contains shell operator token ${JSON.stringify(refused)}`);
     const found = resolveSpawnExecutable(argv0, { cwd });
     if (!found.ok) throw new Error(`${prefix}argv[0] ${JSON.stringify(argv0)} did not resolve to an executable via ${found.source} from repository cwd ${JSON.stringify(cwd)}`);
   }
