@@ -274,13 +274,13 @@ function transformIssuePublication({ issueKey, title, body }) {
   if (references.length !== 1) return { ok: false };
   const reference = references[0];
   const completeLine = originalBody.subarray(reference.lineStart, reference.lineEnd);
-  if (!completeLine.equals(Buffer.from(`Closes #${issueKey}`))) return { ok: false };
+  if (reference.lineStart === 0 || !completeLine.equals(Buffer.from(`Closes #${issueKey}`))) return { ok: false };
   return { ok: true, title: decoratedTitle, body: decoratedBody };
 }
 
 const PUBLICATION_FRAGMENTS = {
   close: "For a numeric key with no recognized reference, append exact bytes `\\nCloses #<issue_key>\\n` when the decorated body already ends LF",
-  canonical: "For a numeric key with exactly one recognized reference, proceed only when its complete undecorated line is byte-exactly `Closes #<issue_key>`",
+  canonical: "For a numeric key with exactly one recognized reference, proceed only when its complete undecorated line is byte-exactly `Closes #<issue_key>` and begins after at least one LF",
   numericRefusal: "For a numeric key, refuse before target comparison or publication on duplicate references, noncanonical spelling, case, spacing, surrounding text, CRLF, or a reference to another issue.",
   prefix: "For every valid issue key, prepend the exact bytes `<issue_key> : ` to `TITLE` and to byte zero of `BODY_FILE`, preserving every following byte.",
   nonnumeric: "For a valid nonnumeric key, add both prefixes and no closing reference, and refuse before target comparison or publication if the undecorated body contains any recognized reference.",
@@ -288,10 +288,17 @@ const PUBLICATION_FRAGMENTS = {
   absent: "An absent `issue_key` is explicitly exempt from the title-prefix, description-prefix, and closing-reference requirements.",
 };
 
+function checkPublicationContract(prose) {
+  if (!prose.includes(PUBLICATION_FRAGMENTS.close)) {
+    throw new Error("publication-policy:missing-no-reference-closing-rule");
+  }
+}
+
 const PUBLICATION_FIXTURES = [
   ["numeric-lf-no-reference", "270", "Ship", "Summary\n", "270 : Ship", "270 : Summary\n\nCloses #270\n", PUBLICATION_FRAGMENTS.close],
   ["numeric-non-lf-no-reference", "270", "Ship", "Summary", "270 : Ship", "270 : Summary\n\nCloses #270\n", PUBLICATION_FRAGMENTS.close],
   ["numeric-canonical-own-line", "270", "Ship", "Summary\nCloses #270\n", "270 : Ship", "270 : Summary\nCloses #270\n", PUBLICATION_FRAGMENTS.canonical],
+  ["numeric-first-line-canonical", "270", "Ship", "Closes #270\n", null, null, PUBLICATION_FRAGMENTS.canonical],
   ["numeric-duplicate", "270", "Ship", "Closes #270\nCloses #270\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
   ["numeric-fixes", "270", "Ship", "Fixes #270\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
   ["numeric-mixed-case-spaces", "270", "Ship", "cLoSeS  #270\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
@@ -1510,6 +1517,13 @@ describe("prose claims about what the CLI permits", () => {
       const prose = readFileSync(join(pkg, claim.file), "utf8");
       assert.ok(prose.includes(claim.fragment),
         `${claim.file} no longer contains the claim this test proves:\n  ${claim.fragment}`);
+      if (claim.id === "publication-numeric-lf-no-reference") {
+        checkPublicationContract(prose);
+        const withoutClosingRule = prose.replace(PUBLICATION_FRAGMENTS.close, "");
+        assert.throws(() => checkPublicationContract(withoutClosingRule),
+          /publication-policy:missing-no-reference-closing-rule/u);
+        checkPublicationContract(prose);
+      }
 
       const repo = project(claim.id);
       try {

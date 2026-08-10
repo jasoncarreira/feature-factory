@@ -1506,7 +1506,7 @@ For every valid issue key, prepend the exact bytes `<issue_key> : ` to `TITLE` a
 Scan only the undecorated body as LF-delimited lines; a complete line excludes LF but retains CR.
 A recognized reference is every ASCII-case-insensitive occurrence of `close|closed|closes|fix|fixed|fixes|resolve|resolved|resolves` that starts at byte zero or after a non-ASCII-word byte and is followed by zero or more ASCII spaces, then `#`, then one or more ASCII digits; tabs are not spaces.
 For a numeric key with no recognized reference, append exact bytes `\nCloses #<issue_key>\n` when the decorated body already ends LF, and otherwise append exact bytes `\n\nCloses #<issue_key>\n`.
-For a numeric key with exactly one recognized reference, proceed only when its complete undecorated line is byte-exactly `Closes #<issue_key>`; preserve that line and append nothing.
+For a numeric key with exactly one recognized reference, proceed only when its complete undecorated line is byte-exactly `Closes #<issue_key>` and begins after at least one LF; preserve that line and append nothing.
 For a numeric key, refuse before target comparison or publication on duplicate references, noncanonical spelling, case, spacing, surrounding text, CRLF, or a reference to another issue.
 For a valid nonnumeric key, add both prefixes and no closing reference, and refuse before target comparison or publication if the undecorated body contains any recognized reference.
 For an invalid or absent issue key, do not scan, refuse, prefix, or rewrite because of references; pass the original title and body bytes through exactly, and introduce no closing reference.
