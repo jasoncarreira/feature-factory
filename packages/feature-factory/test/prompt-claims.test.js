@@ -27,6 +27,8 @@ const CLI = join(pkg, "bin", "factory.js");
 const RUN = "app-1";
 const NOW = "2026-07-30T12:00:00Z";
 const PASSING_TEST_COMMAND = "git --no-pager log -1 --format=%H";
+const FACTORY_ENV = { ...process.env };
+delete FACTORY_ENV.FORCE_COLOR;
 
 const PLAN = {
   slices: [{ id: "s1", stack: "backend", paths: ["src/"], depends_on: [], acceptance: ["AC1"], test_plan: [PASSING_TEST_COMMAND] }],
@@ -77,7 +79,7 @@ function activateSlice(operator) {
 
 function factory(repo, args) {
   try {
-    return { ok: true, out: execFileSync("node", [CLI, ...args, "--repo", repo], { encoding: "utf8" }) };
+    return { ok: true, out: execFileSync("node", [CLI, ...args, "--repo", repo], { encoding: "utf8", env: FACTORY_ENV }) };
   } catch (error) {
     return { ok: false, out: String(error.stdout ?? "") + String(error.stderr ?? "") };
   }
