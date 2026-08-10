@@ -1490,15 +1490,27 @@ before push, `gh`, or `factory pr` and retains all state. After those checks, in
 fresh comparison without changing either remote:
 
 Use the status response's exact recorded `branch` as `FEATURE_BRANCH`, exact recorded `pr_base` as
-`PR_BASE`, and effective boolean `pr_draft` as `PR_DRAFT`; never infer, shorten, normalize, or
-substitute any value. Bind all three from this one status response without rereading repository config.
-A legacy manifest omission is projected as `true`. Bind before target recapture, and do not rebind or
-re-observe them between target equality and push.
+`PR_BASE`, effective boolean `pr_draft` as `PR_DRAFT`, and exact optional recorded `issue_key` as
+`ISSUE_KEY`; never infer, shorten, normalize, or substitute any value. Bind all four from this one status
+response without rereading repository config. A legacy manifest omission of `pr_draft` is projected as
+`true`. Bind before target recapture, and do not rebind or re-observe them between target equality and push.
 
 ```sh
 factory status "$R" --json --repo "$RUN_REPO"
 git -C "$O" show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"
 ```
+
+Before target comparison or publication, retain the undecorated `TITLE` and `BODY_FILE` bytes and apply the following deterministic transformer; description means the exact `BODY_FILE` bytes.
+An issue key is valid exactly when it matches `^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`, and a valid key is numeric exactly when every byte is an ASCII digit.
+For every valid issue key, prepend the exact bytes `<issue_key> : ` to `TITLE`, and prepend the exact bytes `<issue_key> :\n\n` to byte zero of `BODY_FILE`, preserving every following byte. The description marker occupies its own line followed by one blank line and carries no trailing space, so it cannot displace leading Markdown: a body beginning `## Summary` keeps that heading at line start.
+Scan only the undecorated body as LF-delimited lines; a complete line excludes LF but retains CR.
+A recognized reference is every ASCII-case-insensitive occurrence of `close|closed|closes|fix|fixed|fixes|resolve|resolved|resolves` that starts at byte zero or after a non-ASCII-word byte and is followed by zero or more ASCII spaces, then `#`, then one or more ASCII digits; tabs are not spaces.
+For a numeric key with no recognized reference, append exact bytes `\nCloses #<issue_key>\n` when the decorated body already ends LF, and otherwise append exact bytes `\n\nCloses #<issue_key>\n`.
+For a numeric key with exactly one recognized reference, proceed only when its complete undecorated line is byte-exactly `Closes #<issue_key>` and begins after at least one LF; preserve that line and append nothing.
+For a numeric key, refuse before target comparison or publication on duplicate references, noncanonical spelling, case, spacing, surrounding text, CRLF, or a reference to another issue.
+For a valid nonnumeric key, add both prefixes and no closing reference, and refuse before target comparison or publication if the undecorated body contains any recognized reference.
+For an invalid or absent issue key, do not scan, refuse, prefix, or rewrite because of references; pass the original title and body bytes through exactly, and introduce no closing reference.
+An absent `issue_key` is explicitly exempt from the title-prefix, description-prefix, and closing-reference requirements.
 
 Step 6 effective-push refusal parks differently from Step 0: Step 0 remains status-only with an unchanged manifest; Step 6 follows the procedure below.
 

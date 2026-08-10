@@ -27,6 +27,8 @@ const CLI = join(pkg, "bin", "factory.js");
 const RUN = "app-1";
 const NOW = "2026-07-30T12:00:00Z";
 const PASSING_TEST_COMMAND = "git --no-pager log -1 --format=%H";
+const FACTORY_ENV = { ...process.env };
+delete FACTORY_ENV.FORCE_COLOR;
 
 const PLAN = {
   slices: [{ id: "s1", stack: "backend", paths: ["src/"], depends_on: [], acceptance: ["AC1"], test_plan: [PASSING_TEST_COMMAND] }],
@@ -77,7 +79,7 @@ function activateSlice(operator) {
 
 function factory(repo, args) {
   try {
-    return { ok: true, out: execFileSync("node", [CLI, ...args, "--repo", repo], { encoding: "utf8" }) };
+    return { ok: true, out: execFileSync("node", [CLI, ...args, "--repo", repo], { encoding: "utf8", env: FACTORY_ENV }) };
   } catch (error) {
     return { ok: false, out: String(error.stdout ?? "") + String(error.stderr ?? "") };
   }
@@ -210,9 +212,130 @@ function checkBootstrapPolicy(prose) {
   for (const contract of BOOTSTRAP_POLICY_CONTRACTS) checkBootstrapContract(prose, contract);
 }
 
+function isAsciiWord(byte) {
+  return (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x5a)
+    || byte === 0x5f || (byte >= 0x61 && byte <= 0x7a);
+}
+
+function asciiLower(byte) {
+  return byte >= 0x41 && byte <= 0x5a ? byte + 0x20 : byte;
+}
+
+function recognizedReferences(body) {
+  const keywords = ["close", "closed", "closes", "fix", "fixed", "fixes", "resolve", "resolved", "resolves"];
+  const references = [];
+  for (let start = 0; start < body.length; start += 1) {
+    if (start > 0 && isAsciiWord(body[start - 1])) continue;
+    for (const keyword of keywords) {
+      let cursor = start;
+      let matches = true;
+      for (const expected of Buffer.from(keyword)) {
+        if (cursor >= body.length || asciiLower(body[cursor]) !== expected) {
+          matches = false;
+          break;
+        }
+        cursor += 1;
+      }
+      if (!matches) continue;
+      while (body[cursor] === 0x20) cursor += 1;
+      if (body[cursor] !== 0x23 || body[cursor + 1] < 0x30 || body[cursor + 1] > 0x39) continue;
+      cursor += 2;
+      while (body[cursor] >= 0x30 && body[cursor] <= 0x39) cursor += 1;
+      let lineStart = start;
+      while (lineStart > 0 && body[lineStart - 1] !== 0x0a) lineStart -= 1;
+      let lineEnd = cursor;
+      while (lineEnd < body.length && body[lineEnd] !== 0x0a) lineEnd += 1;
+      references.push({ lineStart, lineEnd });
+      start = cursor - 1;
+      break;
+    }
+  }
+  return references;
+}
+
+function transformIssuePublication({ issueKey, title, body }) {
+  const originalTitle = Buffer.from(title);
+  const originalBody = Buffer.from(body);
+  if (typeof issueKey !== "string" || !/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/u.test(issueKey)) {
+    return { ok: true, title: originalTitle, body: originalBody };
+  }
+  const prefix = Buffer.from(`${issueKey} : `);
+  // The description marker is a line of its own, not a byte-zero prefix: prefixing inline destroyed
+  // leading Markdown, turning `## Summary` into plain text on this change's own PR (#272).
+  const bodyMarker = Buffer.from(`${issueKey} :\n\n`);
+  const decoratedTitle = Buffer.concat([prefix, originalTitle]);
+  let decoratedBody = Buffer.concat([bodyMarker, originalBody]);
+  const references = recognizedReferences(originalBody);
+  if (!/^[0-9]+$/u.test(issueKey)) {
+    return references.length === 0
+      ? { ok: true, title: decoratedTitle, body: decoratedBody }
+      : { ok: false };
+  }
+  if (references.length === 0) {
+    const separator = decoratedBody.at(-1) === 0x0a ? "\n" : "\n\n";
+    decoratedBody = Buffer.concat([decoratedBody, Buffer.from(`${separator}Closes #${issueKey}\n`)]);
+    return { ok: true, title: decoratedTitle, body: decoratedBody };
+  }
+  if (references.length !== 1) return { ok: false };
+  const reference = references[0];
+  const completeLine = originalBody.subarray(reference.lineStart, reference.lineEnd);
+  if (reference.lineStart === 0 || !completeLine.equals(Buffer.from(`Closes #${issueKey}`))) return { ok: false };
+  return { ok: true, title: decoratedTitle, body: decoratedBody };
+}
+
+const PUBLICATION_FRAGMENTS = {
+  close: "For a numeric key with no recognized reference, append exact bytes `\\nCloses #<issue_key>\\n` when the decorated body already ends LF",
+  canonical: "For a numeric key with exactly one recognized reference, proceed only when its complete undecorated line is byte-exactly `Closes #<issue_key>` and begins after at least one LF",
+  numericRefusal: "For a numeric key, refuse before target comparison or publication on duplicate references, noncanonical spelling, case, spacing, surrounding text, CRLF, or a reference to another issue.",
+  prefix: "The description marker occupies its own line followed by one blank line and carries no trailing space",
+  nonnumeric: "For a valid nonnumeric key, add both prefixes and no closing reference, and refuse before target comparison or publication if the undecorated body contains any recognized reference.",
+  invalid: "For an invalid or absent issue key, do not scan, refuse, prefix, or rewrite because of references; pass the original title and body bytes through exactly, and introduce no closing reference.",
+  absent: "An absent `issue_key` is explicitly exempt from the title-prefix, description-prefix, and closing-reference requirements.",
+};
+
+function checkPublicationContract(prose) {
+  if (!prose.includes(PUBLICATION_FRAGMENTS.close)) {
+    throw new Error("publication-policy:missing-no-reference-closing-rule");
+  }
+}
+
+const PUBLICATION_FIXTURES = [
+  ["numeric-lf-no-reference", "270", "Ship", "Summary\n", "270 : Ship", "270 :\n\nSummary\n\nCloses #270\n", PUBLICATION_FRAGMENTS.close],
+  ["numeric-non-lf-no-reference", "270", "Ship", "Summary", "270 : Ship", "270 :\n\nSummary\n\nCloses #270\n", PUBLICATION_FRAGMENTS.close],
+  ["numeric-canonical-own-line", "270", "Ship", "Summary\nCloses #270\n", "270 : Ship", "270 :\n\nSummary\nCloses #270\n", PUBLICATION_FRAGMENTS.canonical],
+  ["numeric-first-line-canonical", "270", "Ship", "Closes #270\n", null, null, PUBLICATION_FRAGMENTS.canonical],
+  ["numeric-duplicate", "270", "Ship", "Closes #270\nCloses #270\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
+  ["numeric-fixes", "270", "Ship", "Fixes #270\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
+  ["numeric-mixed-case-spaces", "270", "Ship", "cLoSeS  #270\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
+  ["numeric-inline-surrounded", "270", "Ship", "Text (Closes #270) text\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
+  ["numeric-crlf", "270", "Ship", "Summary\r\nCloses #270\r\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
+  ["numeric-other-issue", "270", "Ship", "Closes #271\n", null, null, PUBLICATION_FRAGMENTS.numericRefusal],
+  ["hyphenated-clean", "ABC-270", "Ship", "Summary\n", "ABC-270 : Ship", "ABC-270 :\n\nSummary\n", PUBLICATION_FRAGMENTS.prefix],
+  ["hyphenated-reference", "ABC-270", "Ship", "Fixes #270\n", null, null, PUBLICATION_FRAGMENTS.nonnumeric],
+  ["invalid-byte-identity", "bad_key", "Ship", "Fixes #999\n", "Ship", "Fixes #999\n", PUBLICATION_FRAGMENTS.invalid],
+  ["absent-byte-identity", undefined, "Ship", "Fixes #999\n", "Ship", "Fixes #999\n", PUBLICATION_FRAGMENTS.absent],
+];
+
+const PUBLICATION_CLAIMS = PUBLICATION_FIXTURES.map(([id, issueKey, title, body, expectedTitle, expectedBody, fragment]) => ({
+  id: `publication-${id}`,
+  file: "WORKFLOW.md",
+  fragment,
+  expect: expectedTitle === null ? "refused" : "allowed",
+  matches: expectedTitle === null ? /publication refused/u : /publication transformed/u,
+  act() {
+    const result = transformIssuePublication({ issueKey, title: Buffer.from(title), body: Buffer.from(body) });
+    if (expectedTitle === null) return { ok: result.ok, out: "publication refused\n" };
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.title, Buffer.from(expectedTitle));
+    assert.deepEqual(result.body, Buffer.from(expectedBody));
+    return { ok: true, out: "publication transformed\n" };
+  },
+}));
+
 // Each claim: where the prose lives, the exact fragment that makes the claim, and the behaviour it
 // asserts. `expect: "refused"` means the CLI must reject; `"allowed"` means it must succeed.
 const CLAIMS = [
+  ...PUBLICATION_CLAIMS,
   {
     id: "no-amend-and-reseed",
     file: "agents/work-decomposer.md",
@@ -1399,6 +1522,13 @@ describe("prose claims about what the CLI permits", () => {
       const prose = readFileSync(join(pkg, claim.file), "utf8");
       assert.ok(prose.includes(claim.fragment),
         `${claim.file} no longer contains the claim this test proves:\n  ${claim.fragment}`);
+      if (claim.id === "publication-numeric-lf-no-reference") {
+        checkPublicationContract(prose);
+        const withoutClosingRule = prose.replace(PUBLICATION_FRAGMENTS.close, "");
+        assert.throws(() => checkPublicationContract(withoutClosingRule),
+          /publication-policy:missing-no-reference-closing-rule/u);
+        checkPublicationContract(prose);
+      }
 
       const repo = project(claim.id);
       try {
