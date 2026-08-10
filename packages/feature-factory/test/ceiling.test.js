@@ -327,13 +327,15 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Instruction, not enforcement, pinned only against silent deletion: a plan deadlock blocks rather
     // than producing a false green, and "does this slice change an interface" is not computable here.
     // mimir 1410 lost a run at seven of ten merged slices because an interface change and its callers
-    // sat on opposite sides of a dependency edge, so the rule earns a presence assertion even though
+      // sat apart, and 1423 lost one because a merged slice read an env var whose documented inventory
+    // lived in a later slice -- so the rule earns a presence assertion even though
     // nothing can enforce it. Each fragment sits on one line in the raw markdown.
     for (const [agent, fragment] of [
-      ["work-decomposer", "A slice owns every caller, fixture and test its change invalidates."],
+      ["work-decomposer", "A slice must be able to make its ratified `test_plan` green using only the paths it owns."],
         ["work-decomposer", "The trigger is invalidation, not change."],
-      ["work-decomposer", "If you cannot satisfy this, merge the two slices rather than ordering them."],
-      ["work-reviewer", "check that the same slice owns those call sites, fixtures"],
+        ["work-decomposer", "Moving a repo-wide rule whose inventory another slice owns."],
+      ["work-decomposer", "If you cannot satisfy it, merge the slices rather than ordering them."],
+      ["work-reviewer", "green using only that slice's own `paths`"],
     ]) {
       assert.ok(byName.get(agent)?.includes(fragment),
         `${agent}.md must keep the interface-ownership rule: ${fragment}`);
@@ -403,8 +405,16 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     }
     const decomposer = byName.get("work-decomposer") ?? "";
     const reviewer = byName.get("work-reviewer") ?? "";
-    assert.match(decomposer, /No slice may depend on the absence of what another slice owns/u,
-      "work-decomposer must forbid a plan that contradicts its own order");
+    // Rules 6 and 7 were merged into one invariant: a slice must be able to make its ratified
+    // `test_plan` green from its own `paths`. This assertion previously pinned rule 6's headline
+    // ("No slice may depend on the absence of what another slice owns"), which is now one of three
+    // named faces of that invariant rather than a rule of its own. Pinning the invariant instead
+    // keeps the guard at the altitude of the thing being guarded; the absence face is still pinned
+    // by its own fragment below.
+    assert.match(decomposer, /A slice must be able to make its ratified `test_plan` green using only the paths it owns/u,
+      "work-decomposer must require each slice's test_plan to be satisfiable from its own paths");
+    assert.match(decomposer, /Proving an absence a later slice fills/u,
+      "work-decomposer must keep the absence face of the satisfiability invariant");
     assert.match(decomposer, /how\*\* a negative claim survives later slices/u,
       "work-decomposer must require a negative claim to state how it survives later slices");
     assert.match(decomposer, /Stable once it lands/u,

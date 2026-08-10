@@ -78,59 +78,62 @@ a re-read rather than a run.
 4. **Every AC maps to a slice.** No orphan criteria; no slice without at least one AC.
 4b. **No slice carries them all.** Where the plan has more than one slice, none may claim the entire acceptance set. Coverage and concentration are different properties, and only coverage was ever checked: a plan whose first slice claims every criterion satisfies rule 4 perfectly and is not a decomposition. A slice must be reviewable on its own — if rejecting it would read as "N categories of behaviour are still missing" rather than naming specific defects, it is too large and must be split before seeding. A genuinely small feature may still be one slice; this is about a slice that hoards while siblings exist.
 5. **Keep slices coherent.** A slice is one layer-consistent chunk (e.g. "entity + repository", "api handler + projection", "list component + its data op"), not an arbitrary file split.
-6. **No slice may depend on the absence of what another slice owns.** Cross-check every slice's
-   `test_plan` against every other slice's `paths` before you emit the plan. If a slice must prove that
-   something does not exist, is not imported, or is not reachable, and a different slice owns or creates
-   that thing, decide which of these the claim is. They are not the same, and only the first is a
-   contradiction:
-   - **Invalidated when the later path lands.** The claim holds only while the thing is absent, so the
-     earlier slice's suite must fail once the later slice lands — and the later slice cannot repair it,
-     because `paths` freeze at seeding. Give this invariant to the **later** slice, or to a terminal
-     integration slice that owns the boundary; never to the earlier one.
-   - **Stable once it lands.** A dependency-direction invariant — this module must not reach that one —
-      stays true after the later slice exists, as long as its proof does not rest on absence. It may stay
-      with the earlier slice, whose executable test command must prove that stable form.
+6. **A slice must be able to make its ratified `test_plan` green using only the paths it owns.** This is
+   one invariant with several faces, and it is the only rule in this list whose violation admits *no legal
+   move*: `paths` freeze at seeding, a blocked slice's dependents cannot be dispatched, and the slice's own
+   ratified command includes whatever its change affected. No retry count fixes it. Three runs have died
+   here, each arriving at it differently.
 
-   This is rule 3's problem arriving through behaviour rather than through a filename, and file-disjointness
-   cannot see it: the two slices share no path.
-   Choose a complete executable command whose tests prove **how** a negative claim survives later slices.
-   Process-global state — import caches, module registries, singletons — is visible to every test in the
-   same process, so a claim written against it passes alone and fails as soon as a sibling's tests are
-   collected beside it, which makes it the first kind. Prove the same claim statically over the source,
-   or inside an isolated child process, and it becomes the second. Leaving the form to the builder is how
-   one file ends up with the same claim written twice, once robustly and once not.
+   **The check is mechanical, and it is the same one every time.** Cross-check every slice's `test_plan`
+   against every other slice's `paths` before you emit the plan. For each slice ask: when this command
+   runs, is everything it must change in order to pass owned by *this* slice? If not, the plan is wrong,
+   whatever the topic suggests. Ownership follows the change, not the subject matter.
 
-7. **A slice owns every caller, fixture and test its change invalidates.** Ownership follows the change,
-   not the topic. If a slice alters a signature, a return shape, sync/async nature, or a module contract
-   other code imports, **and existing call sites, fixtures or tests must migrate as a result**, then those
-   belong to **that** slice — even when they read as another slice's subject matter. Use `amend-paths` to
-   take out-of-lane paths if the seeded plan missed them.
+   Three observed faces of it:
 
-   The trigger is invalidation, not change. A backward-compatible change requires none of this: adding a
+   - **Proving an absence a later slice fills.** Two kinds, and only the first is a contradiction:
+     - **Invalidated when the later path lands.** The claim holds only while the thing is absent, so the
+       earlier slice's suite must fail once the later slice lands — and it cannot repair it, because `paths`
+       freeze at seeding. Give this invariant to the **later** slice, or to a terminal integration slice
+       that owns the boundary; never to the earlier one.
+     - **Stable once it lands.** A dependency-direction invariant — this module must not reach that one —
+       stays true after the later slice exists, as long as its proof does not rest on absence. It may stay
+       with the earlier slice, whose executable command must prove that stable form.
+
+     Process-global state makes the first easy to write by accident: import caches, module registries and
+     singletons are visible to every test in the same process, so a claim written against them passes alone
+     and fails as soon as a sibling's tests are collected beside it. Prove the same claim statically over
+     the source, or inside an isolated child process, and it becomes the second kind. The slice's
+     `test_plan` must name the command that proves **how** a negative claim survives later slices; leaving
+     that form to the builder is how one file ends up with the same claim written twice, once robustly and
+     once not.
+   - **Breaking callers a later slice owns.** If a change invalidates existing call sites, fixtures or
+     tests — a signature, a return shape, sync/async nature, a module contract other code imports — those
+     belong to the slice making the change. mimir 1410 lost a run at seven of ten merged slices this way:
+     `evidence-routing` made `observe_evidence` async and SafeGit-only, sixteen orchestrator and reattach
+     tests called the old contract, and only the dependent `orchestrator-publication` slice owned them.
+   - **Moving a repo-wide rule whose inventory another slice owns.** A closed-inventory test — every env
+     var documented, every tool in an allowlist, every surface in a list, a budget or a limit — fails the
+     moment your change adds a member, and passes again only when the inventory is updated. mimir 1423
+     merged a slice that read `XDG_CONFIG_HOME` while `docs/configuration.md` and
+     `tests/test_config_docs_complete.py` sat in a later slice; the merged slice could not be repaired,
+     because a merged slice cannot be amended.
+
+   **The trigger is invalidation, not change.** A backward-compatible change needs none of this: a
    defaulted optional parameter, or an added field on a returned object, leaves every existing caller,
-   fixture and test passing unmodified, and there is nothing to co-own. Apply this rule when the old
-   contract stops working, not whenever an interface is touched.
+   fixture and test passing unmodified, and there is nothing to co-own. Apply this when the old contract,
+   or the old inventory, stops holding.
 
-   This is rule 6 in reverse. Rule 6 forbids a slice from depending on the **absence** of what a later
-   slice owns; this forbids depending on a later slice to **repair what your change breaks**. Both close
-   the same circle, and this direction closes it harder: `paths` freeze at seeding, blocked-slice ordering
-   forbids dispatching a dependent of a blocked slice, and the slice's own ratified `test_plan` includes
-   the tests it just invalidated. There is then no legal move — no retry count fixes it, because nothing
-   the slice may edit can make its suite green.
+   **If you cannot satisfy it, merge the slices rather than ordering them.** Use `amend-paths` when a
+   seeded plan missed an out-of-lane path and the slice is still unmerged. A large merged slice is the
+   right answer and a deadlocked pair is not; say so in `### Risks`, and note that such a slice may need
+   more than the default three attempts. Once a slice has merged, neither route is available.
 
-   mimir 1410 lost a run this way with seven of ten slices merged. `evidence-routing` changed
-   `observe_evidence` to an async SafeGit-only interface; sixteen existing orchestrator and reattach tests
-   called the old one; only the dependent `orchestrator-publication` slice owned those callers and
-   fixtures; and it could not be dispatched while `evidence-routing` was blocked.
+   Two behaviours are worth repeating when a slice hits this anyway. Block after the first attempt once
+   the situation is structural — burning the retry budget re-deriving the same deadlock buys nothing. And
+   do not take an in-lane fallback that makes the suite green by restoring behaviour the story forbids; a
+   green suite bought that way is the false green the plan exists to avoid.
 
-   **If you cannot satisfy this, merge the two slices rather than ordering them.** A large merged slice is
-   the right answer and a deadlocked pair is not. Say so in `### Risks` when you merge for this reason,
-   and note that a merged slice of that size may need more than the default three attempts.
-
-   Two behaviours from that run are worth repeating when this happens anyway. Block after the first
-   attempt once the situation is structural — burning the retry budget re-deriving the same deadlock buys
-   nothing. And do not take an in-lane compatibility fallback that makes the suite green by restoring the
-   behaviour the story forbids; a green suite bought that way is the false green the plan exists to avoid.
 
 ## Working style
 
