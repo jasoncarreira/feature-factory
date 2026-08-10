@@ -332,6 +332,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // nothing can enforce it. Each fragment sits on one line in the raw markdown.
     for (const [agent, fragment] of [
       ["work-decomposer", "A slice must be able to make its ratified `test_plan` green using only the paths it owns."],
+      ["work-decomposer", "`observe` executes each ratified command as argv with no shell"],
         ["work-decomposer", "The trigger is invalidation, not change."],
         ["work-decomposer", "Moving a repo-wide rule whose inventory another slice owns."],
       ["work-decomposer", "If you cannot satisfy it, merge the slices rather than ordering them."],
@@ -767,7 +768,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // `.git` relocated outside the sandbox. Thirteen lines re-prove containment after bootstrap and
     // again as the publication final guard, closing a path that published `run.json` for a
     // repository whose Git administration had left S.
-    assert.equal(total, 3918, "issue #261 with repository PR draft policy lands at 3918 production lines");
+    // 3918 -> 3966 for run 276: seed admission rejects commands observe cannot execute as argv.
+    assert.equal(total, 3966, "run 276 with seed test-command admission lands at 3966 production lines");
     assert.ok(total <= 4000, `production source is ${total} lines; the tripwire is 4000`);
   });
 
