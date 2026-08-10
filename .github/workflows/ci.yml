@@ -17,9 +17,19 @@ jobs:
     runs-on: ubuntu-latest
     # No sharding. The 4-way size-balanced shard runner existed because the old suite was
     # 2,322 tests across 116k lines and child-process heavy. All packages together are now
-    # 99 tests and run in well under a minute, so a shard matrix would be four times the
-    # setup cost to parallelise something that is no longer slow.
-    timeout-minutes: 5
+    # 234 tests across the three workspaces plus the packed-tarball check, and a shard matrix
+    # would be four times the setup cost to parallelise a job that is dominated by `npm ci`
+    # and two full runs of the factory suite rather than by any one slow test.
+    #
+    # The cap catches a hang; it is not a performance budget. At 5 minutes it had stopped doing
+    # the first job and started doing the second: measured legs run 4.00-4.73 min, so the margin
+    # was under 20 seconds and whichever leg drew a slower runner was killed after passing every
+    # test. PR #273 lost that coin flip with 171/51/7/5 green on both legs and `test (24)` killed
+    # at 5.11 min, which reads on the PR as a red suite caused by the change. A false red costs
+    # what a false green costs in the other direction: it blocks work for a reason that is not
+    # about the code. 15 gives roughly 3x headroom over the measured range while still ending a
+    # genuinely hung child process, which would otherwise sit until the 6-hour runner limit.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
