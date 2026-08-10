@@ -117,6 +117,7 @@ function assertExecutableTestPlan(slices, cwd, missingOnly = false) {
     const refused = tokens.find((token) => REFUSED_TEST_TOKENS.includes(token));
     if (refused) throw new Error(`${prefix}contains shell operator token ${JSON.stringify(refused)}`);
     const found = resolveSpawnExecutable(argv0, { cwd });
+    if (found.reason === "unsupported-platform") throw new Error(`${prefix}argv[0] resolution is POSIX-only and cannot predict this platform's shell-free spawn (${found.platform}); seeding refuses rather than admit a command observe may fail to run`);
     if (!found.ok) throw new Error(`${prefix}argv[0] ${JSON.stringify(argv0)} did not resolve to an executable via ${found.source} from repository cwd ${JSON.stringify(cwd)}`);
   }
 }

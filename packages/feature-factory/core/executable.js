@@ -2,11 +2,14 @@ import { accessSync, constants, statSync } from "node:fs";
 import { posix } from "node:path";
 
 // Resolves argv[0] the way observe's shell-free spawn does, so a passing seed check cannot be followed by a
-// spawn that fails for the same reason. POSIX only, deliberately: a first version approximated Windows
-// lookup and review was right that it did not match, and nothing else under `bin/`, `core/`, `state/` or
-// `observe/` references `win32` with CI on ubuntu -- there is no Windows spawn here to be equivalent to, and
-// a guard must not claim an equivalence it cannot establish.
+// spawn that fails for the same reason. POSIX only, and that boundary is enforced here rather than inferred:
+// a first version approximated Windows lookup and did not match it, and simply deleting the branch was worse
+// -- `observe` spawns cross-platform, nothing declares this package POSIX-only, so on Windows the check would
+// have split `PATH` on `:` and disagreed with the spawn it exists to predict. A guard that cannot establish
+// its claim must refuse, not guess.
 export function resolveSpawnExecutable(argv0, options = {}) {
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") return { ok: false, reason: "unsupported-platform", platform };
   const cwd = options.cwd ?? process.cwd(), env = options.env ?? process.env;
   const stat = options.stat ?? statSync, access = options.access ?? accessSync;
   const defaultPath = options.posixDefaultPath ?? "/usr/bin:/bin", direct = argv0.includes("/");

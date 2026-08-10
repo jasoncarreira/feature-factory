@@ -227,6 +227,14 @@ describe("end to end — a merge is refused through the real CLI", () => {
       ["missing relative direct", "./tool", { cwd: "/repo", env: {}, ...fakeFs({}) }, "its direct path"],
       ["missing absolute direct", "/tool", { cwd: "/repo", env: {}, ...fakeFs({}) }, "its direct path"],
     ]) assert.deepEqual(resolveSpawnExecutable(argv0, options), { ok: false, reason: "not-executable", source }, label);
+    // The POSIX-only boundary is executable, not inferred from Linux-only CI. Without this a Windows caller
+    // would get POSIX `PATH` splitting, and the check would disagree with the very spawn it exists to
+    // predict -- relocating the mismatch rather than removing it. Refusing is the only answer a guard may
+    // give when it cannot establish its claim; `assertExecutableTestPlan` turns this into a seed refusal.
+    for (const argv0 of ["tool", "./tool", "C:\\tools\\tool.exe"]) {
+      assert.deepEqual(resolveSpawnExecutable(argv0, { platform: "win32", cwd: "C:\\repo", env: { Path: "C:\\bin" } }),
+        { ok: false, reason: "unsupported-platform", platform: "win32" }, `win32 refuses ${argv0} rather than mis-resolving it`);
+    }
 
     const p = upToReview("clean");
     try {
