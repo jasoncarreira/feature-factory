@@ -768,8 +768,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // `.git` relocated outside the sandbox. Thirteen lines re-prove containment after bootstrap and
     // again as the publication final guard, closing a path that published `run.json` for a
     // repository whose Git administration had left S.
-    // 3918 -> 3968 for run 276: seed admission rejects commands observe cannot execute as argv.
-    assert.equal(total, 3968, "run 276 with seed test-command admission lands at 3968 production lines");
+    // 3918 -> 3966 for run 276: seed admission rejects commands observe cannot execute as argv.
+    assert.equal(total, 3966, "run 276 with seed test-command admission lands at 3966 production lines");
     assert.ok(total <= 4000, `production source is ${total} lines; the tripwire is 4000`);
   });
 

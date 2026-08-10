@@ -100,14 +100,16 @@ function planDigest(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
-const REFUSED_TEST_TOKENS = Object.freeze(["&&", "||", "$(", ";", "|", "&", "<", ">", "`", "'", '"', "\n"]);
-function assertExecutableTestPlan(slices, cwd) {
-  for (const slice of slices) for (const entry of slice.test_plan) {
+const REFUSED_TEST_TOKENS = Object.freeze(["&&", "||", ";", "|", "&", "<", ">", "`", "$(", "'", '"', "\n"]);
+function assertExecutableTestPlan(slices, cwd, missingOnly = false) {
+  for (const slice of slices) for (const entry of Array.isArray(slice.test_plan) ? slice.test_plan : []) {
+    if (typeof entry !== "string") continue;
     const prefix = `slice '${slice.id}' test_plan entry ${JSON.stringify(entry)} cannot be executed by observe as argv without a shell: `;
-    const refused = REFUSED_TEST_TOKENS.find((token) => entry.includes(token));
-    if (refused) throw new Error(`${prefix}contains refused token ${JSON.stringify(refused)}`);
     const argv0 = entry.split(" ").filter(Boolean)[0];
     if (!argv0) throw new Error(`${prefix}argv[0] is missing`);
+    if (missingOnly) continue;
+    const refused = REFUSED_TEST_TOKENS.find((token) => entry.includes(token));
+    if (refused) throw new Error(`${prefix}contains refused token ${JSON.stringify(refused)}`);
     const found = resolveSpawnExecutable(argv0, { cwd });
     if (!found.ok) throw new Error(`${prefix}argv[0] ${JSON.stringify(argv0)} did not resolve to an executable via ${found.source} from repository cwd ${JSON.stringify(cwd)}`);
   }
@@ -600,6 +602,7 @@ const HANDLERS = {
             merge_commit: null,
           })),
         };
+        assertExecutableTestPlan(candidate.slices, resolve(flags.repo ?? process.cwd()), true);
         validateRun(candidate);
         // Enforcement: refuse a ratified false green with no executable legal move.
         assertExecutableTestPlan(candidate.slices, resolve(flags.repo ?? process.cwd()));
