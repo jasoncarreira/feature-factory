@@ -4,6 +4,11 @@
   "description": "OpenCode integration for feature-factory: server plugin and sidebar. Reads run state; never writes it.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasoncarreira/feature-factory.git",
+    "directory": "packages/opencode-feature-factory"
+  },
   "main": "plugin/index.js",
   "exports": {
     ".": "./plugin/index.js",

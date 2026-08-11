@@ -4,6 +4,11 @@
   "description": "Durable, observed control plane for /feature runs. Host-agnostic: no opencode dependency.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasoncarreira/feature-factory.git",
+    "directory": "packages/feature-factory"
+  },
   "bin": {
     "factory": "bin/factory.js"
   },
