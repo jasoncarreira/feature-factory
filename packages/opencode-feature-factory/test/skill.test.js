@@ -56,7 +56,12 @@ describe("OpenCode skill adapter", () => {
       /immutable persisted mode, base, and retry budget/u,
       /inner maximal mode\/base\/retry-prefix\s+admission/u,
     ];
-    for (const contract of retryGrammar) assert.match(skill, contract);
+    const checkRetryContract = (text, contract) => assert.match(text, contract);
+    for (const contract of retryGrammar) checkRetryContract(skill, contract);
+    for (const contract of retryGrammar) {
+      const matchedPhrase = skill.match(contract)[0];
+      assert.throws(() => checkRetryContract(skill.replace(matchedPhrase, ""), contract));
+    }
     assert.deepEqual(bundledWorkflow, canonicalWorkflow);
     const workflow = bundledWorkflow.toString("utf8");
     const firstMatch = "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.";
