@@ -141,11 +141,13 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
       assert.equal(event.options.env.PATH, process.env.PATH);
     }
   };
-  const effectivePushProgram = (...args) => spawnSync(process.execPath, [cli, "effective-push", ...args], {
-    encoding: "utf8",
-    env: { ...process.env, LC_ALL: "C" },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const effectivePushProgram = (...args) => {
+    const env = { ...process.env, LC_ALL: "C" };
+    delete env.FORCE_COLOR;
+    return spawnSync(process.execPath, [cli, "effective-push", ...args], {
+      encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"],
+    });
+  };
   const arityMessage = "factory effective-push: expected exactly three positional arguments: <bootstrap|check> <operator-repository> <sandbox-repository>";
   const emptyMessage = "factory effective-push: positional arguments must be non-empty";
   const operationMessage = "factory effective-push: operation must be bootstrap or check";
