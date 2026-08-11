@@ -805,6 +805,20 @@ policy, a compatibility decision or explicit exclusion, and a mapped test. If th
 established from repository evidence, send it back for targeted research rather than treating one call
 site as representative of the class.
 
+Those markers are instances rather than the boundary. A criterion is class-wide when it **cannot be
+established by a bounded witness** — proving it means checking every in-scope member — which covers an
+absence ("no module constructs the runtime"), a preserved property ("behaviour remains unchanged") and a
+global capability ("the installed artifact works") even though none of them uses those words. An
+existential criterion is not class-wide: "a module constructs the runtime" is settled by one witness, and
+requiring a finite inventory for it is closed-world work nobody asked for. The direction of the
+quantifier is the test, not whether a set is unenumerated — both kinds quantify over sets that are not
+listed.
+
+This classification decides whether the inventory requirement and the reviewer's acceptance bar apply at
+all, so reading a universal claim as ordinary leaves both unreachable: with no list to finish against,
+review rejects at finer granularity each round and the step exhausts `max_retries` while the findings get
+smaller rather than fewer.
+
 ## Step 2 — Spec (reviewed)
 
 Run `spec-writer` with the approved story, research map, and design brief → the technical brief in

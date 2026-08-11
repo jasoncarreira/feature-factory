@@ -386,6 +386,25 @@ describe("ceiling — scope cannot grow without editing this file", () => {
         .map(([token]) => `${relative(pkg, path)} :: ${token}`));
     assert.deepEqual(agentPolicyOffenders, [], "shipped agent prose contains a prohibited vendor or operational tool identifier");
     const requiredAgentFragments = [
+      // Class-wide classification is what makes the finite-inventory requirement and the reviewer's
+      // acceptance bar apply, so the trigger has to be the property of the claim rather than four
+      // keywords. mimir #1423 spent four runs and zero slices on a criterion that quantified over an
+      // open set ("absence of a standalone-runtime path") using none of the words: nothing demanded a
+      // finite inventory, so review rejected at finer granularity every round. All three steps that
+      // act on the classification are pinned, because widening one alone would have the reviewer
+      // demand an inventory the researcher was never told to build.
+      // Paired on purpose. The first version of this widening said "its truth depends on a set the
+      // criterion does not enumerate", which is also true of an *existential* claim -- "a module
+      // constructs the runtime" quantifies over an open set and is settled by one witness. That would
+      // have imposed closed-world inventory work on ordinary requirements, so each agent pins the
+      // universal test *and* the existential exemption. Dropping either half lets the rule collapse
+      // back into "any unenumerated set", which over-triggers instead of under-triggering.
+      { name: "codebase-researcher", label: "class-wide test is bounded-witness", fragment: "cannot be established by a bounded witness" },
+      { name: "codebase-researcher", label: "existential claims are exempt", fragment: "An **existential** criterion is not class-wide" },
+      { name: "spec-writer", label: "class-wide test is bounded-witness", fragment: "cannot be established by a bounded witness" },
+      { name: "spec-writer", label: "existential claims are exempt", fragment: "An existential criterion is not class-wide and needs no inventory" },
+      { name: "work-reviewer", label: "class-wide test is bounded-witness", fragment: "cannot be established by a bounded witness" },
+      { name: "work-reviewer", label: "existential claims are exempt", fragment: "An existential claim is the opposite and must **not** be treated as class-wide" },
       { name: "backend-builder", label: "current backend commit-template field", fragment: "<issue_key>: <imperative backend summary>" },
       { name: "backend-builder", label: "backend no-key fallback", fragment: "If no issue key yet, use a short imperative subject" },
       { name: "backend-builder", label: "backend delivery ownership", fragment: "Do **not** push or open a PR" },
