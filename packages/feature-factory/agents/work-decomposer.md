@@ -77,7 +77,7 @@ a re-read rather than a run.
    quietly working around the rule.
    Flag each hotspot you serialized so the orchestrator and human see why parallelism was limited.
 4. **Every AC maps to a slice.** No orphan criteria; no slice without at least one AC.
-4b. **No slice carries them all.** Where the plan has more than one slice, none may claim the entire acceptance set. Coverage and concentration are different properties, and only coverage was ever checked: a plan whose first slice claims every criterion satisfies rule 4 perfectly and is not a decomposition. A slice must be reviewable on its own — if rejecting it would read as "N categories of behaviour are still missing" rather than naming specific defects, it is too large and must be split before seeding. A genuinely small feature may still be one slice; this is about a slice that hoards while siblings exist.
+4b. **No oversized catch-all slice.** Where the plan has more than one slice, none may claim the entire acceptance set: coverage and concentration are different properties, and only coverage was ever checked — a plan whose first slice claims every criterion satisfies rule 4 perfectly and is not a decomposition. **Separately, and with no condition on how many slices exist, every slice — including the only slice of a one-slice plan — must be reviewable as one complete implementation unit.** If a likely rejection would say that whole categories of required behaviour remain unimplemented, rather than naming specific defects, the slice is too large and must be split before seeding. Path and AC counts are warning signs and not the test: a count threshold would buy proof-only or arbitrary file-split slices, which is the opposite failure. **A one-slice plan is permitted only when you fill `### Single-slice justification`** — name the plausible semantic boundaries you considered and say why splitting them would create artificial proof-only work, illegal path or test ownership, or inseparable implementation. That the brief presents one closed inventory is not a reason. A genuinely small change satisfies this in two sentences; the requirement is that you say why, not that you split.
 5. **Keep slices coherent.** A slice is one layer-consistent chunk (e.g. "entity + repository", "api handler + projection", "list component + its data op"), not an arbitrary file split.
 6. **A slice must be able to make its ratified `test_plan` green using only the paths it owns.** This is
    one invariant with several faces, and it is the only rule in this list whose violation admits *no legal
@@ -175,8 +175,14 @@ Return this as your final message (consumed by the orchestrator; it writes `plan
 - ACs: AC1→be-entity, AC2→be-resolver, ... (every AC mapped)
 - Unmapped ACs: <none | list — this is a blocker, flag it>
 
+### Single-slice justification
+- <n/a — the plan has more than one slice | the semantic boundaries you considered, and why splitting them
+  would create artificial proof-only work, illegal path/test ownership, or inseparable implementation>
+
 ### Risks
 - <serialized parallelism cost, ambiguous dependency, single-slice giant — or none>
 ```
 
-If the brief genuinely can't be sliced (one indivisible change), say so and emit a single slice — don't invent artificial splits. If an AC has no home in any slice, flag it rather than silently dropping it.
+A one-indivisible-change brief still yields a single slice — don't invent artificial splits — but rule 4b's
+`### Single-slice justification` is how you say so, and it asks which boundaries you rejected rather than only
+that you rejected them. If an AC has no home in any slice, flag it rather than silently dropping it.

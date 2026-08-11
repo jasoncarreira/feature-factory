@@ -399,6 +399,19 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // have imposed closed-world inventory work on ordinary requirements, so each agent pins the
       // universal test *and* the existential exemption. Dropping either half lets the rule collapse
       // back into "any unenumerated set", which over-triggers instead of under-triggering.
+      // Rule 4b could not reject an oversized *single-slice* plan: its concentration sentence was guarded by
+      // "where the plan has more than one slice" and its exemption said a small feature may still be one
+      // slice. Three monoliths exploited that -- 1423 at 30 paths/22 ACs, then 25/17 and 48/12 -- and the
+      // last two seeded after briefs began carrying closed inventories. Deleting both clauses was rejected
+      // in review: it would leave "none may claim the entire acceptance set" applying to a lone slice, which
+      // no one-slice plan can satisfy, imposing a structural minimum of two slices. So the reviewability test
+      // is unconditional and the one-slice escape survives but must be *argued*. All four fragments are
+      // pinned: the universal test, the justification requirement, the reviewer's blocker, and the
+      // over-rejection guard that keeps a genuinely small change to one slice.
+      { name: "work-decomposer", label: "reviewability applies to a one-slice plan", fragment: "including the only slice of a" },
+      { name: "work-decomposer", label: "one-slice plans must be argued", fragment: "That the brief presents one closed inventory is not a reason." },
+      { name: "work-reviewer", label: "unsupported one-slice justification blocks", fragment: "closed inventory, is a BLOCKER" },
+      { name: "work-reviewer", label: "small changes are not forced to split", fragment: "is a stated reason, not a minimum slice count" },
       { name: "codebase-researcher", label: "class-wide test is bounded-witness", fragment: "cannot be established by a bounded witness" },
       { name: "codebase-researcher", label: "existential claims are exempt", fragment: "An **existential** criterion is not class-wide" },
       { name: "spec-writer", label: "class-wide test is bounded-witness", fragment: "cannot be established by a bounded witness" },
