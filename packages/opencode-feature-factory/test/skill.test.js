@@ -34,6 +34,34 @@ describe("OpenCode skill adapter", () => {
       /for\s+no-base input, omit `--pr-base` without changing the preserved request suffix or other effects/u,
     ];
     for (const contract of grammar) assert.match(skill, contract);
+    const retryGrammar = [
+      /\[--max-retries <n>\] <ticket key \| feature idea>/u,
+      /\[--max-retries <n>\] <ticket key \| issue reference \| feature idea>/u,
+      /\[--max-retries <n>\] <request>/u,
+      /at most\s+one exact two-token `--max-retries <n>` pair in any order/u,
+      /exact standalone case-sensitive token `--max-retries`/u,
+      /Preserve `--max-retries=3`, `--MAX-RETRIES 3`, `--max-retries! 3`, and `request --max-retries 3` as request bytes\./u,
+      /missing value for --max-retries; no run created\./u,
+      /repeated --max-retries; no run created\./u,
+      /repetition wins even when the first retry value is invalid/u,
+      /admitted retry option but no request reaches that same missing-request refusal before numeric validation/u,
+      /All retry refusals\s+precede run-id allocation, config effects, context lookup, state reads, tool calls, and factory invocation/u,
+      /complete token matches\s+ASCII `\[0-9\]\+` and its numeric value is from 1 through 9007199254740991 inclusive/u,
+      /Accept `1`, `003`, and\s+`9007199254740991`/u,
+      /reject `0`, `000`, `-1`, `\+1`, `1\.0`, `1e2`, embedded whitespace, non-ASCII digits,\s+and `9007199254740992`/u,
+      /--max-retries must be a positive integer; no run created\./u,
+      /supplied retry token unchanged only as `factory init --max-retries <n>`/u,
+      /when retry is absent,\s+omit the complete `--max-retries` argv pair/u,
+      /`run\.json\.max_retries`, so forwarded `003` persists as `3`/u,
+      /immutable persisted mode, base, and retry budget/u,
+      /inner maximal mode\/base\/retry-prefix\s+admission/u,
+    ];
+    const checkRetryContract = (text, contract) => assert.match(text, contract);
+    for (const contract of retryGrammar) checkRetryContract(skill, contract);
+    for (const contract of retryGrammar) {
+      const matchedPhrase = skill.match(contract)[0];
+      assert.throws(() => checkRetryContract(skill.replace(matchedPhrase, ""), contract));
+    }
     assert.deepEqual(bundledWorkflow, canonicalWorkflow);
     const workflow = bundledWorkflow.toString("utf8");
     const firstMatch = "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.";

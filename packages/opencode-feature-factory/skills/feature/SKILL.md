@@ -6,10 +6,10 @@ description: >
   three approval gates and ending in a draft PR. State is durable (a per-run manifest on disk,
   written only by the `factory` CLI), evidence is observed rather than trusted from agent prose,
   high-risk steps are reviewed, and independent slices build in parallel. The compatibility shorthand
-  remains `/feature [--autonomous | --headless] [--base <branch>] <ticket key | feature idea>`.
+  remains `/feature [--autonomous | --headless] [--base <branch>] [--max-retries <n>] <ticket key | feature idea>`.
   The complete foreground intake is
-  `/feature [--autonomous | --headless] [--base <branch>] <ticket key | issue reference | feature idea>`; use
-  `/feature --background [--autonomous | --headless] [--base <branch>] <request>` for a dedicated host session.
+  `/feature [--autonomous | --headless] [--base <branch>] [--max-retries <n>] <ticket key | issue reference | feature idea>`; use
+  `/feature --background [--autonomous | --headless] [--base <branch>] [--max-retries <n>] <request>` for a dedicated host session.
 ---
 
 # /feature — OpenCode adapter
@@ -45,11 +45,30 @@ the suffix beginning there byte-for-byte for ticket detection, story or design c
 and run-id derivation. `--base=x`, case or punctuation variants, and `--base` after the first request
 token are request content.
 
+The same prefix may contain at most one exact two-token `--max-retries <n>` pair in any order with mode
+and base options. Consume its span and separator under the same suffix-preservation rule.
+
+Recognize retry only as the exact standalone case-sensitive token `--max-retries`. Assignment forms,
+case or punctuation variants, and `--max-retries` after the first request token are request content.
+Preserve `--max-retries=3`, `--MAX-RETRIES 3`, `--max-retries! 3`, and `request --max-retries 3` as request bytes.
+
 A prefix `--base` without a value returns exactly `missing value for --base; no run created.` A second
 prefix occurrence returns exactly `repeated --base; no run created.` Both refusals precede all effects.
 Duplicate copies of one mode remain idempotent. Both distinct modes return exactly
 `conflicting mode flags: --autonomous and --headless; choose one`. A prefix containing only admitted
-mode/base options reaches the existing placement-specific missing-request refusal.
+mode/base options reaches the existing placement-specific missing-request refusal. A prefix with an
+admitted retry option but no request reaches that same missing-request refusal before numeric validation.
+
+A prefix `--max-retries` without a value returns exactly `missing value for --max-retries; no run created.`
+A second prefix pair returns exactly `repeated --max-retries; no run created.` Structural refusals precede
+numeric validation, so repetition wins even when the first retry value is invalid. All retry refusals
+precede run-id allocation, config effects, context lookup, state reads, tool calls, and factory invocation.
+
+After structural and missing-request checks, accept a retry value only when its complete token matches
+ASCII `[0-9]+` and its numeric value is from 1 through 9007199254740991 inclusive. Accept `1`, `003`, and
+`9007199254740991`; reject `0`, `000`, `-1`, `+1`, `1.0`, `1e2`, embedded whitespace, non-ASCII digits,
+and `9007199254740992`. An invalid value returns exactly
+`--max-retries must be a positive integer; no run created.`
 
 For a consumed base, validate the exact value with `git check-ref-format --branch <value>` and require
 `git show-ref --verify --quiet refs/heads/<value>` in the canonical local operator repository to exit
@@ -58,9 +77,14 @@ tool calls, or factory invocation. Refuse invalid syntax, an absent exact local 
 failure without creating a run. Pass the unchanged value only as `factory init --pr-base <value>`; for
 no-base input, omit `--pr-base` without changing the preserved request suffix or other effects.
 
+Pass a supplied retry token unchanged only as `factory init --max-retries <n>`; when retry is absent,
+omit the complete `--max-retries` argv pair. A new manifest persists the supplied numeric value as
+`run.json.max_retries`, so forwarded `003` persists as `3`.
+
 For a new manifest, `--autonomous` maps only to `factory init --mode autonomous`, `--headless` maps only
 to `factory init --mode headless`, and no admitted mode omits `--mode`. An existing manifest always
-resumes its immutable persisted mode and base. Invocation options never reinitialize or mutate it.
+resumes its immutable persisted mode, base, and retry budget. Invocation options never reinitialize or
+mutate it.
 
 ## Operating modes
 
@@ -95,7 +119,7 @@ uncertainty, or any new manifest key or state file.
 
 The dedicated background session receives a bounded control part followed by the unchanged inner
 request produced by outer admission as a separate text part.
-The `run-orchestrator` applies only the inner maximal mode-prefix
+The `run-orchestrator` applies only the inner maximal mode/base/retry-prefix
 admission and shared derivation before its first `factory` command. It never repeats outer background
 placement admission on the forwarded inner request, so an inner second `--background` remains request
 content. It requires the derived result to equal the expected canonical run ID in the control part. A

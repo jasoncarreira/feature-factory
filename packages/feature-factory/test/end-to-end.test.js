@@ -24,8 +24,10 @@ const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" 
 // Runs the CLI out of process so the assertion is against the real entry point,
 // including argument parsing, rather than against an imported handler.
 function factory(repo, args, { env = process.env } = {}) {
+  const childEnv = { ...env };
+  delete childEnv.FORCE_COLOR;
   try {
-    const stdout = execFileSync("node", [CLI, ...args, "--repo", repo, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env });
+    const stdout = execFileSync("node", [CLI, ...args, "--repo", repo, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: childEnv });
     return { ok: true, out: JSON.parse(stdout) };
   } catch (error) {
     return { ok: false, stderr: String(error.stderr ?? error.message) };
