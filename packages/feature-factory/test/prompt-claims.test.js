@@ -337,6 +337,29 @@ const PUBLICATION_CLAIMS = PUBLICATION_FIXTURES.map(([id, issueKey, title, body,
 const CLAIMS = [
   ...PUBLICATION_CLAIMS,
   {
+    // Step 4's prose promised the opposite of what Gate 3 enforces: "the slices that did merge still reach a
+    // PR instead of being discarded", while the pre_pr approval refuses unless *every* slice is `merged`. A
+    // real run followed the enforced half -- mimir 1423 went `partial` with three merged slices and published
+    // nothing -- and the prose was read as evidence that a correct run had a defect. Prose asserting what the
+    // CLI permits, wrongly, is exactly the class this file exists for, so the corrected sentence is pinned to
+    // the refusal that makes it true.
+    id: "partial-is-surfaced-not-published",
+    file: "WORKFLOW.md",
+    fragment: "A `partial` run is **surfaced, not published**",
+    expect: "refused",
+    matches: /every slice/u,
+    act(repo) {
+      const { repository } = seeded(repo);
+      // A seeded-but-unmerged slice is the same shape a partial run reaches: work exists, the plan did not
+      // finish. Approving pre_pr is the transition that authorizes publication, so its refusal here is the
+      // mechanism the prose now describes. The gate is opened pending first, or the refusal would be about
+      // gate sequencing rather than about the unmerged slice, and story is approved because the refusal
+      // order checks gates before slices -- reaching the slice check is the whole point of this claim.
+      assert.equal(decide(repository, "story", "approved").ok, true);
+      return decide(repository, "pre_pr", "approved");
+    },
+  },
+  {
     id: "no-amend-and-reseed",
     file: "agents/work-decomposer.md",
     fragment: "`factory slices-seed` refuses a second seed",
