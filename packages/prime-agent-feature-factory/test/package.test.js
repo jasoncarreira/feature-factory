@@ -50,6 +50,39 @@ describe("Prime package contract", () => {
       /for no-base\s+input, omit `--pr-base` without changing the preserved request suffix or other effects/u,
     ];
     for (const contract of grammar) assert.match(skill, contract);
+    const retryGrammar = [
+      ["retry-syntax", /\[--max-retries <n>\] <request>/u],
+      ["retry-two-token", /at most one exact two-token `--max-retries <n>` pair/u],
+      ["retry-prefix-order", /with mode and base in either order and\s+retry in any position/u],
+      ["retry-request-variants", /`--max-retries=3`, `--Max-Retries 3`, and `--max-retries! 3`/u],
+      ["retry-later-request", /exact\s+`--max-retries` after the first request token, are request content/u],
+      ["retry-missing", /missing\s+value for --max-retries; no run created\./u],
+      ["retry-repeated", /repeated --max-retries; no run created\./u],
+      ["retry-repeat-precedence", /repetition wins even\s+when the first retry value is invalid/u],
+      ["retry-options-only", /prefix containing only admitted mode, base, and retry options reaches exactly\s+`missing \/feature request; no run created\.` before retry numeric validation/u],
+      ["retry-ascii-range", /full token matches ASCII `\[0-9\]\+` and its\s+mathematical value is from 1 through `9007199254740991`/u],
+      ["retry-valid-examples", /`1`, `003`, and `9007199254740991` are\s+accepted/u],
+      ["retry-invalid-examples", /`0`, `000`, `-1`, `\+1`, `1\.0`, `1e2`, embedded whitespace, non-ASCII digits, and\s+`9007199254740992`/u],
+      ["retry-invalid-refusal", /--max-retries must be a positive integer; no run created\./u],
+      ["retry-forward", /supplied retry token unchanged only as `factory init --max-retries <n>`/u],
+      ["retry-persistence", /persists it\s+numerically as `max_retries` in `run\.json`, so `003` persists as `3`/u],
+      ["retry-absent", /retry is absent, omit the entire\s+`--max-retries <n>` argv pair/u],
+      ["preflight-order", /closed pre-context order:\s+canonical workflow load; placement rejection; full-prefix mode, base, and retry structural checks;\s+missing request; retry numeric validation; then base syntax and local-ref validation/u],
+      ["refusal-skips-context", /Every admission refusal\s+skips `feature_factory_context` and precedes run-id allocation, configuration, state reads, dispatch, and every\s+factory invocation/u],
+      ["one-context-call", /Only after successful admission, call `feature_factory_context` exactly once/u],
+      ["context-validation-before-effects", /Require its returned\s+`sessionId`, `agents`, and `cli` to be non-empty strings and require the agent directory and CLI path to\s+be readable before resolver or configuration work, state reads, dispatch, or any factory effect/u],
+    ];
+    const checkRetryGrammar = (text) => {
+      for (const [label, contract] of retryGrammar) {
+        if (!contract.test(text)) throw new Error(label);
+      }
+    };
+    checkRetryGrammar(skill);
+    for (const [label, contract] of retryGrammar) {
+      const match = skill.match(contract);
+      assert.throws(() => checkRetryGrammar(skill.replace(match[0], "")), new RegExp(label, "u"));
+    }
+    assert.ok(skill.indexOf("This is the closed pre-context order:") < skill.indexOf("Only after successful admission"));
     assert.equal(workflow, canonicalWorkflow);
     const firstMatch = "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.";
     const noOp = "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.";
