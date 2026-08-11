@@ -223,7 +223,7 @@ Publishing-identity verification is enforcement because it prevents false-green 
 publication. Credential provisioning and helper setup are instruction only. Existing push,
 `gh pr create`, `factory pr`, Gate 3, merge, and approval semantics remain unchanged. The live config
 is not part of this package and no generated config or resolver asset is shipped. See the repository's
-[operator guide](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/OPERATING.md) for the
+[operator guide](https://github.com/jasoncarreira/feature-factory/blob/main/OPERATING.md) for the
 shared inherited-token helper recipe; it does not acquire, store, install, or repair credentials.
 
 ## Effective push target
@@ -270,7 +270,7 @@ and is the same function `factory status` uses — so a display cannot disagree 
 
 The write path is deliberately not exported. Changing state means calling the CLI.
 
-See the [repository](https://github.com/jasoncarreira/opencode-feature-factory) for the full command
+See the [repository](https://github.com/jasoncarreira/feature-factory) for the full command
 reference and design notes.
 
 ## License

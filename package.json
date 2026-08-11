@@ -10,12 +10,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jasoncarreira/opencode-feature-factory.git"
+    "url": "git+https://github.com/jasoncarreira/feature-factory.git"
   },
   "bugs": {
-    "url": "https://github.com/jasoncarreira/opencode-feature-factory/issues"
+    "url": "https://github.com/jasoncarreira/feature-factory/issues"
   },
-  "homepage": "https://github.com/jasoncarreira/opencode-feature-factory#readme",
+  "homepage": "https://github.com/jasoncarreira/feature-factory#readme",
   "scripts": {
     "test": "npm run test:packages && npm run test:pack",
     "test:ci": "npm ci && npm test",

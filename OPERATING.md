@@ -101,7 +101,7 @@ factory config entry 'resolve' failed for reference <reference>; exit status una
 An absent config file means no resolver is declared, and nothing is recognized or fetched: the skill
 carries no tracker grammar and no fetch command. Reference intake exists only where a repository declares
 it. **This repository declares its own**, in a committed `.factory.json`, so `205`, `#205`, and
-`https://github.com/jasoncarreira/opencode-feature-factory/issues/205` still select run `205` — through
+`https://github.com/jasoncarreira/feature-factory/issues/205` still select run `205` — through
 that declaration rather than through anything built in. A repository without one can still start a run
 from free text; it just cannot start one from a reference.
 

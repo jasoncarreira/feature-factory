@@ -4,6 +4,11 @@
   "description": "Prime Agent integration for feature-factory: /feature command and Prime delegation adapter.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasoncarreira/feature-factory.git",
+    "directory": "packages/prime-agent-feature-factory"
+  },
   "keywords": [
     "pi-package",
     "prime-agent",

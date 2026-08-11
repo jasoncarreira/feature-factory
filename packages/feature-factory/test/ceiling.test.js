@@ -808,7 +808,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // authorized. Recorded rather than trimmed: what remains is the comment saying which kind of check this
     // is and the platform refusal itself, and cutting either to satisfy an assertion is the trade this file
     // exists to prevent. The 4000 tripwire below is the only cap and is untouched.
-    assert.equal(total, 3976, "run 276 with seed test-command admission lands at 3976 production lines");
+    // 3981: five of these lines are the `repository` field added to this package's manifest after the
+    // GitHub repo was renamed to `feature-factory`. The ledger counts `.json`, so package metadata lands
+    // here alongside code. npm freezes metadata per published version, which is why the field goes in
+    // before a first publish rather than after.
+    assert.equal(total, 3981, "the repo-rename reference sweep lands at 3981 production lines");
     assert.ok(total <= 4000, `production source is ${total} lines; the tripwire is 4000`);
   });
 
