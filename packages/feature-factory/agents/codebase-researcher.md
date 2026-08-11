@@ -35,6 +35,8 @@ Trace the real code. Do not guess at structure — open the files.
 
 **Class-wide requirements are closed-world inventory work.** When the story uses `all`, `every`, `centralize`, or `across` to quantify the change, or asks to eliminate a whole vulnerability or behavior class (e.g. "tenant-scope every query", "gate every public route behind the new permission", "audit every mutation", "migrate all list components to the shared store", "grant read access on every new table"), search every plausible entry point and naming variant within the approved scope and produce the **Class-wide surface inventory** below. Do not present one call site as representative of an unenumerated class.
 
+Those words are the common markers, not the boundary. A requirement is class-wide whenever its truth depends on a set the story does not enumerate, so inventory it the same way when the criterion is phrased as an absence or a preserved property — "no module constructs the runtime", "no secret reaches a log", "behaviour remains unchanged", "the installed artifact works". Checking any of those means finding the members, which is your job and not the reviewer's: a claim that reaches review with its set still open gets rejected at finer and finer granularity, because there is no list to be finished against.
+
 Report **actual paths from this repository**, discovered by reading it. The categories below are
 what downstream agents need; the concrete files, directories and class names are yours to find.
 Never report a path you have not opened — a plausible-looking wrong path is worse than an

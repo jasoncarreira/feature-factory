@@ -386,6 +386,16 @@ describe("ceiling — scope cannot grow without editing this file", () => {
         .map(([token]) => `${relative(pkg, path)} :: ${token}`));
     assert.deepEqual(agentPolicyOffenders, [], "shipped agent prose contains a prohibited vendor or operational tool identifier");
     const requiredAgentFragments = [
+      // Class-wide classification is what makes the finite-inventory requirement and the reviewer's
+      // acceptance bar apply, so the trigger has to be the property of the claim rather than four
+      // keywords. mimir #1423 spent four runs and zero slices on a criterion that quantified over an
+      // open set ("absence of a standalone-runtime path") using none of the words: nothing demanded a
+      // finite inventory, so review rejected at finer granularity every round. All three steps that
+      // act on the classification are pinned, because widening one alone would have the reviewer
+      // demand an inventory the researcher was never told to build.
+      { name: "codebase-researcher", label: "class-wide trigger is the claim, not the keywords", fragment: "Those words are the common markers, not the boundary." },
+      { name: "spec-writer", label: "class-wide is a property of the claim", fragment: "Class-wide is a property of the claim rather than its wording" },
+      { name: "work-reviewer", label: "class-wide includes unenumerated sets", fragment: "the words are instances and not the test" },
       { name: "backend-builder", label: "current backend commit-template field", fragment: "<issue_key>: <imperative backend summary>" },
       { name: "backend-builder", label: "backend no-key fallback", fragment: "If no issue key yet, use a short imperative subject" },
       { name: "backend-builder", label: "backend delivery ownership", fragment: "Do **not** push or open a PR" },

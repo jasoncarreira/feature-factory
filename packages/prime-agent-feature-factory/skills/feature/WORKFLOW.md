@@ -805,6 +805,15 @@ policy, a compatibility decision or explicit exclusion, and a mapped test. If th
 established from repository evidence, send it back for targeted research rather than treating one call
 site as representative of the class.
 
+Those markers are instances rather than the boundary. A criterion is class-wide whenever its truth
+depends on a set it does not enumerate — an absence ("no module constructs the runtime"), a preserved
+property ("behaviour remains unchanged"), or a global capability ("the installed artifact works") — and
+requires the same finite inventory even though it uses none of those words. This classification decides
+whether the inventory requirement and the reviewer's acceptance bar apply at all, so reading such a
+claim as ordinary leaves both unreachable: with no list to finish against, review rejects at finer
+granularity each round and the step exhausts `max_retries` while the findings get smaller rather than
+fewer.
+
 ## Step 2 — Spec (reviewed)
 
 Run `spec-writer` with the approved story, research map, and design brief → the technical brief in
