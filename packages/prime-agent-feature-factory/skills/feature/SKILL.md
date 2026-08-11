@@ -21,35 +21,59 @@ inspecting intake or running any `factory` command:
    observation requirements, lock discipline, crash recovery, and terminal handoff exactly.
 3. Apply the Prime bindings below wherever the canonical text describes host-specific dispatch.
 
-Call the extension tool `feature_factory_context` once. Require its returned `sessionId`, `agents`, and `cli`
-to be non-empty strings and require the agent directory to be readable. If `WORKFLOW.md` is unreadable,
-the tool is absent, any value is invalid or the CLI path is unreadable, or RLM subagents
-are unavailable, stop before creating or changing a run. Explain that the complete
+After loading the canonical workflow, perform only the bounded admission preflight below before calling
+`feature_factory_context`. This exception permits no other intake inspection before the context call.
+
+The Prime adapter supports foreground `/feature [--autonomous | --headless] [--base <branch>]
+[--max-retries <n>] <request>` invocations. First, before any other admission check, ignore leading
+whitespace only to locate the first token and reject an exact case-sensitive first `--background`;
+assignment, case, punctuation, and later variants remain request content. Prime never allocates a
+background owner or applies OpenCode placement consumption.
+
+After that placement check, scan the full maximal leading option prefix. It may contain exact
+case-sensitive `--autonomous` and `--headless` mode tokens, at most one exact two-token `--base <value>`
+pair, and at most one exact two-token `--max-retries <n>` pair, with mode and base in either order and
+retry in any position. Consume only those admitted option spans and their separators. Preserve the suffix
+beginning with the first request token byte-for-byte for later resolver, ticket or story content, and
+run-id derivation. Assignment, case, and punctuation variants such as
+`--max-retries=3`, `--Max-Retries 3`, and `--max-retries! 3`, plus an exact
+`--max-retries` after the first request token, are request content. Existing `--base=x`, case and punctuation variants,
+and any `--base` after the first request token are request content.
+
+Complete the structural checks across that full prefix before value validation. A prefix `--base` or
+`--max-retries` without a value returns exactly `missing value for --base; no run created.` or `missing
+value for --max-retries; no run created.`, respectively. A second prefix pair returns exactly
+`repeated --base; no run created.` or `repeated --max-retries; no run created.`, respectively;
+repetition wins even when the first retry value is invalid. Duplicate copies of one mode are idempotent; both distinct modes
+return exactly `conflicting mode flags: --autonomous and --headless; choose one`.
+
+After structural checks, a prefix containing only admitted mode, base, and retry options reaches exactly
+`missing /feature request; no run created.` before retry numeric validation. With request content
+present, accept a consumed retry value only when the full token matches ASCII `[0-9]+` and its
+mathematical value is from 1 through `9007199254740991`. Thus `1`, `003`, and `9007199254740991` are
+accepted, while `0`, `000`, `-1`, `+1`, `1.0`, `1e2`, embedded whitespace, non-ASCII digits, and
+`9007199254740992` return exactly `--max-retries must be a positive integer; no run created.`
+
+After retry validation, validate a consumed base unchanged with `git check-ref-format --branch <value>`
+and require the exact local operator ref `refs/heads/<value>` through `git show-ref --verify --quiet`.
+Syntax, absence, and observation failures are effect-free refusals before those same effects. This is the
+closed pre-context order:
+canonical workflow load; placement rejection; full-prefix mode, base, and retry structural checks;
+missing request; retry numeric validation; then base syntax and local-ref validation. Every admission refusal
+skips `feature_factory_context` and precedes run-id allocation, configuration, state reads, dispatch, and every
+factory invocation.
+
+Only after successful admission, call `feature_factory_context` exactly once. Require its returned
+`sessionId`, `agents`, and `cli` to be non-empty strings and require the agent directory and CLI path to
+be readable before resolver or configuration work, state reads, dispatch, or any factory effect. If
+`WORKFLOW.md` is unreadable, the tool is absent, any returned value is invalid, or RLM subagents are
+unavailable, stop before creating or changing a run. Explain that the complete
 `prime-agent-feature-factory` package must be installed; never hand-write `run.json` as a fallback.
 
-The Prime adapter supports foreground `/feature [--autonomous | --headless] [--base <branch>] <request>`
-invocations. Before allocation, configuration, context lookup, state reads, or CLI effects, ignore
-leading whitespace only to locate the first token and reject an exact case-sensitive first
-`--background`; assignment, case, punctuation, and later variants remain request content. Prime never
-allocates a background owner or applies OpenCode placement consumption.
-
-After that placement check, scan the maximal leading option prefix. It may contain exact case-sensitive
-`--autonomous` and `--headless` mode tokens and at most one exact two-token `--base <value>` pair, with
-mode and base in either order. Consume only those option spans and their separators. Preserve the suffix
-beginning with the first request token byte-for-byte for resolver, ticket or story content, and run-id
-derivation. `--base=x`, case and punctuation variants, and any `--base` after the first request token
-are request content.
-
-A prefix `--base` without a value returns exactly `missing value for --base; no run created.` A second
-prefix occurrence returns exactly `repeated --base; no run created.` Duplicate copies of one mode are
-idempotent; both distinct modes return exactly `conflicting mode flags: --autonomous and --headless;
-choose one`. A prefix containing only admitted mode/base options reaches exactly `missing /feature
-request; no run created.` All these refusals precede run-id allocation, configuration, context lookup,
-state reads, and factory invocation. For a consumed base, validate the unchanged value with `git
-check-ref-format --branch <value>` and require exact local operator ref `refs/heads/<value>` through
-`git show-ref --verify --quiet` before those same effects. Syntax, absence, and observation failures are
-effect-free refusals. Pass the exact value only as `factory init --pr-base <value>` and, for no-base
-input, omit `--pr-base` without changing the preserved request suffix or other effects.
+Pass a supplied retry token unchanged only as `factory init --max-retries <n>`; the CLI persists it
+numerically as `max_retries` in `run.json`, so `003` persists as `3`. When retry is absent, omit the entire
+`--max-retries <n>` argv pair. Pass a supplied base unchanged only as `factory init --pr-base <value>` and,
+for no-base input, omit `--pr-base` without changing the preserved request suffix or other effects.
 
 ## Prime session ownership
 
