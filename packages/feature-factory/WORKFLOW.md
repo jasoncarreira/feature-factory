@@ -1142,7 +1142,10 @@ Per slice:
    runs in `SLICE_WORKTREE`, so a commit on the integration branch is invisible to the re-observation; and
    bringing that commit into the slice would put an out-of-lane test path in the observed diff, which the
    merge refuses. Mark the slice `blocked`, stop dispatching its dependents, and follow the wave rule below
-   — the slices that did merge still reach a PR instead of being discarded.
+   — the slices that did merge are retained on the integration branch in the retained sandbox
+   rather than discarded. A `partial` run is **surfaced, not published**: Gate 3 refuses the
+   approval that authorizes publication unless every slice is `merged`, so an operator decides
+   what to do with the merged work rather than a PR appearing for a plan that did not finish.
 
    **Never narrow the ratified command to get past this.** `factory observe` compares the raw supplied
    slice command with the persisted ratified entries before tokenization or execution and refuses a
