@@ -1105,9 +1105,17 @@ SLICE_WORKTREE = RECORDED_SLICE.worktree
 SLICE_BRANCH = RECORDED_SLICE.branch
 SLICE_BASE_REF = RECORDED_SLICE.base_ref
 SLICE_TEST_PLAN = RECORDED_SLICE.test_plan
+SLICE_ATTEMPT = RECORDED_SLICE.attempts
 ```
 
-Require the row status to be `running` or `review`, all three values to be non-null, `SLICE_BASE_REF` to
+`SLICE_ATTEMPT` is the only source for the attempt number, on a fresh activation as much as on a resume:
+the `factory slice … running` response reports the same persisted `attempts`, and nothing else may stand in
+for it. A driver that assumes "this is the first try" observes as attempt 1 while the row records 2, and the
+merge then refuses that evidence — `evidence '…' is for attempt 1, slice is at attempt 2` — after the build
+and the review have already been spent. It names the report and the `--attempt` argument below.
+
+Require the row status to be `running` or `review`, every bound value to be non-null, `SLICE_ATTEMPT` to be
+a positive integer, `SLICE_BASE_REF` to
 be a 40-character commit SHA, `SLICE_BRANCH` to equal `factory/R/<slice-id>`, and the physical
 `SLICE_WORKTREE` to equal `SLICE_ROOT/<slice-id>`. Require `git -C "$RUN_REPO" worktree list
 --porcelain` to associate that physical path with that exact branch. A pending slice requires both path
@@ -1131,7 +1139,7 @@ Per slice:
    ```sh
    CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
    $ factory observe "$R" "$SLICE_ID" --worktree "$SLICE_WORKTREE" --base "$SLICE_BASE_REF" \
-     [--test-cmd "$SLICE_TEST_COMMAND"] [--claim "$BUILDER_REPORT"] --repo "$RUN_REPO"
+     --attempt "$SLICE_ATTEMPT" [--test-cmd "$SLICE_TEST_COMMAND"] --claim "$BUILDER_REPORT" --repo "$RUN_REPO"
    ```
    `base_ref` is fixed when the slice is activated and cannot be changed afterwards — it is the branch
    point, a fact about the past. A slice that needs a different base is a new slice.
@@ -1147,16 +1155,18 @@ Per slice:
    unless its ratified `test_plan` is empty — the waiver comes from the plan, not from you.
 
    `BUILDER_REPORT` is a path and not the report. Write the builder's returned report to
-   `BUILDER_REPORT=".factory/$R/artifacts/$SLICE_ID-builder-attempt-$ATTEMPT.json"` and pass that path, which
-   keeps the report beside the run's other evidence instead of in argv. It holds `status`, `slice`,
+   `BUILDER_REPORT=".factory/$R/artifacts/$SLICE_ID-builder-attempt-$SLICE_ATTEMPT.json"` and pass that path,
+   which keeps the report beside the run's other evidence instead of in argv. It holds `status`, `slice`,
    `files_changed`, `commit`, `tests` with `cmd` and `exit`, and `blockers`; reconciliation compares `commit`,
    `files_changed`, `status` and `tests.exit`. **`--claim` resolves against `RUN_REPO`, unlike a gate
    `--artifact`, which is run-relative** — the two flags do not share a coordinate system. Passing the JSON
    itself is refused.
 
-   Omitting `--claim` is permitted and records `claimed: false` with no mismatches. Nothing then compares the
-   builder's own account of its commit, files and test result against the observation, so the disagreement
-   this step exists to surface cannot be surfaced. Supply it whenever the builder returned a report.
+   **This step requires `--claim`.** Every dispatched builder returns a report, so there is no builder
+   observation without one, and an observation that omits it records `claimed: false` and reconciles nothing —
+   a documented route straight past the mechanism this step exists to run. The CLI leaves the flag optional
+   because subjects with no builder exist: `test-verifier` and agent steps have no report to supply. That
+   latitude is theirs and not this step's.
 
    **When the ratified suite fails on something this slice may not touch.** An already-merged slice's
    test can assert what a later slice in the same plan must invalidate — a module's absence, an import that

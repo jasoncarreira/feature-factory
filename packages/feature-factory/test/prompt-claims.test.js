@@ -454,7 +454,7 @@ const CLAIMS = [
       const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
       // Written where the workflow says, and passed as the path the workflow says -- relative to RUN_REPO,
       // which for this file is exactly the documented `.factory/<run-id>/artifacts/...`.
-      const reference = join(".factory", RUN, "artifacts", `s1-builder-attempt-1.json`);
+      const reference = join(".factory", RUN, "artifacts", "s1-builder-attempt-1.json");
       writeFileSync(join(repository, reference), JSON.stringify({
         status: "completed", slice: "s1", files_changed: ["src/work.ts"],
         commit, tests: { cmd: PASSING_TEST_COMMAND, exit: 0 }, blockers: [],
@@ -488,6 +488,76 @@ const CLAIMS = [
       const evidence = JSON.parse(readFileSync(join(runDir, "evidence", "s1.json"), "utf8"));
       assert.equal(evidence.claim_reconciliation.claimed, true);
       assert.deepEqual(evidence.claim_reconciliation.mismatches.map((entry) => entry.field), ["commit", "tests.exit"]);
+      return result;
+    },
+  },
+  {
+    // The report path carries the attempt, so the attempt has to come from durable state. Ambient "this is
+    // the first try" is not merely untidy: the merge compares evidence.attempt to the persisted row and
+    // refuses the mismatch, so a driver that guesses spends a build and a review before finding out.
+    id: "the-attempt-comes-from-the-persisted-slice-row",
+    file: "WORKFLOW.md",
+    fragment: "SLICE_ATTEMPT = RECORDED_SLICE.attempts",
+    expect: "allowed",
+    matches: /review_ready: true/u,
+    act(repo) {
+      const { repository, runDir, base } = activateSlice(repo);
+      // A retry, recorded the way the CLI records one. From here the row says 2 and nothing else may.
+      const retried = factory(repository, ["slice", RUN, "s1", "running", "--attempts", "2",
+        "--worktree", ".", "--branch", "slice", "--now", NOW]);
+      assert.equal(retried.ok, true, retried.out);
+      const persisted = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"))
+        .slices.find((entry) => entry.id === "s1").attempts;
+      assert.equal(persisted, 2);
+
+      const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
+      const report = { status: "completed", slice: "s1", files_changed: ["src/work.ts"], commit, tests: { cmd: PASSING_TEST_COMMAND, exit: 0 }, blockers: [] };
+      const forAttempt = (attempt) => {
+        const reference = join(".factory", RUN, "artifacts", `s1-builder-attempt-${attempt}.json`);
+        writeFileSync(join(repository, reference), JSON.stringify(report));
+        return reference;
+      };
+
+      // Ambient state: the driver assumes attempt 1 and names its report accordingly. `observe` accepts it,
+      // which is exactly why the workflow has to bind the attempt -- the cost lands later, at the merge.
+      const ambient = factory(repository, ["observe", RUN, "s1", "--worktree", ".", "--base", base,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--claim", forAttempt(1), "--now", NOW]);
+      assert.equal(ambient.ok, true, ambient.out);
+      assert.equal(JSON.parse(readFileSync(join(runDir, "evidence", "s1.json"), "utf8")).attempt, 1);
+      // Bound as the workflow binds it, so the merge reaches the attempt comparison rather than refusing
+      // earlier for a missing evidence_ref.
+      assert.equal(factory(repository, ["slice", RUN, "s1", "review",
+        "--evidence-ref", "evidence/s1.json", "--now", NOW]).ok, true);
+      const merged = factory(repository, ["slice", RUN, "s1", "merged", "--merge-commit", commit, "--now", NOW]);
+      assert.equal(merged.ok, false, "evidence from a guessed attempt must not reach a merge");
+      assert.match(merged.out, /is for attempt 1, slice is at attempt 2/u);
+
+      // The persisted attempt, and its own report path. This is the documented spelling.
+      const result = factory(repository, ["observe", RUN, "s1", "--worktree", ".", "--base", base,
+        "--attempt", String(persisted), "--test-cmd", PASSING_TEST_COMMAND, "--claim", forAttempt(persisted), "--now", NOW]);
+      assert.equal(result.ok, true, result.out);
+      const evidence = JSON.parse(readFileSync(join(runDir, "evidence", "s1.json"), "utf8"));
+      assert.equal(evidence.attempt, 2);
+      assert.deepEqual(evidence.claim_reconciliation, { claimed: true, mismatches: [] });
+      return result;
+    },
+  },
+  {
+    // The distinction the requirement rests on: the builder step must supply a claim, while the CLI keeps the
+    // flag optional because `test-verifier` and agent steps have no builder report to supply. If the CLI ever
+    // required it globally, those subjects could not be observed at all.
+    id: "a-subject-with-no-builder-report-still-observes",
+    file: "WORKFLOW.md",
+    fragment: "**This step requires `--claim`.**",
+    expect: "allowed",
+    matches: /review_ready: true/u,
+    act(repo) {
+      const { repository, runDir, base } = activateSlice(repo);
+      const result = factory(repository, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", base,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW]);
+      assert.equal(result.ok, true, result.out);
+      const evidence = JSON.parse(readFileSync(join(runDir, "evidence", "test-verifier.json"), "utf8"));
+      assert.deepEqual(evidence.claim_reconciliation, { claimed: false, mismatches: [] });
       return result;
     },
   },
