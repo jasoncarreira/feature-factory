@@ -818,7 +818,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // an ENOENT discarded a slice that had already committed and observed green. Six of the seven lines are
     // the comment recording that this is instruction at the moment of failure and not enforcement: an
     // unreadable claim already refused, and only the message changes.
-    assert.equal(total, 3988, "the --claim path contract lands at 3988 production lines");
+    assert.equal(total, 3998, "the init ignore guard lands at 3998 production lines");
     assert.ok(total <= 4000, `production source is ${total} lines; the tripwire is 4000`);
   });
 
