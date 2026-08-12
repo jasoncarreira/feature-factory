@@ -36,6 +36,13 @@ Two principles make this a factory rather than a session workflow:
   `$REPO/.factory/<run-id>/`. A dead session or a next-day return resumes from it. You never
   hand-write `run.json` — every state change goes through a `factory` command, because a
   hand-written manifest is the single most reliable way to corrupt a run.
+
+  The executable is `factory`, and the host adapter names the exact one to invoke. Bind that single
+  invocation before the first command and use nothing else. **Never obtain the CLI from a package registry or
+  any other network fetch, and never fall back to fetching one when a command is not found.** A fetched CLI
+  can be a different generation of this tool with its own state store: it answers every question confidently,
+  about a run that is not the one being driven, while the real manifest sits untouched. That has happened. If
+  the named CLI is not readable, stop without effects rather than substituting another resolution.
 - **Observe, don't trust.** A subagent's report is a *claim*. Before accepting a build or test step
   you run `factory observe`, which re-derives the diff and re-runs the named tests itself and records
   what it saw. `work-reviewer` judges that record, never the prose.

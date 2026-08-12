@@ -206,11 +206,40 @@ export function createBackgroundTool(input = {}) {
   };
 }
 
-// The installed factory package's directory. Resolved through its one export rather than a
-// `./package.json` entry, so the factory's public surface stays a single module.
+// The installed factory package's directory and the CLI inside it. Resolved through its one export rather
+// than a `./package.json` entry, so the factory's public surface stays a single module.
+//
+// `cli` exists because a driver that has to find the CLI itself will find the wrong one. Resuming a run
+// through this adapter, a driver tried `feature-factory factory --help`, got `command not found` for the
+// package name, and escalated to `npx --package opencode-feature-factory` -- which fetched a version
+// published before the rename, with its own command set and its own state store. It initialized a fresh run
+// there and presented a gate for it while the real manifest sat untouched. The Prime adapter's
+// `factoryResources` has always named this path; this is the same thing, and the resolver is injectable for
+// the same reason: so a test can assert the exact path without depending on where the host installed it.
+export function factoryResources(resolve) {
+  // The literal `createRequire(import.meta.url).resolve("feature-factory")` shape appears exactly once,
+  // because the package boundary test admits exactly that one call and nothing else. Injecting the resolver
+  // as a default parameter looked tidier and tripped it -- correctly, since a defaulted resolver is a second
+  // way to reach the module system.
+  const entry = resolve ? resolve("feature-factory") : createRequire(import.meta.url).resolve("feature-factory");
+  const root = dirname(dirname(entry));
+  return { root, cli: join(root, "bin", "factory.js") };
+}
+
+// The one statement of how the CLI is invoked, composed after whatever prompt was selected. It is appended
+// rather than embedded because both agent prompts are overridable: a project or profile `prompt` replaces the
+// default wholesale, and an embedded binding would vanish with it -- reopening the command inference and
+// registry fetch this exists to close. Composed last, it survives every supported override.
+export function cliBinding(cli) {
+  return `Every \`factory\` command runs as \`node ${cli}\`, the CLI this adapter resolved and shipped against. `
+    + "Bind that one invocation before any factory command and use nothing else. Do not resolve `factory` from PATH, "
+    + "and never obtain the CLI with `npx`, `npm exec`, `pnpm dlx`, or `bunx`: a fetched CLI can be a different "
+    + "generation of this tool with its own state store, and it answers confidently about a run that is not this one. "
+    + "If that path is not readable, stop without effects rather than substituting another resolution.";
+}
+
 function factoryRoot() {
-  const resolved = createRequire(import.meta.url).resolve("feature-factory");
-  return dirname(dirname(resolved));
+  return factoryResources().root;
 }
 
 function integrationRoot() {
@@ -364,7 +393,6 @@ const RUN_ORCHESTRATOR = {
     "Map `stop` to `factory gate \"$R\" \"$GATE\" stop --repo \"$RUN_REPO\"`; require qualified status `next: stopped-at-gate:<GATE>`, await in-flight work, stop heartbeat calls, release this session with `factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"`, and verify it is unlocked. Return run, repository, `Outcome: stopped-at-gate`, gate, and `Status: stop`. The gate stop ends orchestration: do not terminalize it or invite another resume. A release failure uses the retained-lock-error contract.",
     "For approved and changes paths, reread qualified status and resume solely from `status.next`. Never initialize a replacement or repeat completed stages except the intentional changes loop. When the next interactive gate parks, persist it and release this same session's lock again.",
     "Final and parked reporting follows the skill. `headless` uses existing parked top-level `needs-human` with reason `headless run reached a human gate` and retention rules. `autonomous` follows existing draft-PR and Step 7 behavior. An interactive `stop` remains unlocked and nonterminal at `stopped-at-gate:<name>` and retains the selected run repository. Blocked, partial, and needs-human retain selected sandbox status and repository. After Step 7 archives or removes a completed sandbox, query and report the canonical post-completion repository selected by Step 7, never a stale sandbox. Report only existing status, terminal result, and PR URL; add no durable fields. Top-level `needs-human` is parked and resumable, not final. Resume only in this order after fixing the external cause: select and bind the retained sandbox and complete every existing pre-lock check; claim or perform a justified steal and verify the fresh owner and unchanged parked result; explicitly run `factory resume` and verify running status, unchanged historical result, real next action, and the same fresh owner; replay only existing post-lock reconciliation and safety checks; continue solely from newly qualified `status.next`. Never auto-clear or continue from `terminal_result.reason`; this plugin is read-only and never clears state.",
-    RUN_ORCHESTRATOR_TARGET_POLICY,
   ].join("\n\n"),
 };
 
@@ -372,20 +400,31 @@ export function registerAgents(cfg, { root = factoryRoot(), ...options } = {}) {
   cfg.agent ??= {};
   // The orchestrator has no frontmatter file, so its tier is stated here: the deep model, since it
   // holds the whole chain and every gate decision.
+  const cli = options.cli ?? join(root, "bin", "factory.js");
+  const orchestratorProfile = profileFor("feature-factory", "planning", options) ?? {};
+  const orchestratorProject = cfg.agent["feature-factory"] ?? {};
+  // Read before the spreads and composed after them. A project or profile `prompt` is a supported override, so
+  // a binding written before it is a binding that override deletes.
+  const selectedOrchestratorPrompt = Object.hasOwn(orchestratorProject, "prompt") ? orchestratorProject.prompt
+    : Object.hasOwn(orchestratorProfile, "prompt") ? orchestratorProfile.prompt : ORCHESTRATOR.prompt;
   cfg.agent["feature-factory"] = {
     ...ORCHESTRATOR,
     // The orchestrator has no frontmatter file, so its role is named here: it plans.
     variant: "xhigh",
-    ...(profileFor("feature-factory", "planning", options) ?? {}),
-    ...(cfg.agent["feature-factory"] ?? {}),
-    permission: { ...(cfg.agent["feature-factory"]?.permission ?? {}), ...ORCHESTRATOR.permission },
+    ...orchestratorProfile,
+    ...orchestratorProject,
+    prompt: `${selectedOrchestratorPrompt}\n\n${cliBinding(cli)}`,
+    permission: { ...(orchestratorProject.permission ?? {}), ...ORCHESTRATOR.permission },
   };
   const runOrchestratorProfile = profileFor("run-orchestrator", "planning", options) ?? {};
   const runOrchestratorProject = cfg.agent["run-orchestrator"] ?? {};
   const selectedRunOrchestratorPrompt = Object.hasOwn(runOrchestratorProject, "prompt")
     ? runOrchestratorProject.prompt : runOrchestratorProfile.prompt;
-  const runOrchestratorPrompt = typeof selectedRunOrchestratorPrompt === "string"
-    ? `${selectedRunOrchestratorPrompt}\n\n${RUN_ORCHESTRATOR_TARGET_POLICY}` : RUN_ORCHESTRATOR.prompt;
+  // One composition for both the custom and the default prompt: selected text, then the host-owned CLI
+  // binding, then the target policy last and exactly once.
+  const selectedChildBase = typeof selectedRunOrchestratorPrompt === "string"
+    ? selectedRunOrchestratorPrompt : RUN_ORCHESTRATOR.prompt;
+  const runOrchestratorPrompt = `${selectedChildBase}\n\n${cliBinding(cli)}\n\n${RUN_ORCHESTRATOR_TARGET_POLICY}`;
   cfg.agent["run-orchestrator"] = {
     ...RUN_ORCHESTRATOR,
     variant: "xhigh",
@@ -437,7 +476,7 @@ export function registerSkill(cfg, { root = integrationRoot() } = {}) {
   return path;
 }
 
-export function registerCommand(cfg) {
+export function registerCommand(cfg, { cli = factoryResources().cli } = {}) {
   cfg.command ??= {};
   cfg.command.feature = {
     description: "Take a feature, ticket or idea end to end: story, spec, decomposition, parallel "
@@ -453,15 +492,16 @@ export function registerCommand(cfg) {
       "For background start, derive the canonical run ID before effects with the skill's shared issue, ticket, branch, and NFKD free-text policy. Preserve the inner request unchanged. Reject unresolvable issue references, ambiguous request or branch ticket keys, and an invalid or empty final ID with the skill's exact responses. Then invoke only `feature_background` operation `start` with that run ID and unchanged inner request. Return immediately after `dispatched`; HTTP 204 means admission only, not execution or completion. Report `existing`, `rejected`, or `unknown` without automatic retry.",
       "For a gate answer, accept only explicit `<canonical-run-id> approve`, `<canonical-run-id> stop`, or `<canonical-run-id> changes: <verbatim feedback>`, or a bare allowed decision with exactly one prior scoped background tool result in this conversation. Explicit ID takes precedence. Invoke only `feature_background` operation `answer` with the exact decision bytes. Invalid or ambiguous routing is mutation-free. Never dispatch a fresh child, mutate a gate locally, use delivery, steer, queue, wait, or treat admittedSeq as execution proof.",
       "For a foreground request, persist state through `factory` commands, route work to the specialized agents the skill names, and observe evidence yourself. Persisted `run.json.mode` is the sole gate authority: `interactive` persists and presents a pending gate and waits for a real human; `headless` preserves parked top-level `needs-human`; `autonomous` decides only when existing preconditions authorize and continues toward a draft PR. Inability to ask never changes the persisted mode. Top-level `needs-human` is parked and resumable, not final. Resume only in this order after fixing the external cause: select and bind the retained sandbox and complete every existing pre-lock check; claim or perform a justified steal and verify the fresh owner and unchanged parked result; explicitly run `factory resume` and verify running status, unchanged historical result, real next action, and the same fresh owner; replay only existing post-lock reconciliation and safety checks; continue solely from newly qualified `status.next`. Never auto-clear or continue from `terminal_result.reason`; this plugin is read-only and never clears state.",
-    ].join("\n\n"),
+    ].join("\n\n") + `\n\n${cliBinding(cli)}`,
   };
 }
 
 // One call for the host's `config` hook.
 export function registerWorkflow(cfg, options = {}) {
   const root = options.root ?? factoryRoot();
-  registerCommand(cfg);
+  const cli = options.cli ?? join(root, "bin", "factory.js");
+  registerCommand(cfg, { cli });
   const skill = registerSkill(cfg, { root: options.skillRoot ?? integrationRoot() });
-  const agents = registerAgents(cfg, { root, ...options });
+  const agents = registerAgents(cfg, { root, ...options, cli });
   return { root, skill, agents };
 }
