@@ -1146,6 +1146,18 @@ Per slice:
    not a detail to reconcile in your head. Omit `--test-cmd` and the slice is not `review_ready`
    unless its ratified `test_plan` is empty — the waiver comes from the plan, not from you.
 
+   `BUILDER_REPORT` is a path and not the report. Write the builder's returned report to
+   `BUILDER_REPORT=".factory/$R/artifacts/$SLICE_ID-builder-attempt-$ATTEMPT.json"` and pass that path, which
+   keeps the report beside the run's other evidence instead of in argv. It holds `status`, `slice`,
+   `files_changed`, `commit`, `tests` with `cmd` and `exit`, and `blockers`; reconciliation compares `commit`,
+   `files_changed`, `status` and `tests.exit`. **`--claim` resolves against `RUN_REPO`, unlike a gate
+   `--artifact`, which is run-relative** — the two flags do not share a coordinate system. Passing the JSON
+   itself is refused.
+
+   Omitting `--claim` is permitted and records `claimed: false` with no mismatches. Nothing then compares the
+   builder's own account of its commit, files and test result against the observation, so the disagreement
+   this step exists to surface cannot be surfaced. Supply it whenever the builder returned a report.
+
    **When the ratified suite fails on something this slice may not touch.** An already-merged slice's
    test can assert what a later slice in the same plan must invalidate — a module's absence, an import that
    must not appear. Such a test can only fail here if it is inside `SLICE_TEST_COMMAND`, and then **there
