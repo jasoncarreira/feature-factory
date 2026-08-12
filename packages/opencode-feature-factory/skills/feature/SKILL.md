@@ -174,16 +174,20 @@ The gate artifact map is exact:
 
 | Gate | Name | Run-relative artifact |
 |---|---|---|
-| Story | `story` | `.factory/<run-id>/artifacts/story.md` |
-| Brief | `brief` | `.factory/<run-id>/artifacts/technical-brief.md` |
-| Pre-PR | `pre_pr` | `.factory/<run-id>/gates/pre_pr.md` |
+| Story | `story` | `artifacts/story.md` |
+| Brief | `brief` | `artifacts/technical-brief.md` |
+| Pre-PR | `pre_pr` | `gates/pre_pr.md` |
+
+Those references are run-relative and stored verbatim, so a run-relative reference `X` is physically
+`$RUN_REPO/.factory/$R/X`. Create and read artifacts there; pass only the run-relative reference.
 
 For an interactive background session, an orderly pending-gate park is complete only after all of
 these actions:
 
 1. Await every in-flight specialized task call and stop heartbeat calls, including awaiting one already
    in flight.
-2. Select `ARTIFACT` from the exact map and directly verify that it exists. Before Pre-PR, refresh
+2. Select `ARTIFACT` from the exact map and directly verify that it exists at
+   `$RUN_REPO/.factory/$R/$ARTIFACT`. Before Pre-PR, refresh
    `.factory/$R/gates/pre_pr.md` as required by Gate 3 and verify it exists.
 3. Persist the named gate as pending with the existing qualified command and `--artifact "$ARTIFACT"`.
 4. Directly verify the artifact still exists, the manifest records that gate as `pending` with exactly

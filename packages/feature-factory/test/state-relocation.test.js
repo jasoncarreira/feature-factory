@@ -254,7 +254,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "property outcome and every\nproperty loss",
     "No attempt, outcome, or\nproperty loss may be omitted",
   ]) assert.ok(gateThree.includes(fragment), `Gate 3 repair summary is missing: ${fragment}`);
-  assert.ok(gateThree.indexOf("first validate `.factory/$R/artifacts/post-merge-repairs.md`") < gateThree.indexOf('factory gate "$R" pre_pr pending --artifact ".factory/$R/gates/pre_pr.md"'),
+  assert.ok(gateThree.indexOf("first validate `.factory/$R/artifacts/post-merge-repairs.md`") < gateThree.indexOf('factory gate "$R" pre_pr pending --artifact gates/pre_pr.md'),
     "repair history must be validated and summarized before Gate 3 presentation");
 
   const resumeSection = skill.slice(skill.indexOf("### Resume or collision"), skill.indexOf("### Fresh sandbox request"));

@@ -482,7 +482,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "first validate `.factory/$R/artifacts/post-merge-repairs.md`",
     "Then write or refresh `.factory/$R/gates/pre_pr.md`",
     "`## Post-merge test-only repairs` section",
-    'factory gate "$R" pre_pr pending --artifact ".factory/$R/gates/pre_pr.md"',
+    'factory gate "$R" pre_pr pending --artifact gates/pre_pr.md',
   ], "Gate 3 repair validation and summary");
   for (const fragment of [
     "summarizes every journal record in order",

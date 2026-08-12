@@ -157,15 +157,20 @@ Every platform uses this exact gate artifact map:
 
 | Gate | Name | Run-relative artifact |
 |---|---|---|
-| Story | `story` | `.factory/<run-id>/artifacts/story.md` |
-| Brief | `brief` | `.factory/<run-id>/artifacts/technical-brief.md` |
-| Pre-PR | `pre_pr` | `.factory/<run-id>/gates/pre_pr.md` |
+| Story | `story` | `artifacts/story.md` |
+| Brief | `brief` | `artifacts/technical-brief.md` |
+| Pre-PR | `pre_pr` | `gates/pre_pr.md` |
 
-Gate artifacts live under the run directory because it is gitignored. Merge replay requires an observably
-clean integration worktree, so a run that writes its own artifacts into the repository root parks itself: the
-untracked output it was told to produce makes the tree dirty, which records `worktree_clean` false, skips the
-suite, and classifies post-merge verify `unavailable`. Nothing here may be written to a tracked path instead —
-`.gitignore` is privileged precisely because ignoring a file conceals it from these checks.
+Those references are run-relative, and the CLI stores `--artifact` verbatim.
+A run-relative reference `X` is physically `$RUN_REPO/.factory/$R/X`: create and read every artifact there,
+and pass only the run-relative reference to `--artifact`. A repository-relative spelling records a reference
+that resolves to `.factory/$R/.factory/$R/X`, which is no file.
+
+Physical location is the run directory because it is gitignored and the repository root is not. An artifact
+written to the root is untracked output that makes the integration worktree dirty, and merge replay requires
+an observably clean tree: `worktree_clean` records false, the suite is skipped, and post-merge verify
+classifies `unavailable`, which parks the run. Ignoring the root paths instead is not the fix — `.gitignore`
+is privileged precisely because ignoring a file conceals it from these checks.
 
 At every interactive gate, `changes: <feedback>` records `changes`, follows
 `changes-at-gate:<name>`, revises only the affected stage, and re-presents it pending. `stop` requires
@@ -791,7 +796,7 @@ and the CLI refuses it.
 `changes-at-gate:<name>`, and the loop is: revise the artifact, re-open the gate, re-present.
 
 ```sh
-factory gate "$R" story pending --artifact ".factory/$R/artifacts/story.md" --repo "$RUN_REPO"
+factory gate "$R" story pending --artifact artifacts/story.md --repo "$RUN_REPO"
 factory gate "$R" story approved --repo "$RUN_REPO"
 ```
 
@@ -936,9 +941,9 @@ empty; revise the brief and plan, repeat their required reviews, re-open the gat
 asking for another decision:
 
 ```sh
-factory gate "$R" brief pending --artifact ".factory/$R/artifacts/technical-brief.md" --repo "$RUN_REPO"
+factory gate "$R" brief pending --artifact artifacts/technical-brief.md --repo "$RUN_REPO"
 factory gate "$R" brief changes --repo "$RUN_REPO"
-factory gate "$R" brief pending --artifact ".factory/$R/artifacts/technical-brief.md" --repo "$RUN_REPO"
+factory gate "$R" brief pending --artifact artifacts/technical-brief.md --repo "$RUN_REPO"
 ```
 
 On approval, record only the Brief decision. This produces a durable Brief-approved, zero-slices state
@@ -1391,7 +1396,7 @@ HEAD, a branch name, or an unpersisted variable.
    When you do run it, it returns GO / GO-WITH-NITS / NO-GO **and writes `reviews/implementation-validator.json`
    naming the commit it judged**, exactly like any other reviewer. Then:
    ```sh
-   factory validator "$R" --report ".factory/$R/artifacts/validation-report.md" --repo "$RUN_REPO"
+   factory validator "$R" --report artifacts/validation-report.md --repo "$RUN_REPO"
    ```
    The verdict and the judged head are read from that record, not passed as arguments, and the record's
    commit must still be the integration head — so a report about one commit cannot be recorded as a
@@ -1430,7 +1435,7 @@ Production source: <landed count> / 3600
 Present that current artifact and open the gate with:
 
 ```sh
-factory gate "$R" pre_pr pending --artifact ".factory/$R/gates/pre_pr.md" --repo "$RUN_REPO"
+factory gate "$R" pre_pr pending --artifact gates/pre_pr.md --repo "$RUN_REPO"
 ```
 
 **Approving this gate is the transition that authorizes publication**, so the fully qualified Gate 3
@@ -1481,15 +1486,15 @@ re-open the state and unfreeze validator recording; it is not the recovered Gate
 the current validator when applicable, then refresh `.factory/$R/gates/pre_pr.md` with the newly observed tests,
 current verdict and reviewed head when applicable, current feature-branch diff and PR-base summary,
 migration and flag callouts, and remaining risks. Only after that refresh does the second `pending`
-transition, with `--artifact ".factory/$R/gates/pre_pr.md"`, present the recovered gate for approval:
+transition, with `--artifact gates/pre_pr.md`, present the recovered gate for approval:
 
 ```sh
 CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
 factory observe "$R" test-verifier --worktree "$INTEGRATION_WORKTREE" --base "$BRANCH_POINT" \
   --test-cmd "$INTEGRATION_SUITE" --repo "$RUN_REPO"
 factory gate "$R" pre_pr pending --repo "$RUN_REPO"
-factory validator "$R" --report ".factory/$R/artifacts/validation-report.md" --repo "$RUN_REPO"
-factory gate "$R" pre_pr pending --artifact ".factory/$R/gates/pre_pr.md" --repo "$RUN_REPO"
+factory validator "$R" --report artifacts/validation-report.md --repo "$RUN_REPO"
+factory gate "$R" pre_pr pending --artifact gates/pre_pr.md --repo "$RUN_REPO"
 factory gate "$R" pre_pr approved --repo "$RUN_REPO"
 ```
 

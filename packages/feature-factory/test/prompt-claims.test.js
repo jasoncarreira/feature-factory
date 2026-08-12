@@ -719,25 +719,32 @@ const CLAIMS = [
   {
     id: "exact-gate-artifact-map",
     file: "WORKFLOW.md",
-    // The reason travels with the map. Pinning only the three paths lets a later edit move them back to
-    // the repository root and delete the sentence saying why they cannot go there.
-    fragment: "| Story | `story` | `.factory/<run-id>/artifacts/story.md` |\n| Brief | `brief` | `.factory/<run-id>/artifacts/technical-brief.md` |\n| Pre-PR | `pre_pr` | `.factory/<run-id>/gates/pre_pr.md` |\n\nGate artifacts live under the run directory because it is gitignored.",
+    // The coordinate system travels with the map. Pinning only the three paths leaves the two facts that
+    // make them usable -- that the reference is run-relative and that its physical home is the run
+    // directory -- free to be deleted or contradicted.
+    fragment: "| Story | `story` | `artifacts/story.md` |\n| Brief | `brief` | `artifacts/technical-brief.md` |\n| Pre-PR | `pre_pr` | `gates/pre_pr.md` |\n\nThose references are run-relative, and the CLI stores `--artifact` verbatim.\nA run-relative reference `X` is physically `$RUN_REPO/.factory/$R/X`: create and read every artifact there,",
     expect: "allowed",
     matches: /gate: pre_pr\nstatus: pending/u,
     act(repo) {
       const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
-      // These are joined onto `runDir`, so they resolve to exactly what the map's
-      // `.factory/<run-id>/…` denotes. This agreement used to be accidental: the map said the
-      // repository root while this fixture wrote inside the control plane, and the fixture was the
-      // one telling the truth about where an artifact can live without dirtying the worktree.
+      // Two separately stated things, and the duplication is the whole point. `physical` is where the run
+      // puts each artifact under the run directory; `artifacts` is the reference spelling handed to
+      // `--artifact`. Deriving the write path from the reference -- the obvious way to write this -- makes
+      // the test tautological: the file lands wherever the reference points, so no reference can ever fail
+      // to resolve. Keeping them independent is what lets a changed coordinate system fail here.
+      const physical = {
+        story: "artifacts/story.md",
+        brief: "artifacts/technical-brief.md",
+        pre_pr: "gates/pre_pr.md",
+      };
       const artifacts = {
         story: "artifacts/story.md",
         brief: "artifacts/technical-brief.md",
         pre_pr: "gates/pre_pr.md",
       };
-      for (const artifact of Object.values(artifacts)) {
-        mkdirSync(dirname(join(runDir, artifact)), { recursive: true });
-        writeFileSync(join(runDir, artifact), `${artifact}\n`);
+      for (const location of Object.values(physical)) {
+        mkdirSync(dirname(join(runDir, location)), { recursive: true });
+        writeFileSync(join(runDir, location), `${location}\n`);
       }
       writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify(PLAN));
       assert.equal(factory(repository, ["gate", RUN, "story", "pending", "--artifact", artifacts.story, "--now", NOW]).ok, true);
@@ -750,7 +757,18 @@ const CLAIMS = [
       assert.equal(gates.story.artifact, artifacts.story);
       assert.equal(gates.brief.artifact, artifacts.brief);
       assert.equal(gates.pre_pr.artifact, artifacts.pre_pr);
-      assert.equal(Object.values(artifacts).every((artifact) => existsSync(join(runDir, artifact))), true);
+      // Resolution, not just storage: each persisted reference, joined onto the run directory, must land on
+      // the file written at its independently stated physical location. A repository-relative `--artifact`
+      // spelling fails here, because `.factory/<run-id>/artifacts/story.md` resolves from the run directory
+      // to `.factory/<run-id>/.factory/<run-id>/artifacts/story.md`, which nothing created.
+      for (const [name, location] of Object.entries(physical)) {
+        assert.equal(existsSync(join(runDir, gates[name].artifact)), true,
+          `${name}: persisted reference ${gates[name].artifact} does not resolve under the run directory`);
+        assert.equal(readFileSync(join(runDir, gates[name].artifact), "utf8"), `${location}\n`,
+          `${name}: persisted reference resolves to something other than the artifact written at ${location}`);
+        assert.equal(existsSync(join(runDir, ".factory", RUN, location)), false,
+          `${name}: a repository-relative spelling must not resolve under the run directory`);
+      }
       return result;
     },
   },
