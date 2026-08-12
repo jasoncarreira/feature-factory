@@ -812,7 +812,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // GitHub repo was renamed to `feature-factory`. The ledger counts `.json`, so package metadata lands
     // here alongside code. npm freezes metadata per published version, which is why the field goes in
     // before a first publish rather than after.
-    assert.equal(total, 3981, "the repo-rename reference sweep lands at 3981 production lines");
+    // 3988 for issue 286: seven lines refuse an inline `--claim` and say why. `--claim` is a path the CLI
+    // resolves against RUN_REPO, its one documented use named a variable defined nowhere, and no test passed
+    // the flag at all -- so a run inlined the builder's report, the CLI resolved that JSON as a filename, and
+    // an ENOENT discarded a slice that had already committed and observed green. Six of the seven lines are
+    // the comment recording that this is instruction at the moment of failure and not enforcement: an
+    // unreadable claim already refused, and only the message changes.
+    assert.equal(total, 3988, "the --claim path contract lands at 3988 production lines");
     assert.ok(total <= 4000, `production source is ${total} lines; the tripwire is 4000`);
   });
 

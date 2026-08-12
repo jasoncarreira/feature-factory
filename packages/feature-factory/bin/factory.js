@@ -859,6 +859,13 @@ const HANDLERS = {
 
     let claim = null;
     if (flags.claim) {
+      // Instruction at the moment of failure, not enforcement: an unreadable claim already refuses, so this
+      // changes only what the operator is told. A driver that passed the builder's report inline got an
+      // ENOENT whose "path" was the whole JSON document, which reads as a missing file rather than a wrong
+      // argument -- and it discarded a slice that had already committed and observed green.
+      if (/^\s*[{[]/u.test(flags.claim)) {
+        throw new CliError("--claim expects a path to a JSON file holding the builder's report, not the report itself");
+      }
       try {
         claim = JSON.parse(readFileSync(resolve(repo, flags.claim), "utf8"));
       } catch (error) {
