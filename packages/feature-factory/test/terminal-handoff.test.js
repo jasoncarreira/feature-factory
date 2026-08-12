@@ -218,7 +218,8 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
   git(operator, "config", "user.name", "Factory Test");
   git(operator, "config", "user.email", "factory@example.test");
   writeFileSync(join(operator, "base.txt"), "base\n");
-  git(operator, "add", "base.txt");
+  writeFileSync(join(operator, ".gitignore"), ".factory/\n/.factory-sandboxes/\n");
+  git(operator, "add", "base.txt", ".gitignore");
   git(operator, "commit", "--quiet", "-m", "base");
   if (legacy) {
     const initialized = seedLegacyRun(operator, runId, { branch: `feature/${runId}`, pr_base: "main", mode });

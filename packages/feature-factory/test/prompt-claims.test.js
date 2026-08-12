@@ -42,7 +42,7 @@ function project(name) {
   git("config", "user.name", "T");
   mkdirSync(join(repo, "src"), { recursive: true });
   writeFileSync(join(repo, "src", "base.ts"), "base\n");
-  writeFileSync(join(repo, ".gitignore"), ".factory/\n");
+  writeFileSync(join(repo, ".gitignore"), ".factory/\n/.factory-sandboxes/\n");
   git("add", "-A");
   git("commit", "-q", "-m", "base");
   return repo;

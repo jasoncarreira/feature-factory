@@ -1205,6 +1205,17 @@ function proveInitBranch({ operatorRoot, sandboxPath, worktree, branch, seed, ru
   if (ancestry?.status !== 0) throw new CliError(`feature branch seed '${seed}' is not a proven ancestor of '${ref}' in sandbox '${sandboxPath}'; sandbox was retained; run.json is absent`);
 }
 
+// Enforcement, following the #277 seed-guard precedent: an unignored control plane cannot complete a factory run.
+function assertInitPathsIgnored({ operatorRoot, sandboxPath, runId, runGit, resolvePath, joinPath }) {
+  const rootIgnore = joinPath(operatorRoot, ".gitignore"), tracked = runGit(operatorRoot, ["ls-files", "--error-unmatch", "--", ".gitignore"]);
+  const requirements = [[`${CONTROL_PLANE}/${runId}/run.json`, `${CONTROL_PLANE}/`], [".factory-sandboxes/", "/.factory-sandboxes/"], [`.factory-sandboxes/${runId}/${CONTROL_PLANE}/${runId}/run.json`, "/.factory-sandboxes/"]];
+  for (const [probe, requiredLine] of requirements) {
+    const observed = runGit(operatorRoot, ["check-ignore", "-v", "--no-index", "--", probe]), output = observed?.status === 0 && typeof observed.stdout === "string" ? observed.stdout : "";
+    const match = /^(.+):([1-9][0-9]*):(.+)\t(.+)\n$/u.exec(output);
+    const qualifies = tracked?.status === 0 && tracked.stdout === ".gitignore\n" && match?.[4] === probe && !match[3].includes("\n") && resolvePath(operatorRoot, match[1]) === rootIgnore;
+    if (!qualifies) throw new CliError(`factory init requires '${probe}' to be ignored by tracked root '.gitignore' in operator repository '${operatorRoot}'; add exactly '${requiredLine}' to '${rootIgnore}'; sandbox path '${sandboxPath}' was not created`);
+  }
+}
 export async function dispatchInit(positional, flags, operations = INIT_OPERATIONS) {
   const candidate = preflightInit(positional, flags);
   const {
@@ -1236,6 +1247,7 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
   }
   if (top !== operatorRoot) throw new CliError(`--repo must name the canonical operator repository root; sandbox path '${S}' was not created`);
 
+  assertInitPathsIgnored({ operatorRoot, sandboxPath: S, runId, runGit, resolvePath, joinPath });
   let legacyState;
   let containerState;
   let sandboxState = { kind: "absent" };
