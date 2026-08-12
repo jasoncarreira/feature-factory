@@ -104,7 +104,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "status: \"running\"`, `terminal_result: null`",
     "binds `SESSION_ID` to the actual stable host-adapter identity",
     "never require session-ID inequality",
-    "artifacts/post-merge-repairs.md",
+    ".factory/$R/artifacts/post-merge-repairs.md",
     "Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`",
     "--repository-verify --repo \"$RUN_REPO\"",
   ]) assert.ok(skill.includes(fragment), `state-relocation contract is missing: ${fragment}`);
@@ -247,14 +247,14 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   });
   const gateThree = stepFive.slice(stepFive.indexOf("### Gate 3 — Pre-PR"));
   for (const fragment of [
-    "first validate `artifacts/post-merge-repairs.md`",
+    "first validate `.factory/$R/artifacts/post-merge-repairs.md`",
     "complete journal, ancestry, commit, transition, resume, attempt-bound, one-active-record, and\nlatest-verified/current-green rules",
     "`## Post-merge test-only repairs` section",
     "summarizes every journal record in order",
     "property outcome and every\nproperty loss",
     "No attempt, outcome, or\nproperty loss may be omitted",
   ]) assert.ok(gateThree.includes(fragment), `Gate 3 repair summary is missing: ${fragment}`);
-  assert.ok(gateThree.indexOf("first validate `artifacts/post-merge-repairs.md`") < gateThree.indexOf('factory gate "$R" pre_pr pending --artifact gates/pre_pr.md'),
+  assert.ok(gateThree.indexOf("first validate `.factory/$R/artifacts/post-merge-repairs.md`") < gateThree.indexOf('factory gate "$R" pre_pr pending --artifact gates/pre_pr.md'),
     "repair history must be validated and summarized before Gate 3 presentation");
 
   const resumeSection = skill.slice(skill.indexOf("### Resume or collision"), skill.indexOf("### Fresh sandbox request"));

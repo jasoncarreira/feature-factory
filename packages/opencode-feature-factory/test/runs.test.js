@@ -1341,6 +1341,9 @@ describe("registering the workflow with the host", () => {
       "Story gate `story` -> `artifacts/story.md`",
       "Brief gate `brief` -> `artifacts/technical-brief.md`",
       "Pre-PR gate `pre_pr` -> `gates/pre_pr.md`",
+      // The reason the map is control-plane-rooted, pinned so a later edit cannot quietly move gate
+      // artifacts back to the repository root and re-break post-merge verify.
+      "a run-relative reference `X` is physically `$RUN_REPO/.factory/$R/X`: create and read every artifact there and pass only the run-relative reference",
       "current validator verdict when applicable, the acceptance-criterion/test table, the feature-branch diff and PR-base summary, migration and flag callouts, and remaining risks",
       "factory gate \"$R\" pre_pr pending --artifact gates/pre_pr.md --repo \"$RUN_REPO\"",
       "await every in-flight specialized task call and stop heartbeat calls",
