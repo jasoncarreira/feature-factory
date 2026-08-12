@@ -1208,17 +1208,14 @@ function proveInitBranch({ operatorRoot, sandboxPath, worktree, branch, seed, ru
 // Enforcement, following the #277 seed-guard precedent: an unignored control plane cannot complete a factory run.
 function assertInitPathsIgnored({ operatorRoot, sandboxPath, runId, runGit, resolvePath, joinPath }) {
   const rootIgnore = joinPath(operatorRoot, ".gitignore"), tracked = runGit(operatorRoot, ["ls-files", "--error-unmatch", "--", ".gitignore"]);
-  const requirements = [[`${CONTROL_PLANE}/${runId}/run.json`, `${CONTROL_PLANE}/`], [`.factory-sandboxes/${runId}/${CONTROL_PLANE}/${runId}/run.json`, "/.factory-sandboxes/"]];
+  const requirements = [[`${CONTROL_PLANE}/${runId}/run.json`, `${CONTROL_PLANE}/`], [".factory-sandboxes/", "/.factory-sandboxes/"], [`.factory-sandboxes/${runId}/${CONTROL_PLANE}/${runId}/run.json`, "/.factory-sandboxes/"]];
   for (const [probe, requiredLine] of requirements) {
     const observed = runGit(operatorRoot, ["check-ignore", "-v", "--no-index", "--", probe]), output = observed?.status === 0 && typeof observed.stdout === "string" ? observed.stdout : "";
-    const tab = output.lastIndexOf("\t"), metadata = tab >= 0 ? output.slice(0, tab) : "";
-    const patternColon = metadata.lastIndexOf(":"), lineColon = metadata.lastIndexOf(":", patternColon - 1);
-    const source = metadata.slice(0, lineColon), line = metadata.slice(lineColon + 1, patternColon), pattern = metadata.slice(patternColon + 1), returnedProbe = output.slice(tab + 1, -1);
-    const qualifies = tracked?.status === 0 && tracked.stdout === ".gitignore\n" && output.endsWith("\n") && !output.slice(0, -1).includes("\n") && returnedProbe === probe && /^[1-9][0-9]*$/u.test(line) && pattern.length > 0 && (requiredLine === `${CONTROL_PLANE}/` || ![CONTROL_PLANE, `${CONTROL_PLANE}/`].includes(pattern)) && resolvePath(operatorRoot, source) === rootIgnore;
+    const match = /^(.+):([1-9][0-9]*):(.+)\t(.+)\n$/u.exec(output);
+    const qualifies = tracked?.status === 0 && tracked.stdout === ".gitignore\n" && match?.[4] === probe && !match[3].includes("\n") && resolvePath(operatorRoot, match[1]) === rootIgnore;
     if (!qualifies) throw new CliError(`factory init requires '${probe}' to be ignored by tracked root '.gitignore' in operator repository '${operatorRoot}'; add exactly '${requiredLine}' to '${rootIgnore}'; sandbox path '${sandboxPath}' was not created`);
   }
 }
-
 export async function dispatchInit(positional, flags, operations = INIT_OPERATIONS) {
   const candidate = preflightInit(positional, flags);
   const {
@@ -1235,19 +1232,22 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
     const S = joinPath(operatorInput, ".factory-sandboxes", runId);
     throw new CliError(`operator repository is not observable; sandbox path '${S}' was not created`);
   }
-  const C = joinPath(operatorRoot, ".factory-sandboxes"), S = joinPath(C, runId);
-  const runDir = joinPath(S, CONTROL_PLANE, runId), legacyManifest = joinPath(operatorRoot, CONTROL_PLANE, runId, "run.json");
+  const C = joinPath(operatorRoot, ".factory-sandboxes");
+  const S = joinPath(C, runId);
+  const runDir = joinPath(S, CONTROL_PLANE, runId);
+  const legacyManifest = joinPath(operatorRoot, CONTROL_PLANE, runId, "run.json");
   const sandboxManifest = joinPath(runDir, "run.json");
 
   let top;
   try {
     const observed = runGit(operatorRoot, ["rev-parse", "--show-toplevel"]);
     top = observed.ok && observed.stdout.trim() ? realpath(resolvePath(operatorRoot, observed.stdout.trim())) : null;
-  } catch { top = null; }
+  } catch {
+    top = null;
+  }
   if (top !== operatorRoot) throw new CliError(`--repo must name the canonical operator repository root; sandbox path '${S}' was not created`);
 
   assertInitPathsIgnored({ operatorRoot, sandboxPath: S, runId, runGit, resolvePath, joinPath });
-
   let legacyState;
   let containerState;
   let sandboxState = { kind: "absent" };
@@ -1315,7 +1315,9 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
     try {
       const state = manifestPresence(sandboxManifest, { lstat });
       manifest = state === "present" ? "present" : state === "absent" ? "absent" : "unobservable";
-    } catch { manifest = "unobservable"; }
+    } catch {
+      manifest = "unobservable";
+    }
     throw new CliError(`git clone failed for sandbox '${S}'; run.json is ${manifest}; sandbox was retained`);
   }
 

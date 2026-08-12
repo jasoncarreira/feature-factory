@@ -190,11 +190,13 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
 
     const ignoreRows = [
       { name: "missing-control", rootIgnore: "/.factory-sandboxes/\n", probe: ".factory/missing-control/run.json", line: ".factory/" },
-      { name: "missing-sandbox", rootIgnore: ".factory/\n", probe: ".factory-sandboxes/missing-sandbox/.factory/missing-sandbox/run.json", line: "/.factory-sandboxes/" },
+      { name: "missing-sandbox", rootIgnore: ".factory/\n", probe: ".factory-sandboxes/", line: "/.factory-sandboxes/" },
       { name: "info-exclude", rootIgnore: "/.factory-sandboxes/\n", alternate: "info", probe: ".factory/info-exclude/run.json", line: ".factory/" },
       { name: "global-exclude", rootIgnore: "/.factory-sandboxes/\n", alternate: "global", probe: ".factory/global-exclude/run.json", line: ".factory/" },
       { name: "local-exclude", rootIgnore: "/.factory-sandboxes/\n", alternate: "local", probe: ".factory/local-exclude/run.json", line: ".factory/" },
       { name: "untracked-root", rootIgnore: ".factory/\n/.factory-sandboxes/\n", tracked: false, probe: ".factory/untracked-root/run.json", line: ".factory/" },
+      { name: "nested-only", rootIgnore: ".factory/\n.factory-sandboxes/*/.factory/\n", probe: ".factory-sandboxes/", line: "/.factory-sandboxes/" },
+      { name: "filename-only", rootIgnore: ".factory/\nrun.json\n", probe: ".factory-sandboxes/", line: "/.factory-sandboxes/" },
     ];
     for (const row of ignoreRows) {
       const ignoreSource = operator(root, `ignore-${row.name}`);
@@ -502,17 +504,23 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       ], row.name);
       assert.equal(existsSync(observed.sandboxPath), false, row.name);
     }
-    const sandboxSeam = await injectedInit("seam-sandbox-missing", { inject: ({ repository, args, sourceRepository, result }) =>
-      repository === sourceRepository && args === "check-ignore -v --no-index -- .factory-sandboxes/seam-sandbox-missing/.factory/seam-sandbox-missing/run.json"
-        ? result(1) : null });
-    await assert.rejects(sandboxSeam.promise, /add exactly '\/\.factory-sandboxes\/'/u);
-    assert.deepEqual(sandboxSeam.effects, []);
-    assert.deepEqual(sandboxSeam.calls.map(({ args }) => args), [
-      "rev-parse --show-toplevel",
-      "ls-files --error-unmatch -- .gitignore",
-      "check-ignore -v --no-index -- .factory/seam-sandbox-missing/run.json",
-      "check-ignore -v --no-index -- .factory-sandboxes/seam-sandbox-missing/.factory/seam-sandbox-missing/run.json",
-    ]);
+    for (const row of [
+      { name: "seam-container-missing", probe: ".factory-sandboxes/" },
+      { name: "seam-descendant-missing", probe: ".factory-sandboxes/seam-descendant-missing/.factory/seam-descendant-missing/run.json" },
+    ]) {
+      const sandboxSeam = await injectedInit(row.name, { inject: ({ repository, args, sourceRepository, result }) =>
+        repository === sourceRepository && args === `check-ignore -v --no-index -- ${row.probe}` ? result(1) : null });
+      await assert.rejects(sandboxSeam.promise, /add exactly '\/\.factory-sandboxes\/'/u);
+      assert.deepEqual(sandboxSeam.effects, [], row.name);
+      const expected = [
+        "rev-parse --show-toplevel",
+        "ls-files --error-unmatch -- .gitignore",
+        `check-ignore -v --no-index -- .factory/${row.name}/run.json`,
+        "check-ignore -v --no-index -- .factory-sandboxes/",
+      ];
+      if (row.name === "seam-descendant-missing") expected.push(`check-ignore -v --no-index -- ${row.probe}`);
+      assert.deepEqual(sandboxSeam.calls.map(({ args }) => args), expected, row.name);
+    }
 
     for (const row of [
       { name: "malformed-branch", branch: "bad..branch", match: /feature branch 'bad\.\.branch' is not a valid branch name/u },
