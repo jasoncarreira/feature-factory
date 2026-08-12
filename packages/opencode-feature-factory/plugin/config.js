@@ -226,12 +226,16 @@ export function factoryResources(resolve) {
   return { root, cli: join(root, "bin", "factory.js") };
 }
 
-// The prompts carry `FACTORY_CLI_PATH` as a literal token because they are joined once at module load, before
-// any resolution has happened. Registration substitutes the resolved path, so the driver is handed an absolute
-// CLI it never has to look for. Prompt order is untouched by design: `run-orchestrator`'s prompt is pinned to
-// end with its target policy, and the command template's ordering is pinned too.
-function withCliPath(text, cli) {
-  return text.replaceAll("FACTORY_CLI_PATH", cli);
+// The one statement of how the CLI is invoked, composed after whatever prompt was selected. It is appended
+// rather than embedded because both agent prompts are overridable: a project or profile `prompt` replaces the
+// default wholesale, and an embedded binding would vanish with it -- reopening the command inference and
+// registry fetch this exists to close. Composed last, it survives every supported override.
+export function cliBinding(cli) {
+  return `Every \`factory\` command runs as \`node ${cli}\`, the CLI this adapter resolved and shipped against. `
+    + "Bind that one invocation before any factory command and use nothing else. Do not resolve `factory` from PATH, "
+    + "and never obtain the CLI with `npx`, `npm exec`, `pnpm dlx`, or `bunx`: a fetched CLI can be a different "
+    + "generation of this tool with its own state store, and it answers confidently about a run that is not this one. "
+    + "If that path is not readable, stop without effects rather than substituting another resolution.";
 }
 
 function factoryRoot() {
@@ -335,7 +339,6 @@ const ORCHESTRATOR = {
   // The active run driver delegates and changes durable state only through factory commands.
   permission: { edit: "allow", bash: "allow", webfetch: "allow", task: "allow" },
   prompt: [
-    "Every `factory` command runs as `node FACTORY_CLI_PATH`, the CLI this adapter resolved and shipped against. Bind that one invocation before any factory command and use nothing else. Do not resolve `factory` from PATH, and never obtain the CLI with `npx`, `npm exec`, `pnpm dlx`, or `bunx`: a fetched CLI can be a different generation of this tool with its own state store, and it answers confidently about a run that is not this one. If that path is not readable, stop without effects rather than substituting another resolution.",
     "You are the feature-factory orchestrator. Follow the loaded `feature` skill exactly: it is the authority on the chain, gates, admission, run-ID derivation, and which commands are yours. Every state change goes through a `factory` command; never hand-write run.json. Re-derive evidence yourself rather than trusting agent prose.",
     "Apply outer background admission before mode admission. Only a case-sensitive exact `--background` first non-whitespace token is the selector. It must have at least one separator; consume the token and exactly one separator character and preserve every remaining code unit as the inner request. A later, repeated, near-miss, differently-cased, punctuated, or mode-preceded background token is request content. Empty or whitespace foreground input and a foreground request containing only repeated identical leading modes return `missing /feature request; no run created.` before effects. An outer selector with no non-mode request returns `missing /feature request after --background; no session or run created.` before effects. Conflicting inner or foreground mode prefixes use the existing exact conflict response before effects.",
     "Apply the loaded skill's maximal mode-prefix algorithm to a derivation copy while forwarding admitted bytes unchanged: only exact standalone leading `--autonomous` and `--headless` tokens select a noninteractive mode, identical repeats are idempotent, and request prose never selects mode. Background is placement, never a mode. Persisted `run.json.mode` is immutable and is the sole gate authority on resume.",
@@ -373,7 +376,6 @@ const RUN_ORCHESTRATOR = {
     task: "allow",
   },
   prompt: [
-    "Every `factory` command runs as `node FACTORY_CLI_PATH`, the CLI this adapter resolved and shipped against. Bind that one invocation before any factory command and use nothing else. Do not resolve `factory` from PATH, and never obtain the CLI with `npx`, `npm exec`, `pnpm dlx`, or `bunx`: a fetched CLI can be a different generation of this tool with its own state store, and it answers confidently about a run that is not this one. If that path is not readable, stop without effects rather than substituting another resolution.",
     "You are the bounded run-orchestrator for exactly one background feature-factory session. Load and follow the existing `feature` skill exactly. A start turn contains the tool's control text followed by one unchanged invocation-request text part. A later answer turn in this same session contains exactly one unchanged decision text part and no request framing.",
     "Before the first factory command, apply the skill's maximal exact-leading-token inner mode admission to a derivation copy of the unchanged request, then independently apply the shared issue, ticket, branch, and free-text run-ID policy. The request part is already the admitted inner request, so a later or repeated `--background` token remains request content. Require exact equality with the expected canonical run ID in the control text and stop before initialization, lock, or factory effects on mismatch. For fresh initialization, only exact standalone leading `--autonomous` and `--headless` tokens select those modes, identical repeats are idempotent, and request prose never selects mode. Background is not a mode. On resume, persisted `run.json.mode` is immutable and authoritative.",
     "Enter the existing Step 0 unchanged. Select or resume only the deterministic existing sandbox path `O/.factory-sandboxes/<R>`; never initialize another path, invent isolation, create another orchestration layer, or hand-write `run.json`.",
@@ -391,7 +393,6 @@ const RUN_ORCHESTRATOR = {
     "Map `stop` to `factory gate \"$R\" \"$GATE\" stop --repo \"$RUN_REPO\"`; require qualified status `next: stopped-at-gate:<GATE>`, await in-flight work, stop heartbeat calls, release this session with `factory lock \"$R\" release --session \"$SESSION_ID\" --repo \"$RUN_REPO\"`, and verify it is unlocked. Return run, repository, `Outcome: stopped-at-gate`, gate, and `Status: stop`. The gate stop ends orchestration: do not terminalize it or invite another resume. A release failure uses the retained-lock-error contract.",
     "For approved and changes paths, reread qualified status and resume solely from `status.next`. Never initialize a replacement or repeat completed stages except the intentional changes loop. When the next interactive gate parks, persist it and release this same session's lock again.",
     "Final and parked reporting follows the skill. `headless` uses existing parked top-level `needs-human` with reason `headless run reached a human gate` and retention rules. `autonomous` follows existing draft-PR and Step 7 behavior. An interactive `stop` remains unlocked and nonterminal at `stopped-at-gate:<name>` and retains the selected run repository. Blocked, partial, and needs-human retain selected sandbox status and repository. After Step 7 archives or removes a completed sandbox, query and report the canonical post-completion repository selected by Step 7, never a stale sandbox. Report only existing status, terminal result, and PR URL; add no durable fields. Top-level `needs-human` is parked and resumable, not final. Resume only in this order after fixing the external cause: select and bind the retained sandbox and complete every existing pre-lock check; claim or perform a justified steal and verify the fresh owner and unchanged parked result; explicitly run `factory resume` and verify running status, unchanged historical result, real next action, and the same fresh owner; replay only existing post-lock reconciliation and safety checks; continue solely from newly qualified `status.next`. Never auto-clear or continue from `terminal_result.reason`; this plugin is read-only and never clears state.",
-    RUN_ORCHESTRATOR_TARGET_POLICY,
   ].join("\n\n"),
 };
 
@@ -400,21 +401,30 @@ export function registerAgents(cfg, { root = factoryRoot(), ...options } = {}) {
   // The orchestrator has no frontmatter file, so its tier is stated here: the deep model, since it
   // holds the whole chain and every gate decision.
   const cli = options.cli ?? join(root, "bin", "factory.js");
+  const orchestratorProfile = profileFor("feature-factory", "planning", options) ?? {};
+  const orchestratorProject = cfg.agent["feature-factory"] ?? {};
+  // Read before the spreads and composed after them. A project or profile `prompt` is a supported override, so
+  // a binding written before it is a binding that override deletes.
+  const selectedOrchestratorPrompt = Object.hasOwn(orchestratorProject, "prompt") ? orchestratorProject.prompt
+    : Object.hasOwn(orchestratorProfile, "prompt") ? orchestratorProfile.prompt : ORCHESTRATOR.prompt;
   cfg.agent["feature-factory"] = {
     ...ORCHESTRATOR,
-    prompt: withCliPath(ORCHESTRATOR.prompt, cli),
     // The orchestrator has no frontmatter file, so its role is named here: it plans.
     variant: "xhigh",
-    ...(profileFor("feature-factory", "planning", options) ?? {}),
-    ...(cfg.agent["feature-factory"] ?? {}),
-    permission: { ...(cfg.agent["feature-factory"]?.permission ?? {}), ...ORCHESTRATOR.permission },
+    ...orchestratorProfile,
+    ...orchestratorProject,
+    prompt: `${selectedOrchestratorPrompt}\n\n${cliBinding(cli)}`,
+    permission: { ...(orchestratorProject.permission ?? {}), ...ORCHESTRATOR.permission },
   };
   const runOrchestratorProfile = profileFor("run-orchestrator", "planning", options) ?? {};
   const runOrchestratorProject = cfg.agent["run-orchestrator"] ?? {};
   const selectedRunOrchestratorPrompt = Object.hasOwn(runOrchestratorProject, "prompt")
     ? runOrchestratorProject.prompt : runOrchestratorProfile.prompt;
-  const runOrchestratorPrompt = typeof selectedRunOrchestratorPrompt === "string"
-    ? `${selectedRunOrchestratorPrompt}\n\n${RUN_ORCHESTRATOR_TARGET_POLICY}` : withCliPath(RUN_ORCHESTRATOR.prompt, cli);
+  // One composition for both the custom and the default prompt: selected text, then the host-owned CLI
+  // binding, then the target policy last and exactly once.
+  const selectedChildBase = typeof selectedRunOrchestratorPrompt === "string"
+    ? selectedRunOrchestratorPrompt : RUN_ORCHESTRATOR.prompt;
+  const runOrchestratorPrompt = `${selectedChildBase}\n\n${cliBinding(cli)}\n\n${RUN_ORCHESTRATOR_TARGET_POLICY}`;
   cfg.agent["run-orchestrator"] = {
     ...RUN_ORCHESTRATOR,
     variant: "xhigh",
@@ -475,7 +485,6 @@ export function registerCommand(cfg, { cli = factoryResources().cli } = {}) {
     agent: "feature-factory",
     template: [
       "Load the `feature` skill and run it as the primary orchestrator for this invocation.",
-      "Every `factory` command runs as `node FACTORY_CLI_PATH`, the CLI this adapter resolved and shipped against. Bind that one invocation before any factory command and use nothing else. Do not resolve `factory` from PATH, and never obtain the CLI with `npx`, `npm exec`, `pnpm dlx`, or `bunx`: a fetched CLI can be a different generation of this tool with its own state store, and it answers confidently about a run that is not this one. If that path is not readable, stop without effects rather than substituting another resolution.",
       "Request: $ARGUMENTS",
       "Before effects, apply the skill's outer admission. Only exact case-sensitive `--background` as the first non-whitespace token selects background placement. Require a separator, consume exactly one separator character, and preserve every remaining inner code unit. Any later, repeated, near-miss, differently-cased, punctuated, or mode-preceded background token is request content.",
       "Apply maximal exact-leading-token mode admission to a copy of the admitted request; preserve forwarded bytes unchanged. Exact repeated identical `--autonomous` or `--headless` prefixes are idempotent; both modes conflict; mode-only input is missing. Background is never a mode, and persisted `run.json.mode` remains the sole gate authority.",
@@ -483,7 +492,7 @@ export function registerCommand(cfg, { cli = factoryResources().cli } = {}) {
       "For background start, derive the canonical run ID before effects with the skill's shared issue, ticket, branch, and NFKD free-text policy. Preserve the inner request unchanged. Reject unresolvable issue references, ambiguous request or branch ticket keys, and an invalid or empty final ID with the skill's exact responses. Then invoke only `feature_background` operation `start` with that run ID and unchanged inner request. Return immediately after `dispatched`; HTTP 204 means admission only, not execution or completion. Report `existing`, `rejected`, or `unknown` without automatic retry.",
       "For a gate answer, accept only explicit `<canonical-run-id> approve`, `<canonical-run-id> stop`, or `<canonical-run-id> changes: <verbatim feedback>`, or a bare allowed decision with exactly one prior scoped background tool result in this conversation. Explicit ID takes precedence. Invoke only `feature_background` operation `answer` with the exact decision bytes. Invalid or ambiguous routing is mutation-free. Never dispatch a fresh child, mutate a gate locally, use delivery, steer, queue, wait, or treat admittedSeq as execution proof.",
       "For a foreground request, persist state through `factory` commands, route work to the specialized agents the skill names, and observe evidence yourself. Persisted `run.json.mode` is the sole gate authority: `interactive` persists and presents a pending gate and waits for a real human; `headless` preserves parked top-level `needs-human`; `autonomous` decides only when existing preconditions authorize and continues toward a draft PR. Inability to ask never changes the persisted mode. Top-level `needs-human` is parked and resumable, not final. Resume only in this order after fixing the external cause: select and bind the retained sandbox and complete every existing pre-lock check; claim or perform a justified steal and verify the fresh owner and unchanged parked result; explicitly run `factory resume` and verify running status, unchanged historical result, real next action, and the same fresh owner; replay only existing post-lock reconciliation and safety checks; continue solely from newly qualified `status.next`. Never auto-clear or continue from `terminal_result.reason`; this plugin is read-only and never clears state.",
-    ].map((passage) => withCliPath(passage, cli)).join("\n\n"),
+    ].join("\n\n") + `\n\n${cliBinding(cli)}`,
   };
 }
 
