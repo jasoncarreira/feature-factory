@@ -7,13 +7,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CONTROL_PLANE } from "feature-factory";
 import { findControlPlane, listRuns, pollRuns, repositoryRoots } from "../observe/runs.js";
-import { registerAgents } from "../plugin/config.js";
+import { registerAgents, factoryResources,
+} from "../plugin/config.js";
 import plugin from "../plugin/index.js";
 import { renderLines } from "../tui/lines.js";
 import { runCommands } from "../tui/commands.js";
@@ -1260,6 +1261,26 @@ describe("registering the workflow with the host", () => {
       + "<ticket key | feature idea>; no mode flag is interactive.");
     assert.match(cfg.command.feature.template, /Request: \$ARGUMENTS/u,
       "the host must transport the raw invocation to the skill");
+
+    // The adapter names the CLI it shipped against, the way the Prime adapter's `factoryResources` always
+    // has. A driver left to find the CLI itself found the wrong one: `feature-factory factory --help` is
+    // `command not found`, and the escalation was `npx --package opencode-feature-factory`, which fetched a
+    // pre-rename version with its own state store and drove a parallel run to a gate presentation.
+    assert.deepEqual(factoryResources(() => "/opt/host/node_modules/feature-factory/state/index.js"), {
+      root: "/opt/host/node_modules/feature-factory",
+      cli: "/opt/host/node_modules/feature-factory/bin/factory.js",
+    });
+    const { cli } = factoryResources();
+    assert.equal(existsSync(cli), true, `the named CLI must exist: ${cli}`);
+    // Substituted, not left as a token, in every place a driver reads instructions from.
+    for (const [where, text] of [
+      ["command template", cfg.command.feature.template],
+      ["orchestrator prompt", cfg.agent["feature-factory"].prompt],
+      ["run-orchestrator prompt", cfg.agent["run-orchestrator"].prompt],
+    ]) {
+      assert.ok(text.includes(cli), `${where} must name the resolved CLI`);
+      assert.ok(!text.includes("FACTORY_CLI_PATH"), `${where} must not leave the substitution token`);
+    }
     assert.match(cfg.agent["feature-factory"].description, /Persisted run mode is the sole gate authority/u);
     for (const passage of [
       "Only a case-sensitive exact `--background` first non-whitespace token is the selector",
@@ -1338,6 +1359,7 @@ describe("registering the workflow with the host", () => {
       "In `interactive`, perform the orderly pending-gate park",
       "In `headless`, preserve parked top-level `needs-human`",
       "In `autonomous`, decide only under the existing autonomous preconditions and continue through existing Step 7",
+      "never obtain the CLI with `npx`, `npm exec`, `pnpm dlx`, or `bunx`",
       "Story gate `story` -> `artifacts/story.md`",
       "Brief gate `brief` -> `artifacts/technical-brief.md`",
       "Pre-PR gate `pre_pr` -> `gates/pre_pr.md`",

@@ -20,6 +20,11 @@ durable transition. This skill is authoritative only for OpenCode invocation adm
 placement, named-agent registration, background routing, and gate-answer delivery. If the two files
 appear inconsistent, stop without effects rather than improvising.
 
+Before resolver or configuration work, state reads, dispatch, or any factory effect, require the CLI path
+named in your instructions to be readable, and invoke only that path. Never resolve `factory` from PATH and
+never fetch it with `npx`, `npm exec`, `pnpm dlx`, or `bunx`; a fetched CLI can be a different generation
+with its own state store. If it is not readable, stop without effects.
+
 You are the active **run driver**: either the primary `feature-factory` agent driving a foreground
 `/feature` request or the bounded `run-orchestrator` driving one run in its dedicated background host
 session. OpenCode registers the exact eleven specialists named by `WORKFLOW.md`; dispatch only those

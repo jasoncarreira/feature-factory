@@ -105,6 +105,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "binds `SESSION_ID` to the actual stable host-adapter identity",
     "never require session-ID inequality",
     ".factory/$R/artifacts/post-merge-repairs.md",
+    "never fall back to fetching one when a command is not found",
     "Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`",
     "--repository-verify --repo \"$RUN_REPO\"",
   ]) assert.ok(skill.includes(fragment), `state-relocation contract is missing: ${fragment}`);
