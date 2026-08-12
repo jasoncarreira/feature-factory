@@ -1338,11 +1338,14 @@ describe("registering the workflow with the host", () => {
       "In `interactive`, perform the orderly pending-gate park",
       "In `headless`, preserve parked top-level `needs-human`",
       "In `autonomous`, decide only under the existing autonomous preconditions and continue through existing Step 7",
-      "Story gate `story` -> `artifacts/story.md`",
-      "Brief gate `brief` -> `artifacts/technical-brief.md`",
-      "Pre-PR gate `pre_pr` -> `gates/pre_pr.md`",
+      "Story gate `story` -> `.factory/$R/artifacts/story.md`",
+      "Brief gate `brief` -> `.factory/$R/artifacts/technical-brief.md`",
+      "Pre-PR gate `pre_pr` -> `.factory/$R/gates/pre_pr.md`",
+      // The reason the map is control-plane-rooted, pinned so a later edit cannot quietly move gate
+      // artifacts back to the repository root and re-break post-merge verify.
+      "writing them to the repository root dirties the integration worktree and parks the run at post-merge verify",
       "current validator verdict when applicable, the acceptance-criterion/test table, the feature-branch diff and PR-base summary, migration and flag callouts, and remaining risks",
-      "factory gate \"$R\" pre_pr pending --artifact gates/pre_pr.md --repo \"$RUN_REPO\"",
+      "factory gate \"$R\" pre_pr pending --artifact \".factory/$R/gates/pre_pr.md\" --repo \"$RUN_REPO\"",
       "await every in-flight specialized task call and stop heartbeat calls",
       "factory gate \"$R\" \"$GATE\" pending --artifact \"$ARTIFACT\" --repo \"$RUN_REPO\"",
       "manifest records the named gate pending with `ARTIFACT`",

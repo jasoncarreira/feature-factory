@@ -719,11 +719,17 @@ const CLAIMS = [
   {
     id: "exact-gate-artifact-map",
     file: "WORKFLOW.md",
-    fragment: "| Story | `story` | `artifacts/story.md` |\n| Brief | `brief` | `artifacts/technical-brief.md` |\n| Pre-PR | `pre_pr` | `gates/pre_pr.md` |",
+    // The reason travels with the map. Pinning only the three paths lets a later edit move them back to
+    // the repository root and delete the sentence saying why they cannot go there.
+    fragment: "| Story | `story` | `.factory/<run-id>/artifacts/story.md` |\n| Brief | `brief` | `.factory/<run-id>/artifacts/technical-brief.md` |\n| Pre-PR | `pre_pr` | `.factory/<run-id>/gates/pre_pr.md` |\n\nGate artifacts live under the run directory because it is gitignored.",
     expect: "allowed",
     matches: /gate: pre_pr\nstatus: pending/u,
     act(repo) {
       const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
+      // These are joined onto `runDir`, so they resolve to exactly what the map's
+      // `.factory/<run-id>/…` denotes. This agreement used to be accidental: the map said the
+      // repository root while this fixture wrote inside the control plane, and the fixture was the
+      // one telling the truth about where an artifact can live without dirtying the worktree.
       const artifacts = {
         story: "artifacts/story.md",
         brief: "artifacts/technical-brief.md",
