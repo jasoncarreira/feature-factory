@@ -829,7 +829,18 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // next production line in this package fails it. That is a decision to take deliberately, in its own
     // change, with a reason recorded here — not by nudging the number while landing something else.
     assert.equal(total, 4000, "the init ignore guard lands at 4000 production lines");
-    assert.ok(total <= 4000, `production source is ${total} lines; the tripwire is 4000`);
+    // The tripwire, raised from 4000 to 4050 for issue 292, as its own change and nothing else. #290 landed the
+    // exact total on the cap and left a note requiring that the next raise be deliberate and separate; a raise
+    // bundled with the change that spends it is neither, however good that change is.
+    //
+    // Sized from this file's own record rather than asserted. The last five landings moved the total by 48, 15,
+    // 7, 12 and 3 lines — median 12. 50 lines of headroom is therefore three to four more changes at the
+    // observed rate, which brings this decision back within a handful of merges. An earlier draft proposed 200
+    // and justified it as "the next few guards" at costs of 7 and 12; that arithmetic gives 17 to 29 guards,
+    // which is not a few, and deferring the question that long is how a cap stops being one.
+    //
+    // The cap is not a budget to spend down. It is the point at which growing production requires saying why.
+    assert.ok(total <= 4050, `production source is ${total} lines; the tripwire is 4050`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
