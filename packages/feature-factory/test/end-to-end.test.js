@@ -14,7 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as cli } from "../bin/factory.js";
 import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
-import { assertPublicationReady } from "../observe/review.js";
+import { assertPublicationReady, REVIEW_KEYS } from "../observe/review.js";
 import { resolveSpawnExecutable } from "../core/executable.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
@@ -204,6 +204,36 @@ describe("end to end — a merge is refused through the real CLI", () => {
   }
 
   it("records a clean serial merge", () => {
+    const agentDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "agents");
+    for (const { file, reviewDestination, narrativeContents } of [
+      {
+        file: "work-reviewer.md",
+        reviewDestination: "Write the review JSON separately to the exact workflow-supplied `reviews/<subject>.json` path.",
+        narrativeContents: "Put all non-schema narrative, prioritized gaps, and risk notes in this report",
+      },
+      {
+        file: "implementation-validator.md",
+        reviewDestination: "Write the review JSON separately to the exact workflow-supplied validator review path (`reviews/implementation-validator.json` in the current workflow).",
+        narrativeContents: "Put all non-schema narrative, prioritized findings or gaps, and risk notes in this report",
+      },
+    ]) {
+      const prose = readFileSync(join(agentDir, file), "utf8");
+      const markers = [...prose.matchAll(/^Review JSON keys \(in required order\): (.+)$/gmu)];
+      assert.equal(markers.length, 1, `${file} must declare one canonical review key marker`);
+      assert.deepEqual(markers[0][1].split(", "), REVIEW_KEYS, `${file} review keys must match the runtime schema in order`);
+      assert.equal(markers[0][1].split(", ").includes("reviewed_head"), false, `${file} must exclude reviewed_head`);
+      assert.equal(markers[0][1].split(", ").includes("risks"), false, `${file} must exclude risks`);
+      assert.ok(prose.includes("The review file must contain one JSON object with exactly those eight top-level keys in that order."), `${file} must require the exact object shape`);
+      assert.ok(prose.includes("`attempt` is required and must be a positive integer."), `${file} must require a positive attempt`);
+      assert.ok(prose.includes("`reviewed_commit` is required and must be the 40-character lowercase hexadecimal SHA of the head you judged."), `${file} must bind the judged head`);
+      assert.ok(prose.includes("Refuse unknown or extra top-level keys outright"), `${file} must refuse extra keys`);
+      assert.ok(prose.includes("`reviewed_head`, `risks`, `narrative`, `prioritized_gaps`, and `risk_notes` are not review-record keys."), `${file} must forbid prose-only keys`);
+      assert.ok(prose.includes("Replace `.factory/$R/artifacts/validation-report.md`"), `${file} must write the narrative report`);
+      assert.ok(prose.includes(narrativeContents), `${file} must route narrative outside review JSON`);
+      assert.ok(prose.includes(reviewDestination), `${file} must separately write the workflow-supplied review path`);
+      assert.ok(prose.includes("Your final response may confirm both file writes, but it must not substitute for either file."), `${file} final output must not replace either write`);
+    }
+
     const fakeFs = (entries) => {
       const lookup = (path) => entries[path];
       return {

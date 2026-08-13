@@ -39,7 +39,18 @@ The skeptic. The builders and test-verifier just reported success — your job i
 
 ## Output contract
 
-Return this as your final message:
+Perform two distinct file writes:
+
+1. Replace `.factory/$R/artifacts/validation-report.md` with the holistic narrative for the current integrated review. Put all non-schema narrative, prioritized findings or gaps, and risk notes in this report.
+2. Write the review JSON separately to the exact workflow-supplied validator review path (`reviews/implementation-validator.json` in the current workflow).
+
+Review JSON keys (in required order): subject, reviewer, verdict, attempt, reviewed_commit, findings, required_fixes, checked_against
+
+The review file must contain one JSON object with exactly those eight top-level keys in that order. `attempt` is required and must be a positive integer. `reviewed_commit` is required and must be the 40-character lowercase hexadecimal SHA of the head you judged. Refuse unknown or extra top-level keys outright: `reviewed_head`, `risks`, `narrative`, `prioritized_gaps`, and `risk_notes` are not review-record keys.
+
+Set `subject` and `reviewer` to `implementation-validator`; preserve the GO/GO-WITH-NITS/NO-GO verdict meanings; put schema-compatible finding summaries in `findings`, blocking remediation in `required_fixes`, and the story, brief, evidence, and conventions consulted in `checked_against`.
+
+Write this structure to the narrative report:
 
 ```
 ## Validation report
@@ -63,3 +74,5 @@ Return this as your final message:
 ```
 
 Be specific and cite `path:line` for every finding — an unsourced finding is noise. If it's genuinely clean, say GO without manufacturing problems.
+
+Your final response may confirm both file writes, but it must not substitute for either file.
