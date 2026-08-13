@@ -13,6 +13,22 @@ import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = join(pkg, "bin", "factory.js");
+// Node warns "The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set" whenever both are present,
+// and that warning lands on stderr, which the rows below compare with strict equality. Any host with a coloured
+// UI exports FORCE_COLOR -- Prime Agent does -- so the suite would go red for a reason unrelated to what it
+// tests. `effective-push`, `end-to-end` and `prompt-claims` already scrub it for the same reason; this file
+// missed the convention, and run 291 paid for it: a slice whose implementation was green blocked on the
+// `missing-control` row, could not repair a file outside its paths, and `blocked` is final.
+// The deletion happens last, after every overlay is merged, because an earlier draft scrubbed a base object and
+// then spread caller overlays over it -- so a row passing FORCE_COLOR through `extra` put it straight back. Both
+// CLI spawns below build their environment here. A spawn that constructs `env` itself would not be covered:
+// this is the one place the deletion happens, not a mechanism that stops a future caller from bypassing it.
+function cliEnv(...overlays) {
+  const env = Object.assign({}, process.env, ...overlays);
+  delete env.FORCE_COLOR;
+  return env;
+}
+
 const REAL_GIT = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
 const NOW = "2026-08-04T12:00:00Z";
 
@@ -92,7 +108,7 @@ function invoke(repository, args, record, extra = {}) {
   const command = [CLI, ...args, ...(args.includes("--repo") ? [] : ["--repo", repository])];
   const result = spawnSync(process.execPath, command, {
     encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, PATH: `${record.bin}:${process.env.PATH}`, GIT_LOG: record.log, REAL_GIT, ...extra },
+    env: cliEnv({ PATH: `${record.bin}:${process.env.PATH}`, GIT_LOG: record.log, REAL_GIT }, extra),
   });
   const stdout = String(result.stdout ?? "");
   const stderr = String(result.stderr ?? result.error?.message ?? "");
@@ -197,11 +213,15 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       { name: "untracked-root", rootIgnore: ".factory/\n/.factory-sandboxes/\n", tracked: false, probe: ".factory/untracked-root/run.json", line: ".factory/" },
       { name: "nested-only", rootIgnore: ".factory/\n.factory-sandboxes/*/.factory/\n", probe: ".factory-sandboxes/", line: "/.factory-sandboxes/" },
       { name: "filename-only", rootIgnore: ".factory/\nrun.json\n", probe: ".factory-sandboxes/", line: "/.factory-sandboxes/" },
+      // The control for the seam: this row hands FORCE_COLOR back through `extra`, which the previous draft
+      // spread after the scrub. The strict stderr comparison below is the assertion -- if the deletion stopped
+      // happening last, Node's NO_COLOR warning would be appended and this row alone would fail.
+      { name: "overlay-restores-color", rootIgnore: "/.factory-sandboxes/\n", probe: ".factory/overlay-restores-color/run.json", line: ".factory/", forceColor: true },
     ];
     for (const row of ignoreRows) {
       const ignoreSource = operator(root, `ignore-${row.name}`);
       replaceIgnore(ignoreSource, row.rootIgnore, row.tracked !== false);
-      const extra = { GIT_CONFIG_NOSYSTEM: "1" };
+      const extra = { GIT_CONFIG_NOSYSTEM: "1", ...(row.forceColor ? { FORCE_COLOR: "1", NO_COLOR: "1" } : {}) };
       if (row.alternate === "info") writeFileSync(join(ignoreSource, ".git", "info", "exclude"), ".factory/\n");
       if (row.alternate === "local") {
         const excludes = join(root, `${row.name}.exclude`);
@@ -653,10 +673,10 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     // distinguishes inherited process.env from a reconstructed environment.
     const configuredProcess = spawnSync(process.execPath, [CLI, "init", "configured-bootstrap", "--now", NOW, "--json", "--repo", configuredSource], {
       encoding: "utf8", input: "bootstrap-stdin-marker\n", stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env, PATH: `${configuredRecord.bin}:${process.env.PATH}`, GIT_LOG: configuredRecord.log, REAL_GIT,
+      env: cliEnv({
+        PATH: `${configuredRecord.bin}:${process.env.PATH}`, GIT_LOG: configuredRecord.log, REAL_GIT,
         FACTORY_BOOTSTRAP_ENV_MARKER: "bootstrap-environment-marker",
-      },
+      }),
     });
     const configured = {
       ok: configuredProcess.status === 0,
