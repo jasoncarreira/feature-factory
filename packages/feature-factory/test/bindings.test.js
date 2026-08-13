@@ -82,6 +82,25 @@ describe("attack 3 — an approval presented against a different commit", () => 
       // A short sha is not a binding either: it cannot be compared unambiguously.
       const shortRef = writeReview(f.runDir, "short", { reviewed_commit: f.sliceHead.slice(0, 12) });
       assert.throws(() => readReview(f.runDir, shortRef), /full 40-character sha/u);
+
+      // One refusal names every problem. This record is 1437's shape: the validator wrote the sha under
+      // `reviewed_head`, added `risks`, and omitted `attempt`. Fail-fast reported only the unknown keys, so
+      // correcting them would have earned a second refusal for the binding and a third for the attempt --
+      // each one another validator pass over a 27-file change.
+      const manyRef = writeReview(f.runDir, "many", {
+        reviewed_commit: undefined, attempt: undefined,
+        reviewed_head: f.sliceHead, risks: ["unclosed contract"],
+      });
+      let raised = null;
+      try { readReview(f.runDir, manyRef); } catch (error) { raised = error; }
+      assert.ok(raised, "a record with three shape problems must be refused");
+      for (const fragment of [
+        "has unknown keys: reviewed_head, risks",
+        "has no attempt",
+        "must record reviewed_commit as a full 40-character sha",
+      ]) {
+        assert.ok(raised.message.includes(fragment), `one refusal must name every problem, missing: ${fragment}`);
+      }
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 

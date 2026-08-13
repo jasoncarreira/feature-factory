@@ -27,16 +27,19 @@ export function readReview(runDir, ref) {
   } catch (error) {
     throw new Error(`review '${ref}' could not be read: ${error.message}`);
   }
+  // Accumulate, then throw once. Fail-fast costs one dispatch per problem: run 1437's validator record had
+  // two unknown keys, no reviewed_commit and no attempt, so correcting the keys would have earned a second
+  // refusal and then a third, each after another validator pass over a 27-file change.
   const unknown = Object.keys(value).filter((key) => !REVIEW_KEYS.includes(key));
-  if (unknown.length > 0) throw new Error(`review '${ref}' has unknown keys: ${unknown.sort().join(", ")}`);
-  if (typeof value.subject !== "string" || !value.subject.trim()) throw new Error(`review '${ref}' has no subject`);
-  if (typeof value.verdict !== "string" || !value.verdict.trim()) throw new Error(`review '${ref}' has no verdict`);
-  if (!Number.isSafeInteger(value.attempt) || value.attempt < 1) throw new Error(`review '${ref}' has no attempt`);
+  const problems = [];
+  if (unknown.length > 0) problems.push(`has unknown keys: ${unknown.sort().join(", ")}`);
+  if (typeof value.subject !== "string" || !value.subject.trim()) problems.push("has no subject");
+  if (typeof value.verdict !== "string" || !value.verdict.trim()) problems.push("has no verdict");
+  if (!Number.isSafeInteger(value.attempt) || value.attempt < 1) problems.push("has no attempt");
   // The binding this whole module exists for. A review without it cannot be
   // consumed, rather than being consumed against an assumed commit.
-  if (!SHA.test(String(value.reviewed_commit))) {
-    throw new Error(`review '${ref}' must record reviewed_commit as a full 40-character sha`);
-  }
+  if (!SHA.test(String(value.reviewed_commit))) problems.push("must record reviewed_commit as a full 40-character sha");
+  if (problems.length > 0) throw new Error(`review '${ref}' ${problems.join("; ")}`);
   return value;
 }
 
