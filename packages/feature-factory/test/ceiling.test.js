@@ -834,7 +834,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // `problems.push` and the three-line `reviewed_commit` block collapsed to one. What it prevents: run
     // 1437's validator record had two unknown keys, no `reviewed_commit` and no `attempt`, and fail-fast named
     // only the keys, so each correction cost another validator pass over a 27-file change.
-    assert.equal(total, 4003, "one refusal naming every review shape problem lands at 4003 production lines");
+    // 4017 for issue 301: `readReview` now requires all eight keys of `REVIEW_KEYS`, not just the four it
+    // happened to check. `reviewer`, `findings`, `required_fixes` and `checked_against` were rejected when
+    // unknown but never required, so a record naming only a subject, verdict, attempt and binding passed every
+    // check and was consumed as a complete approval -- while the agent prose has required all eight since #300.
+    // Eight of the fourteen lines are the comment recording that this is enforcement, and that presence is
+    // checked while key order deliberately is not: JSON order carries no meaning, and refusing a complete
+    // record over its formatting is the over-reach that cost run 291 its work.
+    assert.equal(total, 4017, "requiring the whole review record lands at 4017 production lines");
     // The tripwire, raised from 4000 to 4050 for issue 292, as its own change and nothing else. #290 landed the
     // exact total on the cap and left a note requiring that the next raise be deliberate and separate; a raise
     // bundled with the change that spends it is neither, however good that change is.

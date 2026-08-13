@@ -91,6 +91,33 @@ describe("attack 3 — an approval presented against a different commit", () => 
         reviewed_commit: undefined, attempt: undefined,
         reviewed_head: f.sliceHead, risks: ["unclosed contract"],
       });
+      // The other half of the same contract: these four were rejected when unknown but never required, so a
+      // record with only a subject, verdict, attempt and binding passed as a complete approval. `findings` and
+      // `checked_against` are the evidence an approval is supposed to carry.
+      const partialRef = join("reviews", "partial.json");
+      writeFileSync(join(f.runDir, partialRef), `${JSON.stringify({
+        subject: "be-slice", verdict: "APPROVE", attempt: 1, reviewed_commit: f.sliceHead,
+      }, null, 2)}\n`);
+      let partial = null;
+      try { readReview(f.runDir, partialRef); } catch (error) { partial = error; }
+      assert.ok(partial, "a record missing half the required keys must be refused");
+      for (const fragment of [
+        "has no reviewer", "must record findings as an array",
+        "must record required_fixes as an array", "must record checked_against as a non-empty array",
+      ]) {
+        assert.ok(partial.message.includes(fragment), `one refusal must name every missing key, missing: ${fragment}`);
+      }
+
+      // And key order is deliberately not part of the contract: JSON order carries no meaning, so a complete
+      // record in a different order is accepted. Refusing it would be the over-reach that cost run 291.
+      const shuffledRef = join("reviews", "shuffled.json");
+      writeFileSync(join(f.runDir, shuffledRef), `${JSON.stringify({
+        checked_against: ["brief"], required_fixes: [], findings: [], reviewed_commit: f.sliceHead,
+        attempt: 1, verdict: "APPROVE", reviewer: "work-reviewer", subject: "be-slice",
+      }, null, 2)}\n`);
+      assert.doesNotThrow(() => readReview(f.runDir, shuffledRef),
+        "a complete record must be accepted regardless of key order");
+
       let raised = null;
       try { readReview(f.runDir, manyRef); } catch (error) { raised = error; }
       assert.ok(raised, "a record with three shape problems must be refused");
