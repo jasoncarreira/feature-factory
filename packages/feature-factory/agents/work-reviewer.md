@@ -96,7 +96,18 @@ The repository's real trust boundaries stay fully blocking: unauthenticated or a
 
 ## Output contract
 
-Return this as your final message (the orchestrator writes `reviews/<subject>.json` from it):
+Perform two distinct file writes for every dispatch:
+
+1. Replace `.factory/$R/artifacts/validation-report.md` with the current review's narrative report. Put all non-schema narrative, prioritized gaps, and risk notes in this report; a later implementation-validator dispatch replaces it with the final integrated report.
+2. Write the review JSON separately to the exact workflow-supplied `reviews/<subject>.json` path.
+
+Review JSON keys (in required order): subject, reviewer, verdict, attempt, reviewed_commit, findings, required_fixes, checked_against
+
+The review file must contain one JSON object with exactly those eight top-level keys in that order. `attempt` is required and must be a positive integer. `reviewed_commit` is required and must be the 40-character lowercase hexadecimal SHA of the head you judged. Refuse unknown or extra top-level keys outright: `reviewed_head`, `risks`, `narrative`, `prioritized_gaps`, and `risk_notes` are not review-record keys.
+
+Use the supplied subject; set `reviewer` to `work-reviewer`; preserve the APPROVE/REJECT verdict rule; put the structured finding list in `findings`, the blocking remediation list in `required_fixes`, and the applied inputs in `checked_against`.
+
+Write this structure to the narrative report:
 
 ```
 ## Review: <subject>
@@ -116,3 +127,5 @@ Return this as your final message (the orchestrator writes `reviews/<subject>.js
 ```
 
 Cite `path:line` for every finding — an unsourced finding is noise. If it's genuinely clean and the evidence is review-ready, APPROVE without manufacturing problems. If evidence is missing when it should exist (a build slice with no observed diff/tests), that itself is a BLOCKER — do not approve unobserved work.
+
+Your final response may confirm both file writes, but it must not substitute for either file.
