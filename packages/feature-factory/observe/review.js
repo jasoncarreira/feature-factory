@@ -39,6 +39,20 @@ export function readReview(runDir, ref) {
   // The binding this whole module exists for. A review without it cannot be
   // consumed, rather than being consumed against an assumed commit.
   if (!SHA.test(String(value.reviewed_commit))) problems.push("must record reviewed_commit as a full 40-character sha");
+  // Enforcement: the four keys below were rejected when unknown but never required, so a record naming only a
+  // subject, verdict, attempt and binding passed every check and was consumed as a complete approval. That is
+  // the evidence this step exists to produce -- `checked_against` is what the reviewer read and `findings` is
+  // what it found -- so a partial record is weaker evidence being trusted as whole. The agent prose has
+  // required all eight since #300; this closes the half the CLI was not checking.
+  //
+  // Presence and type only, never key order: order carries no meaning in JSON, and refusing a semantically
+  // complete record over its formatting is the over-reach that cost run 291 its work.
+  if (typeof value.reviewer !== "string" || !value.reviewer.trim()) problems.push("has no reviewer");
+  if (!Array.isArray(value.findings)) problems.push("must record findings as an array");
+  if (!Array.isArray(value.required_fixes)) problems.push("must record required_fixes as an array");
+  if (!Array.isArray(value.checked_against) || value.checked_against.length === 0) {
+    problems.push("must record checked_against as a non-empty array naming what the review read");
+  }
   if (problems.length > 0) throw new Error(`review '${ref}' ${problems.join("; ")}`);
   return value;
 }
