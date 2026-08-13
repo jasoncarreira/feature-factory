@@ -38,6 +38,17 @@ function operator(root, name, plant) {
   return repository;
 }
 
+function replaceIgnore(repository, bytes, tracked = true) {
+  writeFileSync(join(repository, ".gitignore"), bytes);
+  if (tracked) {
+    git(repository, "add", ".gitignore");
+    git(repository, "commit", "--quiet", "-m", "ignore policy");
+  } else {
+    git(repository, "rm", "--quiet", "--cached", ".gitignore");
+    git(repository, "commit", "--quiet", "-m", "untrack ignore policy");
+  }
+}
+
 function recorder(root) {
   const bin = join(root, "bin");
   const log = join(root, "git.jsonl");
@@ -161,6 +172,66 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.deepEqual(observeTrackedCleanliness(sandbox, { runner: () => { throw new Error("Git probe failed"); } }),
       { observed: false, entries: [] });
 
+    const patternRows = [
+      { name: "slash-absent", pattern: ".factory/", present: false },
+      { name: "slash-present", pattern: ".factory/", present: true },
+      { name: "plain-absent", pattern: ".factory", present: false },
+      { name: "plain-present", pattern: ".factory", present: true },
+    ];
+    for (const row of patternRows) {
+      const patternSource = operator(root, `pattern-${row.name}`);
+      replaceIgnore(patternSource, `${row.pattern}\n/.factory-sandboxes/\n`);
+      if (row.present) mkdirSync(join(patternSource, ".factory"));
+      const patternRun = `pattern-${row.name}`;
+      const patternResult = invoke(patternSource, ["init", patternRun, "--now", NOW], recorder(join(root, `pattern-${row.name}-recorder`)));
+      assert.equal(patternResult.ok, true, `${row.name}: ${patternResult.stderr}`);
+      assert.equal(existsSync(join(patternSource, ".factory-sandboxes", patternRun, ".factory", patternRun, "run.json")), true, row.name);
+    }
+
+    const ignoreRows = [
+      { name: "missing-control", rootIgnore: "/.factory-sandboxes/\n", probe: ".factory/missing-control/run.json", line: ".factory/" },
+      { name: "missing-sandbox", rootIgnore: ".factory/\n", probe: ".factory-sandboxes/", line: "/.factory-sandboxes/" },
+      { name: "info-exclude", rootIgnore: "/.factory-sandboxes/\n", alternate: "info", probe: ".factory/info-exclude/run.json", line: ".factory/" },
+      { name: "global-exclude", rootIgnore: "/.factory-sandboxes/\n", alternate: "global", probe: ".factory/global-exclude/run.json", line: ".factory/" },
+      { name: "local-exclude", rootIgnore: "/.factory-sandboxes/\n", alternate: "local", probe: ".factory/local-exclude/run.json", line: ".factory/" },
+      { name: "untracked-root", rootIgnore: ".factory/\n/.factory-sandboxes/\n", tracked: false, probe: ".factory/untracked-root/run.json", line: ".factory/" },
+      { name: "nested-only", rootIgnore: ".factory/\n.factory-sandboxes/*/.factory/\n", probe: ".factory-sandboxes/", line: "/.factory-sandboxes/" },
+      { name: "filename-only", rootIgnore: ".factory/\nrun.json\n", probe: ".factory-sandboxes/", line: "/.factory-sandboxes/" },
+    ];
+    for (const row of ignoreRows) {
+      const ignoreSource = operator(root, `ignore-${row.name}`);
+      replaceIgnore(ignoreSource, row.rootIgnore, row.tracked !== false);
+      const extra = { GIT_CONFIG_NOSYSTEM: "1" };
+      if (row.alternate === "info") writeFileSync(join(ignoreSource, ".git", "info", "exclude"), ".factory/\n");
+      if (row.alternate === "local") {
+        const excludes = join(root, `${row.name}.exclude`);
+        writeFileSync(excludes, ".factory/\n");
+        git(ignoreSource, "config", "core.excludesFile", excludes);
+      }
+      if (row.alternate === "global") {
+        const home = join(root, `${row.name}-home`);
+        const excludes = join(home, "global.exclude");
+        mkdirSync(home);
+        writeFileSync(excludes, ".factory/\n");
+        writeFileSync(join(home, ".gitconfig"), `[core]\n\texcludesFile = ${excludes}\n`);
+        extra.HOME = home;
+        extra.XDG_CONFIG_HOME = join(home, "xdg");
+      }
+      const ignoreRecord = recorder(join(root, `${row.name}-recorder`));
+      const ignored = invoke(ignoreSource, ["init", row.name, "--now", NOW], ignoreRecord, extra);
+      const canonical = realpathSync(ignoreSource);
+      const ignoredSandbox = join(canonical, ".factory-sandboxes", row.name);
+      assert.equal(ignored.ok, false, row.name);
+      assert.equal(ignored.stdout, "", row.name);
+      assert.equal(ignored.stderr, `factory init requires '${row.probe}' to be ignored by tracked root '.gitignore' in operator repository '${canonical}'; add exactly '${row.line}' to '${join(canonical, ".gitignore")}'; sandbox path '${ignoredSandbox}' was not created\n`, row.name);
+      assert.match(ignored.stderr, new RegExp(`factory init requires '${row.probe.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}'`, "u"), row.name);
+      assert.match(ignored.stderr, new RegExp(`add exactly '${row.line.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}' to '${join(canonical, ".gitignore").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}'`, "u"), row.name);
+      assert.match(ignored.stderr, new RegExp(`sandbox path '${ignoredSandbox.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}' was not created`, "u"), row.name);
+      assert.equal(existsSync(join(canonical, ".factory-sandboxes")), false, row.name);
+      assert.equal(clones(ignoreRecord).length, 0, row.name);
+      assert.equal(git(ignoreSource, "branch", "--list", `feature/${row.name}`), "", row.name);
+    }
+
     const failedSource = operator(root, "clone-failure");
     const failedRecord = recorder(join(root, "failure-recorder"));
     const failedSandbox = join(failedSource, ".factory-sandboxes", "clone-failure");
@@ -201,7 +272,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       const unsafe = invoke(unsafeSource, ["init", `destination-${kind}`, "--now", NOW], unsafeRecord);
       assert.equal(unsafe.ok, false);
       assert.match(unsafe.stderr, new RegExp(unsafeSandbox.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
-      assert.match(unsafe.stderr, kind === "file" ? /regular file/u : /symbolic link/u);
+      assert.match(unsafe.stderr, kind === "file" ? /regular file/u : /requires '.factory-sandboxes\//u);
       assert.equal(clones(unsafeRecord).length, 0);
       const after = kind === "file"
         ? { ...pathSnapshot(unsafeSandbox, true), target: null }
@@ -325,12 +396,13 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       const physical = invoke(physicalSource, ["init", row.name, "--now", NOW], physicalRecord);
       const physicalSandbox = join(physicalSource, ".factory-sandboxes", row.name);
       assert.equal(physical.ok, false, row.name);
-      assert.match(physical.stderr, /physical containment could not be proved/u);
+      assert.match(physical.stderr, ["factory-link", "run-link"].includes(row.name)
+        ? /requires '.factory\//u : /physical containment could not be proved/u);
       assert.match(physical.stderr, new RegExp(physicalSandbox.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
-      assert.equal(clones(physicalRecord).length, 1);
+      assert.equal(clones(physicalRecord).length, ["factory-link", "run-link"].includes(row.name) ? 0 : 1);
       assert.equal(existsSync(join(physicalSandbox, ".factory", row.name, "run.json")), false);
       assert.deepEqual(snapshot(external), externalBefore);
-      assertClonePreserved(physicalRecord);
+      if (!["factory-link", "run-link"].includes(row.name)) assertClonePreserved(physicalRecord);
     }
 
     const escapeSource = operator(root, "worktree-escape", (repository) => symlinkSync(external, join(repository, "escape")));
@@ -361,6 +433,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     symlinkSync(external, join(symlinkContainerSource, ".factory-sandboxes"));
     const symlinkContainer = invoke(symlinkContainerSource, ["init", "container-link", "--now", NOW], symlinkContainerRecord);
     assert.equal(symlinkContainer.ok, false);
+    assert.match(symlinkContainer.stderr, /requires '.factory-sandboxes\//u);
     assert.equal(clones(symlinkContainerRecord).length, 0);
     assert.deepEqual(snapshot(external), externalBefore);
 
@@ -394,19 +467,60 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       const sandboxPath = join(sourceRepository, ".factory-sandboxes", name);
       prepare(sourceRepository, branch);
       const calls = [];
+      const effects = [];
       const result = (status, stdout = "") => ({ ok: status === 0, status, stdout, stderr: "", argv: [] });
       const operations = {
         cwd: () => sourceRepository, resolvePath: resolve, joinPath: join, realpath: realpathSync,
-        lstat: lstatSync, mkdir: mkdirSync, readdir: readdirSync,
+        lstat: (...args) => { effects.push("lstat"); return lstatSync(...args); },
+        mkdir: (...args) => { effects.push("mkdir"); return mkdirSync(...args); },
+        readdir: (...args) => { effects.push("readdir"); return readdirSync(...args); },
         runGit: (repository, args) => {
           calls.push({ repository, args: args.join(" ") });
           return inject({ repository, args: args.join(" "), sourceRepository, sandboxPath, result, calls }) ?? observeGit(repository, args);
         },
-        prove: proveInitContainment, publish,
+        prove: (...args) => { effects.push("prove"); return proveInitContainment(...args); },
+        publish: (...args) => { effects.push("publish"); return publish(...args); },
       };
       const promise = dispatchInit([name], { repo: sourceRepository, branch, prBase: base, now: NOW }, operations);
-      return { sourceRepository, sandboxPath, calls, promise };
+      return { sourceRepository, sandboxPath, calls, effects, promise };
     };
+
+    const ignoreSeamRows = [
+      { name: "seam-missing", response: (result) => result(1) },
+      { name: "seam-malformed", response: (result) => result(0, ".gitignore:1:.factory/ .factory/seam-malformed/run.json\n") },
+      { name: "seam-multiline", response: (result) => result(0, ".gitignore:1:.factory/\t.factory/seam-multiline/run.json\nextra\n") },
+      { name: "seam-wrong-probe", response: (result) => result(0, ".gitignore:1:.factory/\t.factory/other/run.json\n") },
+    ];
+    for (const row of ignoreSeamRows) {
+      const observed = await injectedInit(row.name, { inject: ({ repository, args, sourceRepository, result }) =>
+        repository === sourceRepository && args === `check-ignore -v --no-index -- .factory/${row.name}/run.json`
+          ? row.response(result) : null });
+      await assert.rejects(observed.promise, /requires '.factory\//u);
+      assert.deepEqual(observed.effects, [], row.name);
+      assert.deepEqual(observed.calls.map(({ args }) => args), [
+        "rev-parse --show-toplevel",
+        "ls-files --error-unmatch -- .gitignore",
+        `check-ignore -v --no-index -- .factory/${row.name}/run.json`,
+      ], row.name);
+      assert.equal(existsSync(observed.sandboxPath), false, row.name);
+    }
+    for (const row of [
+      { name: "seam-container-missing", probe: ".factory-sandboxes/" },
+      { name: "seam-descendant-missing", probe: ".factory-sandboxes/seam-descendant-missing/.factory/seam-descendant-missing/run.json" },
+    ]) {
+      const sandboxSeam = await injectedInit(row.name, { inject: ({ repository, args, sourceRepository, result }) =>
+        repository === sourceRepository && args === `check-ignore -v --no-index -- ${row.probe}` ? result(1) : null });
+      await assert.rejects(sandboxSeam.promise, /add exactly '\/\.factory-sandboxes\/'/u);
+      assert.deepEqual(sandboxSeam.effects, [], row.name);
+      const expected = [
+        "rev-parse --show-toplevel",
+        "ls-files --error-unmatch -- .gitignore",
+        `check-ignore -v --no-index -- .factory/${row.name}/run.json`,
+        "check-ignore -v --no-index -- .factory-sandboxes/",
+      ];
+      if (row.name === "seam-descendant-missing") expected.push(`check-ignore -v --no-index -- ${row.probe}`);
+      assert.deepEqual(sandboxSeam.calls.map(({ args }) => args), expected, row.name);
+    }
 
     for (const row of [
       { name: "malformed-branch", branch: "bad..branch", match: /feature branch 'bad\.\.branch' is not a valid branch name/u },
@@ -673,6 +787,10 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     // `git switch` in between.
     assert.equal((dispatchBody.match(/^ {2}proveContainedBranch\(\);$/gmu) ?? []).length, 1);
     assert.equal((dispatchBody.match(/^ {2}proveBranch\(\);$/gmu) ?? []).length, 1);
+    assert.match(initSource, /^\/\/ Enforcement, following the #277 seed-guard precedent: an unignored control plane cannot complete a factory run\.$/mu);
+    assert.match(initSource, /runGit\(operatorRoot, \["ls-files", "--error-unmatch", "--", "\.gitignore"\]\)/u);
+    assert.match(initSource, /runGit\(operatorRoot, \["check-ignore", "-v", "--no-index", "--", probe\]\)/u);
+    assert.doesNotMatch(initSource, /check-ignore[^\n]*"-z"/u);
     assert.doesNotMatch(ownedProduction, /--no-hardlinks|\b(?:copyFile|cp|rm|rmSync|rmdir|unlink|unlinkSync)\s*\(|staging path|quarantine|ownership (?:record|evidence)|attempt-numbered/iu);
   } finally {
     rmSync(root, { recursive: true, force: true });

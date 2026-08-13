@@ -25,6 +25,7 @@ function fixture(name) {
   run(root, "config", "user.name", "T");
   mkdirSync(join(root, "src"), { recursive: true });
   writeFileSync(join(root, "src", "base.ts"), "base\n");
+  writeFileSync(join(root, ".gitignore"), ".factory/\n");
   run(root, "add", "-A");
   run(root, "commit", "-q", "-m", "base");
   const featureBase = run(root, "rev-parse", "HEAD");

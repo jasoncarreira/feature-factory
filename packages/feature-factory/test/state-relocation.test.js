@@ -294,7 +294,8 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     git(repository, "config", "user.name", "Factory Test");
     git(repository, "config", "user.email", "factory@example.test");
     writeFileSync(join(repository, "tracked.txt"), "state relocation\n");
-    git(repository, "add", "tracked.txt");
+    writeFileSync(join(repository, ".gitignore"), ".factory/\n/.factory-sandboxes/\n");
+    git(repository, "add", "tracked.txt", ".gitignore");
     git(repository, "commit", "--quiet", "-m", "fixture");
 
     const initialized = seedLegacyRun(repository, "state-relocation", { branch: "feature/state-relocation", pr_base: "main" });
@@ -355,7 +356,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     // it every run leaves the operator checkout dirty and the ownership refusal fires against the
     // run's own workspace. Committed here so the `operatorBefore`/`operatorAfter` comparison below
     // proves it — that assertion fails with `?? .factory-sandboxes/` if the rule is ever dropped.
-    writeFileSync(join(operator, ".gitignore"), "/.factory-sandboxes/\n");
+    writeFileSync(join(operator, ".gitignore"), ".factory/\n/.factory-sandboxes/\n");
     git(operator, "add", "operator.txt", ".gitignore");
     git(operator, "commit", "--quiet", "-m", "operator seed");
     git(operator, "switch", "--quiet", "-c", "operator-work");

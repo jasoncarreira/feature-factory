@@ -818,7 +818,17 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // an ENOENT discarded a slice that had already committed and observed green. Six of the seven lines are
     // the comment recording that this is instruction at the moment of failure and not enforcement: an
     // unreadable claim already refused, and only the message changes.
-    assert.equal(total, 3988, "the --claim path contract lands at 3988 production lines");
+    // 4000 for issue 285: init refuses to seed a repository whose control plane is not ignored by a tracked
+    // root `.gitignore`. The provenance is the reason it costs this much — a bare `check-ignore` exit code
+    // would have been two lines and a false pass, because `.git/info/exclude` and a local `core.excludesFile`
+    // satisfy it and neither survives the clone into the sandbox. So the guard parses `check-ignore -v`,
+    // requires the deciding file to be tracked and to be the root `.gitignore`, requires the reported path to
+    // be the probe, and fail-closes on anything malformed.
+    //
+    // **This landing consumes the remaining headroom: the exact total now equals the tripwire below.** The
+    // next production line in this package fails it. That is a decision to take deliberately, in its own
+    // change, with a reason recorded here — not by nudging the number while landing something else.
+    assert.equal(total, 4000, "the init ignore guard lands at 4000 production lines");
     assert.ok(total <= 4000, `production source is ${total} lines; the tripwire is 4000`);
   });
 
