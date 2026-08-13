@@ -828,7 +828,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // **This landing consumes the remaining headroom: the exact total now equals the tripwire below.** The
     // next production line in this package fails it. That is a decision to take deliberately, in its own
     // change, with a reason recorded here — not by nudging the number while landing something else.
-    assert.equal(total, 4000, "the init ignore guard lands at 4000 production lines");
+    // 4003 for issue 293, the first change to spend the headroom #295 authorized. Three lines, all of them
+    // comment: `readReview` now collects every shape problem and throws once instead of failing on the first.
+    // The code is net zero — the five checks already sat one per line, so each `throw` became a
+    // `problems.push` and the three-line `reviewed_commit` block collapsed to one. What it prevents: run
+    // 1437's validator record had two unknown keys, no `reviewed_commit` and no `attempt`, and fail-fast named
+    // only the keys, so each correction cost another validator pass over a 27-file change.
+    assert.equal(total, 4003, "one refusal naming every review shape problem lands at 4003 production lines");
     // The tripwire, raised from 4000 to 4050 for issue 292, as its own change and nothing else. #290 landed the
     // exact total on the cap and left a note requiring that the next raise be deliberate and separate; a raise
     // bundled with the change that spends it is neither, however good that change is.
