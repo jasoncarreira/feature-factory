@@ -19,6 +19,13 @@ Agent installs the runtime `feature-factory` dependency with it. Node.js 22 or n
 /feature [--autonomous | --headless] <ticket key | feature idea>
 ```
 
+Unattended, a run needs two things beyond the invocation, both documented with their reasoning in the
+repository's [operator guide](https://github.com/jasoncarreira/feature-factory/blob/main/OPERATING.md):
+redirect stdin from `/dev/null`, because an inherited pipe that never reaches EOF blocks the CLI before it
+emits a byte and looks exactly like a broken tool; and raise the `--autonomous` limits, because the defaults of
+12 turns, 3 continuations, 80,000 tokens and 30 minutes stop a real run mid-flight in a way that looks like a
+stall. `-p` alone prints one response and exits, which initializes a run and then abandons it.
+
 The integration currently drives foreground runs only. It rejects `--background` before creating or
 changing a run. The extension exposes the current Prime session and installed agent directory through
 `feature_factory_context`; the skill uses Prime RLM children for specialist work and requires their reports through agent messaging.
