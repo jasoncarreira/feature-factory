@@ -260,6 +260,42 @@ opencode run --log-level DEBUG --print-logs --dir <repo> \
   --command feature " --autonomous <issue-number>"
 ```
 
+The same launch under Prime Agent, where two details are not optional:
+
+```sh
+prime-agent --autonomous \
+  --autonomous-max-turns 600 --autonomous-max-continuations 200 \
+  --autonomous-max-tokens 6000000 --autonomous-timeout-ms 21600000 \
+  --cwd <repo> -p "/feature --autonomous <issue-number>" < /dev/null
+```
+
+**Redirect stdin from `/dev/null`.** A supervised launch inherits a pipe that never reaches EOF, and the CLI
+reads stdin for piped input, so it blocks before emitting a byte. The symptom is indistinguishable from a
+broken tool: it hangs until killed, exits 124, and writes zero bytes to both stdout and stderr, unaffected by
+`--verbose`, `--offline`, or disabling extensions, skills and tools. One redirect returns it to answering in
+seconds. Diagnose a silent hang by closing stdin before theorising about the tool.
+
+**Raise every autonomous limit.** `-p` on its own prints one response and exits, which initializes a run and
+then abandons it with `status: running` and nothing alive. `--autonomous` continues until a gate passes or a
+limit is reached, and its defaults are 12 assistant turns, 3 continuations, 80,000 tokens and a 30-minute wall
+clock. None of those reach Gate 2 on a real issue, and a run that stops on a limit looks exactly like a stall.
+Set the limits to the run you expect rather than accepting the defaults.
+
+The two `--autonomous` spellings above are different flags and both are needed: the first is Prime's
+continuation control, and the one inside the quoted request is content the skill reads to select the run mode.
+
+**A self-hosted run needs in-tree resources.** When the target repository is the factory itself, its own
+read-scope rule forbids reading the installed package, so a driver handed installed skill, agent or CLI paths
+refuses before creating a run — correctly. Point it at this tree instead, which is also the copy a self-hosted
+run should exercise:
+
+```sh
+prime-agent --autonomous <limits as above> -ne -ns \
+  -e packages/prime-agent-feature-factory/extensions/index.js \
+  --skill packages/prime-agent-feature-factory/skills/feature/SKILL.md \
+  -p "/feature --autonomous <issue-number>" < /dev/null
+```
+
 The Git credential helper reads the inherited `GH_TOKEN` as its password, while `gh` reads that same
 inherited variable directly. The real identity probe is a read-only network request, so a locally active
 machine account, cached login, or successful `gh auth status` is not a prepared environment. Credential
