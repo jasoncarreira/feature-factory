@@ -273,9 +273,11 @@ prime-agent --autonomous \
   --cwd <repo> -p "/feature --autonomous [--base <branch>] [--max-retries <n>] <issue-number>" < /dev/null
 ```
 
-**A self-hosted run, where the target is this repository, is not supported under Prime today. Use opencode.**
+**A self-hosted run, where the target is this repository, has no sanctioned Prime launch today. Use opencode.**
+Not because the process fails to start — one such run was watched all the way to a slice — but because the only
+way it starts is a driver ignoring a stop rule in its own skill. Expect it to run, and do not rely on it.
 
-The reason is a genuine dead end rather than a missing flag. Discovery must be off, because the installed adapter
+The reason is a contract conflict rather than a missing flag. Discovery must be off, because the installed adapter
 hands the driver installed skill, agent and CLI paths and this repository's read-scope rule then refuses. But
 `-ne` also suppresses an explicitly passed `-e`, so the in-tree extension does not load either: `/feature` is not
 a registered command and **`feature_factory_context` does not exist**. Confirmed by asking a session directly —
@@ -288,8 +290,13 @@ driver refuses here, and a driver that proceeds on paths supplied in its prompt 
 than demonstrating a recipe. An earlier revision of this section recommended exactly that, on the strength of one
 session that did proceed; a single contract violation is not evidence of a supported path, and it is removed.
 
-Until a self-host adapter returns in-tree context legitimately, use the opencode recipe above with this
-repository as `<repo>`: its command comes from the host rather than from a tool the driver must call.
+Two consequences follow, and the second is the one that costs an afternoon. Nothing makes the violation repeat —
+a stricter prompt or a driver that reads the clause more carefully refuses instead. And a refusal here presents
+as the process exiting with zero bytes and no sandbox, which is identical to all three failures above, so the
+next operator re-derives the whole set.
+
+Until a self-host adapter returns in-tree context legitimately (issue #307), use the opencode recipe above with
+this repository as `<repo>`: its command comes from the host rather than from a tool the driver must call.
 
 `-p` and `--autonomous` belong together, contrary to an earlier claim here. `-p` is print-and-exit for the
 launching process, which hands off to the daemon session; `--autonomous` is what keeps that session continuing.
