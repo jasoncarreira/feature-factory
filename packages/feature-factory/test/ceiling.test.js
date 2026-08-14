@@ -26,10 +26,11 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // and adding them will be another visible diff.
 // All twelve commands BUILD-PLAN-SMALL.md declares are built. Issue #243 authorizes the thirteenth:
 // explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
-// one parked amendment command that changes only an unmerged slice's ownership and history.
+// one parked amendment command that changes only an unmerged slice's ownership and history. Issue #303 authorizes
+// repair-reverify as the sole operator-authorized exit from an eligible repair record needs-human.
 const CLI_COMMANDS = [
   "init", "status", "amend-paths", "resume", "lock", "heartbeat", "gate", "step", "terminal",
-  "slices-seed", "slice", "observe", "validator", "pr", "effective-push",
+  "slices-seed", "slice", "observe", "validator", "pr", "repair-reverify", "effective-push",
 ];
 
 const RUN_JSON_KEYS = [
@@ -101,13 +102,14 @@ const proseFiles = sourceFiles(pkg, [], PROSE_EXTENSIONS);
 describe("ceiling — scope cannot grow without editing this file", () => {
   it("exposes exactly the declared CLI commands, and the skill invokes only those", () => {
     assert.deepEqual(Object.keys(COMMANDS).sort(), [...CLI_COMMANDS].sort());
-    assert.deepEqual(Object.keys(COMMANDS).slice(0, 4), ["init", "status", "amend-paths", "resume"]);
+    assert.deepEqual(Object.keys(COMMANDS).slice(0, 5), ["init", "status", "amend-paths", "repair-reverify", "resume"]);
     assert.deepEqual(COMMANDS.init, [
       "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode",
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
+    assert.deepEqual(COMMANDS["repair-reverify"], ["--repo", "--session", "--json"]);
     assert.deepEqual(COMMANDS["effective-push"], []);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
@@ -843,7 +845,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Eight of the fourteen lines are the comment recording that this is enforcement, and that presence is
     // checked while key order deliberately is not: JSON order carries no meaning, and refusing a complete
     // record over its formatting is the over-reach that cost run 291 its work.
-    assert.equal(total, 4017, "requiring the whole review record lands at 4017 production lines");
+    // 4128 for issue #303: canonical repair markers, create-only re-verification evidence, the explicit
+    // session-authorized command, and the shared publication guard provide the sole pass-only exit.
+    assert.equal(total, 4128, "repair re-verification lands at 4128 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -869,7 +873,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // which is not a few, and deferring the question that long is how a cap stops being one.
     //
     // The cap is not a budget to spend down. It is the point at which growing production requires saying why.
-    assert.ok(total <= 4050, `production source is ${total} lines; the tripwire is 4050`);
+    assert.ok(total <= 4150, `production source is ${total} lines; the tripwire is 4150`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

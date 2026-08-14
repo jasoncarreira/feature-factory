@@ -8,7 +8,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1638,6 +1638,72 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
   }
 
   it("records a PR against the validated head, and is idempotent on replay", () => {
+    const repair = readyForPr("repair-reverify", {
+      verify: (operator) => {
+        writeFileSync(join(operator, "repair-ready"), "ready\n");
+        return `node -e "process.exit(require('fs').existsSync('${join(operator, "repair-ready")}')?0:23)"`;
+      },
+      verifyTimeout: 2000,
+    });
+    try {
+      assert.equal(verifyTests(repair.repo, repair.basePoint, NOW(5)).ok, true);
+      assert.equal(approveGate(repair.repo, "pre_pr", NOW(5)).ok, true);
+      const command = JSON.parse(readFileSync(join(repair.repo, ".factory.json"), "utf8")).verify;
+      const recordId = `repair-${repair.head}-1`;
+      const marker = `Reverify-v1: ${JSON.stringify({ record_id: recordId, merge_commit: repair.head,
+        trigger: { command, timeout_ms: 2000 }, status: "needs-human" })}`;
+      const journal = join(repair.runDir, "artifacts", "post-merge-repairs.md");
+      writeFileSync(journal, `original failed repair\n${marker}\n`);
+      const originalJournal = readFileSync(journal, "utf8");
+      const originalVerifier = readFileSync(join(repair.runDir, "evidence", "test-verifier.json"), "utf8");
+
+      const prBlocked = factory(repair.repo, ["pr", RUN, "--url", "https://example.test/pr/repair", "--now", NOW(6)]);
+      assert.equal(prBlocked.ok, false, "factory pr must execute the repair publication guard");
+      assert.match(prBlocked.stderr, /eligible post-merge repair remains needs-human/u);
+      assert.equal(factory(repair.repo, ["gate", RUN, "pre_pr", "pending", "--now", NOW(6)]).ok, true);
+      const gateBlocked = approveGate(repair.repo, "pre_pr", NOW(6));
+      assert.equal(gateBlocked.ok, false, "Gate 3 must execute the repair publication guard");
+      assert.match(gateBlocked.stderr, /eligible post-merge repair remains needs-human/u);
+      assert.equal(factory(repair.repo, ["repair-reverify", RUN, recordId, "--session", "operator"]).ok, false,
+        "the explicit command requires a held owner lock");
+      assert.equal(factory(repair.repo, ["repair-reverify", RUN, recordId, "--session", " "]).ok, false,
+        "blank authorization is not an owner identity");
+      assert.equal(factory(repair.repo, ["lock", RUN, "claim", "--session", "operator", "--branch", "feature"]).ok, true);
+      assert.equal(factory(repair.repo, ["repair-reverify", RUN, recordId, "--session", "intruder"]).ok, false,
+        "a different session cannot use the owner's authorization");
+      const lockPath = join(repair.runDir, "factory.lock");
+      const staleOwner = JSON.parse(readFileSync(lockPath, "utf8"));
+      staleOwner.heartbeat_at = "2000-01-01T00:00:00.000Z";
+      writeFileSync(lockPath, `${JSON.stringify(staleOwner)}\n`);
+      assert.equal(factory(repair.repo, ["repair-reverify", RUN, recordId, "--session", "operator"]).ok, false,
+        "stale ownership cannot authorize execution");
+      assert.equal(factory(repair.repo, ["lock", RUN, "steal", "--session", "operator", "--branch", "feature"]).ok, true);
+      rmSync(join(repair.operator, "repair-ready"));
+      const failed = factory(repair.repo, ["repair-reverify", RUN, recordId, "--session", "operator"]);
+      assert.equal(failed.ok, true, failed.stderr);
+      assert.equal(failed.out.review_ready, false);
+      assert.equal(approveGate(repair.repo, "pre_pr", NOW(6)).ok, false, "failed re-verification remains blocking");
+      writeFileSync(join(repair.operator, "repair-ready"), "ready\n");
+      const passed = factory(repair.repo, ["repair-reverify", RUN, recordId, "--session", "operator"]);
+      assert.equal(passed.ok, true, passed.stderr);
+      assert.equal(passed.out.review_ready, true);
+      assert.deepEqual([failed.out.evidence_ref, passed.out.evidence_ref], [
+        `evidence/post-merge-repair-reverify-${recordId}-attempt-1.json`,
+        `evidence/post-merge-repair-reverify-${recordId}-attempt-2.json`,
+      ]);
+      assert.equal(readFileSync(journal, "utf8"), originalJournal);
+      assert.equal(readFileSync(join(repair.runDir, "evidence", "test-verifier.json"), "utf8"), originalVerifier);
+      assert.equal(approveGate(repair.repo, "pre_pr", NOW(7)).ok, true, "the first canonical pass permits Gate 3");
+      const published = factory(repair.repo, ["pr", RUN, "--url", "https://example.test/pr/repair", "--now", NOW(7)]);
+      assert.equal(published.ok, true, published.stderr);
+      const evidenceNames = () => readdirSync(join(repair.runDir, "evidence")).filter((name) => name.startsWith("post-merge-repair-reverify-"));
+      const beforeReplay = evidenceNames().map((name) => [name, readFileSync(join(repair.runDir, "evidence", name), "utf8")]);
+      const replay = factory(repair.repo, ["repair-reverify", RUN, recordId, "--session", "operator"]);
+      assert.equal(replay.ok, false, "a pass permanently refuses later execution and allocation");
+      assert.deepEqual(evidenceNames().map((name) => [name, readFileSync(join(repair.runDir, "evidence", name), "utf8")]), beforeReplay);
+      assert.equal(existsSync(join(repair.runDir, "evidence", recordId)), false, "attempts remain flat files");
+    } finally { cleanupProject(repair); }
+
     const p = readyForPr("pr-ok", { legacy: true });
     try {
       const status = factory(p.repo, ["status", RUN]);

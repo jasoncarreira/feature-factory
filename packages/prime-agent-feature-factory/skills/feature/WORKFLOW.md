@@ -1327,7 +1327,7 @@ and respect `max_retries`. Before the first attempted edit create
 journal as untrusted input on every read.
 
 Each record contains `Introducing merge`, per-merge `Attempt`, `Starting head`, `Trigger result`, sorted
-`Test paths`, concrete `Cause`, `Property outcome`, `Repair commit`, `Post-repair result`, and `Status`.
+`Test paths`, concrete `Cause`, `Property outcome`, `Repair commit`, `Post-repair result`, and `Status`. At planning, capture the exact 40-character lowercase introducing merge plus the current `.factory.json` `verify` string and resolved positive timeout. When a record created under this rule enters `needs-human`, add exactly one immutable single line to that original entry, with no other keys and this key order: `Reverify-v1: {"record_id":"repair-<40-lowercase-hex-introducing-merge>-<attempt>","merge_commit":"<40-lowercase-hex recorded merge>","trigger":{"command":"<captured .factory.json verify string>","timeout_ms":<resolved positive integer>},"status":"needs-human"}`. Historical entries without this marker remain unchanged and are ineligible.
 Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`. This repair record is not the run envelope, and envelope resume does not clear that status.
 For each
 introducing merge attempts are ordered, contiguous, duplicate- and gap-free `1..N`, with
@@ -1336,7 +1336,7 @@ are introducing merge, attempt, Starting head, trigger result, paths, and cause.
 HEAD at planning and must descend from the introducing merge.
 
 Allowed transitions are `planned → committed|needs-human`, `committed → verified|failed|exhausted|needs-human`, and `failed → exhausted` when no attempt remains. Envelope resume does not clear or alter these repair transitions.
-This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication.
+In Step 4, an eligible repair-record `needs-human` has exactly one exit: the operator explicitly invokes `factory repair-reverify <run-id> <record-id> --session ID`, which reruns the captured trigger at the recorded merge; failed create-only evidence remains blocking, the first canonical pass resolves it permanently, envelope resume cannot clear it, and the unchanged original entry plus every separate re-verification evidence item remain disclosed.
 Final records are never deleted. A later attempt is a new record starting at the prior failed repair
 commit, which must equal current HEAD; prior failed records remain complete history. Write `planned`
 before edits. The repair commit must be a separate single-parent commit whose parent is Starting head,
@@ -1446,7 +1446,7 @@ the complete journal, ancestry, commit, transition, resume, attempt-bound, one-a
 latest-verified/current-green rules in Step 4. An absent journal is valid only when no test-only repair
 was attempted. A known attempted repair with no journal, or a present journal that is malformed, omitted
 from the gate artifact, active, latest-failed, or exhausted refuses presentation.
-A Gate 3 repair-record needs-human remains unresolved because envelope resume does not clear it.
+At Gate 3, an eligible repair-record `needs-human` has exactly one exit: the operator explicitly invokes `factory repair-reverify <run-id> <record-id> --session ID`, which reruns the captured trigger at the recorded merge; failed create-only evidence remains blocking, the first canonical pass resolves it permanently, envelope resume cannot clear it, and the unchanged original entry plus every separate re-verification evidence item remain disclosed.
 
 Then write or refresh `.factory/$R/gates/pre_pr.md` with the current validator verdict when applicable, the
 acceptance-criterion/test table, the feature-branch diff and PR-base summary, migration and flag
@@ -1485,7 +1485,7 @@ the time `factory pr` runs, so this is the last refusal that can still prevent s
 - no active or unresolved post-merge repair record, and for every represented introducing merge the
   latest record is `verified`. Earlier complete `failed` attempts are allowed; malformed, omitted,
   active, latest-failed, or exhausted history refuses publication.
-Publication refuses a repair-record needs-human because envelope resume does not clear the repair record.
+Before publication, an eligible repair-record `needs-human` has exactly one exit: the operator explicitly invokes `factory repair-reverify <run-id> <record-id> --session ID`, which reruns the captured trigger at the recorded merge; failed create-only evidence remains blocking, the first canonical pass resolves it permanently, envelope resume cannot clear it, and the unchanged original entry plus every separate re-verification evidence item remain disclosed.
 
 If the gate refuses, its message names the missing piece. Fix that and re-present — do not push.
 
@@ -1662,7 +1662,7 @@ When `.factory/$R/artifacts/post-merge-repairs.md` exists, validate it again and
 post-repair results, files, cause, property outcome, repair commit, and status. Never omit an earlier
 failed attempt or property loss. Refuse publication on missing, malformed, active, unresolved,
 latest-failed, or exhausted records.
-This publication repair-record needs-human remains blocking, and envelope resume does not clear it.
+In final publication, an eligible repair-record `needs-human` has exactly one exit: the operator explicitly invokes `factory repair-reverify <run-id> <record-id> --session ID`, which reruns the captured trigger at the recorded merge; failed create-only evidence remains blocking, the first canonical pass resolves it permanently, envelope resume cannot clear it, and the unchanged original entry plus every separate re-verification evidence item remain disclosed.
 
 Labels, reviewers, and tracker fields are repository policy: derive them from the changed paths using
 whatever mapping the repository documents, and update the tracker only through *your* own calls.

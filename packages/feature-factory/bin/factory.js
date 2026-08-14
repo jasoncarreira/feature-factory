@@ -14,6 +14,7 @@ import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { buildEvidence, DEFAULT_BOOTSTRAP_TIMEOUT_MS, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
+import { readPostMergeReverifications } from "../observe/post-merge-repairs.js";
 import { archiveReviewAttempt } from "../state/review-archive.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
@@ -28,6 +29,7 @@ export const COMMANDS = Object.freeze({
   init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
   "amend-paths": Object.freeze(["--repo", "--add", "--reason", "--session", "--now", "--json"]),
+  "repair-reverify": Object.freeze(["--repo", "--session", "--json"]),
   resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
   // No --force: `lock <id> steal` is the same operation with a name that says what it
   // does, and two spellings of "take someone else's lock" is one too many.
@@ -319,7 +321,7 @@ function branchPoint(run) {
   return base;
 }
 
-async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs }) {
+async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs, ref = evidenceRef(subject), createOnly = false, beforeWrite = null }) {
   const evidence = buildEvidence({
     subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, runId,
     testCommand, skipReason, shellCommand, testTimeoutMs,
@@ -329,7 +331,7 @@ async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, 
     evidence.review_ready = false;
     evidence.blocked_reason = evidence.blocked_reason ?? `base ${baseRef} is ${ancestry} of HEAD`;
   }
-  await writeProtectedJsonAtomic(runDir, evidenceRef(subject), evidence);
+  await writeProtectedJsonAtomic(runDir, ref, evidence, { createOnly, hooks: { beforeCommit: beforeWrite } });
   return { evidence, ancestry };
 }
 
@@ -617,6 +619,35 @@ const HANDLERS = {
       },
     });
     return emit(flags, { run_id: runId, seeded: next.slices.length, slices: next.slices.map((slice) => slice.id) });
+  },
+
+  async ["repair-reverify"](positional, flags) {
+    if (positional.length !== 2) throw new CliError("factory repair-reverify requires exactly <run-id> <record-id>");
+    const [runId, recordId] = positional;
+    if (typeof flags.session !== "string" || !flags.session.trim()) throw new CliError("factory repair-reverify requires nonblank --session <id>");
+    const runDir = runDirFor(flags, runId);
+    const run = readRun(runDir);
+    assertFreshSessionOwner(runDir, runId, flags.session, "repair-reverify");
+    const { unresolved } = readPostMergeReverifications(runDir, run);
+    if (!unresolved || unresolved.recordId !== recordId) throw new CliError(`post-merge repair '${recordId}' is not an eligible unresolved needs-human record`);
+    const repo = resolve(flags.repo ?? process.cwd());
+    const integration = repositoryVerifyRetrySafety(repo, run, unresolved.mergeCommit);
+    let verify;
+    try { verify = readRepositoryConfig(integration.worktree); }
+    catch (error) { if (error instanceof RepositoryConfigError) throw new CliError(error.message); throw error; }
+    if (verify.command !== unresolved.trigger.command || verify.timeoutMs !== unresolved.trigger.timeout_ms) {
+      throw new CliError(`factory config entry 'verify' no longer matches post-merge repair '${recordId}'`);
+    }
+    const ref = join("evidence", `post-merge-repair-reverify-${recordId}-attempt-${unresolved.nextAttempt}.json`);
+    const { evidence } = await writeObservedEvidence({
+      runDir, runId, subject: `repair-reverify:${recordId}`, attempt: unresolved.nextAttempt,
+      branch: run.branch, baseRef: branchPoint(run), worktree: integration.worktree,
+      status: "completed", blockedReason: null, claim: null, testCommand: verify.command,
+      skipReason: null, shellCommand: true, testTimeoutMs: verify.timeoutMs, ref, createOnly: true,
+      beforeWrite: () => assertFreshSessionOwner(runDir, runId, flags.session, "repair-reverify"),
+    });
+    return emit(flags, { run_id: runId, record_id: recordId, evidence_ref: ref, review_ready: evidence.review_ready,
+      tests: evidence.tests.observed ? `exit ${evidence.tests.exit}` : "exit unavailable" });
   },
 
   async ["amend-paths"](positional, flags) {
@@ -1472,6 +1503,7 @@ function usage() {
   factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
   factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID [--now ISO]
+  factory repair-reverify <run-id> <record-id> --session ID
   factory resume <run-id> --session ID [--now ISO]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID

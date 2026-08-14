@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { isAbsolute, sep } from "node:path";
 import { deriveReviewReady, EVIDENCE_DIR, EVIDENCE_KEYS, evidenceRef, git, observeAncestry } from "./index.js";
 import { GATE_NAMES, TERMINAL_STATUSES, VALIDATOR_VERDICTS } from "../state/schema.js";
+import { readPostMergeReverifications } from "./post-merge-repairs.js";
 
 export const REVIEW_KEYS = Object.freeze([
   "subject", "reviewer", "verdict", "attempt", "reviewed_commit",
@@ -305,6 +306,8 @@ export function assertPublicationReady({ runDir, state, runId, observeHead }) {
   if (evidence.commit !== head) {
     refuse(`${ref} tested ${String(evidence.commit).slice(0, 12)} but the integration head is ${head.slice(0, 12)}`);
   }
+  // False-green enforcement: an eligible repair remains blocking until its first canonical passing observation.
+  if (readPostMergeReverifications(runDir, state).unresolved) refuse("an eligible post-merge repair remains needs-human");
   return { head, tested: evidence.commit };
 }
 

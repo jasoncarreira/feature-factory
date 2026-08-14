@@ -116,13 +116,13 @@ const NEEDS_HUMAN_PROSE = [
   ["repair-status", "Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`.", "envelope resume clears this repair-record"],
   ["repair-planned-transition", "`planned → committed|needs-human`", "factory resume resolves the repair-record"],
   ["repair-committed-transition", "`committed → verified|failed|exhausted|needs-human`", "factory resume resolves the repair-record"],
-  ["repair-guard", "This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication.", "envelope resume authorizes this repair-record"],
+  ["repair-guard", "In Step 4, an eligible repair-record `needs-human` has exactly one exit: the operator explicitly invokes `factory repair-reverify <run-id> <record-id> --session ID`, which reruns the captured trigger at the recorded merge; failed create-only evidence remains blocking, the first canonical pass resolves it permanently, envelope resume cannot clear it, and the unchanged original entry plus every separate re-verification evidence item remain disclosed.", "envelope resume authorizes this repair-record"],
   ["path-amendment", "park `needs-human` with that diagnosis; only the verified owner may use the optional", "resume silently widens ownership"],
   ["generic-stop", "Use terminal needs-human only to park a running envelope; use explicit factory resume after the cause is fixed.", "terminal needs-human is a final outcome"],
   ["generic-retention", "A top-level needs-human sandbox stays retained while parked and continues only after explicit factory resume.", "retained needs-human cannot continue"],
-  ["gate-three-repair", "A Gate 3 repair-record needs-human remains unresolved because envelope resume does not clear it.", "envelope resume satisfies Gate 3 repair"],
-  ["publication-repair", "Publication refuses a repair-record needs-human because envelope resume does not clear the repair record.", "resume makes this repair publishable"],
-  ["publication-record", "This publication repair-record needs-human remains blocking, and envelope resume does not clear it.", "envelope resume erases publication repair"],
+  ["gate-three-repair", "At Gate 3, an eligible repair-record `needs-human` has exactly one exit: the operator explicitly invokes `factory repair-reverify <run-id> <record-id> --session ID`, which reruns the captured trigger at the recorded merge; failed create-only evidence remains blocking, the first canonical pass resolves it permanently, envelope resume cannot clear it, and the unchanged original entry plus every separate re-verification evidence item remain disclosed.", "envelope resume satisfies Gate 3 repair"],
+  ["publication-repair", "Before publication, an eligible repair-record `needs-human` has exactly one exit: the operator explicitly invokes `factory repair-reverify <run-id> <record-id> --session ID`, which reruns the captured trigger at the recorded merge; failed create-only evidence remains blocking, the first canonical pass resolves it permanently, envelope resume cannot clear it, and the unchanged original entry plus every separate re-verification evidence item remain disclosed.", "resume makes this repair publishable"],
+  ["publication-record", "In final publication, an eligible repair-record `needs-human` has exactly one exit: the operator explicitly invokes `factory repair-reverify <run-id> <record-id> --session ID`, which reruns the captured trigger at the recorded merge; failed create-only evidence remains blocking, the first canonical pass resolves it permanently, envelope resume cannot clear it, and the unchanged original entry plus every separate re-verification evidence item remain disclosed.", "envelope resume erases publication repair"],
   ["handoff", "Completed handoff remains final, while top-level needs-human is parked and requires explicit factory resume.", "needs-human is excluded from resume"],
   ["autonomous-failure", "Autonomous gate failure parks top-level needs-human; quiesce and unlock before a later explicit factory resume.", "autonomous gate failure is final"],
   // The satisfiability check's park. `forbidden` is the drift that matters: an unsatisfiable brief
@@ -180,7 +180,7 @@ function checkNeedsHumanProse(prose) {
     const line = prose.split("\n").find((entry) => entry.includes(required));
     if (!line || line.includes(forbidden)) throw new Error(id);
   }
-  if ((prose.match(/needs-human/gu) ?? []).length !== NEEDS_HUMAN_PROSE.length) throw new Error("needs-human-count");
+  if ((prose.match(/needs-human/gu) ?? []).length !== NEEDS_HUMAN_PROSE.length + 2) throw new Error("needs-human-count");
 }
 
 // Every *executable* resume instruction must pass the session. The command rejects without it, so an

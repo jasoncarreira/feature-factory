@@ -52,6 +52,16 @@ describe("atomic writer", () => {
       assert.deepEqual(JSON.parse(readFileSync(join(dir, "run.json"), "utf8")), { version: 2 });
       assert.deepEqual(hidden(dir), [], "no temp file may survive a successful write");
 
+      const evidenceDir = join(dir, "evidence");
+      mkdirSync(evidenceDir);
+      const repairRef = "evidence/post-merge-repair-reverify-repair-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1-attempt-1.json";
+      await writeProtectedJsonAtomic(dir, repairRef, { attempt: 1 }, { createOnly: true });
+      const repairBytes = readFileSync(join(dir, repairRef), "utf8");
+      await assert.rejects(() => writeProtectedJsonAtomic(dir, repairRef, { attempt: 2 }, { createOnly: true }),
+        /protected create target already exists/u);
+      assert.equal(readFileSync(join(dir, repairRef), "utf8"), repairBytes, "a repair evidence collision preserves the original bytes");
+      assert.deepEqual(readdirSync(evidenceDir), [repairRef.slice("evidence/".length)], "repair evidence is one flat file");
+
       const matrixRoot = realpathSync(root("init-publication"));
       try {
         const sandboxPath = join(matrixRoot, "sandbox");

@@ -13,6 +13,7 @@ import { coordinateRunJsonTransition } from "../core/write-core.js";
 import { readRun } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { validateRun } from "../state/schema.js";
+import { readPostMergeReverifications } from "../observe/post-merge-repairs.js";
 import { claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock } from "../state/session-lock.js";
 
 const NOW = "2026-07-30T12:00:00.000Z";
@@ -178,6 +179,43 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
       mutate(invalid);
       assert.throws(() => validateRun(baseRun({ slices: [invalid] })), pattern);
     }
+
+    const repairRun = baseRun({ slices: [{ merge_commit: SHA_A }] });
+    const marker = (overrides = {}) => ({ record_id: `repair-${SHA_A}-1`, merge_commit: SHA_A,
+      trigger: { command: "npm test", timeout_ms: 1000 }, status: "needs-human", ...overrides });
+    for (const [name, journal, reservedName, pattern] of [
+      ["bad-json", "Reverify-v1: {", null, /marker is malformed/u],
+      ["bad-order", `Reverify-v1: ${JSON.stringify({ status: "needs-human", ...marker() })}`, null, /marker is noncanonical/u],
+      ["duplicate", `Reverify-v1: ${JSON.stringify(marker())}\nReverify-v1: ${JSON.stringify(marker())}`, null, /duplicate post-merge repair/u],
+      ["unrecorded", `Reverify-v1: ${JSON.stringify(marker({ record_id: `repair-${"b".repeat(40)}-1`, merge_commit: "b".repeat(40) }))}`, null, /names an unrecorded merge/u],
+      ["malformed-name", `Reverify-v1: ${JSON.stringify(marker())}`, "post-merge-repair-reverify-bad.json", /malformed reserved/u],
+      ["orphan", "historical record only", `post-merge-repair-reverify-repair-${SHA_A}-1-attempt-1.json`, /no matching marker/u],
+    ]) {
+      const f = fixture(`repair-${name}`);
+      try {
+        mkdirSync(join(f.runDir, "artifacts"));
+        mkdirSync(join(f.runDir, "evidence"));
+        writeFileSync(join(f.runDir, "artifacts", "post-merge-repairs.md"), `${journal}\n`);
+        if (reservedName) writeFileSync(join(f.runDir, "evidence", reservedName), "{}\n");
+        assert.throws(() => readPostMergeReverifications(f.runDir, repairRun), pattern, name);
+      } finally { rmSync(f.root, { recursive: true, force: true }); }
+    }
+
+    const gap = fixture("repair-gap");
+    try {
+      mkdirSync(join(gap.runDir, "artifacts"));
+      mkdirSync(join(gap.runDir, "evidence"));
+      writeFileSync(join(gap.runDir, "artifacts", "post-merge-repairs.md"), `Reverify-v1: ${JSON.stringify(marker())}\n`);
+      const evidence = {
+        subject: `repair-reverify:repair-${SHA_A}-1`, run_id: repairRun.run_id, attempt: 2,
+        branch: repairRun.branch, base_ref: SHA_A, worktree: "/repo", status: "completed", blocked_reason: null,
+        worktree_clean: false, files_changed: [], diff_stat: "", diff_observed: false, commands: [],
+        tests: { cmd: "npm test", observed: true, exit: 1, skipped_reason: null }, commit: SHA_A,
+        observed_by: "orchestrator", review_ready: false, claim_reconciliation: { claimed: false, mismatches: [] },
+      };
+      writeFileSync(join(gap.runDir, "evidence", `post-merge-repair-reverify-repair-${SHA_A}-1-attempt-2.json`), JSON.stringify(evidence));
+      assert.throws(() => readPostMergeReverifications(gap.runDir, repairRun), /gapped or duplicate attempts/u);
+    } finally { rmSync(gap.root, { recursive: true, force: true }); }
 
     const malformed = malformedRun();
     assert.throws(() => validateRun(malformed), new RegExp(`unknown keys: ${REMOVED_KEY}`, "u"));
