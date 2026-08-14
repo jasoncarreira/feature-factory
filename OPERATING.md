@@ -260,8 +260,8 @@ opencode run --log-level DEBUG --print-logs --dir <repo> \
   --command feature " --autonomous <issue-number>"
 ```
 
-Under Prime Agent, the shape depends on whether the target repository is the factory itself. Both forms below
-were run and watched; the earlier version of this section was written from inference and was wrong.
+Under Prime Agent, what is possible depends on whether the target repository is the factory itself. The form
+below was run and watched; the earlier version of this section was written from inference and was wrong.
 
 **A normal run, in a repository that is not this one.** Let discovery load the installed adapter, which is what
 registers the `/feature` command and provides the `feature_factory_context` tool:
@@ -273,29 +273,23 @@ prime-agent --autonomous \
   --cwd <repo> -p "/feature --autonomous [--base <branch>] [--max-retries <n>] <issue-number>" < /dev/null
 ```
 
-**A self-hosted run, where the target is the factory repository.** Discovery must be off, because the installed
-adapter hands the driver installed skill, agent and CLI paths and this repository's read-scope rule then refuses
-before creating a run -- correctly. But `-ne` also suppresses an explicitly passed `-e`, so **the extension does
-not load, the `/feature` command is not registered, and `feature_factory_context` does not exist.** Confirmed by
-asking a session directly: command registered `No`, skill loaded `Yes`, `feature_*` tools `None`. A `/feature ...`
-prompt is then inert text: the process exits within seconds, writes zero bytes to stdout, stderr and the log, and
-creates no sandbox. That silence is the whole symptom, and it looks exactly like a hang.
+**A self-hosted run, where the target is this repository, is not supported under Prime today. Use opencode.**
 
-So supply in the prompt what the missing tool would have provided:
+The reason is a genuine dead end rather than a missing flag. Discovery must be off, because the installed adapter
+hands the driver installed skill, agent and CLI paths and this repository's read-scope rule then refuses. But
+`-ne` also suppresses an explicitly passed `-e`, so the in-tree extension does not load either: `/feature` is not
+a registered command and **`feature_factory_context` does not exist**. Confirmed by asking a session directly —
+command registered `No`, skill loaded `Yes`, `feature_*` tools `None`.
 
-```sh
-R=<absolute path to this repository>
-prime-agent --autonomous \
-  --autonomous-max-turns 600 --autonomous-max-continuations 200 \
-  --autonomous-max-tokens 6000000 --autonomous-timeout-ms 21600000 \
-  -ne -ns --skill packages/prime-agent-feature-factory/skills/feature/SKILL.md \
-  -p "Drive feature-factory issue <N> as one autonomous run, following the loaded feature skill and its
-      WORKFLOW.md exactly. Treat this as the invocation '/feature --autonomous --max-retries 5 <N>'. No
-      feature_factory_context tool is available in this session, so use these in-tree resources, which are the
-      ones a self-hosted run must exercise: CLI $R/packages/feature-factory/bin/factory.js, agents
-      $R/packages/feature-factory/agents, operator repository $R. Run every factory command as
-      'node <that CLI path>'. Begin at Step 0 and continue to a terminal state." < /dev/null
-```
+That tool is not optional. `packages/prime-agent-feature-factory/skills/feature/SKILL.md` requires the driver to
+call it exactly once after admission, to require its `sessionId`, `agents` and `cli`, and — when the tool is
+absent — to **stop before creating or changing a run**, never substituting hand-written paths. So a conforming
+driver refuses here, and a driver that proceeds on paths supplied in its prompt is violating that contract rather
+than demonstrating a recipe. An earlier revision of this section recommended exactly that, on the strength of one
+session that did proceed; a single contract violation is not evidence of a supported path, and it is removed.
+
+Until a self-host adapter returns in-tree context legitimately, use the opencode recipe above with this
+repository as `<repo>`: its command comes from the host rather than from a tool the driver must call.
 
 `-p` and `--autonomous` belong together, contrary to an earlier claim here. `-p` is print-and-exit for the
 launching process, which hands off to the daemon session; `--autonomous` is what keeps that session continuing.
