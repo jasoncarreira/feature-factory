@@ -130,6 +130,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   assert.ok(placeholderCommands.length >= 3);
   assert.ok(placeholderCommands.every((entry) => [
     "factory status <run-id> --json", "factory gate <run-id> pre_pr pending",
+    "factory repair-reverify <run-id> <record-id> --session ID",
   ].includes(entry)), `unqualified placeholder invocation is not marked compatibility: ${placeholderCommands.join(", ")}`);
   assert.ok(skill.includes("quoted phrase names a\ncommand stem, not a runnable invocation"));
   assert.ok(skill.includes("It names a non-runnable\ncommand stem. Execute only `factory status \"$R\" --json --repo \"$RUN_REPO\"`"));
@@ -203,7 +204,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "failed → exhausted",
   ], "the repair journal must admit only the approved transitions");
   assert.ok(repairPolicy.includes("Envelope resume does not clear or alter these repair transitions."));
-  assert.ok(repairPolicy.includes("This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication."));
+  assert.ok(repairPolicy.includes("In Step 4, an eligible repair-record `needs-human` has exactly one exit: the operator explicitly invokes `factory repair-reverify <run-id> <record-id> --session ID`, which reruns the captured trigger at the recorded merge; failed create-only evidence remains blocking, the first canonical pass resolves it permanently, envelope resume cannot clear it, and the unchanged original entry plus every separate re-verification evidence item remain disclosed."));
   for (const [state, outcomes] of [
     ["planned", ["tree is clean", "`HEAD === Starting head`", "same known trigger", "resume edits without rerunning verify", "Otherwise terminalize"]],
     ["committed", ["valid repair head and diff plus green evidence becomes `verified`", "known failed evidence becomes\n`failed` or `exhausted`", "unknown evidence or any mismatch terminalizes"]],

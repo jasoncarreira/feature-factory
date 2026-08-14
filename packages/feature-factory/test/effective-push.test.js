@@ -532,7 +532,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   for (const fragment of [
     "## Post-merge test-only repairs",
     "include every attempt",
-    "This publication repair-record needs-human remains blocking, and envelope resume does not clear it.",
+    "In final publication, an eligible repair-record `needs-human` has exactly one exit: the operator explicitly invokes `factory repair-reverify <run-id> <record-id> --session ID`, which reruns the captured trigger at the recorded merge; failed create-only evidence remains blocking, the first canonical pass resolves it permanently, envelope resume cannot clear it, and the unchanged original entry plus every separate re-verification evidence item remain disclosed.",
   ]) required(publication, fragment, "post-merge repair disclosure");
   assert.doesNotMatch(publication, /git -C "\$RUN_REPO" (?:config|remote get-url)/u);
   required(summary, "guarded sandbox-removal", "Step 7 exclusion");
