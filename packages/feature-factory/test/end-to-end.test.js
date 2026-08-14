@@ -1658,12 +1658,20 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       const originalVerifier = readFileSync(join(repair.runDir, "evidence", "test-verifier.json"), "utf8");
       const forgedRef = join(repair.runDir, "evidence", `post-merge-repair-reverify-${recordId}-attempt-1.json`);
       const falsePass = { ...JSON.parse(originalVerifier), subject: `repair-reverify:${recordId}`, attempt: 1,
+        branch: runJson(repair.runDir).branch,
         tests: { cmd: command, observed: true, exit: 0, skipped_reason: null } };
+      writeFileSync(forgedRef, `${JSON.stringify(falsePass)}
+`);
+      assert.equal(factory(repair.repo, ["gate", RUN, "pre_pr", "pending", "--now", NOW(6)]).ok, true);
+      const controlGate = approveGate(repair.repo, "pre_pr", NOW(6));
+      assert.equal(controlGate.ok, true, controlGate.stderr);
+      rmSync(forgedRef);
       for (const [name, mutate] of [
         ["wrong base", (evidence) => { evidence.base_ref = "f".repeat(40); }],
         ["wrong worktree", (evidence) => { evidence.worktree = join(repair.repo, "forged"); }],
         ["malformed command trace", (evidence) => { evidence.commands[0].cmd = "git status"; }],
         ["reconciliation mismatch", (evidence) => { evidence.claim_reconciliation = { claimed: true, mismatches: [] }; }],
+        ["reordered top-level keys", (evidence) => { const subject = evidence.subject; delete evidence.subject; evidence.subject = subject; }],
       ]) {
         const evidence = structuredClone(falsePass);
         mutate(evidence);

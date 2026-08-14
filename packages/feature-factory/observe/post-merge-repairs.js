@@ -25,7 +25,7 @@ export function canonicalObservedEvidence(evidence, { runId, branch, baseRef, wo
     && tests.cmd === command && typeof tests.observed === "boolean" && tests.skipped_reason === null
     && ((tests.observed && Number.isInteger(tests.exit)) || (!tests.observed && tests.exit === null));
   const reconciliation = evidence?.claim_reconciliation;
-  return JSON.stringify(Object.keys(evidence ?? {}).sort()) === JSON.stringify([...EVIDENCE_KEYS].sort())
+  return JSON.stringify(Object.keys(evidence ?? {})) === JSON.stringify(EVIDENCE_KEYS)
     && evidence.subject === subject && evidence.run_id === runId && evidence.attempt === attempt
     && evidence.branch === branch && evidence.base_ref === baseRef && evidence.worktree === worktree
     && evidence.status === "completed" && typeof evidence.worktree_clean === "boolean"
