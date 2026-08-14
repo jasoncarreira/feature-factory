@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { deriveReviewReady, EVIDENCE_KEYS } from "./index.js";
 
 const SHA = "[0-9a-f]{40}";
@@ -8,10 +8,48 @@ const FILE = new RegExp(`^post-merge-repair-reverify-(repair-${SHA}-[1-9][0-9]*)
 const PREFIX = "post-merge-repair-reverify-";
 const MARKER = "Reverify-v1: ";
 
+export function canonicalObservedEvidence(evidence, { runId, branch, baseRef, worktree, commit, command, subject, attempt }) {
+  const commandNames = [
+    "git rev-parse HEAD",
+    `git --literal-pathspecs diff --name-only -z ${baseRef}...HEAD`,
+    `git diff --stat ${baseRef}...HEAD`,
+  ];
+  const commandsAreCanonical = Array.isArray(evidence?.commands)
+    && evidence.commands.length === commandNames.length
+    && evidence.commands.every((item, index) => item && typeof item === "object" && !Array.isArray(item)
+      && JSON.stringify(Object.keys(item).sort()) === JSON.stringify(["cmd", "exit", "summary"])
+      && item.cmd === commandNames[index] && item.exit === 0 && typeof item.summary === "string");
+  const tests = evidence?.tests;
+  const testsAreCanonical = tests && typeof tests === "object" && !Array.isArray(tests)
+    && JSON.stringify(Object.keys(tests).sort()) === JSON.stringify(["cmd", "exit", "observed", "skipped_reason"])
+    && tests.cmd === command && typeof tests.observed === "boolean" && tests.skipped_reason === null
+    && ((tests.observed && Number.isInteger(tests.exit)) || (!tests.observed && tests.exit === null));
+  const reconciliation = evidence?.claim_reconciliation;
+  return JSON.stringify(Object.keys(evidence ?? {}).sort()) === JSON.stringify([...EVIDENCE_KEYS].sort())
+    && evidence.subject === subject && evidence.run_id === runId && evidence.attempt === attempt
+    && evidence.branch === branch && evidence.base_ref === baseRef && evidence.worktree === worktree
+    && evidence.status === "completed" && typeof evidence.worktree_clean === "boolean"
+    && ((evidence.worktree_clean && evidence.blocked_reason === null)
+      || (!evidence.worktree_clean && typeof evidence.blocked_reason === "string" && Boolean(evidence.blocked_reason.trim())))
+    && Array.isArray(evidence.files_changed) && evidence.files_changed.length > 0
+    && evidence.files_changed.every((path) => typeof path === "string" && Boolean(path))
+    && typeof evidence.diff_stat === "string" && evidence.diff_observed === true
+    && commandsAreCanonical && testsAreCanonical && evidence.commit === commit
+    && evidence.observed_by === "orchestrator" && evidence.review_ready === deriveReviewReady(evidence)
+    && reconciliation && typeof reconciliation === "object" && !Array.isArray(reconciliation)
+    && JSON.stringify(Object.keys(reconciliation).sort()) === JSON.stringify(["claimed", "mismatches"])
+    && reconciliation.claimed === false && Array.isArray(reconciliation.mismatches)
+    && reconciliation.mismatches.length === 0;
+}
+
 export function readPostMergeReverifications(runDir, run) {
+  // False-green enforcement: malformed reserved history can never become command or publication authority.
   let journal = "";
-  try { journal = readFileSync(join(runDir, "artifacts", "post-merge-repairs.md"), "utf8"); }
-  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  try {
+    journal = readFileSync(join(runDir, "artifacts", "post-merge-repairs.md"), "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   const records = new Map();
   const markerLines = journal.split("\n").filter((entry) => entry.startsWith("Reverify-v1"));
   if (markerLines.some((line) => !line.startsWith(MARKER))) throw new Error("post-merge repair re-verification marker is malformed");
@@ -48,15 +86,12 @@ export function readPostMergeReverifications(runDir, run) {
     try { evidence = JSON.parse(readFileSync(join(runDir, "evidence", name), "utf8")); }
     catch { throw new Error(`post-merge repair evidence '${name}' is malformed`); }
     const attempt = Number(match[2]);
-    if (JSON.stringify(Object.keys(evidence ?? {})) !== JSON.stringify(EVIDENCE_KEYS)
-      || evidence.subject !== `repair-reverify:${record.recordId}` || evidence.run_id !== run.run_id
-      || evidence.attempt !== attempt || evidence.branch !== run.branch || evidence.commit !== record.mergeCommit
-      || evidence.status !== "completed" || evidence.observed_by !== "orchestrator"
-      || evidence.tests?.cmd !== record.trigger.command || evidence.tests?.skipped_reason !== null
-      || typeof evidence.tests?.observed !== "boolean"
-      || !((evidence.tests.observed && Number.isInteger(evidence.tests.exit))
-        || (!evidence.tests.observed && evidence.tests.exit === null))
-      || typeof evidence.review_ready !== "boolean" || evidence.review_ready !== deriveReviewReady(evidence)) {
+    const baseRef = run.slices.find((slice) => Array.isArray(slice.depends_on) && slice.depends_on.length === 0)?.base_ref;
+    const worktree = resolve(runDir, "..", "..", run.worktree);
+    if (!canonicalObservedEvidence(evidence, {
+      runId: run.run_id, branch: run.branch, baseRef, worktree, commit: record.mergeCommit,
+      command: record.trigger.command, subject: `repair-reverify:${record.recordId}`, attempt,
+    })) {
       throw new Error(`post-merge repair evidence '${name}' is noncanonical`);
     }
     record.evidence.push({ attempt, passed: evidence.tests.observed === true && evidence.tests.exit === 0 && evidence.review_ready === true });

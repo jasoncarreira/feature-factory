@@ -14,7 +14,7 @@ import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { buildEvidence, DEFAULT_BOOTSTRAP_TIMEOUT_MS, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
-import { readPostMergeReverifications } from "../observe/post-merge-repairs.js";
+import { canonicalObservedEvidence, readPostMergeReverifications } from "../observe/post-merge-repairs.js";
 import { archiveReviewAttempt } from "../state/review-archive.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
@@ -336,47 +336,10 @@ async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, 
 }
 
 function canonicalRepositoryVerifyEvidence(evidence, { runId, run, integration, verifyCommand }) {
-  const baseRef = branchPoint(run);
-  const keys = Object.keys(evidence).sort();
-  const commandNames = [
-    "git rev-parse HEAD",
-    `git --literal-pathspecs diff --name-only -z ${baseRef}...HEAD`,
-    `git diff --stat ${baseRef}...HEAD`,
-  ];
-  const commandsAreCanonical = Array.isArray(evidence.commands)
-    && evidence.commands.length === commandNames.length
-    && evidence.commands.every((command, index) => command && typeof command === "object" && !Array.isArray(command)
-      && JSON.stringify(Object.keys(command).sort()) === JSON.stringify(["cmd", "exit", "summary"])
-      && command.cmd === commandNames[index] && command.exit === 0 && typeof command.summary === "string");
-  const tests = evidence.tests;
-  const testsAreCanonical = tests && typeof tests === "object" && !Array.isArray(tests)
-    && JSON.stringify(Object.keys(tests).sort()) === JSON.stringify(["cmd", "exit", "observed", "skipped_reason"])
-    && tests.cmd === verifyCommand && typeof tests.observed === "boolean" && tests.skipped_reason === null
-    && ((tests.observed === true && Number.isInteger(tests.exit))
-      || (tests.observed === false && tests.exit === null));
-  const reconciliation = evidence.claim_reconciliation;
-  return JSON.stringify(keys) === JSON.stringify([...EVIDENCE_KEYS].sort())
-    && evidence.subject === "test-verifier" && evidence.run_id === runId
-    && Number.isSafeInteger(evidence.attempt) && evidence.attempt >= 1
-    && evidence.branch === run.branch && evidence.base_ref === baseRef
-    && evidence.worktree === integration.worktree && evidence.status === "completed"
-    && typeof evidence.worktree_clean === "boolean"
-    && ((evidence.worktree_clean && evidence.blocked_reason === null)
-      || (!evidence.worktree_clean && typeof evidence.blocked_reason === "string" && Boolean(evidence.blocked_reason.trim())))
-    && Array.isArray(evidence.files_changed) && evidence.files_changed.length > 0
-    && evidence.files_changed.every((path) => typeof path === "string" && Boolean(path))
-    && typeof evidence.diff_stat === "string" && evidence.diff_observed === true
-    && commandsAreCanonical && testsAreCanonical && evidence.commit === integration.head
-    && evidence.observed_by === "orchestrator"
-    // The value, not the type. `readEvidence` above already refuses a record whose stored
-    // review_ready disagrees with its contents, so no such record reaches here today; this
-    // keeps the predicate that decides replay-eligibility from being correct only by virtue
-    // of its caller.
-    && evidence.review_ready === deriveReviewReady(evidence)
-    && reconciliation && typeof reconciliation === "object" && !Array.isArray(reconciliation)
-    && JSON.stringify(Object.keys(reconciliation).sort()) === JSON.stringify(["claimed", "mismatches"])
-    && reconciliation.claimed === false && Array.isArray(reconciliation.mismatches)
-    && reconciliation.mismatches.length === 0;
+  return canonicalObservedEvidence(evidence, {
+    runId, branch: run.branch, baseRef: branchPoint(run), worktree: integration.worktree,
+    commit: integration.head, command: verifyCommand, subject: "test-verifier", attempt: evidence?.attempt,
+  }) && Number.isSafeInteger(evidence.attempt) && evidence.attempt >= 1;
 }
 
 function classifyRepositoryVerifyEvidence(runDir, context) {
@@ -622,19 +585,31 @@ const HANDLERS = {
   },
 
   async ["repair-reverify"](positional, flags) {
-    if (positional.length !== 2) throw new CliError("factory repair-reverify requires exactly <run-id> <record-id>");
+    // Instruction: workflow policy reserves this explicit invocation to the operator.
+    // False-green enforcement: admission binds the owner, record, merge, worktree, and captured trigger.
+    if (positional.length !== 2) {
+      throw new CliError("factory repair-reverify requires exactly <run-id> <record-id>");
+    }
     const [runId, recordId] = positional;
-    if (typeof flags.session !== "string" || !flags.session.trim()) throw new CliError("factory repair-reverify requires nonblank --session <id>");
+    if (typeof flags.session !== "string" || !flags.session.trim()) {
+      throw new CliError("factory repair-reverify requires nonblank --session <id>");
+    }
     const runDir = runDirFor(flags, runId);
     const run = readRun(runDir);
     assertFreshSessionOwner(runDir, runId, flags.session, "repair-reverify");
     const { unresolved } = readPostMergeReverifications(runDir, run);
-    if (!unresolved || unresolved.recordId !== recordId) throw new CliError(`post-merge repair '${recordId}' is not an eligible unresolved needs-human record`);
+    if (!unresolved || unresolved.recordId !== recordId) {
+      throw new CliError(`post-merge repair '${recordId}' is not an eligible unresolved needs-human record`);
+    }
     const repo = resolve(flags.repo ?? process.cwd());
     const integration = repositoryVerifyRetrySafety(repo, run, unresolved.mergeCommit);
     let verify;
-    try { verify = readRepositoryConfig(integration.worktree); }
-    catch (error) { if (error instanceof RepositoryConfigError) throw new CliError(error.message); throw error; }
+    try {
+      verify = readRepositoryConfig(integration.worktree);
+    } catch (error) {
+      if (error instanceof RepositoryConfigError) throw new CliError(error.message);
+      throw error;
+    }
     if (verify.command !== unresolved.trigger.command || verify.timeoutMs !== unresolved.trigger.timeout_ms) {
       throw new CliError(`factory config entry 'verify' no longer matches post-merge repair '${recordId}'`);
     }

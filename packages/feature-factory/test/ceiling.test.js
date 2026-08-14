@@ -845,9 +845,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Eight of the fourteen lines are the comment recording that this is enforcement, and that presence is
     // checked while key order deliberately is not: JSON order carries no meaning, and refusing a complete
     // record over its formatting is the over-reach that cost run 291 its work.
-    // 4128 for issue #303: canonical repair markers, create-only re-verification evidence, the explicit
+    // 4138 for issue #303: canonical repair markers, create-only re-verification evidence, the explicit
     // session-authorized command, and the shared publication guard provide the sole pass-only exit.
-    assert.equal(total, 4128, "repair re-verification lands at 4128 production lines");
+    assert.equal(total, 4138, "repair re-verification lands at 4138 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

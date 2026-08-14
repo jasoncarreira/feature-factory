@@ -1656,6 +1656,31 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       writeFileSync(journal, `original failed repair\n${marker}\n`);
       const originalJournal = readFileSync(journal, "utf8");
       const originalVerifier = readFileSync(join(repair.runDir, "evidence", "test-verifier.json"), "utf8");
+      const forgedRef = join(repair.runDir, "evidence", `post-merge-repair-reverify-${recordId}-attempt-1.json`);
+      const falsePass = { ...JSON.parse(originalVerifier), subject: `repair-reverify:${recordId}`, attempt: 1,
+        tests: { cmd: command, observed: true, exit: 0, skipped_reason: null } };
+      for (const [name, mutate] of [
+        ["wrong base", (evidence) => { evidence.base_ref = "f".repeat(40); }],
+        ["wrong worktree", (evidence) => { evidence.worktree = join(repair.repo, "forged"); }],
+        ["malformed command trace", (evidence) => { evidence.commands[0].cmd = "git status"; }],
+        ["reconciliation mismatch", (evidence) => { evidence.claim_reconciliation = { claimed: true, mismatches: [] }; }],
+      ]) {
+        const evidence = structuredClone(falsePass);
+        mutate(evidence);
+        writeFileSync(forgedRef, `${JSON.stringify(evidence)}
+`);
+        const forgedPr = factory(repair.repo, ["pr", RUN, "--url", "https://example.test/pr/forged", "--now", NOW(6)]);
+        assert.equal(forgedPr.ok, false, `${name} must not permit factory pr`);
+        assert.match(forgedPr.stderr, /post-merge repair evidence.*is noncanonical/u);
+        assert.equal(factory(repair.repo, ["gate", RUN, "pre_pr", "pending", "--now", NOW(6)]).ok, true);
+        const forgedGate = approveGate(repair.repo, "pre_pr", NOW(6));
+        assert.equal(forgedGate.ok, false, `${name} must not permit Gate 3`);
+        assert.match(forgedGate.stderr, /post-merge repair evidence.*is noncanonical/u);
+        rmSync(forgedRef);
+        writeFileSync(journal, "original failed repair\n");
+        assert.equal(approveGate(repair.repo, "pre_pr", NOW(6)).ok, true, `${name} negative control`);
+        writeFileSync(journal, originalJournal);
+      }
 
       const prBlocked = factory(repair.repo, ["pr", RUN, "--url", "https://example.test/pr/repair", "--now", NOW(6)]);
       assert.equal(prBlocked.ok, false, "factory pr must execute the repair publication guard");
