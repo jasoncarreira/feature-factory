@@ -273,30 +273,51 @@ prime-agent --autonomous \
   --cwd <repo> -p "/feature --autonomous [--base <branch>] [--max-retries <n>] <issue-number>" < /dev/null
 ```
 
-**A self-hosted run, where the target is this repository, has no sanctioned Prime launch today. Use opencode.**
-Not because the process fails to start — one such run was watched all the way to a slice — but because the only
-way it starts is a driver ignoring a stop rule in its own skill. Expect it to run, and do not rely on it.
+**A self-hosted run, where the target is this repository, works but is not sanctioned by the skill.** It has
+been watched to a slice, so expect it to start; the paragraphs after the recipe say what it is trading away, and
+they are the reason not to be surprised the day it refuses.
 
-The reason is a contract conflict rather than a missing flag. Discovery must be off, because the installed adapter
-hands the driver installed skill, agent and CLI paths and this repository's read-scope rule then refuses. But
-`-ne` also suppresses an explicitly passed `-e`, so the in-tree extension does not load either: `/feature` is not
-a registered command and **`feature_factory_context` does not exist**. Confirmed by asking a session directly —
-command registered `No`, skill loaded `Yes`, `feature_*` tools `None`.
+Discovery must be off, because the installed adapter hands the driver installed skill, agent and CLI paths and
+this repository's read-scope rule then refuses. But `-ne` also suppresses an explicitly passed `-e`, so the
+in-tree extension does not load either: `/feature` is not a registered command and **`feature_factory_context`
+does not exist**. Confirmed by asking a session directly — command registered `No`, skill loaded `Yes`,
+`feature_*` tools `None`. So the prompt has to supply what the missing tool would have returned:
 
-That tool is not optional. `packages/prime-agent-feature-factory/skills/feature/SKILL.md` requires the driver to
-call it exactly once after admission, to require its `sessionId`, `agents` and `cli`, and — when the tool is
-absent — to **stop before creating or changing a run**, never substituting hand-written paths. So a conforming
-driver refuses here, and a driver that proceeds on paths supplied in its prompt is violating that contract rather
-than demonstrating a recipe. An earlier revision of this section recommended exactly that, on the strength of one
-session that did proceed; a single contract violation is not evidence of a supported path, and it is removed.
+```sh
+R=<absolute path to this repository>
+prime-agent --autonomous \
+  --autonomous-max-turns 600 --autonomous-max-continuations 200 \
+  --autonomous-max-tokens 6000000 --autonomous-timeout-ms 21600000 \
+  -ne -ns --skill packages/prime-agent-feature-factory/skills/feature/SKILL.md \
+  -p "Drive feature-factory issue <N> as one autonomous run, following the loaded feature skill and its
+      WORKFLOW.md. Treat this as the invocation '/feature --autonomous --max-retries 5 <N>'. One operator
+      override applies, and it is the only deviation from the skill: this session has no
+      feature_factory_context tool, and instead of stopping as the skill's admission step directs, proceed with
+      these in-tree resources in place of what that tool would return -- CLI
+      $R/packages/feature-factory/bin/factory.js, agents $R/packages/feature-factory/agents, operator
+      repository $R. Verify each path is readable before Step 0, and stop if any is not. Run every factory
+      command as 'node <that CLI path>'. Follow every other instruction in the skill exactly. Begin at Step 0
+      and continue to a terminal state." < /dev/null
+```
 
-Two consequences follow, and the second is the one that costs an afternoon. Nothing makes the violation repeat —
-a stricter prompt or a driver that reads the clause more carefully refuses instead. And a refusal here presents
-as the process exiting with zero bytes and no sandbox, which is identical to all three failures above, so the
-next operator re-derives the whole set.
+The override is stated rather than implied on purpose. `skills/feature/SKILL.md` requires the driver to call
+`feature_factory_context` once after admission and, when it is absent, to **stop before creating or changing a
+run**, never substituting hand-written paths. An earlier version of this prompt said "follow the skill exactly"
+*and* "no tool is available, use these paths," which is a contradiction the driver had to resolve silently —
+which half it honoured was luck. Naming the deviation and keeping the readability check the tool would have
+performed leaves one explicit exception instead.
 
-Until a self-host adapter returns in-tree context legitimately (issue #307), use the opencode recipe above with
-this repository as `<repo>`: its command comes from the host rather than from a tool the driver must call.
+It is still an exception, so know what it costs. **A conforming driver may refuse, and nothing here prevents
+that** — a model revision or a stricter reading of the clause is enough. **That refusal presents as the process
+exiting with zero bytes and no sandbox**, identical to all three failures above, so budget for the confusion
+rather than re-deriving the whole set. And a run admitted this way never had its CLI and agent identity checked
+through the contract; the CLI still enforces every evidence, binding and merge rule, so the exposure is an
+unvalidated context, not a forged one.
+
+Issue #307 is the fix that retires the exception: an in-tree context path returning a real `sessionId`, `agents`
+and `cli`, after which self-hosted admission needs no override. Until then, the opencode recipe above with this
+repository as `<repo>` is the route that needs no exception at all, and it is the better default for an
+unattended run.
 
 `-p` and `--autonomous` belong together, contrary to an earlier claim here. `-p` is print-and-exit for the
 launching process, which hands off to the daemon session; `--autonomous` is what keeps that session continuing.
