@@ -260,40 +260,70 @@ opencode run --log-level DEBUG --print-logs --dir <repo> \
   --command feature " --autonomous <issue-number>"
 ```
 
-The same launch under Prime Agent, where two details are not optional:
+Under Prime Agent, the shape depends on whether the target repository is the factory itself. Both forms below
+were run and watched; the earlier version of this section was written from inference and was wrong.
+
+**A normal run, in a repository that is not this one.** Let discovery load the installed adapter, which is what
+registers the `/feature` command and provides the `feature_factory_context` tool:
 
 ```sh
 prime-agent --autonomous \
   --autonomous-max-turns 600 --autonomous-max-continuations 200 \
   --autonomous-max-tokens 6000000 --autonomous-timeout-ms 21600000 \
-  --cwd <repo> -p "/feature --autonomous <issue-number>" < /dev/null
+  --cwd <repo> -p "/feature --autonomous [--base <branch>] [--max-retries <n>] <issue-number>" < /dev/null
 ```
 
-**Redirect stdin from `/dev/null`.** A supervised launch inherits a pipe that never reaches EOF, and the CLI
-reads stdin for piped input, so it blocks before emitting a byte. The symptom is indistinguishable from a
-broken tool: it hangs until killed, exits 124, and writes zero bytes to both stdout and stderr, unaffected by
-`--verbose`, `--offline`, or disabling extensions, skills and tools. One redirect returns it to answering in
-seconds. Diagnose a silent hang by closing stdin before theorising about the tool.
+**A self-hosted run, where the target is the factory repository.** Discovery must be off, because the installed
+adapter hands the driver installed skill, agent and CLI paths and this repository's read-scope rule then refuses
+before creating a run -- correctly. But `-ne` also suppresses an explicitly passed `-e`, so **the extension does
+not load, the `/feature` command is not registered, and `feature_factory_context` does not exist.** Confirmed by
+asking a session directly: command registered `No`, skill loaded `Yes`, `feature_*` tools `None`. A `/feature ...`
+prompt is then inert text: the process exits within seconds, writes zero bytes to stdout, stderr and the log, and
+creates no sandbox. That silence is the whole symptom, and it looks exactly like a hang.
 
-**Raise every autonomous limit.** `-p` on its own prints one response and exits, which initializes a run and
-then abandons it with `status: running` and nothing alive. `--autonomous` continues until a gate passes or a
-limit is reached, and its defaults are 12 assistant turns, 3 continuations, 80,000 tokens and a 30-minute wall
-clock. None of those reach Gate 2 on a real issue, and a run that stops on a limit looks exactly like a stall.
-Set the limits to the run you expect rather than accepting the defaults.
-
-The two `--autonomous` spellings above are different flags and both are needed: the first is Prime's
-continuation control, and the one inside the quoted request is content the skill reads to select the run mode.
-
-**A self-hosted run needs in-tree resources.** When the target repository is the factory itself, its own
-read-scope rule forbids reading the installed package, so a driver handed installed skill, agent or CLI paths
-refuses before creating a run — correctly. Point it at this tree instead, which is also the copy a self-hosted
-run should exercise:
+So supply in the prompt what the missing tool would have provided:
 
 ```sh
-prime-agent --autonomous <limits as above> -ne -ns \
-  -e packages/prime-agent-feature-factory/extensions/index.js \
-  --skill packages/prime-agent-feature-factory/skills/feature/SKILL.md \
-  -p "/feature --autonomous <issue-number>" < /dev/null
+R=<absolute path to this repository>
+prime-agent --autonomous \
+  --autonomous-max-turns 600 --autonomous-max-continuations 200 \
+  --autonomous-max-tokens 6000000 --autonomous-timeout-ms 21600000 \
+  -ne -ns --skill packages/prime-agent-feature-factory/skills/feature/SKILL.md \
+  -p "Drive feature-factory issue <N> as one autonomous run, following the loaded feature skill and its
+      WORKFLOW.md exactly. Treat this as the invocation '/feature --autonomous --max-retries 5 <N>'. No
+      feature_factory_context tool is available in this session, so use these in-tree resources, which are the
+      ones a self-hosted run must exercise: CLI $R/packages/feature-factory/bin/factory.js, agents
+      $R/packages/feature-factory/agents, operator repository $R. Run every factory command as
+      'node <that CLI path>'. Begin at Step 0 and continue to a terminal state." < /dev/null
+```
+
+`-p` and `--autonomous` belong together, contrary to an earlier claim here. `-p` is print-and-exit for the
+launching process, which hands off to the daemon session; `--autonomous` is what keeps that session continuing.
+The launcher process disappearing is normal and is not the run dying -- read `run.json`, not `ps`.
+
+**Redirect stdin from `/dev/null`.** A supervised launch inherits a pipe that never reaches EOF, and the CLI
+reads stdin for piped input, so it blocks before emitting a byte: hangs until killed, exit 124, zero bytes on
+both streams, unaffected by `--verbose`, `--offline`, or disabling extensions, skills and tools.
+
+**Raise every autonomous limit.**
+The defaults are 12 assistant turns, 3 continuations, 80,000 tokens and a 30-minute wall clock.
+None of those reach Gate 2 on a real issue, and a run that stops on a limit is indistinguishable from a stall. The two `--autonomous` spellings are different flags and both are needed: the
+first is Prime's continuation control, the one inside the quoted request is content the skill reads to select the
+run mode.
+
+**Daemon health is a precondition, not a detail.** Sessions accumulate; a daemon carrying a dozen idle ones logs
+`Idle eviction sweep failed: Error: Timed out draining daemon mutations for idle eviction` every few minutes and
+then drops new clients with `Daemon worker client closed`. Launches degrade into the same zero-byte silence as a
+bad invocation, which is how an afternoon disappears. Check with `prime-agent doctor --json`, clear with
+`doctor --fix`, and if that is not enough, `prime-agent shutdown` and let the next invocation start a fresh
+daemon. `prime-agent list --json` shows every session with its `cwd`, which is how to tell a run's session from
+an operator's.
+
+**When a launch produces nothing, ask the session what it has** before theorising about the tool:
+
+```sh
+prime-agent -ne -ns --skill <skill> -p "Is a command named 'feature' registered? \
+  Is a skill named 'feature' loaded? Name any tool starting with feature_" < /dev/null
 ```
 
 The Git credential helper reads the inherited `GH_TOKEN` as its password, while `gh` reads that same
