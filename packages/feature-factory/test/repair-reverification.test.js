@@ -144,12 +144,17 @@ describe("repair re-verification — the recovery path is executable, not just d
     }
   });
 
-  it("records a failing attempt and admits exactly the next contiguous one", async () => {
+  it("keeps every non-passing outcome non-passing, and admits exactly the next contiguous attempt", async () => {
     // A non-passing outcome must still be published as a completed attempt: a failure that left only a
     // marker would be indistinguishable from a crash, and would park the record for a human forever.
     for (const [label, verify, expected] of [
-      ["nonzero exit", "exit 3", { observed: true, exit: 3, worktree_clean: true }],
-      ["dirty worktree", "printf x > untracked.txt", { observed: true, exit: 0, worktree_clean: false }],
+      ["nonzero exit", "exit 3", { observed: true, exit: 3, worktree_clean: true, atRepairCommit: true }],
+      ["dirty worktree", "printf x > untracked.txt", { observed: true, exit: 0, worktree_clean: false, atRepairCommit: true }],
+      // A command that commits moves detached HEAD off the immutable repair commit. The tree it leaves is
+      // clean and the exit is zero, so `commit` is the only thing standing between this and a false pass:
+      // evidence would otherwise say the repair commit was tested when something else was.
+      ["moved detached HEAD", 'git -c user.name=T -c user.email=t@e.test commit --allow-empty -q -m moved',
+        { observed: true, exit: 0, worktree_clean: true, atRepairCommit: false }],
     ]) {
       const fixture = seedRepair({ verify });
       const message = await refusal(reverifyRepair({ repo: fixture.repository, runDir: fixture.runDir, runId: RUN_ID, recordId: fixture.recordId, at: AT }));
@@ -159,6 +164,7 @@ describe("repair re-verification — the recovery path is executable, not just d
       assert.equal(first.result.observed, expected.observed, label);
       assert.equal(first.result.exit, expected.exit, label);
       assert.equal(first.result.worktree_clean, expected.worktree_clean, label);
+      assert.equal(first.result.commit === fixture.repairCommit, expected.atRepairCommit, `${label}: observed commit`);
 
       const state = readRepairState({ repo: fixture.repository, runDir: fixture.runDir, runId: RUN_ID, recordId: fixture.recordId });
       assert.equal(state.selectedHistory.pass, null, label);
@@ -172,6 +178,35 @@ describe("repair re-verification — the recovery path is executable, not just d
       );
       rmSync(fixture.repository, { recursive: true, force: true });
     }
+
+    // Cleanup failure is its own branch, and the invariant is that it can never become passing evidence.
+    // `git worktree lock` makes the real removal path fail rather than a test double standing in for it,
+    // so the marker is already published when the throw happens and no result ever follows it.
+    const locked = seedRepair({ verify: 'git worktree lock "$(pwd)"' });
+    const cleanupMessage = await refusal(reverifyRepair({ repo: locked.repository, runDir: locked.runDir, runId: RUN_ID, recordId: locked.recordId, at: AT }));
+    assert.ok(cleanupMessage, "a failed cleanup must refuse rather than return an outcome");
+    assert.match(cleanupMessage, /repair worktree cleanup failed; retained at /u);
+    assert.deepEqual(evidence(locked.runDir), [`repair-reverification.${locked.recordId}.1.started.json`],
+      "cleanup failure leaves the marker and publishes no result");
+    const stranded = readRepairState({ repo: locked.repository, runDir: locked.runDir, runId: RUN_ID, recordId: locked.recordId });
+    assert.equal(stranded.selectedHistory.tail, true, "the interrupted attempt is a tail");
+    assert.equal(stranded.selectedHistory.pass, null);
+    assert.throws(
+      () => assertRepairPublicationReady({ repo: locked.repository, runDir: locked.runDir, runId: RUN_ID, head: locked.repairCommit }),
+      /remains needs-human and blocks publication/u,
+      "a stranded attempt cannot authorize publication",
+    );
+    // And the record now requires a human: no further attempt may be reserved over an unresolved tail.
+    assert.match(
+      await refusal(reverifyRepair({ repo: locked.repository, runDir: locked.runDir, runId: RUN_ID, recordId: locked.recordId, at: AT })),
+      /marker-only attempt requiring manual resolution/u,
+    );
+    const retained = /retained at (\S+)/u.exec(cleanupMessage)?.[1];
+    if (retained) {
+      sh(locked.repository, ["worktree", "unlock", retained]);
+      sh(locked.repository, ["worktree", "remove", "--force", retained]);
+    }
+    rmSync(locked.repository, { recursive: true, force: true });
 
     // The next attempt is N+1 and nothing else. Rewriting `.factory.json` is not possible mid-record —
     // the trigger is bound to the committed config — so the second attempt reruns the same failing
