@@ -1,6 +1,6 @@
 // The ceiling. This test exists to fail when scope grows.
 //
-// BUILD-PLAN-SMALL.md lists non-goals as refusals, not deferrals. Prose cannot
+// The build plan listed non-goals as refusals, not deferrals. Prose cannot
 // enforce that: the inherited 43,013 lines were each individually defensible
 // at the time. So the command set, the run.json key set, the family list, and the
 // absence of the dropped subsystems are asserted here as exact values.
@@ -21,10 +21,10 @@ import { MODES, RUN_KEYS } from "../state/schema.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-// Widened deliberately when slices/observe landed. BUILD-PLAN-SMALL.md declares
+// Widened deliberately when slices/observe landed. The build plan declared
 // twelve commands; `validator` and `pr` are not built yet, so they are absent here
 // and adding them will be another visible diff.
-// All twelve commands BUILD-PLAN-SMALL.md declares are built. Issue #243 authorizes the thirteenth:
+// All twelve commands the build plan declared are built. Issue #243 authorizes the thirteenth:
 // explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
@@ -45,7 +45,7 @@ const RUN_JSON_KEYS = [
 
 const FAMILIES = ["envelope", "gates", "steps", "slices", "verdict"];
 
-// The chain BUILD-PLAN-SMALL.md settled: story -> spec -> decomposition ->
+// The chain the build plan settled: story -> spec -> decomposition ->
 // (impl -> review -> merge) x n -> test-verifier -> implementation-validator -> PR.
 // security-reviewer is absent deliberately; it is a declared non-goal.
 const AGENT_NAMES = [
@@ -614,7 +614,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("keeps the production surface small enough to read in one sitting", () => {
     const total = productionFiles.reduce((sum, path) => sum + readFileSync(path, "utf8").split("\n").length, 0);
-    // 2000 -> 2500 when the twelfth command landed. 2500 was BUILD-PLAN-SMALL.md's stated
+    // 2000 -> 2500 when the twelfth command landed. 2500 was the build plan's stated
     // upper bound for the whole system and was described here as a number that could not
     // be quietly raised again. This raise is therefore not quiet: Jason authorized it
     // explicitly, for three named findings, after the removals below were made first.
