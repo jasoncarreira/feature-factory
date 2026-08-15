@@ -1,6 +1,6 @@
 // The ceiling. This test exists to fail when scope grows.
 //
-// BUILD-PLAN-SMALL.md lists non-goals as refusals, not deferrals. Prose cannot
+// The build plan listed non-goals as refusals, not deferrals. Prose cannot
 // enforce that: the inherited 43,013 lines were each individually defensible
 // at the time. So the command set, the run.json key set, the family list, and the
 // absence of the dropped subsystems are asserted here as exact values.
@@ -21,10 +21,10 @@ import { MODES, RUN_KEYS } from "../state/schema.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-// Widened deliberately when slices/observe landed. BUILD-PLAN-SMALL.md declares
+// Widened deliberately when slices/observe landed. The build plan declared
 // twelve commands; `validator` and `pr` are not built yet, so they are absent here
 // and adding them will be another visible diff.
-// All twelve commands BUILD-PLAN-SMALL.md declares are built. Issue #243 authorizes the thirteenth:
+// All twelve commands the build plan declared are built. Issue #243 authorizes the thirteenth:
 // explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
@@ -45,7 +45,7 @@ const RUN_JSON_KEYS = [
 
 const FAMILIES = ["envelope", "gates", "steps", "slices", "verdict"];
 
-// The chain BUILD-PLAN-SMALL.md settled: story -> spec -> decomposition ->
+// The chain the build plan settled: story -> spec -> decomposition ->
 // (impl -> review -> merge) x n -> test-verifier -> implementation-validator -> PR.
 // security-reviewer is absent deliberately; it is a declared non-goal.
 const AGENT_NAMES = [
@@ -513,19 +513,23 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.match(design, /absent[^.]*gap|gap[^.]*absent/iu);
     assert.match(design, /do not infer/iu);
 
-    const predecessorMarker = ["vi", "so"].join("");
     const repo = resolve(pkg, "..", "..");
-    const predecessorExtensions = [...SOURCE_EXTENSIONS, ".jsx", ...PROSE_EXTENSIONS];
+    const scannedExtensions = [...SOURCE_EXTENSIONS, ".jsx", ...PROSE_EXTENSIONS];
     const packageFiles = execFileSync(
       "git",
       ["ls-files", "--", "packages/feature-factory", "packages/opencode-feature-factory"],
       { cwd: repo, encoding: "utf8" },
-    ).split("\n").filter((path) => predecessorExtensions.some((extension) => path.endsWith(extension)))
+    ).split("\n").filter((path) => scannedExtensions.some((extension) => path.endsWith(extension)))
       .map((path) => join(repo, path)).filter(existsSync);
-    const predecessorOffenders = packageFiles
-      .filter((path) => readFileSync(path, "utf8").toLowerCase().includes(predecessorMarker))
-      .map((path) => path.slice(repo.length + 1));
-    assert.deepEqual(predecessorOffenders, [], "the predecessor name must not remain in either package");
+    // There is deliberately no guard here on the predecessor's name, and this comment exists so the next reader
+    // does not add one back. It tested for a four-character substring, which ordinary English contains: `advisory`
+    // and `supervisor` both matched, and it blocked an autonomous run over a local variable that had nothing to do
+    // with the predecessor. It also had no comment saying what it protected. By the rule this repository governs
+    // itself with -- enforce what can produce a false green, instruct the rest -- a brand name surviving in prose
+    // is not a false green, and the documents that carried the real references are gone from the tree.
+    //
+    // The markers below are the opposite case and stay. They are distinctive API names, matched case-sensitively,
+    // and their reappearance means removed compatibility code came back with them.
     const removedMarkers = [
       ["validate", "Run", "For", "Read"].join(""),
       ["read", "Envelope"].join(""),
@@ -614,7 +618,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("keeps the production surface small enough to read in one sitting", () => {
     const total = productionFiles.reduce((sum, path) => sum + readFileSync(path, "utf8").split("\n").length, 0);
-    // 2000 -> 2500 when the twelfth command landed. 2500 was BUILD-PLAN-SMALL.md's stated
+    // 2000 -> 2500 when the twelfth command landed. 2500 was the build plan's stated
     // upper bound for the whole system and was described here as a number that could not
     // be quietly raised again. This raise is therefore not quiet: Jason authorized it
     // explicitly, for three named findings, after the removals below were made first.

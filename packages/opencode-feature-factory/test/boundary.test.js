@@ -1,6 +1,6 @@
 // The package boundary, asserted rather than intended.
 //
-// BUILD-PLAN-SMALL.md's contract: the factory is standalone with a CLI, the opencode
+// The build plan's contract: the factory is standalone with a CLI, the opencode
 // integration depends on it and never writes state, and the dependency runs one way.
 // Prose cannot hold that — the predecessor's plugin was read-only by convention and
 // still reached mutation through imported dispatch-completion helpers.

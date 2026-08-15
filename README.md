@@ -398,9 +398,8 @@ commands and flags the CLI accepts, that every specialist it dispatches ships, a
 on production source. Widening any of it means editing that file, which is the point — the decision
 shows up in a diff instead of arriving as a reasonable-sounding addition.
 
-The design is recorded in [BUILD-PLAN-SMALL.md](BUILD-PLAN-SMALL.md), the reasoning for the scope in
-[SCOPE-DECISION.md](SCOPE-DECISION.md), and the baseline it was cut against in
-[VISO-BASELINE-COMPARISON.md](VISO-BASELINE-COMPARISON.md).
+The design documents that argued for this scope have been removed; what they decided is enforced in that test
+and explained where it is enforced, which is the only place a decision keeps working.
 
 ## License
 
