@@ -921,6 +921,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // effective push, state relocation, and terminal handoff.
     // Issue #187 removed terminal-handoff AC20's duplicate guard; issue #234 raises 87 -> 88 for the
     // real-CLI command-authorization regression. This remains the sole executable call-site budget.
-    assert.equal(count, 88, `the approved catalogue has exactly 88 call sites; found ${count}`);
+    // Issue #303 raises 88 -> 93 for the repair re-verification recovery path. Five sites, and the reason
+    // there are five rather than one per behaviour is this budget: cases that share a shape are data rows
+    // inside a site — seven corrupted inventories, three non-canonical timestamps, six disqualifying
+    // records — and only genuinely different shapes earned a site. That path carried 469 production lines
+    // and no executable coverage when review caught it, which is the growth this budget exists to permit.
+    assert.equal(count, 93, `the approved catalogue has exactly 93 call sites; found ${count}`);
   });
 });
