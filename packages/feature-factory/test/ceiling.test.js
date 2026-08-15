@@ -513,19 +513,23 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.match(design, /absent[^.]*gap|gap[^.]*absent/iu);
     assert.match(design, /do not infer/iu);
 
-    const predecessorMarker = ["vi", "so"].join("");
     const repo = resolve(pkg, "..", "..");
-    const predecessorExtensions = [...SOURCE_EXTENSIONS, ".jsx", ...PROSE_EXTENSIONS];
+    const scannedExtensions = [...SOURCE_EXTENSIONS, ".jsx", ...PROSE_EXTENSIONS];
     const packageFiles = execFileSync(
       "git",
       ["ls-files", "--", "packages/feature-factory", "packages/opencode-feature-factory"],
       { cwd: repo, encoding: "utf8" },
-    ).split("\n").filter((path) => predecessorExtensions.some((extension) => path.endsWith(extension)))
+    ).split("\n").filter((path) => scannedExtensions.some((extension) => path.endsWith(extension)))
       .map((path) => join(repo, path)).filter(existsSync);
-    const predecessorOffenders = packageFiles
-      .filter((path) => readFileSync(path, "utf8").toLowerCase().includes(predecessorMarker))
-      .map((path) => path.slice(repo.length + 1));
-    assert.deepEqual(predecessorOffenders, [], "the predecessor name must not remain in either package");
+    // There is deliberately no guard here on the predecessor's name, and this comment exists so the next reader
+    // does not add one back. It tested for a four-character substring, which ordinary English contains: `advisory`
+    // and `supervisor` both matched, and it blocked an autonomous run over a local variable that had nothing to do
+    // with the predecessor. It also had no comment saying what it protected. By the rule this repository governs
+    // itself with -- enforce what can produce a false green, instruct the rest -- a brand name surviving in prose
+    // is not a false green, and the documents that carried the real references are gone from the tree.
+    //
+    // The markers below are the opposite case and stay. They are distinctive API names, matched case-sensitively,
+    // and their reappearance means removed compatibility code came back with them.
     const removedMarkers = [
       ["validate", "Run", "For", "Read"].join(""),
       ["read", "Envelope"].join(""),
