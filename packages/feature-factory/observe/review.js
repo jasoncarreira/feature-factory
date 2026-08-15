@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isAbsolute, sep } from "node:path";
 import { deriveReviewReady, EVIDENCE_DIR, EVIDENCE_KEYS, evidenceRef, git, observeAncestry } from "./index.js";
+import { assertRepairPublicationReady } from "./repair-record.js";
 import { GATE_NAMES, TERMINAL_STATUSES, VALIDATOR_VERDICTS } from "../state/schema.js";
 
 export const REVIEW_KEYS = Object.freeze([
@@ -241,7 +242,7 @@ function pathsChanged(worktree, from, to, options) {
 //
 // `observeHead` is injected so this module does not need to know how a worktree is
 // resolved; it returns the integration branch's currently observed commit, or null.
-export function assertPublicationReady({ runDir, state, runId, observeHead }) {
+export function assertPublicationReady({ runDir, state, runId, repo, observeHead }) {
   const refuse = (message) => { throw new Error(`this run is not publishable: ${message}`); };
 
   if (state.status === "needs-human") {
@@ -280,6 +281,14 @@ export function assertPublicationReady({ runDir, state, runId, observeHead }) {
   if (validator && head !== validator.reviewed_head) {
     refuse(`the validator judged ${String(validator.reviewed_head).slice(0, 12)} but the integration head is ${head.slice(0, 12)}`);
   }
+
+  let repair;
+  try {
+    repair = assertRepairPublicationReady({ runDir, state, runId, repo, head });
+  } catch (error) {
+    refuse(error.message);
+  }
+  if (repair.tested === head) return { head, tested: repair.tested };
 
   // The test-verifier stage, required by evidence rather than by having been mentioned.
   // Read at its canonical path, not through a ref in run.json: a ref is a value the

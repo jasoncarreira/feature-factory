@@ -476,7 +476,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "stop before branch handling",
   ], "push refusal effects");
   required(fresh, "stop before branch handling,\nlock claim or steal, dispatch, transition, push, forge command, or further publication.", "push refusal effects");
-  required(gateThree, "Production source: <landed count> / 3600", "Gate 3 source accounting");
+  required(gateThree, "Production source: <landed count> / 4500", "Gate 3 source accounting");
   ordered(gateThree, [
     "Before every Gate 3 presentation",
     "first validate `.factory/$R/artifacts/post-merge-repairs.md`",
@@ -488,6 +488,8 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "summarizes every journal record in order",
     "introducing\nmerge, attempt, Starting head, trigger result, sorted test paths, cause, property outcome and every\nproperty loss, repair commit, post-repair result, and final or active status",
     "No attempt, outcome, or\nproperty loss may be omitted or collapsed into only the latest result",
+    "A Gate 3 repair-record needs-human remains blocked until the complete inventory proves its canonical first passing re-verification; Gate 3 never executes or clears re-verification.",
+    "Publication accepts a repair-record needs-human only through its first canonical pass-derived effective `verified`, with the separate repair commit supplying current-head repository-test proof; resume and reconciliation never execute or clear it.",
   ]) required(gateThree, fragment, "Gate 3 repair attempt/property-loss summary");
   ordered(publication, [
     'factory status "$R" --json --repo "$RUN_REPO"',
@@ -498,7 +500,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"',
     'gh pr create --base "$PR_BASE" --head "$FEATURE_BRANCH"',
     'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
-    "Production source ceiling: <landed count> / 3600",
+    "Production source ceiling: <landed count> / 4500",
   ], "Step 6 compare/publication");
   required(publication, "effective boolean `pr_draft` as `PR_DRAFT`", "status policy binding");
   required(publication, "without rereading repository config", "status policy binding");
@@ -532,7 +534,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   for (const fragment of [
     "## Post-merge test-only repairs",
     "include every attempt",
-    "This publication repair-record needs-human remains blocking, and envelope resume does not clear it.",
+    "This publication repair-record needs-human remains blocked until Step 6 and `factory pr` independently revalidate its first canonical pass and unchanged inventory; neither path executes or clears re-verification.",
   ]) required(publication, fragment, "post-merge repair disclosure");
   assert.doesNotMatch(publication, /git -C "\$RUN_REPO" (?:config|remote get-url)/u);
   required(summary, "guarded sandbox-removal", "Step 7 exclusion");

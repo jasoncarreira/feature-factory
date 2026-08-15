@@ -189,13 +189,25 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   ]);
   assert.ok(repairPolicy.includes("This repair record is not the run envelope, and envelope resume does not clear that status."));
   for (const fragment of [
-    "attempts are ordered, contiguous, duplicate- and gap-free `1..N`",
+    "attempts are ordered, contiguous, duplicate- and gap-free\n`1..N`",
     "`N <= max_retries`; globally at most one record is active (`planned` or `committed`)",
-    "Immutable fields\nare introducing merge, attempt, Starting head, trigger result, paths, and cause",
-    "Starting head is exact\nHEAD at planning and must descend from the introducing merge",
+    "Immutable fields from the first `planned` write are record ID, introducing merge, attempt, Starting\nhead, trigger snapshot, trigger result, paths, and cause",
+    "Starting head is exact HEAD at planning and\nmust descend from the introducing merge",
     "separate single-parent commit whose parent is Starting head",
     "nonempty diff is exactly the sorted test paths, which changes tests only, and which is current\nHEAD when recorded",
   ]) assert.ok(repairPolicy.includes(fragment), `repair invariant is missing: ${fragment}`);
+  for (const fragment of [
+    "This contract applies only to new version-1 records.",
+    "version-1 journal is canonical UTF-8 JSON with no BOM",
+    "The complete status-conditioned shape is:",
+    "is identity and ancestry proof only, never the re-verification execution target.",
+    "operator-only recovery action by instruction, not identity, role, session, or authority enforcement.",
+    "requires exactly the run ID and exact canonical record ID; its only optional flags are `--repo`, `--now`, and `--json`.",
+    "Every direct entry of `.factory/$R/evidence/` whose basename starts `repair-reverification.` belongs to",
+    "Marker attempts are contiguous `1..N`.",
+    "Marker publication linearizes begin; final evidence publication linearizes finish; a marker-only tail always requires manual resolution.",
+    "Gate 3 and publication perform only\nsynchronous lock-free validation",
+  ]) assert.ok(repairPolicy.includes(fragment), `version-1 repair contract is missing: ${fragment}`);
   const transitionSentence = /Allowed transitions are ([\s\S]*?)\nFinal records/u.exec(repairPolicy)?.[1] ?? "";
   assert.deepEqual([...transitionSentence.matchAll(/`([^`]+ → [^`]+)`/gu)].map((match) => match[1]), [
     "planned → committed|needs-human",
@@ -203,7 +215,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "failed → exhausted",
   ], "the repair journal must admit only the approved transitions");
   assert.ok(repairPolicy.includes("Envelope resume does not clear or alter these repair transitions."));
-  assert.ok(repairPolicy.includes("This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication."));
+  assert.ok(repairPolicy.includes('Only the explicit `factory reverify-repair "$R" "$REPAIR_RECORD_ID" --repo "$RUN_REPO"` may derive effective `verified` from this repair-record needs-human; the physical row stays frozen, and resume and reconciliation never execute or clear it.'));
   for (const [state, outcomes] of [
     ["planned", ["tree is clean", "`HEAD === Starting head`", "same known trigger", "resume edits without rerunning verify", "Otherwise terminalize"]],
     ["committed", ["valid repair head and diff plus green evidence becomes `verified`", "known failed evidence becomes\n`failed` or `exhausted`", "unknown evidence or any mismatch terminalizes"]],
@@ -249,11 +261,13 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const gateThree = stepFive.slice(stepFive.indexOf("### Gate 3 — Pre-PR"));
   for (const fragment of [
     "first validate `.factory/$R/artifacts/post-merge-repairs.md`",
-    "complete journal, ancestry, commit, transition, resume, attempt-bound, one-active-record, and\nlatest-verified/current-green rules",
+    "complete journal, ancestry, separate repair commit, transition, resume, attempt-bound,\none-active-record, evidence inventory, and latest-effective-verified/current-head rules",
+    "A Gate 3 repair-record needs-human remains blocked until the complete inventory proves its canonical first passing re-verification; Gate 3 never executes or clears re-verification.",
     "`## Post-merge test-only repairs` section",
     "summarizes every journal record in order",
     "property outcome and every\nproperty loss",
     "No attempt, outcome, or\nproperty loss may be omitted",
+    "Publication accepts a repair-record needs-human only through its first canonical pass-derived effective `verified`, with the separate repair commit supplying current-head repository-test proof; resume and reconciliation never execute or clear it.",
   ]) assert.ok(gateThree.includes(fragment), `Gate 3 repair summary is missing: ${fragment}`);
   assert.ok(gateThree.indexOf("first validate `.factory/$R/artifacts/post-merge-repairs.md`") < gateThree.indexOf('factory gate "$R" pre_pr pending --artifact gates/pre_pr.md'),
     "repair history must be validated and summarized before Gate 3 presentation");

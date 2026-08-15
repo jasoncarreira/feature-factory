@@ -1326,17 +1326,75 @@ and respect `max_retries`. Before the first attempted edit create
 `.factory/$R/artifacts/post-merge-repairs.md`. Do not create it when no repair is attempted. Validate the complete
 journal as untrusted input on every read.
 
+The workflow driver owns journal creation and lifecycle mutation. `factory slice … merged` still writes
+only ordinary repository-verification evidence; production JavaScript validates the driver-written
+journal but does not create or mutate it. This contract applies only to new version-1 records. Historical,
+freeform, alternate-layout, or pre-version records remain blocked and require manual resolution; do not
+import, migrate, normalize, or re-verify them.
+
+Despite its `.md` suffix, the version-1 journal is canonical UTF-8 JSON with no BOM and bytes exactly
+equal to `${JSON.stringify(value, null, 2)}\n`. Its exact top-level key order is `version`, `records`;
+`version` is integer `1`, and `records` is a nonempty array in append order. Reject malformed UTF-8 or
+JSON, reordered, missing, or unknown keys, alternate whitespace, and trailing bytes. Every record always
+contains every key in this exact order, using JSON `null` rather than omission:
+
+```text
+record_id
+introducing_merge
+attempt
+starting_head
+trigger
+trigger_result
+test_paths
+cause
+property_outcome
+repair_commit
+post_repair_result
+status
+```
+
 Each record contains `Introducing merge`, per-merge `Attempt`, `Starting head`, `Trigger result`, sorted
 `Test paths`, concrete `Cause`, `Property outcome`, `Repair commit`, `Post-repair result`, and `Status`.
 Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`. This repair record is not the run envelope, and envelope resume does not clear that status.
-For each
-introducing merge attempts are ordered, contiguous, duplicate- and gap-free `1..N`, with
-`N <= max_retries`; globally at most one record is active (`planned` or `committed`). Immutable fields
-are introducing merge, attempt, Starting head, trigger result, paths, and cause. Starting head is exact
-HEAD at planning and must descend from the introducing merge.
+`record_id` is exactly `repair-<40-lowercase-hex-introducing-merge>-<attempt>`. `attempt` is a positive
+safe integer. For each introducing merge attempts are ordered, contiguous, duplicate- and gap-free
+`1..N`, with `N <= max_retries`; globally at most one record is active (`planned` or `committed`).
+`trigger` has exact key order `command`, `timeout_ms`, with a nonblank command and positive safe-integer
+timeout. Both result objects have exact key order `observed`, `exit`; `observed: true` requires a
+nonnegative safe-integer exit, while `observed: false` requires `exit: null`. `trigger_result` is always
+the known observed nonzero pre-repair failure. `test_paths` is nonempty, unique, strictly sorted, and
+repository-relative; `cause` is nonblank.
+
+The complete status-conditioned shape is:
+
+| Physical status | `property_outcome` | `repair_commit` | `post_repair_result` | Rule |
+|---|---|---|---|---|
+| `planned` | `null` | `null` | `null` | It is the only mutable pre-commit form. |
+| `committed` | nonblank | SHA | `null` | The separate repair commit has been validated. |
+| `verified` | nonblank | SHA | observed exit `0` | Final; no later record for this introducing merge. |
+| `failed` | nonblank | SHA | observed exit greater than `0` | Only the next contiguous planned record may follow. |
+| `exhausted` | nonblank | SHA | observed exit greater than `0` | Final, at `max_retries`, and always blocking. |
+| pre-commit parked form | `null` | `null` | `null` | Final, manual-only, and ineligible for re-verification. |
+| post-commit parked form | nonblank | SHA | observed nonzero or canonical unobserved result | Final physical row; only this form is eligible for explicit re-verification. |
+
+Here and in the transition table, parked means the repair-record status listed last above, never the run envelope.
+Immutable fields from the first `planned` write are record ID, introducing merge, attempt, Starting
+head, trigger snapshot, trigger result, paths, and cause. Starting head is exact HEAD at planning and
+must descend from the introducing merge. The driver may change only these fields in these transitions:
+
+| Transition | Permitted mutation |
+|---|---|
+| `planned → committed` | Set property outcome and separate repair commit; change status. |
+| `planned → pre-commit parked form` | Change status only, preserving the manual-only null shape. |
+| `committed → verified` | Set the observed passing post-repair result; change status. |
+| `committed → failed` | Set the observed nonzero post-repair result; change status. |
+| `committed → exhausted` | Set the observed nonzero post-repair result; change status only at `max_retries`. |
+| `committed → post-commit parked form` | Set a canonical non-pass post-repair result; change status. |
+| `failed → exhausted` | Change status only, leaving every other byte unchanged, at `max_retries`. |
+| failed row → next attempt | Append attempt `N+1` with Starting head equal to the prior repair commit; never edit the failed row. |
 
 Allowed transitions are `planned → committed|needs-human`, `committed → verified|failed|exhausted|needs-human`, and `failed → exhausted` when no attempt remains. Envelope resume does not clear or alter these repair transitions.
-This repair-record needs-human blocks independently, and envelope resume does not clear it or authorize publication.
+Only the explicit `factory reverify-repair "$R" "$REPAIR_RECORD_ID" --repo "$RUN_REPO"` may derive effective `verified` from this repair-record needs-human; the physical row stays frozen, and resume and reconciliation never execute or clear it.
 Final records are never deleted. A later attempt is a new record starting at the prior failed repair
 commit, which must equal current HEAD; prior failed records remain complete history. Write `planned`
 before edits. The repair commit must be a separate single-parent commit whose parent is Starting head,
@@ -1351,6 +1409,97 @@ factory observe "$R" test-verifier --worktree "$INTEGRATION_WORKTREE" --base "$B
 This direct repair observation receives the shared configured timeout for its one repository shell
 attempt. It does not inherit the merge/replay retry cycle; the repair journal and `max_retries` remain
 the only repair retry policy.
+
+The introducing merge identifies exactly one merged slice and must be an ancestor of Starting head. It
+is identity and ancestry proof only, never the re-verification execution target. Independently observe
+the immutable repair commit: it differs from the introducing merge, has Starting head as its sole parent,
+and has a nonempty NUL-safe diff exactly equal to sorted `test_paths`. Execute only at that repair commit
+in a temporary detached worktree. Parse the committed `.factory.json` there with the existing exact
+configuration rules and require its resolved verify command and timeout to equal the immutable journal
+trigger; mutable integration-worktree configuration is never execution authority.
+
+`reverify-repair` is an operator-only recovery action by instruction, not identity, role, session, or authority enforcement. Its lock and marker checks control internal races only; there is no force, trigger, target, timeout, merge, repair-commit, attempt, or replay override.
+`reverify-repair` requires exactly the run ID and exact canonical record ID; its only optional flags are `--repo`, `--now`, and `--json`.
+The explicit command accepts a `running` or parked run envelope and exactly one caller-supplied canonical
+record ID. It accepts only a complete eligible post-commit parked row that is latest for its introducing
+merge. It never changes `run.json`, envelope status, `terminal_result`, the journal, or
+`evidence/test-verifier.json`; a parked envelope still requires its independent ordinary resume after a
+passing re-verification. It executes the exact recorded shell command once with inherited environment
+and stdio and its exact recorded timeout, with no bootstrap, retry, output parsing, partial suite, or
+mutable-config fallback. A numeric nonzero result, unobservable result, dirty worktree, moved HEAD, or
+cleanup failure cannot pass. A later explicit invocation follows a complete failure at the next attempt;
+the first canonical pass is the sole effective transition, and any invocation after it refuses without
+creating a marker or executing the trigger.
+
+Every direct entry of `.factory/$R/evidence/` whose basename starts `repair-reverification.` belongs to
+one finite inventory. Missing `evidence/` means an empty inventory; every other read error fails closed.
+Only regular non-symlink files matching one of these complete ASCII forms are allowed:
+
+```text
+repair-reverification.<record-id>.<positive-attempt>.started.json
+repair-reverification.<record-id>.<positive-attempt>.json
+```
+
+The record ID in each filename has the canonical lowercase form above, and attempts have no leading
+zero. A canonical-prefix directory, symlink, non-regular file, backup, case variant, alias, extra suffix,
+or any other unmatched basename is malformed. An absent journal requires this inventory to be empty.
+Every filename record ID identifies exactly one current journal row, and filename identity and attempt
+equal file contents. Each logical `(record_id, attempt, kind)` is unique. Evidence is valid only for the
+eligible post-commit parked form. Sort the complete inventory by basename before parsing it.
+
+Both marker and result are canonical version-1 JSON, published create-only and strictly read back. The
+marker key order is:
+
+```text
+version, run_id, record_id, attempt, run_sha256, journal_sha256, record_sha256,
+introducing_merge, repair_commit, trigger, started_at
+```
+
+The result key order is:
+
+```text
+version, run_id, record_id, attempt, marker_sha256, run_sha256, journal_sha256,
+record_sha256, introducing_merge, repair_commit, trigger, result, observed_at, observed_by
+```
+
+The nested trigger order is `command`, `timeout_ms`; nested result order is `observed`, `exit`, `commit`,
+`worktree_clean`; `observed_by` is exactly `factory`. Every digest is `sha256:` plus the lowercase SHA-256
+of UTF-8 `JSON.stringify(object)` after canonical key validation. Marker and result agree on every
+repeated value and digest and bind the complete run bytes, journal bytes, selected record, introducing
+merge, separate repair commit, and trigger. The result additionally binds the exact marker. A future
+valid journal append may change the whole-journal digest for publication, but the selected record digest
+must remain unchanged.
+
+Marker attempts are contiguous `1..N`. Every final result has the same-attempt marker; every lower marker
+has exactly one result. A marker-only attempt may appear only at the highest attempt and blocks both
+publication and another invocation. A marker-only attempt followed by anything higher, a final result
+without its marker, a gap, duplicate, tuple or digest mismatch, unknown record, wrong physical status,
+second pass, or any marker, result, or malformed canonical-prefix artifact after the first pass is
+invalid. The first passing result must be the highest and final logical attempt. Unrelated evidence names,
+including ordinary test-verifier and slice evidence, are outside this prefix inventory.
+
+Marker publication linearizes begin; final evidence publication linearizes finish; a marker-only tail always requires manual resolution.
+Before execution, a preparatory read may select a candidate commit and create a unique detached worktree;
+it authorizes nothing. Begin acquires `run-json.lock`, reloads and validates exact `run.json`, the complete
+journal and Git bindings, the exact selected row, detached HEAD and committed trigger, and the complete
+sorted inventory. It rejects a prior pass or marker-only tail, allocates the next attempt solely from
+that in-lock history, computes the run, journal, and record digests, publishes the marker create-only,
+strictly reads it back, and returns the immutable reservation. Marker publication is the begin
+linearization point; only then is the lock released and the exact reserved trigger executed once.
+
+After execution, observe numeric status, detached HEAD, and cleanliness, and require detached-worktree
+cleanup before a result can be eligible. Finish reacquires the same lock and requires byte-identical run
+and journal state, the same envelope status and selected record, unchanged prior inventory plus exactly
+the reserved marker, and unchanged Git, target, trigger, and observed-result bindings. It publishes the
+result create-only, reads it back, revalidates the complete contiguous inventory, and derives effective
+`verified` only from a canonical pass. Result publication is the finish linearization point.
+
+If execution or cleanup throws after begin, or run bytes, envelope status, journal bytes, record, history,
+marker, or Git target changes before finish, write no result and never retry, rewrite, clear, or infer
+success. The durable marker-only tail requires manual resolution. Gate 3 and publication perform only
+synchronous lock-free validation while their outer manifest transition already holds `run-json.lock`;
+they cannot overlap begin or finish, never acquire a nested lock, and see either no create-only file or a
+complete file.
 
 Resume `planned` only when the tree is clean, `HEAD === Starting head`, and the same known trigger
 failure is canonical; resume edits without rerunning verify. Otherwise terminalize. For `committed`, a
@@ -1413,9 +1562,10 @@ HEAD, a branch name, or an unpersisted variable.
    is no waiver: the stage exists to run the tests, so the evidence must record an observed run that
    exited zero, against the integration head as it stands. Then `work-reviewer` confirms each criterion
    maps to a real assertion.
-   This Gate 3 observation is always fresh and independent. It uses the existing argv-tokenized
-   `--test-cmd` path, overwrites canonical evidence at the current head, and never shares, substitutes,
-   or optimizes from a post-merge repository verification result.
+   This Gate 3 observation is always fresh and independent in the ordinary path. It uses the existing
+   argv-tokenized `--test-cmd` path and overwrites canonical evidence at the current head. The sole
+   substitution is a qualifying explicit repair re-verification pass at current HEAD under Gate 3's
+   complete inventory rules below; failed ordinary evidence remains preserved rather than overwritten.
 2. `implementation-validator` — the holistic pass across the whole diff, complementing per-slice
    reviews. **Skip it when the run has exactly one slice**: its subject is the interaction *between*
    slices, and with one there is none, so it re-reads the diff the slice reviewer just approved —
@@ -1442,11 +1592,13 @@ the file and the cause. Respect `max_retries`.
 ### Gate 3 — Pre-PR
 
 Before every Gate 3 presentation, first validate `.factory/$R/artifacts/post-merge-repairs.md` when it exists against
-the complete journal, ancestry, commit, transition, resume, attempt-bound, one-active-record, and
-latest-verified/current-green rules in Step 4. An absent journal is valid only when no test-only repair
-was attempted. A known attempted repair with no journal, or a present journal that is malformed, omitted
-from the gate artifact, active, latest-failed, or exhausted refuses presentation.
-A Gate 3 repair-record needs-human remains unresolved because envelope resume does not clear it.
+the complete journal, ancestry, separate repair commit, transition, resume, attempt-bound,
+one-active-record, evidence inventory, and latest-effective-verified/current-head rules in Step 4. An
+absent journal is valid only when no test-only repair was attempted and the repair evidence inventory is
+empty. A known attempted repair with no journal, or a present journal that is malformed, omitted from the
+gate artifact, active, latest-failed, exhausted, marker-only, or otherwise noncanonical refuses
+presentation.
+A Gate 3 repair-record needs-human remains blocked until the complete inventory proves its canonical first passing re-verification; Gate 3 never executes or clears re-verification.
 
 Then write or refresh `.factory/$R/gates/pre_pr.md` with the current validator verdict when applicable, the
 acceptance-criterion/test table, the feature-branch diff and PR-base summary, migration and flag
@@ -1458,7 +1610,7 @@ property loss may be omitted or collapsed into only the latest result. Include t
 production count using this exact line template:
 
 ```text
-Production source: <landed count> / 3600
+Production source: <landed count> / 4500
 ```
 
 Present that current artifact and open the gate with:
@@ -1480,12 +1632,14 @@ the time `factory pr` runs, so this is the last refusal that can still prevent s
   `reviewed_head` **is** the integration branch's current head, re-observed from git rather than read
   back from the manifest. A single-slice run does not require one — see Step 5 — but if a verdict was
   recorded anyway it must still approve and still name the current head;
-- `evidence/test-verifier.json`, belonging to this run, recording tests that were observed and exited
-  zero, against that same head.
+- repository-test proof against that same head: ordinarily `evidence/test-verifier.json`, belonging to
+  this run and recording tests observed to exit zero; only a canonical first passing repair
+  re-verification may substitute when its immutable separate repair commit is current HEAD and every
+  repair chain is publishable.
 - no active or unresolved post-merge repair record, and for every represented introducing merge the
   latest record is `verified`. Earlier complete `failed` attempts are allowed; malformed, omitted,
   active, latest-failed, or exhausted history refuses publication.
-Publication refuses a repair-record needs-human because envelope resume does not clear the repair record.
+Publication accepts a repair-record needs-human only through its first canonical pass-derived effective `verified`, with the separate repair commit supplying current-head repository-test proof; resume and reconciliation never execute or clear it.
 
 If the gate refuses, its message names the missing piece. Fix that and re-present — do not push.
 
@@ -1654,7 +1808,7 @@ what was approved — say so at the gate rather than recording it anyway.
 The PR body includes the same measured landed count using this exact line template:
 
 ```text
-Production source ceiling: <landed count> / 3600
+Production source ceiling: <landed count> / 4500
 ```
 
 When `.factory/$R/artifacts/post-merge-repairs.md` exists, validate it again and include every attempt under
@@ -1662,7 +1816,7 @@ When `.factory/$R/artifacts/post-merge-repairs.md` exists, validate it again and
 post-repair results, files, cause, property outcome, repair commit, and status. Never omit an earlier
 failed attempt or property loss. Refuse publication on missing, malformed, active, unresolved,
 latest-failed, or exhausted records.
-This publication repair-record needs-human remains blocking, and envelope resume does not clear it.
+This publication repair-record needs-human remains blocked until Step 6 and `factory pr` independently revalidate its first canonical pass and unchanged inventory; neither path executes or clears re-verification.
 
 Labels, reviewers, and tracker fields are repository policy: derive them from the changed paths using
 whatever mapping the repository documents, and update the tracker only through *your* own calls.

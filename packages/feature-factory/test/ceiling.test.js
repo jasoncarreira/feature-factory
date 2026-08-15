@@ -29,7 +29,7 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
   "init", "status", "amend-paths", "resume", "lock", "heartbeat", "gate", "step", "terminal",
-  "slices-seed", "slice", "observe", "validator", "pr", "effective-push",
+  "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push",
 ];
 
 const RUN_JSON_KEYS = [
@@ -108,6 +108,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
+    assert.deepEqual(COMMANDS["reverify-repair"], ["--repo", "--now", "--json"]);
     assert.deepEqual(COMMANDS["effective-push"], []);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
 
@@ -232,6 +233,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.deepEqual(unknown, [], "the skill documents a command or flag the CLI does not accept");
     const cliSource = readFileSync(join(pkg, "bin", "factory.js"), "utf8");
     assert.ok(cliSource.indexOf("  factory amend-paths <run-id>") < cliSource.indexOf("  factory resume <run-id>"));
+    assert.ok(cliSource.includes("  factory reverify-repair <run-id> <repair-record-id> [--repo PATH] [--now ISO] [--json]"));
     const initPublicationSource = readFileSync(join(pkg, "bin", "init-publication.js"), "utf8");
     const readme = readFileSync(resolve(pkg, "..", "..", "README.md"), "utf8");
     assert.ok(COMMANDS.init.includes("--pr-base"));
@@ -847,7 +849,15 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Eight of the fourteen lines are the comment recording that this is enforcement, and that presence is
     // checked while key order deliberately is not: JSON order carries no meaning, and refusing a complete
     // record over its formatting is the over-reach that cost run 291 its work.
-    assert.equal(total, 4017, "requiring the whole review record lands at 4017 production lines");
+    // 4521 for issue 303: a repair record parked at `needs-human` had no exit, even once the external cause was
+    // resolved and the work verified green. `factory reverify-repair` is that exit, and it is the only thing that
+    // may derive effective `verified` from such a record -- the physical row stays frozen, and resume and
+    // reconciliation never execute or clear it. Three modules carry it: `repair-record` reads and validates the
+    // record, `repair-reverification` runs the attempt against a detached worktree, and `repository-config` is the
+    // configured-command parser extracted out of `bin/factory.js`, which that extraction shortened by 22 lines.
+    // The autonomous run that wrote this blocked at 4521 against a 4500 tripwire rather than compress anything to
+    // fit; the operator then raised the tripwire, which is the order this ledger is meant to force.
+    assert.equal(total, 4521, "the repair re-verification exit lands at 4521 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -873,7 +883,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // which is not a few, and deferring the question that long is how a cap stops being one.
     //
     // The cap is not a budget to spend down. It is the point at which growing production requires saying why.
-    assert.ok(total <= 4050, `production source is ${total} lines; the tripwire is 4050`);
+    //
+    // Raised to 4550 by operator authorization for issue 303, after a run measured 4521 and blocked rather than
+    // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
+    // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
+    // the work that needed that room has now landed and the cap should tighten back toward the record.
+    assert.ok(total <= 4550, `production source is ${total} lines; the tripwire is 4550`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
@@ -910,6 +925,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // effective push, state relocation, and terminal handoff.
     // Issue #187 removed terminal-handoff AC20's duplicate guard; issue #234 raises 87 -> 88 for the
     // real-CLI command-authorization regression. This remains the sole executable call-site budget.
-    assert.equal(count, 88, `the approved catalogue has exactly 88 call sites; found ${count}`);
+    // Issue #303 raises 88 -> 93 for the repair re-verification recovery path. Five sites, and the reason
+    // there are five rather than one per behaviour is this budget: cases that share a shape are data rows
+    // inside a site — seven corrupted inventories, three non-canonical timestamps, six disqualifying
+    // records — and only genuinely different shapes earned a site. That path carried 469 production lines
+    // and no executable coverage when review caught it, which is the growth this budget exists to permit.
+    assert.equal(count, 93, `the approved catalogue has exactly 93 call sites; found ${count}`);
   });
 });

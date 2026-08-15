@@ -12,8 +12,10 @@ import { isDeepStrictEqual } from "node:util";
 import { readFileSync } from "node:fs";
 import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
-import { buildEvidence, DEFAULT_BOOTSTRAP_TIMEOUT_MS, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
+import { buildEvidence, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
+import { readRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
+import { reverifyRepair } from "../observe/repair-reverification.js";
 import { archiveReviewAttempt } from "../state/review-archive.js";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
@@ -43,6 +45,7 @@ export const COMMANDS = Object.freeze({
   observe: Object.freeze(["--repo", "--worktree", "--base", "--attempt", "--test-cmd", "--repository-verify", "--claim", "--status", "--blocked-reason", "--now", "--json"]),
   validator: Object.freeze(["--repo", "--report", "--now", "--json"]),
   pr: Object.freeze(["--repo", "--url", "--now", "--json"]),
+  "reverify-repair": Object.freeze(["--repo", "--now", "--json"]),
   "effective-push": Object.freeze([]),
 });
 
@@ -218,8 +221,6 @@ function integrationHead(repo, run) {
   return { worktree, commit: observeWorktree(worktree, run.branch, { ref: run.branch }).commit };
 }
 
-class RepositoryConfigError extends Error {}
-
 function requireIntegrationWorktree(repo, run, suppliedWorktree) {
   let repository;
   let committed;
@@ -251,54 +252,6 @@ function requireIntegrationWorktree(repo, run, suppliedWorktree) {
     throw new CliError(`integration HEAD must equal the current recorded branch tip for '${run.branch}'`);
   }
   return { worktree: committed, head: headSha };
-}
-
-function readRepositoryConfig(worktree, { optional = false } = {}) {
-  let bytes;
-  try {
-    bytes = readFileSync(join(worktree, ".factory.json"), "utf8");
-  } catch (error) {
-    if (optional && error?.code === "ENOENT") return null;
-    throw new RepositoryConfigError("invalid .factory.json");
-  }
-  let config;
-  try {
-    config = JSON.parse(bytes);
-  } catch {
-    throw new RepositoryConfigError("invalid .factory.json");
-  }
-  const requiredKeys = ["publish", "publishing_identity", "resolve", "verify"];
-  const allowedKeys = [...requiredKeys, "pr_draft", "verify_timeout_ms", "bootstrap", "bootstrap_timeout_ms"];
-  // False-green enforcement: config must not silently select a different repository proof.
-  if (!config || typeof config !== "object" || Array.isArray(config)
-    || Object.keys(config).some((keyName) => !allowedKeys.includes(keyName))) {
-    throw new RepositoryConfigError("invalid .factory.json");
-  }
-  if (Object.hasOwn(config, "pr_draft") && typeof config.pr_draft !== "boolean") {
-    throw new RepositoryConfigError("invalid .factory.json: entry 'pr_draft' must be a boolean");
-  }
-  const hasBootstrap = Object.hasOwn(config, "bootstrap");
-  const hasBootstrapTimeout = Object.hasOwn(config, "bootstrap_timeout_ms");
-  if (hasBootstrap && (typeof config.bootstrap !== "string" || !config.bootstrap.trim())) {
-    throw new RepositoryConfigError("invalid .factory.json: entry 'bootstrap' must be a non-empty string");
-  }
-  if (!hasBootstrap && hasBootstrapTimeout) {
-    throw new RepositoryConfigError("invalid .factory.json: entry 'bootstrap_timeout_ms' requires a declared bootstrap command");
-  }
-  if (hasBootstrapTimeout && (!Number.isSafeInteger(config.bootstrap_timeout_ms) || config.bootstrap_timeout_ms <= 0)) {
-    throw new RepositoryConfigError("invalid .factory.json: entry 'bootstrap_timeout_ms' must be a positive integer");
-  }
-  if (Object.hasOwn(config, "verify_timeout_ms")
-    && (!Number.isSafeInteger(config.verify_timeout_ms) || config.verify_timeout_ms <= 0)) {
-    throw new RepositoryConfigError("invalid .factory.json: entry 'verify_timeout_ms' must be a positive integer");
-  }
-  if (requiredKeys.some((keyName) => typeof config[keyName] !== "string" || !config[keyName].trim())) {
-    throw new RepositoryConfigError("invalid .factory.json");
-  }
-  const parsed = { command: config.verify, timeoutMs: config.verify_timeout_ms ?? DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS,
-    prDraft: config.pr_draft ?? true };
-  return hasBootstrap ? { ...parsed, bootstrapCommand: config.bootstrap,
-    bootstrapTimeoutMs: config.bootstrap_timeout_ms ?? DEFAULT_BOOTSTRAP_TIMEOUT_MS } : parsed;
 }
 
 function bootstrapOutcome(worktree, config, phase) {
@@ -479,6 +432,19 @@ async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit }) {
 }
 
 const HANDLERS = {
+  async ["reverify-repair"](positional, flags) {
+    if (positional.length !== 2) throw new CliError("factory reverify-repair requires exactly <run-id> <repair-record-id>");
+    const [runId, recordId] = positional;
+    if (!/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u.test(runId)) throw new CliError("factory reverify-repair requires a canonical <run-id>");
+    const record = /^repair-([0-9a-f]{40})-([1-9][0-9]*)$/u.exec(recordId);
+    if (!record || !Number.isSafeInteger(Number(record[2]))) throw new CliError("factory reverify-repair requires a canonical <repair-record-id>");
+    if (flags.repo !== undefined && (typeof flags.repo !== "string" || !flags.repo.trim())) throw new CliError("--repo must be a non-empty string");
+    const at = stamp(flags);
+    const repo = resolve(flags.repo ?? process.cwd());
+    const runDir = runDirFor(flags, runId);
+    return emit(flags, await reverifyRepair({ repo, runDir, runId, recordId, at }));
+  },
+
   "effective-push"(positional) {
     enforceEffectivePushTarget(positional);
     return null;
@@ -529,7 +495,7 @@ const HANDLERS = {
     const reobservers = new Map();
     reobservers.set("verdict", async ({ nextState }) => {
       assertPublicationReady({
-        runDir, state: nextState, runId,
+        runDir, state: nextState, runId, repo,
         observeHead: () => integrationHead(repo, nextState).commit,
       });
     });
@@ -1001,7 +967,7 @@ const HANDLERS = {
     if (name === "pre_pr" && decision === "approved") {
       reobservers.set("gates", async ({ nextState }) => {
         assertPublicationReady({
-          runDir, state: nextState, runId,
+          runDir, state: nextState, runId, repo,
           observeHead: () => integrationHead(repo, nextState).commit,
         });
       });
@@ -1473,6 +1439,7 @@ function usage() {
   factory status <run-id> [--json]
   factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID [--now ISO]
   factory resume <run-id> --session ID [--now ISO]
+  factory reverify-repair <run-id> <repair-record-id> [--repo PATH] [--now ISO] [--json]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID
   factory gate <run-id> <${GATE_NAMES.join("|")}> <${GATE_STATUSES.join("|")}> [--artifact REF]
