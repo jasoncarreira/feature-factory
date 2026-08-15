@@ -69,13 +69,13 @@ function removeDetached(repo, temporary) {
 export async function reverifyRepair({ repo, runDir, runId, recordId, at }) {
   const parsedAt = typeof at === "string" ? Date.parse(at) : NaN;
   if (!Number.isFinite(parsedAt) || new Date(parsedAt).toISOString() !== at) throw new Error("repair re-verification timestamp is not canonical");
-  const advisory = readRepairState({ repo, runDir, runId, recordId });
-  assertEnvelope(advisory.run);
-  if (advisory.selectedHistory.pass !== null) throw new Error(`repair record '${recordId}' is already effectively verified`);
-  if (advisory.selectedHistory.tail) throw new Error(`repair record '${recordId}' has a marker-only attempt requiring manual resolution`);
-  const temporary = createDetached(repo, advisory.selected.repair_commit);
+  const preread = readRepairState({ repo, runDir, runId, recordId });
+  assertEnvelope(preread.run);
+  if (preread.selectedHistory.pass !== null) throw new Error(`repair record '${recordId}' is already effectively verified`);
+  if (preread.selectedHistory.tail) throw new Error(`repair record '${recordId}' has a marker-only attempt requiring manual resolution`);
+  const temporary = createDetached(repo, preread.selected.repair_commit);
   try {
-    assertDetached(temporary.worktree, advisory.selected.repair_commit);
+    assertDetached(temporary.worktree, preread.selected.repair_commit);
   } catch (error) {
     try { removeDetached(repo, temporary); } catch (cleanup) { throw new Error(`${error.message}; ${cleanup.message}`); }
     throw error;

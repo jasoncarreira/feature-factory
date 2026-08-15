@@ -1479,7 +1479,7 @@ invalid. The first passing result must be the highest and final logical attempt.
 including ordinary test-verifier and slice evidence, are outside this prefix inventory.
 
 Marker publication linearizes begin; final evidence publication linearizes finish; a marker-only tail always requires manual resolution.
-Before execution, an advisory read may select a candidate commit and create a unique detached worktree;
+Before execution, a preparatory read may select a candidate commit and create a unique detached worktree;
 it authorizes nothing. Begin acquires `run-json.lock`, reloads and validates exact `run.json`, the complete
 journal and Git bindings, the exact selected row, detached HEAD and committed trigger, and the complete
 sorted inventory. It rejects a prior pass or marker-only tail, allocates the next attempt solely from

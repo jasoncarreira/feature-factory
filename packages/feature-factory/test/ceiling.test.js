@@ -845,7 +845,15 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Eight of the fourteen lines are the comment recording that this is enforcement, and that presence is
     // checked while key order deliberately is not: JSON order carries no meaning, and refusing a complete
     // record over its formatting is the over-reach that cost run 291 its work.
-    assert.equal(total, 4017, "requiring the whole review record lands at 4017 production lines");
+    // 4521 for issue 303: a repair record parked at `needs-human` had no exit, even once the external cause was
+    // resolved and the work verified green. `factory reverify-repair` is that exit, and it is the only thing that
+    // may derive effective `verified` from such a record -- the physical row stays frozen, and resume and
+    // reconciliation never execute or clear it. Three modules carry it: `repair-record` reads and validates the
+    // record, `repair-reverification` runs the attempt against a detached worktree, and `repository-config` is the
+    // configured-command parser extracted out of `bin/factory.js`, which that extraction shortened by 22 lines.
+    // The autonomous run that wrote this blocked at 4521 against a 4500 tripwire rather than compress anything to
+    // fit; the operator then raised the tripwire, which is the order this ledger is meant to force.
+    assert.equal(total, 4521, "the repair re-verification exit lands at 4521 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -871,7 +879,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // which is not a few, and deferring the question that long is how a cap stops being one.
     //
     // The cap is not a budget to spend down. It is the point at which growing production requires saying why.
-    assert.ok(total <= 4500, `production source is ${total} lines; the tripwire is 4500`);
+    //
+    // Raised to 4550 by operator authorization for issue 303, after a run measured 4521 and blocked rather than
+    // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
+    // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
+    // the work that needed that room has now landed and the cap should tighten back toward the record.
+    assert.ok(total <= 4550, `production source is ${total} lines; the tripwire is 4550`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
