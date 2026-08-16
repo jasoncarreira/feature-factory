@@ -1,8 +1,8 @@
 name: Publish Package
 
-# Three packages version independently now, so a bare `v1.2.3` tag no longer says what to
-# publish — and the root manifest is private with no version at all, which is what the old
-# tag guard read. Tags therefore name their package:
+# The three packages share one version from 0.7.0, but each still publishes separately, and a bare
+# `v1.2.3` tag cannot say which one to publish — the root manifest is private with no version at all,
+# which is what the old tag guard read. Tags therefore name their package:
 #
 #   feature-factory-v0.1.0
 #   opencode-feature-factory-v0.3.0
