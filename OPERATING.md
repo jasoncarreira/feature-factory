@@ -273,51 +273,50 @@ prime-agent --autonomous \
   --cwd <repo> -p "/feature --autonomous [--base <branch>] [--max-retries <n>] <issue-number>" < /dev/null
 ```
 
-**A self-hosted run, where the target is this repository, works but is not sanctioned by the skill.** It has
-been watched to a slice, so expect it to start; the paragraphs after the recipe say what it is trading away, and
-they are the reason not to be surprised the day it refuses.
+**A self-hosted run, where the target is this repository, is supported and needs no exception.** An earlier
+version of this section said the opposite and shipped an operator override around it. That was wrong, and the
+error was one flag: `-ne` disables extension *discovery*, exactly as `--help` says, and does **not** suppress an
+explicitly passed `-e`. Pass the in-tree extension and the driver's mandated context call simply succeeds.
 
-Discovery must be off, because the installed adapter hands the driver installed skill, agent and CLI paths and
-this repository's read-scope rule then refuses. But `-ne` also suppresses an explicitly passed `-e`, so the
-in-tree extension does not load either: `/feature` is not a registered command and **`feature_factory_context`
-does not exist**. Confirmed by asking a session directly — command registered `No`, skill loaded `Yes`,
-`feature_*` tools `None`. So the prompt has to supply what the missing tool would have returned:
+Discovery still has to be off, because the installed adapter would hand the driver installed skill, agent and
+CLI paths and this repository's read-scope rule then refuses them. So turn discovery off and name the in-tree
+skill and extension directly:
 
 ```sh
 R=<absolute path to this repository>
 prime-agent --autonomous \
   --autonomous-max-turns 600 --autonomous-max-continuations 200 \
   --autonomous-max-tokens 6000000 --autonomous-timeout-ms 21600000 \
-  -ne -ns --skill packages/prime-agent-feature-factory/skills/feature/SKILL.md \
-  -p "Drive feature-factory issue <N> as one autonomous run, following the loaded feature skill and its
-      WORKFLOW.md. Treat this as the invocation '/feature --autonomous --max-retries 5 <N>'. One operator
-      override applies, and it is the only deviation from the skill: this session has no
-      feature_factory_context tool, and instead of stopping as the skill's admission step directs, proceed with
-      these in-tree resources in place of what that tool would return -- CLI
-      $R/packages/feature-factory/bin/factory.js, agents $R/packages/feature-factory/agents, operator
-      repository $R. Verify each path is readable before Step 0, and stop if any is not. Run every factory
-      command as 'node <that CLI path>'. Follow every other instruction in the skill exactly. Begin at Step 0
-      and continue to a terminal state." < /dev/null
+  -ne -ns \
+  --skill "$R/packages/prime-agent-feature-factory/skills/feature/SKILL.md" \
+  -e "$R/packages/prime-agent-feature-factory/extensions" \
+  --cwd "$R" -p "/feature --autonomous [--max-retries <n>] <issue-number>" < /dev/null
 ```
 
-The override is stated rather than implied on purpose. `skills/feature/SKILL.md` requires the driver to call
-`feature_factory_context` once after admission and, when it is absent, to **stop before creating or changing a
-run**, never substituting hand-written paths. An earlier version of this prompt said "follow the skill exactly"
-*and* "no tool is available, use these paths," which is a contradiction the driver had to resolve silently —
-which half it honoured was luck. Naming the deviation and keeping the readability check the tool would have
-performed leaves one explicit exception instead.
+`feature_factory_context` is present under those flags and returns this tree, which is what makes the run
+legitimate rather than excused. Verified by calling it, not by asking a session whether it exists — a model with
+the repository as its cwd can read the tool's name off disk and report it either way:
 
-It is still an exception, so know what it costs. **A conforming driver may refuse, and nothing here prevents
-that** — a model revision or a stricter reading of the clause is enough. **That refusal presents as the process
-exiting with zero bytes and no sandbox**, identical to all three failures above, so budget for the confusion
-rather than re-deriving the whole set. And a run admitted this way never had its CLI and agent identity checked
-through the contract; the CLI still enforces every evidence, binding and merge rule, so the exposure is an
-unvalidated context, not a forged one.
+```text
+{"sessionId":"prime-agent:01a00a92-....jsonl",
+ "agents":".../packages/feature-factory/agents",
+ "cli":".../packages/feature-factory/bin/factory.js"}
+```
 
-Issue #307 is the fix that retires the exception: an in-tree context path returning a real `sessionId`, `agents`
-and `cli`, after which self-hosted admission needs no override. Until then, the opencode recipe above with this
-repository as `<repo>` is the route that needs no exception at all, and it is the better default for an
-unattended run.
+The same probe without `-e` answers `NO_SUCH_TOOL`, so the explicit extension is what supplies it. The skill loads
+from `--skill` alongside it.
+
+**What the earlier text got wrong, recorded because it cost a day.** It claimed `-ne` suppressed an explicit
+`-e`, concluded the tool could not exist, and therefore told the driver to proceed on paths supplied in its
+prompt — in direct conflict with the skill's instruction to stop when the tool is absent. A reviewer blocked that
+recipe on the conflict and was right, though neither of us found the real reason: the exception was never
+needed. Two runs were driven under the override before anyone re-tested the flag. The claim had been carried
+from one session to the next in notes and never re-run.
+
+**A self-hosted session still cannot be listed or stopped.** `prime-agent list` does not show it, and
+`prime-agent stop <uuid>` answers `Unknown active session`, while both work for a discovery-enabled driver. That
+is a real gap, tracked in issue #307, and it is unrelated to the context tool — judge liveness by
+`factory status --json` plus a heartbeat that advances, and see the monitoring notes below.
 
 `-p` and `--autonomous` belong together, contrary to an earlier claim here. `-p` is print-and-exit for the
 launching process, which hands off to the daemon session; `--autonomous` is what keeps that session continuing.
