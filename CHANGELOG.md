@@ -1,8 +1,15 @@
 # Changelog
 
-Repository-only change record. All three packages are pre-1.0 and version independently.
+Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
+version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
 ## Unreleased — three-package architecture
+
+- **One version across the workspace, from 0.7.0.** `feature-factory`, `opencode-feature-factory` and
+  `prime-agent-feature-factory` previously drifted at 0.3.6, 0.5.6 and 0.1.0, which made "which versions
+  work together" a question nothing answered. They now move together, and both adapters pin the exact
+  factory version they ship beside. `test/pack.test.js` fails when only some manifests were edited,
+  because a half-applied bump publishes an adapter that cannot resolve its dependency.
 
 - **`feature-factory` owns the host-agnostic contract.** It now ships the `factory` CLI, specialist
   definitions, and canonical `WORKFLOW.md`, but no platform `SKILL.md`.
