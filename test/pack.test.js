@@ -275,6 +275,19 @@ describe("what actually ships", () => {
       const opencode = pack("opencode-feature-factory", dir);
       const prime = pack("prime-agent-feature-factory", dir);
 
+      // The three packages release in lockstep from 0.7.0. Before that they drifted — 0.3.6, 0.5.6 and
+      // 0.1.0 — and an adapter pinning an exact factory version means a half-applied bump publishes an
+      // adapter that cannot resolve its dependency. This is enforcement rather than tidiness: it is the
+      // check that fails when only some manifests were edited.
+      const manifests = Object.fromEntries(PACKAGES.map((name) =>
+        [name, JSON.parse(readFileSync(join(root, "packages", name, "package.json"), "utf8"))]));
+      const versions = PACKAGES.map((name) => manifests[name].version);
+      assert.equal(new Set(versions).size, 1, `all three packages must ship one version; found ${versions.join(", ")}`);
+      for (const name of ["opencode-feature-factory", "prime-agent-feature-factory"]) {
+        assert.equal(manifests[name].dependencies["feature-factory"], manifests["feature-factory"].version,
+          `${name} must pin the factory version it ships beside`);
+      }
+
       // The factory owns the host-neutral workflow and agents; each adapter owns its platform skill.
       for (const required of ["WORKFLOW.md", "bin/factory.js", "state/index.js", "README.md", "LICENSE"]) {
         assert.ok(factory.files.includes(required), `feature-factory must ship ${required}`);

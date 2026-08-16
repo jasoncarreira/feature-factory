@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const factoryManifest = JSON.parse(readFileSync(new URL("../../feature-factory/package.json", import.meta.url), "utf8"));
 const skill = readFileSync(new URL("../skills/feature/SKILL.md", import.meta.url), "utf8");
 const workflow = readFileSync(new URL("../skills/feature/WORKFLOW.md", import.meta.url), "utf8");
 const canonicalWorkflow = readFileSync(new URL("../../feature-factory/WORKFLOW.md", import.meta.url), "utf8");
@@ -15,7 +16,12 @@ describe("Prime package contract", () => {
       extensions: ["./extensions"],
       skills: ["./skills"],
     });
-    assert.deepEqual(manifest.dependencies, { "feature-factory": "0.3.6" });
+    // Pinned to the factory's own version rather than to a literal. The three packages release in
+    // lockstep from 0.7.0, so a literal here would have to be edited on every sync and would fail for
+    // being stale rather than for the dependency being wrong — which is what it did at 0.3.6.
+    // `boundary.test.js` pins the opencode adapter the same way; the workspace-level check that all
+    // three versions actually match lives in `test/pack.test.js`.
+    assert.deepEqual(manifest.dependencies, { "feature-factory": factoryManifest.version });
     assert.ok(manifest.files.includes("extensions"));
     assert.ok(manifest.files.includes("skills"));
   });
