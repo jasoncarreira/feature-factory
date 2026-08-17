@@ -313,10 +313,36 @@ recipe on the conflict and was right, though neither of us found the real reason
 needed. Two runs were driven under the override before anyone re-tested the flag. The claim had been carried
 from one session to the next in notes and never re-run.
 
-**A self-hosted session still cannot be listed or stopped.** `prime-agent list` does not show it, and
-`prime-agent stop <uuid>` answers `Unknown active session`, while both work for a discovery-enabled driver. That
-is a real gap, tracked in issue #307, and it is unrelated to the context tool — judge liveness by
-`factory status --json` plus a heartbeat that advances, and see the monitoring notes below.
+**A `-p` launched session cannot be stopped once its launcher exits.** This was previously written here as
+"self-hosted sessions cannot be listed or stopped", which is wrong twice over and worth stating precisely, because
+the difference decides how an unattended run should be started.
+
+What is true: `prime-agent list` omits it, but **`prime-agent list --all` shows it** — live, with an id. And `stop`
+refuses that id anyway (`Unknown active session`), as it refuses the transcript uuid and the
+`prime-agent:<uuid>.jsonl` form. The session keeps working throughout. The only lever left is
+`prime-agent shutdown --force`, which stops every agent and the daemon. Reported upstream as
+[prime-agent discussion #1485](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1485).
+
+What is not true: that this follows from `-ne`, or from self-hosting. It follows from **who owns the session.** A
+session created through the daemon protocol behaves correctly:
+
+```js
+import { DaemonClient, defaultDaemonSocketPath } from "prime-agent";
+const client = new DaemonClient(defaultDaemonSocketPath());
+await client.connect(5000); await client.waitForHello(5000);
+const created = await client.request({ type: "create", name: "feature-run" });
+await client.request({ type: "prompt", activeSessionId: created.data.activeSessionId, message: "/feature …" });
+```
+
+`prompt` returns immediately, `prime-agent list` shows the session, and `prime-agent stop <activeSessionId>`
+returns `ok`. **So for an unattended run that supervision must be able to end, create the session through the
+daemon rather than launching `prime-agent -p`.** That is the intended basis for `--background` in the Prime
+adapter (issue #313); until it exists, a `-p` launch is fine for runs you will not need to stop, and the
+recipe above is what to reach for when you will.
+
+Judge liveness by `factory status --json` plus a heartbeat that advances, never by `prime-agent list` — and see
+the monitoring notes below. Daemon logs, when you need them, are at `~/.prime/agent/logs/daemon.sock.<id>.log`;
+they are not in the socket directory, which is where I first looked and wrongly concluded there were none.
 
 `-p` and `--autonomous` belong together, contrary to an earlier claim here. `-p` is print-and-exit for the
 launching process, which hands off to the daemon session; `--autonomous` is what keeps that session continuing.
