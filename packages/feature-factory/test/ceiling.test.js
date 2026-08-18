@@ -151,8 +151,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // reselects the parked run, because the run id is deterministic and init refuses to collide.
       "reselects the parked run instead of replacing it",
       // mimir 1551 ratified `uv run python -c "..."` as its only entry because this bullet called an entry a
-      // "command string" and never said it is argv-split with no shell. `slices-seed` now refuses such an
-      // entry; these pin the instruction that stops a decomposer writing one in the first place.
+      // "command string" and never said it is argv-split with no shell. Seeding still admits that entry, and
+      // the end-to-end payload rows pin it as admitted, so these fragments are the whole of the prevention:
+      // they stop a decomposer authoring the shape rather than refusing it after the fact.
       "executed as argv split on single spaces with no shell",
       "are alternatives, not a sequence",
     ]) {
