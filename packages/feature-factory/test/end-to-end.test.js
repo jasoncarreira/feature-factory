@@ -1441,6 +1441,10 @@ describe("end to end — a merge is refused through the real CLI", () => {
         // The earliest offending token in the command is reported, not the first one in the refused list.
         { entry: "git ; status && git", reason: 'contains shell operator token ";"' },
         { entry: "uv run pytest -q --tb=short tests/test_acp_daemon.py && uv run pytest -q --tb=short", reason: 'contains shell operator token "&&"' },
+        // mimir 1551 ratified this shape, and no attempt could have observed the slice green: the split
+        // orphans the opening quote, so `python -c` receives `"import` as its whole program. A balanced
+        // quoted token stays seedable below -- only an opener the split cannot close is refused.
+        { entry: `uv run python -c "import subprocess; subprocess.check_call(['uv','run','pytest'])"`, reason: 'token "\\"import" opens a quote the argv split cannot close' },
         { entry: "XDG_CONFIG_HOME=/tmp pytest tests/test_config_docs_complete.py", reason: `argv[0] "XDG_CONFIG_HOME=/tmp" did not resolve to an executable via its direct path from repository cwd ${JSON.stringify(admission.repo)}` },
         { entry: "", reason: "argv[0] is missing" },
         { entry: "   ", reason: "argv[0] is missing" },

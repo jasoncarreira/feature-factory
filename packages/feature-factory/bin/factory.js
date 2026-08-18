@@ -119,6 +119,14 @@ function assertExecutableTestPlan(slices, cwd, missingOnly = false) {
     if (missingOnly) continue;
     const refused = tokens.find((token) => REFUSED_TEST_TOKENS.includes(token));
     if (refused) throw new Error(`${prefix}contains shell operator token ${JSON.stringify(refused)}`);
+    // Enforcement, not instruction: an opening quote the split orphaned is an argv element meant to hold
+    // spaces, which `entry.split(" ")` cannot express -- `-c "import x; y"` reaches the program as `"import`
+    // and exits nonzero, so no attempt can ever observe the slice green. Refusing every quote is the false
+    // refusal the payload rows guard, so only an unclosed opener is refused. mimir 1551 ratified one and had
+    // no legal move left: `slices.json` is digest-bound and there is no amend-test-plan.
+    const orphaned = tokens.find((token) => (token.startsWith('"') || token.startsWith("'"))
+      && !(token.length > 1 && token.endsWith(token[0])));
+    if (orphaned) throw new Error(`${prefix}token ${JSON.stringify(orphaned)} opens a quote the argv split cannot close`);
     const found = resolveSpawnExecutable(argv0, { cwd });
     if (found.reason === "unsupported-platform") throw new Error(`${prefix}argv[0] resolution is POSIX-only and cannot predict this platform's shell-free spawn (${found.platform}); seeding refuses rather than admit a command observe may fail to run`);
     if (!found.ok) throw new Error(`${prefix}argv[0] ${JSON.stringify(argv0)} did not resolve to an executable via ${found.source} from repository cwd ${JSON.stringify(cwd)}`);

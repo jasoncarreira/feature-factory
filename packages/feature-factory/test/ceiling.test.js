@@ -864,7 +864,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // the live record is untouched and `createOnly` protects the genuine archive, so nothing here can
     // manufacture a false green -- what it prevents is a reviews directory that invites an operator to
     // look for a second verdict. Well inside the 4550 tripwire, so no authorization is involved.
-    assert.equal(total, 4533, "refusing to archive an archive lands at 4533 production lines");
+    // 4533 -> 4541 for mimir 1551: eight lines refusing a test_plan entry whose opening quote the argv
+    // split cannot close. The run ratified `uv run python -c "..."`, and `--test-cmd` is tokenized on spaces
+    // and spawned with `shell: false`, so `python -c` received `"import` and exited 1 -- the slice could not
+    // have been observed green at any attempt, with no legal move left once seeded. This is enforcement of
+    // the same charter as the operator-token scan beside it: an entry observe cannot execute. It refuses only
+    // an unclosed opener, because refusing every quote is the false refusal the payload rows already pin.
+    // Still inside the 4550 tripwire, so no authorization is involved.
+    assert.equal(total, 4541, "refusing an unexecutable quoted test_plan entry lands at 4541 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
