@@ -1471,6 +1471,32 @@ describe("end to end — a merge is refused through the real CLI", () => {
       "git log --format=%h&&%s",
       "grep -E ^a|b .",
       'node -e console.log("ok")',
+      // An *unmatched* quote is payload, not grouping. Both of these execute under `split(" ")` with
+      // `shell: false` -- grep receives a literal `"` pattern, and an apostrophe in a path is just a byte --
+      // so both must stay seedable. A predicate that refused any leftover quote in a token rejected them,
+      // which is the overcorrection review caught between the two commits above.
+      'grep " tests/fixture.txt',
+      "grep -c x tests/don't.py",
+      // Two isolated same-kind quotes are two payload arguments, not one group: each byte lands in its own
+      // argv element and the command exits zero. A whole-entry span crossed the gap between them and
+      // refused both of these, which is the misclassification review caught in the commit above.
+      `printf %s '"' '"'`,
+      "grep -c x tests/don't.py tests/won't.py",
+      // Naked quote tokens sit at exactly the boundaries grouping uses, so only the span's contents separate
+      // them: two quote bytes with nothing but spaces between them group no argument and exit zero. The
+      // refusal row below draws the line -- one non-space byte inside the span and it is grouping again.
+      'printf %s " "',
+      'printf %s " " " "',
+      // The shape that motivated this check, now deliberately seedable: a quoted group the split breaks, as in
+      // mimir 1551's `uv run python -c "import subprocess; ..."`. `uv` cannot be argv[0] in a seed row -- CI has
+      // no uv, so resolution would refuse the row for an unrelated reason. Under `shell: false` such an entry
+      // *executes* -- `python -c` receives `"import` and exits 1 -- so it is a plan that cannot pass, not one observe cannot
+      // run, and enforcement here would refuse commands that work: five successive predicates each admitted
+      // the real grouping forms while falsely refusing `printf %s '"' '"'`, `tests/don't.py`, `printf %s " "`
+      // and `printf %s " x "` in turn. The input cannot separate grouping from payload, and a bad entry
+      // cannot manufacture a false green -- `readEvidence` refuses fabricated evidence, and a failing command
+      // yields no `review_ready` -- so WORKFLOW.md instructs the shape and seeding admits it.
+      `git --no-pager log -1 --format="%h %s"`,
     ]) {
       const ok = project("seed-command-payload", { testPlan: [seedable] });
       try { assert.deepEqual(runJson(ok.runDir).slices[0].test_plan, [seedable], seedable); }

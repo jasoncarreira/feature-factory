@@ -150,6 +150,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // The reason the removal is load-bearing rather than incidental: without it a relaunch
       // reselects the parked run, because the run id is deterministic and init refuses to collide.
       "reselects the parked run instead of replacing it",
+      // mimir 1551 ratified `uv run python -c "..."` as its only entry because this bullet called an entry a
+      // "command string" and never said it is argv-split with no shell. Seeding still admits that entry, and
+      // the end-to-end payload rows pin it as admitted, so these fragments are the whole of the prevention:
+      // they stop a decomposer authoring the shape rather than refusing it after the fact.
+      "executed as argv split on single spaces with no shell",
+      "are alternatives, not a sequence",
     ]) {
       assert.ok(markdown.includes(instruction), `WORKFLOW.md no longer instructs: ${instruction}`);
     }
@@ -864,7 +870,17 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // the live record is untouched and `createOnly` protects the genuine archive, so nothing here can
     // manufacture a false green -- what it prevents is a reviews directory that invites an operator to
     // look for a second verdict. Well inside the 4550 tripwire, so no authorization is involved.
-    assert.equal(total, 4533, "refusing to archive an archive lands at 4533 production lines");
+    // 4533 unchanged for mimir 1551, because this repository's own rule sent a guard back. The run ratified
+    // `uv run python -c "..."` as its only test command, `--test-cmd` is tokenized on spaces and spawned with
+    // `shell: false`, so `python -c` received `"import` and exited 1 and no attempt could observe the slice
+    // green. Enforcement was written for exactly that and reached 4543 across five predicates, each admitting
+    // the real grouping forms while falsely refusing a command that runs -- `printf %s '"' '"'`, then
+    // `tests/don't.py`, then `printf %s " "`, then `printf %s " x "`. The entry string cannot separate
+    // grouping from payload, and the offending entry *executes*: it fails, which is a different thing.
+    // Since it cannot manufacture a false green either -- `readEvidence` refuses fabricated evidence and a
+    // failing command yields no `review_ready` -- the governing rule is instruct, not enforce. WORKFLOW.md
+    // carries the argv contract instead, and the seed row records the entry as deliberately admitted.
+    assert.equal(total, 4533, "declining to enforce test_plan quoting keeps production at 4533 lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
