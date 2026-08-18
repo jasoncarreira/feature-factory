@@ -1737,6 +1737,13 @@ describe("registering the workflow with the host", () => {
     assert.equal(typeof cfg.agent["run-orchestrator"].permission.task, "string");
     assert.equal(cfg.agent["run-orchestrator"].permission.task, "allow");
     for (const name of CHILD_TASK_TARGETS) assert.equal(cfg.agent[name].permission.task, "deny", name);
+    // Every agent, drivers included. A headless run cannot answer an ask, so the shipped
+    // `external_directory: {"*": "ask"}` default stopped run 1551 for an hour while `work-reviewer`
+    // waited for permission to read the installed factory package -- the exact read the repository's
+    // scope rule forbids, and one that lets a reviewer approve a tree it never read.
+    for (const name of Object.keys(cfg.agent)) {
+      assert.equal(cfg.agent[name].permission.external_directory, "deny", name);
+    }
   });
 
   it("resolves subagent model and variant through every precedence tier", async () => {
@@ -1931,6 +1938,8 @@ describe("registering the workflow with the host", () => {
     for (const [name, values] of Object.entries(FACTORY_PERMISSION_POLICY)) {
       assert.deepEqual(controlledPermissions(cfg.agent[name].permission), expectedPermissions(values), name);
       assert.equal(cfg.agent[name].permission["host-only"], "ask", name);
+      // The read-scope deny must survive a hostile project override too, or it is a default and not a policy.
+      assert.equal(cfg.agent[name].permission.external_directory, "deny", name);
     }
     assert.equal(cfg.agent["run-orchestrator"].mode, "subagent");
     assert.equal(cfg.agent["feature-factory"].permission.task, "allow");
