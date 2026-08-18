@@ -248,6 +248,45 @@ The parent shell, launcher, or supervisor must inject and export a nonempty `GH_
 account before this recipe begins. Do not derive it from the machine-active account. On another machine,
 apply the same ephemeral helper configuration so Git and `gh` consume the one inherited token:
 
+### An unattended run hangs on a permission prompt, silently
+
+`opencode run` is headless, so a permission it decides to *ask* about has nobody to answer. The run does not
+fail — it stops, mid-step, with the driver process alive and burning a trickle of CPU. Observed on a live run:
+
+```
+level=INFO message=asking permission=external_directory patterns=["/Users/…/.asdf/i…"]
+```
+
+Nothing followed for the next hour. The process stayed up, its cumulative CPU kept advancing at an idle trickle,
+and the lock aged to `dead_lock: true` — so **neither process liveness nor advancing CPU is proof of progress.**
+
+The signal that catches *this* failure is specific: **an unresolved `message=asking` line.** Grep the driver log
+for it, and if nothing resolves it, the run is waiting on a human who is not there. Do not reach for
+`run.json.updated_at`, which §3 correctly lists as misleading — it moves only at transitions, so a healthy long
+build looks identically stalled. And note that this failure *defeats* §3's general check as well: the log kept
+moving while the run did not, because background housekeeping still writes to it. The wedged run's last real entry
+was the `asking` line at 23:58, and a `cleanup prune=7.days` line landed at 00:09 with the run already dead in the
+water.
+
+The prompt happens when the agent reaches outside the project directory. In this case it went looking for the
+installed factory packages under `~/.asdf/installs/…` rather than treating the upstream facts recorded in its
+issue as given.
+
+**Two independent guards, and use both.** They compose: an explicit deny is not something `--auto` can approve.
+
+- **Pre-deny the reads that should never happen.** An opencode permission is either a string or a
+  pattern-to-effect map, and `external_directory` ships as `{"*": "ask"}`, which is what asks. Declaring
+  `"external_directory": "deny"` (or `{"*": "deny"}`) turns the hang into a refusal the agent can act on, which is
+  also this repository's read-scope rule enforced rather than merely instructed. Values are `allow`, `ask`, `deny`.
+- **Pass `--auto`** so a prompt this repository has not anticipated does not stop an unattended run either. Its
+  own help calls it dangerous, and it is: it auto-approves anything not explicitly denied. That is the argument
+  for pairing it with the deny above rather than using it alone.
+
+Say the same thing in the issue as well, because instruction is what stops the agent wanting the read in the first
+place: *if the API you need is not in the tree, the dependency is not declared yet — declare it, install it, and
+read it there*, and mark measured host behaviour as an accepted external premise so a run does not go hunting for
+proof of something it already has.
+
 ```sh
 if [ -z "${GH_TOKEN:-}" ]; then
   printf '%s\n' 'GH_TOKEN must be inherited and nonempty' >&2
@@ -256,7 +295,7 @@ fi
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper \
   GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
 
-opencode run --log-level DEBUG --print-logs --dir <repo> \
+opencode run --log-level DEBUG --print-logs --auto --dir <repo> \
   --command feature " --autonomous <issue-number>"
 ```
 
@@ -539,10 +578,28 @@ on the host and could not reach the run.
 
 ## 5. Failure modes to expect
 
-**A subagent reading outside the repository hangs forever.** No error, no terminal state, no telemetry;
-every signal reads "working". Every mechanism that could decide such a request has been measured
-inert — the permission hook is never invoked, `external_directory` config is ignored in every form, and
-the blanket auto-approve flag is too broad to use. Mitigate in the issue: read only inside the tree,
+**A subagent reading outside the repository hangs forever — unless the read is denied in advance.** No error,
+no terminal state, no telemetry; every signal reads "working". The claim that used to stand here — that every
+deciding mechanism was inert, including `external_directory` config "in every form" — **is no longer true and was
+retired after measurement.** Measured on opencode 1.18.18, against a **subagent**, because that is the mode that hangs — a primary is
+auto-rejected and survives, so evidence from a primary proves nothing about this failure. One variable changed
+between the two runs, the subagent's own `external_directory` setting:
+
+```
+deny declared:  evaluated permission=external_directory pattern=/etc/*
+                (no `asking` line)  ->  subagent replied REFUSED  ->  exit 0
+
+deny removed:   evaluated permission=external_directory pattern=/etc/*
+                asking id=per_… permission=external_directory patterns=["/etc/*"]
+                (nothing further)   ->  exit 124, hung
+```
+
+The second run is this failure reproduced on demand, which is what makes the first one mean something. The same
+pair on a primary agent ends in a failed read rather than a hang, consistent with the note below.
+
+So declare the deny (this package now ships it for every factory agent) and pass `--auto` for prompts nobody
+anticipated; `--auto` cannot approve an explicit deny, which is why the pair is safe where the flag alone is not.
+Keep mitigating in the issue as well, because a refused read still costs an attempt: read only inside the tree,
 vendored dependencies are inside it, and a refused read is expected rather than fatal.
 
 A **primary** session's request is auto-rejected instead of hanging, which is survivable — but a run
