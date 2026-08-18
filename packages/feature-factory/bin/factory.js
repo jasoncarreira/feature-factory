@@ -119,15 +119,15 @@ function assertExecutableTestPlan(slices, cwd, missingOnly = false) {
     if (missingOnly) continue;
     const refused = tokens.find((token) => REFUSED_TEST_TOKENS.includes(token));
     if (refused) throw new Error(`${prefix}contains shell operator token ${JSON.stringify(refused)}`);
-    // Enforcement, not instruction: a quote left open at the end of its token is an argv element meant to
-    // hold spaces, which `entry.split(" ")` cannot express -- `-c "import x; y"` reaches the program as
-    // `"import` and exits nonzero, so no attempt can ever observe the slice green. mimir 1551 ratified one
-    // and had no legal move left: `slices.json` is digest-bound and there is no amend-test-plan. Balanced
-    // spans are removed first, so a quote that is payload inside an argv element stays seedable and the
-    // opener may sit anywhere in the token -- `--eval="a b"` groups exactly like `-c "a b"` and byte 0 is
-    // not where it starts. Refusing every quote is the false refusal the payload rows pin.
-    const unclosed = tokens.find((token) => /["']/u.test(token.replace(/"[^"]*"|'[^']*'/gu, "")));
-    if (unclosed) throw new Error(`${prefix}token ${JSON.stringify(unclosed)} opens a quote the argv split cannot close`);
+    // Enforcement, not instruction: a quoted group whose mate sits past a space cannot survive
+    // `entry.split(" ")`. `-c "import x; y"` reaches the program as `"import` and exits nonzero, so no
+    // attempt can ever observe the slice green, and mimir 1551 ratified one with no legal move left --
+    // `slices.json` is digest-bound and there is no amend-test-plan. The opener may sit anywhere, since
+    // `--eval="a b"` groups exactly like `-c "a b"`. An *unmatched* quote is deliberately admitted: under
+    // `shell: false` a lone `"` pattern or an apostrophe in a path is literal payload that runs, and
+    // refusing it is the false refusal the payload rows pin. Only a closed span over a space is grouping.
+    const grouped = entry.match(/"[^"]* [^"]*"|'[^']* [^']*'/u);
+    if (grouped) throw new Error(`${prefix}quoted group ${JSON.stringify(grouped[0])} spans a space the argv split cannot preserve`);
     const found = resolveSpawnExecutable(argv0, { cwd });
     if (found.reason === "unsupported-platform") throw new Error(`${prefix}argv[0] resolution is POSIX-only and cannot predict this platform's shell-free spawn (${found.platform}); seeding refuses rather than admit a command observe may fail to run`);
     if (!found.ok) throw new Error(`${prefix}argv[0] ${JSON.stringify(argv0)} did not resolve to an executable via ${found.source} from repository cwd ${JSON.stringify(cwd)}`);
