@@ -6,6 +6,7 @@
 // the bug in each would be in the path handling that a mock would replace.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
@@ -1272,6 +1273,15 @@ describe("registering the workflow with the host", () => {
     });
     const { cli } = factoryResources();
     assert.equal(existsSync(cli), true, `the named CLI must exist: ${cli}`);
+    // Runnable, not merely present. Every factory agent denies `external_directory`, and review raised the
+    // risk that the deny would also block reaching this CLI -- which lives outside the project, under the
+    // installed package. Measured on opencode 1.18.18 it does not: a subagent under the deny ran this exact
+    // absolute path and got this banner, because the deny gates the read tool rather than execution. This
+    // asserts the half a unit test can hold -- that the bound path executes from a cwd that is not the
+    // package -- so a future change that moves or breaks the binding fails here rather than in a live run.
+    const banner = execFileSync(process.execPath, [cli, "--help"], { cwd: tmpdir(), encoding: "utf8" });
+    assert.match(banner, /durable control plane for \/feature runs/u,
+      "the bound CLI must run at its absolute path from an unrelated cwd");
     for (const [where, text] of [
       ["command template", cfg.command.feature.template],
       ["orchestrator prompt", cfg.agent["feature-factory"].prompt],
