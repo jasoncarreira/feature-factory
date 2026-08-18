@@ -1487,14 +1487,16 @@ describe("end to end — a merge is refused through the real CLI", () => {
       // refusal row below draws the line -- one non-space byte inside the span and it is grouping again.
       'printf %s " "',
       'printf %s " " " "',
-      // The entry that motivated this check, now deliberately seedable. Under `shell: false` it *executes* --
-      // `python -c` receives `"import` and exits 1 -- so it is a plan that cannot pass, not one observe cannot
+      // The shape that motivated this check, now deliberately seedable: a quoted group the split breaks, as in
+      // mimir 1551's `uv run python -c "import subprocess; ..."`. `uv` cannot be argv[0] in a seed row -- CI has
+      // no uv, so resolution would refuse the row for an unrelated reason. Under `shell: false` such an entry
+      // *executes* -- `python -c` receives `"import` and exits 1 -- so it is a plan that cannot pass, not one observe cannot
       // run, and enforcement here would refuse commands that work: five successive predicates each admitted
       // the real grouping forms while falsely refusing `printf %s '"' '"'`, `tests/don't.py`, `printf %s " "`
       // and `printf %s " x "` in turn. The input cannot separate grouping from payload, and a bad entry
       // cannot manufacture a false green -- `readEvidence` refuses fabricated evidence, and a failing command
       // yields no `review_ready` -- so WORKFLOW.md instructs the shape and seeding admits it.
-      `uv run python -c "import subprocess; subprocess.check_call(['uv','run','pytest'])"`,
+      `git --no-pager log -1 --format="%h %s"`,
     ]) {
       const ok = project("seed-command-payload", { testPlan: [seedable] });
       try { assert.deepEqual(runJson(ok.runDir).slices[0].test_plan, [seedable], seedable); }
