@@ -869,20 +869,17 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // the live record is untouched and `createOnly` protects the genuine archive, so nothing here can
     // manufacture a false green -- what it prevents is a reviews directory that invites an operator to
     // look for a second verdict. Well inside the 4550 tripwire, so no authorization is involved.
-    // 4533 -> 4541 for mimir 1551: eight lines refusing a test_plan entry whose opening quote the argv
-    // split cannot close. The run ratified `uv run python -c "..."`, and `--test-cmd` is tokenized on spaces
-    // and spawned with `shell: false`, so `python -c` received `"import` and exited 1 -- the slice could not
-    // have been observed green at any attempt, with no legal move left once seeded. This is enforcement of
-    // the same charter as the operator-token scan beside it: an entry observe cannot execute. It refuses only
-    // a quote left open at the end of its token, because refusing every quote is the false refusal the
-    // payload rows already pin. 4542 rather than 4541 because review caught the first predicate testing
-    // byte 0: `--eval="a b"` groups exactly like `-c "a b"`, and restricting the opener to the first
-    // character would have permanently ratified that form. 4543 after three more review rounds narrowed it
-    // to a boundary opener over a non-space span, each round removing a false refusal of a command that
-    // runs: `printf %s '"' '"'`, repeated apostrophe paths, and `printf %s " "`. Inside 4550, no
-    // authorization. The narrowing is the point -- a false refusal is as permanent as a bad ratification,
-    // so the guard admits when grouping and payload read alike.
-    assert.equal(total, 4543, "refusing an unexecutable quoted test_plan entry lands at 4543 production lines");
+    // 4533 unchanged for mimir 1551, because this repository's own rule sent a guard back. The run ratified
+    // `uv run python -c "..."` as its only test command, `--test-cmd` is tokenized on spaces and spawned with
+    // `shell: false`, so `python -c` received `"import` and exited 1 and no attempt could observe the slice
+    // green. Enforcement was written for exactly that and reached 4543 across five predicates, each admitting
+    // the real grouping forms while falsely refusing a command that runs -- `printf %s '"' '"'`, then
+    // `tests/don't.py`, then `printf %s " "`, then `printf %s " x "`. The entry string cannot separate
+    // grouping from payload, and the offending entry *executes*: it fails, which is a different thing.
+    // Since it cannot manufacture a false green either -- `readEvidence` refuses fabricated evidence and a
+    // failing command yields no `review_ready` -- the governing rule is instruct, not enforce. WORKFLOW.md
+    // carries the argv contract instead, and the seed row records the entry as deliberately admitted.
+    assert.equal(total, 4533, "declining to enforce test_plan quoting keeps production at 4533 lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

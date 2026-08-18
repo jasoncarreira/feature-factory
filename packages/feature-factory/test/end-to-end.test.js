@@ -1441,17 +1441,6 @@ describe("end to end — a merge is refused through the real CLI", () => {
         // The earliest offending token in the command is reported, not the first one in the refused list.
         { entry: "git ; status && git", reason: 'contains shell operator token ";"' },
         { entry: "uv run pytest -q --tb=short tests/test_acp_daemon.py && uv run pytest -q --tb=short", reason: 'contains shell operator token "&&"' },
-        // mimir 1551 ratified this shape, and no attempt could have observed the slice green: the split
-        // orphans the opening quote, so `python -c` receives `"import` as its whole program. A balanced
-        // quoted token stays seedable below -- only an opener the split cannot close is refused.
-        { entry: `uv run python -c "import subprocess; subprocess.check_call(['uv','run','pytest'])"`, reason: `quoted group "\\"import subprocess; subprocess.check_call(['uv','run','pytest'])\\"" spans a space the argv split cannot preserve` },
-        // The opener need not be byte 0: an option prefix groups identically, and restricting the check to
-        // the first character admitted these two and would have ratified them permanently. Caught on review
-        // of the commit above, before either form reached a run.
-        { entry: `node --eval="console.log(1 + 2)"`, reason: `quoted group "\\"console.log(1 + 2)\\"" spans a space the argv split cannot preserve` },
-        { entry: `uv run pytest -k="foo or bar"`, reason: `quoted group "\\"foo or bar\\"" spans a space the argv split cannot preserve` },
-        { entry: `uv run pytest -k "a or b"`, reason: `quoted group "\\"a or b\\"" spans a space the argv split cannot preserve` },
-        { entry: `printf %s " x "`, reason: `quoted group "\\" x \\"" spans a space the argv split cannot preserve` },
         { entry: "XDG_CONFIG_HOME=/tmp pytest tests/test_config_docs_complete.py", reason: `argv[0] "XDG_CONFIG_HOME=/tmp" did not resolve to an executable via its direct path from repository cwd ${JSON.stringify(admission.repo)}` },
         { entry: "", reason: "argv[0] is missing" },
         { entry: "   ", reason: "argv[0] is missing" },
@@ -1498,6 +1487,14 @@ describe("end to end — a merge is refused through the real CLI", () => {
       // refusal row below draws the line -- one non-space byte inside the span and it is grouping again.
       'printf %s " "',
       'printf %s " " " "',
+      // The entry that motivated this check, now deliberately seedable. Under `shell: false` it *executes* --
+      // `python -c` receives `"import` and exits 1 -- so it is a plan that cannot pass, not one observe cannot
+      // run, and enforcement here would refuse commands that work: five successive predicates each admitted
+      // the real grouping forms while falsely refusing `printf %s '"' '"'`, `tests/don't.py`, `printf %s " "`
+      // and `printf %s " x "` in turn. The input cannot separate grouping from payload, and a bad entry
+      // cannot manufacture a false green -- `readEvidence` refuses fabricated evidence, and a failing command
+      // yields no `review_ready` -- so WORKFLOW.md instructs the shape and seeding admits it.
+      `uv run python -c "import subprocess; subprocess.check_call(['uv','run','pytest'])"`,
     ]) {
       const ok = project("seed-command-payload", { testPlan: [seedable] });
       try { assert.deepEqual(runJson(ok.runDir).slices[0].test_plan, [seedable], seedable); }
