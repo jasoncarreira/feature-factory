@@ -1487,6 +1487,11 @@ describe("end to end — a merge is refused through the real CLI", () => {
       // which is the overcorrection review caught between the two commits above.
       'grep " tests/fixture.txt',
       "grep -c x tests/don't.py",
+      // Two isolated same-kind quotes are two payload arguments, not one group: each byte lands in its own
+      // argv element and the command exits zero. A whole-entry span crossed the gap between them and
+      // refused both of these, which is the misclassification review caught in the commit above.
+      `printf %s '"' '"'`,
+      "grep -c x tests/don't.py tests/won't.py",
     ]) {
       const ok = project("seed-command-payload", { testPlan: [seedable] });
       try { assert.deepEqual(runJson(ok.runDir).slices[0].test_plan, [seedable], seedable); }
