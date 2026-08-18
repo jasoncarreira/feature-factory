@@ -7,7 +7,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertReviewBinding, observeMergeProof, readEvidence, readReview } from "../observe/review.js";
@@ -184,6 +184,13 @@ describe("attack 3 — an approval presented against a different commit", () => 
       assert.equal(await archiveReviewAttempt(f.runDir, "reviews/torn.json"), null);
       writeReview(f.runDir, "no-attempt", { attempt: undefined });
       assert.equal(await archiveReviewAttempt(f.runDir, "reviews/no-attempt.json"), null);
+
+      // Archiving an archive has nothing to preserve, and appending the suffix twice names an attempt
+      // of an attempt. Run 1551 did exactly that -- the driver reported the archive path back as
+      // `--review-ref` -- leaving `spec-writer.attempt-1.attempt-1.json` beside the real archive.
+      assert.equal(await archiveReviewAttempt(f.runDir, "reviews/round.attempt-1.json"), null);
+      assert.equal(existsSync(join(f.runDir, "reviews", "round.attempt-1.attempt-1.json")), false,
+        "an archive of an archive must not be written");
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 

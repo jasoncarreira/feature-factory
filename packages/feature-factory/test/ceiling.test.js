@@ -857,7 +857,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // configured-command parser extracted out of `bin/factory.js`, which that extraction shortened by 22 lines.
     // The autonomous run that wrote this blocked at 4521 against a 4500 tripwire rather than compress anything to
     // fit; the operator then raised the tripwire, which is the order this ledger is meant to force.
-    assert.equal(total, 4521, "the repair re-verification exit lands at 4521 production lines");
+    // 4533 for issue 315: twelve lines in `state/review-archive.js` refusing to archive an archive.
+    // A live run reported an archive path back as `--review-ref`, the attempt suffix was appended twice,
+    // and `spec-writer.attempt-1.attempt-1.json` landed beside the real archive with identical bytes.
+    // Eight of the twelve are the comment recording that this is instruction rather than enforcement:
+    // the live record is untouched and `createOnly` protects the genuine archive, so nothing here can
+    // manufacture a false green -- what it prevents is a reviews directory that invites an operator to
+    // look for a second verdict. Well inside the 4550 tripwire, so no authorization is involved.
+    assert.equal(total, 4533, "refusing to archive an archive lands at 4533 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
