@@ -25,8 +25,20 @@ export function attemptArchiveRef(ref, attempt) {
   return join(dir === "." ? "" : dir, `${stem}.attempt-${attempt}.json`);
 }
 
+// An archive has nothing to preserve: its content is already the frozen copy. Handed one anyway --
+// run 1551 reported an archive path back as `--review-ref`, and the suffix was appended twice, leaving
+// `spec-writer.attempt-1.attempt-1.json` beside the real archive with identical bytes. Harmless to
+// state, because the live record is untouched and `createOnly` protects the genuine archive, but the
+// reviews directory is the one place an operator reads to reconstruct why a run blocked, and a file
+// naming an attempt of an attempt invites them to look for a second verdict that does not exist.
+//
+// Instruction, not enforcement, and a no-op rather than a refusal: this module must never fail the
+// step that earned the verdict, which is the contract stated at the top of this file.
+const ARCHIVE_REF = /\.attempt-\d+\.json$/u;
+
 export async function archiveReviewAttempt(runDir, ref) {
   if (typeof ref !== "string" || !ref.trim()) return null;
+  if (ARCHIVE_REF.test(ref)) return null;
   let record;
   try {
     record = JSON.parse(readFileSync(join(runDir, ref), "utf8"));
