@@ -257,9 +257,16 @@ fail — it stops, mid-step, with the driver process alive and burning a trickle
 level=INFO message=asking permission=external_directory patterns=["/Users/…/.asdf/i…"]
 ```
 
-Nothing followed for the next hour. `run.json` kept its old `updated_at`, the lock aged to `dead_lock: true`, and
-the process stayed up — so **process liveness and even advancing CPU time are not proof of progress.** The signal
-that catches this is `run.json.updated_at` standing still while the driver lives.
+Nothing followed for the next hour. The process stayed up, its cumulative CPU kept advancing at an idle trickle,
+and the lock aged to `dead_lock: true` — so **neither process liveness nor advancing CPU is proof of progress.**
+
+The signal that catches *this* failure is specific: **an unresolved `message=asking` line.** Grep the driver log
+for it, and if nothing resolves it, the run is waiting on a human who is not there. Do not reach for
+`run.json.updated_at`, which §3 correctly lists as misleading — it moves only at transitions, so a healthy long
+build looks identically stalled. And note that this failure *defeats* §3's general check as well: the log kept
+moving while the run did not, because background housekeeping still writes to it. The wedged run's last real entry
+was the `asking` line at 23:58, and a `cleanup prune=7.days` line landed at 00:09 with the run already dead in the
+water.
 
 The prompt happens when the agent reaches outside the project directory. In this case it went looking for the
 installed factory packages under `~/.asdf/installs/…` rather than treating the upstream facts recorded in its
@@ -288,7 +295,7 @@ fi
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper \
   GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
 
-opencode run --log-level DEBUG --print-logs --dir <repo> \
+opencode run --log-level DEBUG --print-logs --auto --dir <repo> \
   --command feature " --autonomous <issue-number>"
 ```
 
@@ -571,10 +578,27 @@ on the host and could not reach the run.
 
 ## 5. Failure modes to expect
 
-**A subagent reading outside the repository hangs forever.** No error, no terminal state, no telemetry;
-every signal reads "working". Every mechanism that could decide such a request has been measured
-inert — the permission hook is never invoked, `external_directory` config is ignored in every form, and
-the blanket auto-approve flag is too broad to use. Mitigate in the issue: read only inside the tree,
+**A subagent reading outside the repository hangs forever — unless the read is denied in advance.** No error,
+no terminal state, no telemetry; every signal reads "working". The claim that used to stand here — that every
+deciding mechanism was inert, including `external_directory` config "in every form" — **is no longer true and was
+retired after measurement.** On opencode 1.18.18, with `"permission": {"external_directory": "deny"}` in the
+project config, an out-of-project read is refused outright:
+
+```
+evaluated permission=external_directory pattern=/etc/*    ->  Read /etc/hosts failed
+```
+
+Removing that one setting and repeating the identical prompt reproduces the hang instead, which is the control that
+makes the result mean something:
+
+```
+evaluated permission=external_directory pattern=/etc/*
+asking id=per_… permission=external_directory patterns=["/etc/*"]      <- then nothing
+```
+
+So declare the deny (this package now ships it for every factory agent) and pass `--auto` for prompts nobody
+anticipated; `--auto` cannot approve an explicit deny, which is why the pair is safe where the flag alone is not.
+Keep mitigating in the issue as well, because a refused read still costs an attempt: read only inside the tree,
 vendored dependencies are inside it, and a refused read is expected rather than fatal.
 
 A **primary** session's request is auto-rejected instead of hanging, which is survivable — but a run
