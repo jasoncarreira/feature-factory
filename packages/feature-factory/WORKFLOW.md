@@ -887,7 +887,11 @@ The first successful seed is the **ratification point** for two decisions:
   per-merge proof and verification are what keep that safe.
 - `test_plan` — the exact executable commands authorized to prove the slice. Each non-empty entry is
   one complete, independently sufficient command string that must be supplied verbatim as one
-  `--test-cmd` value. A slice with a non-empty `test_plan` is not `review_ready` until one ratified
+  `--test-cmd` value. Each entry is executed as argv split on single spaces with no shell, so a shell
+  operator, a quote that groups an argument, a substitution or a redirection is inert payload or a hard
+  failure rather than syntax, and seeding refuses an entry it cannot execute that way. Entries
+  are alternatives, not a sequence: a slice needing several commands to run in order names one script
+  committed in the repository. A slice with a non-empty `test_plan` is not `review_ready` until one ratified
   command exits zero. A slice with an **empty** `test_plan` is exempt. That exemption is a decision for
   the engineer at Gate 2, so decide it in the plan and present it: there is no flag that waives tests at
   observation time.
