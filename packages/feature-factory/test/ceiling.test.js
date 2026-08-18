@@ -877,8 +877,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // a quote left open at the end of its token, because refusing every quote is the false refusal the
     // payload rows already pin. 4542 rather than 4541 because review caught the first predicate testing
     // byte 0: `--eval="a b"` groups exactly like `-c "a b"`, and restricting the opener to the first
-    // character would have permanently ratified that form. Inside the 4550 tripwire, no authorization.
-    assert.equal(total, 4542, "refusing an unexecutable quoted test_plan entry lands at 4542 production lines");
+    // character would have permanently ratified that form. 4543 after three more review rounds narrowed it
+    // to a boundary opener over a non-space span, each round removing a false refusal of a command that
+    // runs: `printf %s '"' '"'`, repeated apostrophe paths, and `printf %s " "`. Inside 4550, no
+    // authorization. The narrowing is the point -- a false refusal is as permanent as a bad ratification,
+    // so the guard admits when grouping and payload read alike.
+    assert.equal(total, 4543, "refusing an unexecutable quoted test_plan entry lands at 4543 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

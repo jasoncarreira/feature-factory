@@ -124,9 +124,10 @@ function assertExecutableTestPlan(slices, cwd, missingOnly = false) {
     // attempt can ever observe the slice green, and mimir 1551 ratified one with no legal move left --
     // `slices.json` is digest-bound and there is no amend-test-plan. Grouping is read only from an opener
     // at a token start or after `=` that closes at a token end, because a quote is otherwise payload that
-    // runs: `printf %s '"' '"'`, `tests/don't.py` and `console.log("ok")` all execute. Separating intent
+    // runs: `printf %s '"' '"'`, `tests/don't.py` and `console.log("ok")` all execute, as does `printf %s
+    // " "`, whose span holds only spaces and so carries no argument to group. Separating intent
     // from payload is not decidable here, so this admits when unsure -- a false refusal also has no move.
-    const grouped = entry.match(/(?:^|[ =])(?<group>"[^"]* [^"]*"|'[^']* [^']*')(?=$| )/u);
+    const grouped = entry.match(/(?:^|[ =])(?<group>"(?![ ]*")[^"]* [^"]*"|'(?![ ]*')[^']* [^']*')(?=$| )/u);
     if (grouped) throw new Error(`${prefix}quoted group ${JSON.stringify(grouped.groups.group)} spans a space the argv split cannot preserve`);
     const found = resolveSpawnExecutable(argv0, { cwd });
     if (found.reason === "unsupported-platform") throw new Error(`${prefix}argv[0] resolution is POSIX-only and cannot predict this platform's shell-free spawn (${found.platform}); seeding refuses rather than admit a command observe may fail to run`);

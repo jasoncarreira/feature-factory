@@ -1451,6 +1451,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         { entry: `node --eval="console.log(1 + 2)"`, reason: `quoted group "\\"console.log(1 + 2)\\"" spans a space the argv split cannot preserve` },
         { entry: `uv run pytest -k="foo or bar"`, reason: `quoted group "\\"foo or bar\\"" spans a space the argv split cannot preserve` },
         { entry: `uv run pytest -k "a or b"`, reason: `quoted group "\\"a or b\\"" spans a space the argv split cannot preserve` },
+        { entry: `printf %s " x "`, reason: `quoted group "\\" x \\"" spans a space the argv split cannot preserve` },
         { entry: "XDG_CONFIG_HOME=/tmp pytest tests/test_config_docs_complete.py", reason: `argv[0] "XDG_CONFIG_HOME=/tmp" did not resolve to an executable via its direct path from repository cwd ${JSON.stringify(admission.repo)}` },
         { entry: "", reason: "argv[0] is missing" },
         { entry: "   ", reason: "argv[0] is missing" },
@@ -1492,6 +1493,11 @@ describe("end to end — a merge is refused through the real CLI", () => {
       // refused both of these, which is the misclassification review caught in the commit above.
       `printf %s '"' '"'`,
       "grep -c x tests/don't.py tests/won't.py",
+      // Naked quote tokens sit at exactly the boundaries grouping uses, so only the span's contents separate
+      // them: two quote bytes with nothing but spaces between them group no argument and exit zero. The
+      // refusal row below draws the line -- one non-space byte inside the span and it is grouping again.
+      'printf %s " "',
+      'printf %s " " " "',
     ]) {
       const ok = project("seed-command-payload", { testPlan: [seedable] });
       try { assert.deepEqual(runJson(ok.runDir).slices[0].test_plan, [seedable], seedable); }
