@@ -329,6 +329,15 @@ function permissionFor(tools) {
     webfetch: has("webfetch") ? "allow" : "deny",
     // One level of orchestration is a property of the chain, not a preference.
     task: "deny",
+    // Enforcement, not instruction, and this one was earned. `external_directory` ships as
+    // `{"*": "ask"}`, and a headless `opencode run` has nobody to answer an ask -- run 1551 stopped
+    // mid-step for an hour while `work-reviewer` waited on
+    // `~/.asdf/installs/.../node_modules/feature-factory/*`. It wanted the *installed* package, which
+    // is the read CLAUDE.md forbids in the first line of its read-scope rule: that copy is what
+    // shipped last week, not what the run is changing, so a reviewer judging against it can approve a
+    // tree it never read. Instruction did not hold -- the agent went looking anyway -- and the
+    // failure is silent, so it is denied here.
+    external_directory: "deny",
   };
 }
 
@@ -337,7 +346,7 @@ const ORCHESTRATOR = {
     + "idea to draft PR through the /feature skill. Persisted run mode is the sole gate authority.",
   mode: "primary",
   // The active run driver delegates and changes durable state only through factory commands.
-  permission: { edit: "allow", bash: "allow", webfetch: "allow", task: "allow" },
+  permission: { edit: "allow", bash: "allow", webfetch: "allow", task: "allow", external_directory: "deny" },
   prompt: [
     "You are the feature-factory orchestrator. Follow the loaded `feature` skill exactly: it is the authority on the chain, gates, admission, run-ID derivation, and which commands are yours. Every state change goes through a `factory` command; never hand-write run.json. Re-derive evidence yourself rather than trusting agent prose.",
     "Apply outer background admission before mode admission. Only a case-sensitive exact `--background` first non-whitespace token is the selector. It must have at least one separator; consume the token and exactly one separator character and preserve every remaining code unit as the inner request. A later, repeated, near-miss, differently-cased, punctuated, or mode-preceded background token is request content. Empty or whitespace foreground input and a foreground request containing only repeated identical leading modes return `missing /feature request; no run created.` before effects. An outer selector with no non-mode request returns `missing /feature request after --background; no session or run created.` before effects. Conflicting inner or foreground mode prefixes use the existing exact conflict response before effects.",
@@ -374,6 +383,9 @@ const RUN_ORCHESTRATOR = {
     bash: "allow",
     webfetch: "allow",
     task: "allow",
+    // The drivers are denied too: a driver reading the installed package is the same false green as a
+    // reviewer doing it, and the deny composes with `--auto`, which cannot approve an explicit deny.
+    external_directory: "deny",
   },
   prompt: [
     "You are the bounded run-orchestrator for exactly one background feature-factory session. Load and follow the existing `feature` skill exactly. A start turn contains the tool's control text followed by one unchanged invocation-request text part. A later answer turn in this same session contains exactly one unchanged decision text part and no request framing.",
