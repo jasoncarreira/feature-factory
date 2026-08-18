@@ -1445,6 +1445,11 @@ describe("end to end — a merge is refused through the real CLI", () => {
         // orphans the opening quote, so `python -c` receives `"import` as its whole program. A balanced
         // quoted token stays seedable below -- only an opener the split cannot close is refused.
         { entry: `uv run python -c "import subprocess; subprocess.check_call(['uv','run','pytest'])"`, reason: 'token "\\"import" opens a quote the argv split cannot close' },
+        // The opener need not be byte 0: an option prefix groups identically, and restricting the check to
+        // the first character admitted these two and would have ratified them permanently. Caught on review
+        // of the commit above, before either form reached a run.
+        { entry: `node --eval="console.log(1 + 2)"`, reason: 'token "--eval=\\"console.log(1" opens a quote the argv split cannot close' },
+        { entry: `uv run pytest -k="foo or bar"`, reason: 'token "-k=\\"foo" opens a quote the argv split cannot close' },
         { entry: "XDG_CONFIG_HOME=/tmp pytest tests/test_config_docs_complete.py", reason: `argv[0] "XDG_CONFIG_HOME=/tmp" did not resolve to an executable via its direct path from repository cwd ${JSON.stringify(admission.repo)}` },
         { entry: "", reason: "argv[0] is missing" },
         { entry: "   ", reason: "argv[0] is missing" },
