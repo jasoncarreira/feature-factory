@@ -581,20 +581,21 @@ on the host and could not reach the run.
 **A subagent reading outside the repository hangs forever — unless the read is denied in advance.** No error,
 no terminal state, no telemetry; every signal reads "working". The claim that used to stand here — that every
 deciding mechanism was inert, including `external_directory` config "in every form" — **is no longer true and was
-retired after measurement.** On opencode 1.18.18, with `"permission": {"external_directory": "deny"}` in the
-project config, an out-of-project read is refused outright:
+retired after measurement.** Measured on opencode 1.18.18, against a **subagent**, because that is the mode that hangs — a primary is
+auto-rejected and survives, so evidence from a primary proves nothing about this failure. One variable changed
+between the two runs, the subagent's own `external_directory` setting:
 
 ```
-evaluated permission=external_directory pattern=/etc/*    ->  Read /etc/hosts failed
+deny declared:  evaluated permission=external_directory pattern=/etc/*
+                (no `asking` line)  ->  subagent replied REFUSED  ->  exit 0
+
+deny removed:   evaluated permission=external_directory pattern=/etc/*
+                asking id=per_… permission=external_directory patterns=["/etc/*"]
+                (nothing further)   ->  exit 124, hung
 ```
 
-Removing that one setting and repeating the identical prompt reproduces the hang instead, which is the control that
-makes the result mean something:
-
-```
-evaluated permission=external_directory pattern=/etc/*
-asking id=per_… permission=external_directory patterns=["/etc/*"]      <- then nothing
-```
+The second run is this failure reproduced on demand, which is what makes the first one mean something. The same
+pair on a primary agent ends in a failed read rather than a hang, consistent with the note below.
 
 So declare the deny (this package now ships it for every factory agent) and pass `--auto` for prompts nobody
 anticipated; `--auto` cannot approve an explicit deny, which is why the pair is safe where the flag alone is not.
