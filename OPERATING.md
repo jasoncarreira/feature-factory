@@ -248,6 +248,38 @@ The parent shell, launcher, or supervisor must inject and export a nonempty `GH_
 account before this recipe begins. Do not derive it from the machine-active account. On another machine,
 apply the same ephemeral helper configuration so Git and `gh` consume the one inherited token:
 
+### An unattended run hangs on a permission prompt, silently
+
+`opencode run` is headless, so a permission it decides to *ask* about has nobody to answer. The run does not
+fail — it stops, mid-step, with the driver process alive and burning a trickle of CPU. Observed on a live run:
+
+```
+level=INFO message=asking permission=external_directory patterns=["/Users/…/.asdf/i…"]
+```
+
+Nothing followed for the next hour. `run.json` kept its old `updated_at`, the lock aged to `dead_lock: true`, and
+the process stayed up — so **process liveness and even advancing CPU time are not proof of progress.** The signal
+that catches this is `run.json.updated_at` standing still while the driver lives.
+
+The prompt happens when the agent reaches outside the project directory. In this case it went looking for the
+installed factory packages under `~/.asdf/installs/…` rather than treating the upstream facts recorded in its
+issue as given.
+
+**Two independent guards, and use both.** They compose: an explicit deny is not something `--auto` can approve.
+
+- **Pre-deny the reads that should never happen.** An opencode permission is either a string or a
+  pattern-to-effect map, and `external_directory` ships as `{"*": "ask"}`, which is what asks. Declaring
+  `"external_directory": "deny"` (or `{"*": "deny"}`) turns the hang into a refusal the agent can act on, which is
+  also this repository's read-scope rule enforced rather than merely instructed. Values are `allow`, `ask`, `deny`.
+- **Pass `--auto`** so a prompt this repository has not anticipated does not stop an unattended run either. Its
+  own help calls it dangerous, and it is: it auto-approves anything not explicitly denied. That is the argument
+  for pairing it with the deny above rather than using it alone.
+
+Say the same thing in the issue as well, because instruction is what stops the agent wanting the read in the first
+place: *if the API you need is not in the tree, the dependency is not declared yet — declare it, install it, and
+read it there*, and mark measured host behaviour as an accepted external premise so a run does not go hunting for
+proof of something it already has.
+
 ```sh
 if [ -z "${GH_TOKEN:-}" ]; then
   printf '%s\n' 'GH_TOKEN must be inherited and nonempty' >&2
