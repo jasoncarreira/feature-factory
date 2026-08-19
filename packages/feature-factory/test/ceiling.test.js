@@ -156,6 +156,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // they stop a decomposer authoring the shape rather than refusing it after the fact.
       "executed as argv split on single spaces with no shell",
       "are alternatives, not a sequence",
+      // mimir 1569's decomposer first wrote `./scripts/x.sh`, which seeding refuses because argv[0] is resolved
+      // at Gate 2 and the work had not created it yet. It recovered on its own by moving to `sh scripts/x.sh`,
+      // which costs an attempt; these pin the shape that works so the next decomposer does not pay for it.
+      "resolved against the repository when the plan is seeded",
+      "interpreter that already resolves and pass the script as an argument",
     ]) {
       assert.ok(markdown.includes(instruction), `WORKFLOW.md no longer instructs: ${instruction}`);
     }

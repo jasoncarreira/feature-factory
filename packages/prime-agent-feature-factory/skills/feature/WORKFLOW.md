@@ -891,7 +891,10 @@ The first successful seed is the **ratification point** for two decisions:
   operator, a quote that groups an argument, a substitution or a redirection is inert payload or a hard
   failure rather than syntax, and seeding refuses an entry it cannot execute that way. Entries
   are alternatives, not a sequence: a slice needing several commands to run in order names one script
-  committed in the repository. A slice with a non-empty `test_plan` is not `review_ready` until one ratified
+  committed in the repository. `argv[0]` is resolved against the repository when the plan is seeded, before
+  any slice has implemented anything, so a script the work itself creates cannot be `argv[0]`: name an
+  interpreter that already resolves and pass the script as an argument, as in `sh scripts/verify-all.sh`.
+  A slice with a non-empty `test_plan` is not `review_ready` until one ratified
   command exits zero. A slice with an **empty** `test_plan` is exempt. That exemption is a decision for
   the engineer at Gate 2, so decide it in the plan and present it: there is no flag that waives tests at
   observation time.
