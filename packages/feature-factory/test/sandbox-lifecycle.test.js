@@ -165,6 +165,28 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.equal(staged, readFileSync(new URL("../WORKFLOW.md", import.meta.url), "utf8"),
       "the staged workflow must be an exact copy of the canonical one");
     assert.equal(result.response.workflow, join(result.response.run_dir, "WORKFLOW.md"));
+
+    // Bootstrap runs repository-controlled commands before the workflow is staged, so a planted symlink at
+    // the destination is the live attack: a plain copy would follow it and write outside the sandbox. The
+    // protected writer rechecks the target immediately before the rename, so init refuses instead. And the
+    // refusal must land BEFORE publication -- a published run whose init failed can never be re-initialized,
+    // because init refuses to collide with an existing manifest.
+    for (const [name, plant] of [
+      ["symlink", "ln -s /tmp/ff-staging-escape .factory/$RUN/WORKFLOW.md"],
+      ["directory", "mkdir -p .factory/$RUN/WORKFLOW.md"],
+    ]) {
+      const runId = `stage-${name}`;
+      const command = `sh -c "mkdir -p .factory/${runId} && ${plant.replace("$RUN", runId)}"`;
+      const source = operator(root, `stage-${name}-src`, (repository) => {
+        writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
+          resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
+          pr_draft: false, bootstrap: command, bootstrap_timeout_ms: 120000,
+        }, null, 2)}\n`);
+      });
+      assert.throws(() => initFresh(source, [runId]), /./u, `${name}: init must refuse a planted staging target`);
+      assert.equal(existsSync(join(source, ".factory-sandboxes", runId, ".factory", runId, "run.json")), false,
+        `${name}: no manifest may be published when staging fails`);
+    }
     assert.equal(result.response.sandbox_path, sandbox);
     assert.equal(result.response.run_dir, join(sandbox, ".factory", runId));
     assert.equal(realpathSync(sandbox), sandbox);

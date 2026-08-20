@@ -4,7 +4,7 @@
 // The orchestrator calls this CLI instead of writing control-plane state directly.
 // Flags are declared per command; unknown options fail rather than becoming missing fields.
 // Schema validation surrounds every state write.
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
@@ -17,7 +17,7 @@ import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvi
 import { readRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
 import { reverifyRepair } from "../observe/repair-reverification.js";
 import { archiveReviewAttempt } from "../state/review-archive.js";
-import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
+import { writeProtectedFileAtomic, writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
 import { resolveSpawnExecutable } from "../core/executable.js";
 import { dispatchInitPublication } from "./init-publication.js";
@@ -1185,7 +1185,7 @@ function assertInitPathsIgnored({ operatorRoot, sandboxPath, runId, runGit, reso
 export async function dispatchInit(positional, flags, operations = INIT_OPERATIONS) {
   const candidate = preflightInit(positional, flags);
   const {
-    cwd, resolvePath, joinPath, realpath, lstat, mkdir, readdir, stageWorkflow = copyFileSync,
+    cwd, resolvePath, joinPath, realpath, lstat, mkdir, readdir,
     runGit, prove, publish,
   } = operations;
   const dispatchInitPublication = publish;
@@ -1336,15 +1336,19 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
   } catch (error) {
     throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
   }
-  const { observedRun } = await dispatchInitPublication({ runDir, sandboxPath: S, candidate: run, finalGuard: proveContainedBranch });
-  // The driver must read the canonical workflow, and `external_directory` is denied for every agent, so a
-  // read of this package from inside the sandbox is refused: the guard the skill obeys and the guard the
-  // permission model applies contradict each other, and which wins is a coin flip on whether the skill
-  // loader inlined the file. Staged into the run directory instead -- `.factory/` is gitignored by every
-  // consuming repository, so it cannot dirty the tree, and the read is inside the workspace. This is why
-  // the skill reads the workflow after init rather than before it.
+  // `external_directory` is denied for every agent and the canonical workflow ships outside the workspace, so
+  // without this the driver cannot perform the read its own contract requires; the only other way past it is
+  // `--auto`, which blanket-approves every permission ask. Protected writer, not a copy: `bootstrap` has run
+  // repository-controlled commands by now, so a planted destination symlink would redirect a plain write out
+  // of the sandbox, and `assertSafeTarget` rechecks immediately before the rename. Before publication, so a
+  // failure aborts init while a retry is still possible.
+  const workflowBytes = readFileSync(new URL("../WORKFLOW.md", import.meta.url));
+  await writeProtectedFileAtomic(runDir, "WORKFLOW.md", workflowBytes);
   const workflow = joinPath(runDir, "WORKFLOW.md");
-  stageWorkflow(new URL("../WORKFLOW.md", import.meta.url), workflow);
+  if (!readFileSync(workflow).equals(workflowBytes)) {
+    throw new CliError(`staged workflow at '${workflow}' does not match the canonical copy; sandbox was retained`);
+  }
+  const { observedRun } = await dispatchInitPublication({ runDir, sandboxPath: S, candidate: run, finalGuard: proveContainedBranch });
   return emit(flags, {
     run_id: observedRun.run_id, run_dir: runDir, workflow, sandbox_path: proof.sandboxPath,
     branch: observedRun.branch, worktree: observedRun.worktree, pr_base: observedRun.pr_base,

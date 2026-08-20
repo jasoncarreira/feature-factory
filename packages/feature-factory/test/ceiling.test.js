@@ -892,8 +892,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // outranks a path rule, and omitting `*` leaves everything else at `ask`, which a headless run cannot
     // answer. Staging is the only option that keeps the deny absolute. It lives in the CLI because
     // `boundary.test.js` gives the adapter no way to write, and after init because that is when a run
-    // directory exists. Eight lines, six of them the reason. Inside the 4550 tripwire, no authorization.
-    assert.equal(total, 4541, "staging the workflow into the run directory lands at 4541 production lines");
+    // directory exists, and BEFORE publication so a failure aborts init while a retry is still possible.
+    // Written through `writeProtectedFileAtomic`, not a copy: `bootstrap` runs repository-controlled
+    // commands first, so a planted destination symlink would redirect a plain write out of the sandbox.
+    // Twelve lines, six of them the reason. Inside the 4550 tripwire, so no authorization is involved.
+    assert.equal(total, 4545, "staging the workflow through the protected writer lands at 4545 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
