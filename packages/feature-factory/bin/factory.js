@@ -4,7 +4,7 @@
 // The orchestrator calls this CLI instead of writing control-plane state directly.
 // Flags are declared per command; unknown options fail rather than becoming missing fields.
 // Schema validation surrounds every state write.
-import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
@@ -1185,7 +1185,7 @@ function assertInitPathsIgnored({ operatorRoot, sandboxPath, runId, runGit, reso
 export async function dispatchInit(positional, flags, operations = INIT_OPERATIONS) {
   const candidate = preflightInit(positional, flags);
   const {
-    cwd, resolvePath, joinPath, realpath, lstat, mkdir, readdir,
+    cwd, resolvePath, joinPath, realpath, lstat, mkdir, readdir, stageWorkflow = copyFileSync,
     runGit, prove, publish,
   } = operations;
   const dispatchInitPublication = publish;
@@ -1337,8 +1337,16 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
     throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
   }
   const { observedRun } = await dispatchInitPublication({ runDir, sandboxPath: S, candidate: run, finalGuard: proveContainedBranch });
+  // The driver must read the canonical workflow, and `external_directory` is denied for every agent, so a
+  // read of this package from inside the sandbox is refused: the guard the skill obeys and the guard the
+  // permission model applies contradict each other, and which wins is a coin flip on whether the skill
+  // loader inlined the file. Staged into the run directory instead -- `.factory/` is gitignored by every
+  // consuming repository, so it cannot dirty the tree, and the read is inside the workspace. This is why
+  // the skill reads the workflow after init rather than before it.
+  const workflow = joinPath(runDir, "WORKFLOW.md");
+  stageWorkflow(new URL("../WORKFLOW.md", import.meta.url), workflow);
   return emit(flags, {
-    run_id: observedRun.run_id, run_dir: runDir, sandbox_path: proof.sandboxPath,
+    run_id: observedRun.run_id, run_dir: runDir, workflow, sandbox_path: proof.sandboxPath,
     branch: observedRun.branch, worktree: observedRun.worktree, pr_base: observedRun.pr_base,
     status: observedRun.status, mode: observedRun.mode,
   });

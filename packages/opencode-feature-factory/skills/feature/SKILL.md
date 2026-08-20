@@ -14,8 +14,12 @@ description: >
 
 # /feature — OpenCode adapter
 
-Before any intake, state read, tool call, client call, or `factory` command, read `WORKFLOW.md` located
-next to this file completely. That bundled file is an exact build-time copy of the factory-owned canonical workflow; it is authoritative for Steps 0–7, gates, evidence, repository lifecycle, and every
+`factory init` stages the canonical workflow at the `workflow` path in its own response, inside the run
+directory. **Read that file completely before any state read, dispatch, gate, or factory command other than
+`init` itself** — admission and the `init` invocation are specified here, everything after it is specified
+there. Do not read `WORKFLOW.md` next to this file: it lives outside the workspace, `external_directory` is
+denied for every agent, and a run that depends on that read fails on a permission refusal rather than on
+anything about the work. If the staged file is absent or unreadable, stop without effects. That bundled file is an exact build-time copy of the factory-owned canonical workflow; it is authoritative for Steps 0–7, gates, evidence, repository lifecycle, and every
 durable transition. This skill is authoritative only for OpenCode invocation admission, session
 placement, named-agent registration, background routing, and gate-answer delivery. If the two files
 appear inconsistent, stop without effects rather than improvising.

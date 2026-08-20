@@ -885,7 +885,15 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Since it cannot manufacture a false green either -- `readEvidence` refuses fabricated evidence and a
     // failing command yields no `review_ready` -- the governing rule is instruct, not enforce. WORKFLOW.md
     // carries the argv contract instead, and the seed row records the entry as deliberately admitted.
-    assert.equal(total, 4533, "declining to enforce test_plan quoting keeps production at 4533 lines");
+    // 4533 -> 4541: init stages the canonical workflow into the run directory. `external_directory` is
+    // denied for every agent, so the read SKILL.md mandates -- of a file in the adapter package, outside the
+    // workspace -- is refused, and whether a run survives depends on whether the skill loader happened to
+    // inline it. Two runs died that way. The permission model cannot express the narrow fix: a `*` rule
+    // outranks a path rule, and omitting `*` leaves everything else at `ask`, which a headless run cannot
+    // answer. Staging is the only option that keeps the deny absolute. It lives in the CLI because
+    // `boundary.test.js` gives the adapter no way to write, and after init because that is when a run
+    // directory exists. Eight lines, six of them the reason. Inside the 4550 tripwire, no authorization.
+    assert.equal(total, 4541, "staging the workflow into the run directory lands at 4541 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

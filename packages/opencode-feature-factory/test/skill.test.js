@@ -12,7 +12,12 @@ const canonicalWorkflow = readFileSync(resolve(factoryRoot, "WORKFLOW.md"));
 describe("OpenCode skill adapter", () => {
   it("owns OpenCode mechanics and loads the exact canonical workflow before effects", () => {
     assert.ok(skill.startsWith("---\nname: feature\n"));
-    assert.match(skill, /read `WORKFLOW\.md` located\nnext to this file completely/u);
+    // The workflow is read from where `init` stages it, not from beside this file: that path is outside
+    // the workspace and `external_directory` is denied for every agent, so a run depending on it fails on a
+    // permission refusal. These pin the reordering, one fragment per line so the assertion can match.
+    assert.match(skill, /`factory init` stages the canonical workflow at the `workflow` path/u);
+    assert.match(skill, /before any state read, dispatch, gate, or factory command other than/u);
+    assert.match(skill, /Do not read `WORKFLOW\.md` next to this file/u);
     assert.match(skill, /feature_background/u);
     assert.match(skill, /FACTORY_SESSION_ID/u);
     const grammar = [

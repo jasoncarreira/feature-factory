@@ -157,7 +157,14 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     const sandbox = join(realpathSync(source), ".factory-sandboxes", runId);
     const result = invoke(source, ["init", runId, "--now", NOW, "--json"], record, { SHELL: "/bin/false" });
     assert.equal(result.ok, true, result.stderr);
-    assert.deepEqual(Object.keys(result.response), ["run_id", "run_dir", "sandbox_path", "branch", "worktree", "pr_base", "status", "mode"]);
+    assert.deepEqual(Object.keys(result.response), ["run_id", "run_dir", "workflow", "sandbox_path", "branch", "worktree", "pr_base", "status", "mode"]);
+    // The staged workflow is the file the skill reads, so assert the bytes rather than the key: a response
+    // naming a path that does not exist would satisfy the shape above while leaving the driver with nothing
+    // to read, which is the failure staging exists to remove.
+    const staged = readFileSync(result.response.workflow, "utf8");
+    assert.equal(staged, readFileSync(new URL("../WORKFLOW.md", import.meta.url), "utf8"),
+      "the staged workflow must be an exact copy of the canonical one");
+    assert.equal(result.response.workflow, join(result.response.run_dir, "WORKFLOW.md"));
     assert.equal(result.response.sandbox_path, sandbox);
     assert.equal(result.response.run_dir, join(sandbox, ".factory", runId));
     assert.equal(realpathSync(sandbox), sandbox);
