@@ -3,7 +3,42 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
-## Unreleased — three-package architecture
+## 0.7.1
+
+Six merged changes, all of them earned by self-hosted runs against a real repository. Two are production
+guards; the rest tighten contracts that a run had already misread.
+
+- **`observe` refuses a `test_plan` entry it cannot execute, and `WORKFLOW.md` now says what shape works.**
+  A ratified entry is executed as argv split on single spaces with **no shell**, so a shell operator, a
+  quote that groups an argument across a space, a substitution, or a redirection is inert payload or a hard
+  failure rather than syntax. A run ratified `uv run python -c "import subprocess; ..."` wrapping 33
+  commands; `python -c` received `"import` as its whole program, and the slice could never be observed
+  green. Entries are also **alternatives, not a sequence** — any one exiting zero satisfies observation — so
+  a slice needing several commands in order names one script. (#319)
+
+- **`argv[0]` is resolved when the plan is seeded**, before any slice has implemented anything, so a script
+  the work itself creates cannot be `argv[0]`. Name an interpreter that already resolves and pass the script
+  as an argument: `sh scripts/verify-all.sh`. A decomposer spent an attempt discovering this. (#320)
+
+- **Every factory agent denies `external_directory`.** It ships as `{"*": "ask"}`, and a headless
+  `opencode run` has nobody to answer an ask: one run stopped mid-step for an hour while `work-reviewer`
+  waited on a path under `node_modules/feature-factory`. `--auto` cannot approve an explicit deny, and the
+  deny survives a project-level override. **This is a behaviour change**: an agent that previously read
+  outside the workspace after a prompt is now refused, which is the point — reading an installed copy of the
+  package proves what shipped, not what the run is changing. (#318)
+
+- **Archiving an archive has nothing to preserve, so no archive is written.** A live run reported an archive
+  path back as `--review-ref`, the attempt suffix was appended twice, and
+  `spec-writer.attempt-1.attempt-1.json` landed beside the real archive with identical bytes. (#316)
+
+- **`OPERATING.md` documents both unattended-run permission guards** — pre-deny the prompt and pass
+  `--auto` — and records that progress is judged by `run.json`'s `updated_at` rather than by CPU. (#317)
+
+- **`OPERATING.md` says precisely which Prime sessions cannot be stopped, and how to start one that can.** A
+  `-p` launched session outlives its launcher and only `shutdown --force` ends it; a session created through
+  the daemon is listable and stoppable. (#314)
+
+## 0.7.0 — three-package architecture
 
 - **One version across the workspace, from 0.7.0.** `feature-factory`, `opencode-feature-factory` and
   `prime-agent-feature-factory` previously drifted at 0.3.6, 0.5.6 and 0.1.0, which made "which versions

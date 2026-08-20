@@ -1,6 +1,6 @@
 {
   "name": "prime-agent-feature-factory",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Prime Agent integration for feature-factory: /feature command and Prime delegation adapter.",
   "type": "module",
   "license": "MIT",
@@ -24,7 +24,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "feature-factory": "0.7.0"
+    "feature-factory": "0.7.1"
   },
   "pi": {
     "extensions": [
