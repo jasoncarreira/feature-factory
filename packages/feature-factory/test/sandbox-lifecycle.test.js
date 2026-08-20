@@ -171,12 +171,18 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     // protected writer rechecks the target immediately before the rename, so init refuses instead. And the
     // refusal must land BEFORE publication -- a published run whose init failed can never be re-initialized,
     // because init refuses to collide with an existing manifest.
+    // The third case is the one the protected writer alone does not cover: it validates the final component,
+    // so a bootstrap that replaces the run DIRECTORY with a symlink would have the bytes committed through it,
+    // outside the sandbox, before publication ever rejects the run. Containment is re-proved before staging,
+    // and this asserts the outside destination is left untouched rather than merely that init refused.
+    const stagingEscape = mkdtempSync(join(tmpdir(), "ff-staging-escape-"));
     for (const [name, plant] of [
       ["symlink", "ln -s /tmp/ff-staging-escape .factory/$RUN/WORKFLOW.md"],
       ["directory", "mkdir -p .factory/$RUN/WORKFLOW.md"],
+      ["run-dir-symlink", `rm -rf .factory/$RUN && ln -s ${stagingEscape} .factory/$RUN`],
     ]) {
       const runId = `stage-${name}`;
-      const command = `sh -c "mkdir -p .factory/${runId} && ${plant.replace("$RUN", runId)}"`;
+      const command = `mkdir -p .factory/${runId} && ${plant.replaceAll("$RUN", runId)}`;
       const source = operator(root, `stage-${name}-src`, (repository) => {
         writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
           resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
@@ -186,6 +192,8 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       assert.throws(() => initFresh(source, [runId]), /./u, `${name}: init must refuse a planted staging target`);
       assert.equal(existsSync(join(source, ".factory-sandboxes", runId, ".factory", runId, "run.json")), false,
         `${name}: no manifest may be published when staging fails`);
+      assert.equal(existsSync(join(stagingEscape, "WORKFLOW.md")), false,
+        `${name}: nothing may be written outside the sandbox`);
     }
     assert.equal(result.response.sandbox_path, sandbox);
     assert.equal(result.response.run_dir, join(sandbox, ".factory", runId));
