@@ -3,6 +3,32 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.7.2
+
+One change, and it removes the last reason a run needed `--auto`.
+
+- **`factory init` stages the canonical workflow into the run directory** and returns its path as `workflow`.
+  Every factory agent denies `external_directory` (0.7.1), and the canonical `WORKFLOW.md` ships inside the
+  adapter package, which is never inside the workspace — so the read the skill *mandates* was the read the
+  guard *refused*, and whether a run survived depended on whether the skill loader happened to inline the
+  file. Two runs died with "the authoritative feature/WORKFLOW.md could not be read"; others survived only
+  because their denial landed somewhere harmless.
+
+  The narrow permission fix is not expressible: a `*` rule outranks a path rule, and omitting `*` leaves
+  every other path at `ask`, which a headless run cannot answer and which `--auto` silently approves. So the
+  deny stays absolute and the read moves inside the workspace. `.factory/` is gitignored by every consuming
+  repository, so nothing dirties the tree.
+
+  Staging runs **before** manifest publication, so a failure aborts init while a retry is still possible
+  rather than leaving a published run that can never be re-initialized, and it goes through the protected
+  no-follow atomic writer with the staged bytes verified against canonical.
+
+  **Contract change:** the canonical workflow now states where the driver reads it from. A host whose agents
+  may read outside the workspace may read the copy beside its skill; a host that denies such reads must use
+  the staged copy, which is read after `init` rather than before it — admission and the `init` invocation are
+  specified by the host `SKILL.md`. The bytes are identical either way. The OpenCode adapter uses the staged
+  copy; Prime keeps its adjacent read. (#322)
+
 ## 0.7.1
 
 Six merged changes, all of them earned by self-hosted runs against a real repository. Two are production
