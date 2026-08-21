@@ -1,8 +1,17 @@
 # Feature Factory — host-neutral workflow
 
 This document is the authoritative, host-neutral feature-factory workflow. It is not a discoverable
-skill by itself. A host integration must ship its own `SKILL.md`, place an exact copy of this file next
-to that skill as `WORKFLOW.md`, and require the run driver to read it completely before any effect.
+skill by itself. A host integration must ship its own `SKILL.md` and place an exact copy of this file next
+to that skill as `WORKFLOW.md`.
+
+**Where the driver reads this file from, and when.** `factory init` stages an exact copy into the run
+directory and returns its path as `workflow`. The driver reads THAT copy, completely, before any state read,
+dispatch, gate, or factory command other than `init` itself — admission and the `init` invocation are
+specified by the host `SKILL.md`, everything after them here. A host whose agents may read outside the
+workspace may instead read the copy beside its skill; a host that denies such reads must use the staged copy,
+because the packaged one is unreadable there and a run that depends on it fails on a permission refusal
+rather than on anything about the work. Either way the bytes are identical, and a driver that cannot read
+either copy stops without effects.
 
 The host adapter owns only invocation admission, placement, session identity, specialist dispatch, and
 result delivery. This workflow owns the durable chain, gates, repository lifecycle, evidence rules, and

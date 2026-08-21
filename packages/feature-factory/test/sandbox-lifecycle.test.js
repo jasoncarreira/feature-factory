@@ -157,7 +157,44 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     const sandbox = join(realpathSync(source), ".factory-sandboxes", runId);
     const result = invoke(source, ["init", runId, "--now", NOW, "--json"], record, { SHELL: "/bin/false" });
     assert.equal(result.ok, true, result.stderr);
-    assert.deepEqual(Object.keys(result.response), ["run_id", "run_dir", "sandbox_path", "branch", "worktree", "pr_base", "status", "mode"]);
+    assert.deepEqual(Object.keys(result.response), ["run_id", "run_dir", "workflow", "sandbox_path", "branch", "worktree", "pr_base", "status", "mode"]);
+    // The staged workflow is the file the skill reads, so assert the bytes rather than the key: a response
+    // naming a path that does not exist would satisfy the shape above while leaving the driver with nothing
+    // to read, which is the failure staging exists to remove.
+    const staged = readFileSync(result.response.workflow, "utf8");
+    assert.equal(staged, readFileSync(new URL("../WORKFLOW.md", import.meta.url), "utf8"),
+      "the staged workflow must be an exact copy of the canonical one");
+    assert.equal(result.response.workflow, join(result.response.run_dir, "WORKFLOW.md"));
+
+    // Bootstrap runs repository-controlled commands before the workflow is staged, so a planted symlink at
+    // the destination is the live attack: a plain copy would follow it and write outside the sandbox. The
+    // protected writer rechecks the target immediately before the rename, so init refuses instead. And the
+    // refusal must land BEFORE publication -- a published run whose init failed can never be re-initialized,
+    // because init refuses to collide with an existing manifest.
+    // The third case is the one the protected writer alone does not cover: it validates the final component,
+    // so a bootstrap that replaces the run DIRECTORY with a symlink would have the bytes committed through it,
+    // outside the sandbox, before publication ever rejects the run. Containment is re-proved before staging,
+    // and this asserts the outside destination is left untouched rather than merely that init refused.
+    const stagingEscape = mkdtempSync(join(tmpdir(), "ff-staging-escape-"));
+    for (const [name, plant] of [
+      ["symlink", "ln -s /tmp/ff-staging-escape .factory/$RUN/WORKFLOW.md"],
+      ["directory", "mkdir -p .factory/$RUN/WORKFLOW.md"],
+      ["run-dir-symlink", `rm -rf .factory/$RUN && ln -s ${stagingEscape} .factory/$RUN`],
+    ]) {
+      const runId = `stage-${name}`;
+      const command = `mkdir -p .factory/${runId} && ${plant.replaceAll("$RUN", runId)}`;
+      const source = operator(root, `stage-${name}-src`, (repository) => {
+        writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
+          resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
+          pr_draft: false, bootstrap: command, bootstrap_timeout_ms: 120000,
+        }, null, 2)}\n`);
+      });
+      assert.throws(() => initFresh(source, [runId]), /./u, `${name}: init must refuse a planted staging target`);
+      assert.equal(existsSync(join(source, ".factory-sandboxes", runId, ".factory", runId, "run.json")), false,
+        `${name}: no manifest may be published when staging fails`);
+      assert.equal(existsSync(join(stagingEscape, "WORKFLOW.md")), false,
+        `${name}: nothing may be written outside the sandbox`);
+    }
     assert.equal(result.response.sandbox_path, sandbox);
     assert.equal(result.response.run_dir, join(sandbox, ".factory", runId));
     assert.equal(realpathSync(sandbox), sandbox);
