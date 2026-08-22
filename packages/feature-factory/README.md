@@ -71,6 +71,31 @@ selects the run and reaches `story-reader` without extraction, wrapping, reseria
 normalization. The value matches `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; digit-only values are positive
 decimal without leading zeroes.
 
+A resolver does not have to look anything up. When the caller already holds the work item — a controller
+dispatching an item it rendered itself, or a tracker whose content is already in the launch environment —
+the resolver is a transport rather than a lookup, and the whole of it is one `printf`:
+
+```sh
+[ -n "$MY_WORK_ITEM_JSON" ] && { printf %s "$MY_WORK_ITEM_JSON"; exit 0; }
+# otherwise fall through to whatever lookup this repository declares
+```
+
+Use `printf %s` and not `echo`, which appends a newline and in some shells interprets backslash escapes,
+corrupting a `body` that contains them. Gating the branch on a variable lets one config serve both callers:
+the caller that supplies the item sets it, and a caller that supplies only a reference takes the declared
+lookup unchanged, so adding the branch changes no existing behavior. Because the resolver chooses `run_id`,
+a caller supplying its own item also chooses the sandbox name, feature-branch suffix, and manifest candidate
+— so giving it a namespace of its own, such as `chainlink-1327`, makes collision with the tracker's own
+numbering unrepresentable rather than something a lookup has to detect.
+
+A resolver that recognizes a reference it cannot serve must exit non-zero rather than exit zero with empty
+stdout. The two are indistinguishable from outside — both are exit 0 and no bytes — but they mean different
+things. Empty stdout means *this is not my reference*, and the run continues to ticket, design, and
+free-text derivation from the request; for a bare id that names no workflow, outcome, or acceptance
+criteria, so the run reaches Gate 1 with nothing to approve and parks there. A non-zero exit refuses
+immediately, names the reference, and creates no session or run. Only the resolver author can distinguish
+the two cases, so this cannot be enforced here.
+
 Malformed config, malformed payload, a non-zero exit, or unavailable exit status refuses before any
 run effect and never falls back:
 
