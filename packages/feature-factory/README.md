@@ -89,12 +89,13 @@ a caller supplying its own item also chooses the sandbox name, feature-branch su
 numbering unrepresentable rather than something a lookup has to detect.
 
 A resolver that recognizes a reference it cannot serve must exit non-zero rather than exit zero with empty
-stdout. The two are indistinguishable from outside — both are exit 0 and no bytes — but they mean different
-things. Empty stdout means *this is not my reference*, and the run continues to ticket, design, and
-free-text derivation from the request; for a bare id that names no workflow, outcome, or acceptance
-criteria, so the run reaches Gate 1 with nothing to approve and parks there. A non-zero exit refuses
-immediately, names the reference, and creates no session or run. Only the resolver author can distinguish
-the two cases, so this cannot be enforced here.
+stdout. Exit status is observable, so those two results are distinguishable — which is precisely why the
+choice matters. The ambiguity arises only when an in-scope but unserviceable reference is *reported* as exit
+zero with empty stdout, because that is already the contract's signal for *this is not my reference*: the run
+then continues to ticket, design, and free-text derivation from the request, and for a bare id that names no
+workflow, outcome, or acceptance criteria, so it reaches Gate 1 with nothing to approve and parks there. A
+non-zero exit instead refuses immediately, names the reference, and creates no session or run. Only the
+resolver author knows which of the two cases it is in, so the contract cannot make the choice for it.
 
 Malformed config, malformed payload, a non-zero exit, or unavailable exit status refuses before any
 run effect and never falls back:
