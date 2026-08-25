@@ -27,7 +27,7 @@ import {
 } from "../state/session-lock.js";
 
 export const COMMANDS = Object.freeze({
-  init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
+  init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--issue-key", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
   "amend-paths": Object.freeze(["--repo", "--add", "--reason", "--session", "--now", "--json"]),
   resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
@@ -1360,13 +1360,18 @@ function preflightInit(positional, flags) {
   const refusal = (message, cause) => new CliError(`${message}; no sandbox path was derived or created`, cause ? { cause } : undefined);
   if (positional.length !== 1) throw refusal("factory init requires exactly one <run-id>");
   if (flags.repo !== undefined && (typeof flags.repo !== "string" || !flags.repo.trim())) throw refusal("--repo must be a non-empty string");
+  // Accepted alias, not a guard: `issue_key` is the field name every reader sees, so `--issue-key` is the
+  // spelling reached for first -- mimir 1606's driver did, got `unknown option`, and recovered by dropping
+  // the flag, so a run that had read its real issue recorded none. Disagreement refuses, because the key is
+  // appended as `Closes #<key>` and preferring one silently would close a stranger's issue.
+  if (flags.issue !== undefined && flags.issueKey !== undefined && flags.issue !== flags.issueKey) throw refusal("--issue and --issue-key disagree; pass one");
   const runId = positional[0];
   try {
     const at = stamp(flags);
     return validateRun({
       version: SCHEMA_VERSION,
       run_id: runId,
-      issue_key: flags.issue ?? null,
+      issue_key: flags.issue ?? flags.issueKey ?? null,
       branch: flags.branch ?? `feature/${runId}`,
       worktree: flags.worktree ?? ".",
       pr_base: flags.prBase ?? null,
