@@ -103,7 +103,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.deepEqual(Object.keys(COMMANDS).sort(), [...CLI_COMMANDS].sort());
     assert.deepEqual(Object.keys(COMMANDS).slice(0, 4), ["init", "status", "amend-paths", "resume"]);
     assert.deepEqual(COMMANDS.init, [
-      "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--mode",
+      "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--issue-key", "--mode",
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
@@ -896,7 +896,19 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Written through `writeProtectedFileAtomic`, not a copy: `bootstrap` runs repository-controlled
     // commands first, so a planted destination symlink would redirect a plain write out of the sandbox.
     // Twelve lines, six of them the reason. Inside the 4550 tripwire, so no authorization is involved.
-    assert.equal(total, 4545, "staging the workflow through the protected writer lands at 4545 production lines");
+    // 4541 -> 4545 -> 4550: `init` accepts `--issue-key` as an alias for `--issue`. `issue_key` is the field
+    // name every reader of `run.json` and `status --json` sees, and it is the spelling a caller reaches for
+    // first: mimir 1606's driver ran `init "1606" --issue-key "1606"`, got `unknown option`, and recovered by
+    // dropping the flag rather than retrying the other spelling. That run then read issue 1606 for real, built
+    // a correct story, merged four slices and opened a correct PR while recording `issue_key: null` -- so the
+    // field is a coin flip on how a driver happened to spell it, and an absent key is exempt from the `Closes`
+    // linkage the key exists to produce. Neither a guard nor instruction: an accepted input spelling.
+    // One line of it is enforcement and says so in place -- disagreeing values refuse instead of preferring
+    // one, because the key is appended as `Closes #<key>` and a silent preference closes a stranger's issue.
+    // **This lands exactly on the 4550 tripwire.** No authorization was needed, and none is left: the next
+    // production line anywhere in this package requires an operator-authorized raise, recorded in the issue
+    // body before the run. Read that as the ledger doing its job, not as room to round up.
+    assert.equal(total, 4550, "staging the workflow through the protected writer lands at 4550 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

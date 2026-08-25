@@ -3,6 +3,27 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.7.3
+
+One change, and it stops a field from depending on how a driver spelled a flag.
+
+- **`factory init` accepts `--issue-key` as an alias for `--issue`.** `issue_key` is the field name every
+  reader of `run.json` and `status --json` sees, so it is the spelling a caller reaches for first. mimir 1606's
+  driver ran `init "1606" --issue-key "1606"`, got `unknown option '--issue-key' for 'init'`, and recovered by
+  dropping the flag rather than trying the other spelling. That run then read issue 1606 for real, built a
+  correct story, merged four slices on first attempt and opened a correct PR — while recording
+  `issue_key: null` throughout. Since an absent key is deliberately exempt from the title prefix, body prefix
+  and `Closes #<key>` line, the linkage the key exists to produce was silently forfeited, and whether it
+  appears at all came down to a spelling the caller could not see. Consumers should still treat `run_id` as
+  identity and `issue_key` as optional enrichment.
+- **Two spellings that disagree refuse** rather than one winning: the key is appended as `Closes #<key>`, so a
+  silent preference would close a stranger's issue. That one line is enforcement and says so in place; the
+  alias itself is neither a guard nor instruction, just an accepted input spelling.
+
+Production source lands at 4550 lines, **exactly on the tripwire**. No authorization was required and none
+remains: the next production line in `packages/feature-factory` needs an operator-authorized raise recorded in
+the issue body before the run.
+
 ## 0.7.2
 
 One change, and it removes the last reason a run needed `--auto`.

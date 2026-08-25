@@ -347,6 +347,9 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       { args: ["init", "scalar", "--worktree", " "], positional: ["scalar"], flags: { worktree: " " }, match: /run\.worktree/u },
       { args: ["init", "scalar", "--pr-base", ""], positional: ["scalar"], flags: { prBase: "" }, match: /run\.pr_base/u },
       { args: ["init", "scalar", "--issue", ""], positional: ["scalar"], flags: { issue: "" }, match: /run\.issue_key/u },
+  // The alias reaches the same validation, and two spellings that disagree refuse rather than one winning.
+  { args: ["init", "scalar", "--issue-key", ""], positional: ["scalar"], flags: { issueKey: "" }, match: /run\.issue_key/u },
+  { args: ["init", "scalar", "--issue", "A", "--issue-key", "B"], positional: ["scalar"], flags: { issue: "A", issueKey: "B" }, match: /--issue and --issue-key disagree/u },
       { args: ["init", "scalar", "--mode", "batch"], positional: ["scalar"], flags: { mode: "batch" }, match: /run\.mode/u },
       { args: ["init", "scalar", "--mode", "interactive", "--mode", "batch"], positional: ["scalar"], flags: { mode: "batch" }, match: /run\.mode/u },
       { args: ["init", "scalar", "--max-parallel-slices", "0"], positional: ["scalar"], flags: { maxParallelSlices: "0" }, match: /positive integer/u },
@@ -412,6 +415,14 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.deepEqual({ branch: completeRun.branch, prBase: completeRun.pr_base, issue: completeRun.issue_key, mode: completeRun.mode, parallel: completeRun.max_parallel_slices }, {
       branch: "custom/branch", prBase: "main", issue: "ISSUE-1", mode: "autonomous", parallel: 1,
     });
+
+    // The alias alone records the key: mimir 1606 reached `unknown option` here and dropped the flag,
+    // so a run that had read its real issue published without the `Closes` linkage the key produces.
+    const aliasSource = operator(root, "alias-scalars");
+    mkdirSync(join(aliasSource, ".factory-sandboxes"));
+    const alias = invoke(aliasSource, ["init", "alias-scalars", "--issue-key", "ISSUE-2", "--now", NOW, "--json"], recorder(join(root, "alias-recorder")));
+    assert.equal(alias.ok, true, alias.stderr);
+    assert.equal(JSON.parse(readFileSync(join(alias.response.run_dir, "run.json"), "utf8")).issue_key, "ISSUE-2");
 
     for (const policy of ["legacy", "sandbox", "both"]) {
       const policySource = operator(root, `policy-${policy}`);
