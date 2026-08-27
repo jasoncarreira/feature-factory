@@ -273,6 +273,17 @@ names only `bootstrap_timeout_ms`. Validate this order before executing `resolve
 Retain the validated `publishing_identity` string exactly as parsed, without trimming,
 normalizing, case-folding, or reserializing it, as `DECLARED_PUBLISHING_IDENTITY` for this driver
 invocation. Do not tighten the existing non-whitespace validation to the observed-login grammar.
+An inherited `FACTORY_PUBLISHING_IDENTITY` that exists and contains at least one character replaces the
+file value as `DECLARED_PUBLISHING_IDENTITY`, used exactly as inherited under the same no-trimming,
+no-normalizing, no-case-folding rule. One repository may be published from more than one environment -- a
+maintainer's own checkout and an automated host -- while `.factory.json` is tracked and can carry only one
+value, so the expectation belongs with the environment and the file carries the fallback.
+An absent or zero-length override leaves the file value in force.
+It never means no declaration; only an absent `.factory.json` skips the publishing-identity guards, which
+is what keeps a forgotten override a park rather than a publish under whatever credential happens to exist.
+Never derive this value from `gh`, the token, stored authentication, Git configuration, or any command
+result: an expectation read from the credential being checked would always match, and the guard would
+silently stop guarding.
 Credential values must not appear in the file; command strings may refer only to credentials supplied
 through inherited environment-variable names.
 

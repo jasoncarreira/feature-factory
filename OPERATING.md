@@ -60,6 +60,16 @@ requires `bootstrap`. Each omitted timeout independently defaults to `900000` mi
 shares the other's budget. A command may name credentials supplied through inherited environment, but
 credential values must not appear in the file.
 
+An inherited `FACTORY_PUBLISHING_IDENTITY` that exists and contains at least one character replaces the
+file value, used exactly as inherited. One repository may be published from more than one environment — a
+maintainer's own checkout and an automated host — while `.factory.json` is tracked and can carry only one
+value, so the expectation belongs with the environment and the file carries the fallback. An absent or
+zero-length override leaves the file value in force; it never means no declaration, and only an absent
+`.factory.json` skips the guards. That is what keeps a forgotten override a park rather than a publish
+under whatever credential happens to exist. Never derive the value from `gh`, the token, stored
+authentication, Git configuration, or any command result — an expectation read from the credential being
+checked would always match, and the guard would stop guarding.
+
 Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
 
 The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
@@ -117,7 +127,7 @@ The entries have these execution contracts:
 | `bootstrap` | The exact string runs unchanged with `shell: true`, cwd exactly the selected sandbox, inherited environment and stdin, and child stdout and stderr both routed to CLI stderr. Each attempt gets the independent configured timeout or `900000` millisecond default. | Clean numeric zero succeeds. Tracked-state observation failure outranks named dirty worktree/index paths, which outrank unavailable or nonzero exit. | CLI-owned once during fresh init after clone, containment, and PR-base observation but before manifest publication, and again on every explicit resume while parked. No retry. |
 | `verify` | The unchanged string runs as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio; no structured stdin or factory payload. Each attempt gets the full configured timeout. Stdout and stderr are visible, informational, and unparsed rather than captured or persisted. | Numeric child exit status is authoritative. Zero succeeds; non-zero means repository verification failed; no numeric status is unavailable. | Invoked after each newly recorded merge with at most two executions per merge or replay invocation. Direct committed test-only repair observation remains one execution. |
 | `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by `factory effective-push`. |
-| `publishing_identity` | No runtime input; retain the raw validated string exactly as parsed, without trimming, normalization, case-folding, or reserialization. | A missing, non-string, or whitespace-only identity makes the config malformed; the observed login is compared exactly and case-sensitively. | Active in every mode at exactly three guards; absent config preserves existing behavior. |
+| `publishing_identity` | No runtime input; retain the raw validated string exactly as parsed, without trimming, normalization, case-folding, or reserialization. A nonempty inherited `FACTORY_PUBLISHING_IDENTITY` replaces it. | A missing, non-string, or whitespace-only identity makes the config malformed; the observed login is compared exactly and case-sensitively. | Active in every mode at exactly three guards; absent config preserves existing behavior. |
 
 Bootstrap cleanliness checks tracked worktree and index paths only, so untracked dependency installation is allowed. Clean zero publishes paired top-level `bootstrap_command` and `bootstrap_exit` evidence; the command is exact and the result is a non-negative integer or `null`. Ordinary transitions preserve the pair, while status response shape stays unchanged.
 
@@ -241,6 +251,33 @@ privileged-path policy rather than by being unversioned. It was `.factory/config
 proved unusable — `.factory/` is gitignored, so the declaration could not be committed and never reached
 a sandbox clone. A feature run
 does not create, write, merge, archive, or package it.
+
+### Publishing one repository as two identities
+
+A repository published both by hand and by an automated host needs two different publishing accounts while
+`.factory.json` is tracked and can hold only one. Declare the fallback in the file and override it per
+environment:
+
+```jsonc
+// .factory.json, committed — the identity for ad-hoc local runs
+{ "publishing_identity": "jasoncarreira" }
+```
+
+```sh
+# the automated host, set beside GH_TOKEN so the two cannot drift
+FACTORY_PUBLISHING_IDENTITY=mimir-carreira
+```
+
+Put the fallback where configuration is hardest to attach. An automated host has an image build and a
+dispatched environment to carry a variable; a hand-run checkout has neither, so the committed value should
+be the one that makes local runs work unconfigured.
+
+Set the override in the same place as `GH_TOKEN`. An identity pinned to a token for a different account
+parks before publication with both values named, which is the outcome you want; the failure to avoid is a
+silent publish under whatever credential the environment happened to carry, and a declared fallback is what
+makes that impossible. Do not remove `publishing_identity` from the file to "let the environment decide" —
+it is a required property, so the file becomes invalid and every run refuses; and were it optional, an
+absent declaration would disable the guard entirely and a forgotten variable would publish as anyone.
 
 ### Launch command
 
