@@ -1718,6 +1718,14 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       for (const status of ["completed", "partial", "blocked"]) {
         const finalRun = project(`resume-final-${status}`, { seed: false });
         try {
+          // `completed` now requires a recorded `pr_url`, so a run that published nothing cannot claim success.
+          // This loop is about `resume` refusing every terminal status, not about publication, so the fixture
+          // records a URL directly rather than driving a real publish to satisfy an unrelated precondition.
+          if (status === "completed") {
+            const finalPath = join(finalRun.runDir, "run.json");
+            const finalState = JSON.parse(readFileSync(finalPath, "utf8"));
+            writeFileSync(finalPath, `${JSON.stringify({ ...finalState, pr_url: "https://example.test/resume-final" }, null, 2)}\n`);
+          }
           assert.equal(factory(finalRun.repo, ["terminal", RUN, status, "--reason", "final", "--now", NOW(8)]).ok, true);
           const before = readFileSync(join(finalRun.runDir, "run.json"), "utf8");
           const refused = factory(finalRun.repo, ["resume", RUN, "--now", NOW(9)]);
