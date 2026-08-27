@@ -625,6 +625,12 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     assert.ok(policy.includes("publishing identity mismatch: declared <declared-ascii-json>, observed <observed-ascii-json>; authenticate as <declared-ascii-json> and retry."));
     assert.ok(policy.includes("publishing identity unobservable: declared <declared-ascii-json>; launch with inherited GH_TOKEN for <declared-ascii-json> as documented in OPERATING.md and retry."));
     assert.match(policy, /Never expose the token, raw stdout or stderr, diagnostics, status, command text, target, helper output,\s+or environment/u);
+    // The environment override, and the two properties that keep it a guard rather than an off switch: a
+    // zero-length value falls back to the file instead of disabling the check, and the expectation is never
+    // read from the credential being checked, which would always match. Fragments chosen to sit on one line.
+    assert.ok(source.includes("An absent or zero-length override leaves the file value in force."));
+    assert.match(source, /An inherited `FACTORY_PUBLISHING_IDENTITY` that exists and contains at least one character replaces the\s+file value/u);
+    assert.match(source, /Never derive this value from `gh`, the token, stored authentication, Git configuration, or any command\s+result/u);
     assert.match(policy, /quiesce every builder, tool, background task, and heartbeat call[\s\S]*Bind `PRE_QUOTING_REASON` to the complete already-rendered ASCII reason/u);
     assert.match(policy, /surrounding the complete reason with single quotes and replacing every literal\s+`'` inside it with the exact shell sequence `'\\''`[\s\S]*encoded token as the sole `--reason`\s+argument in the host shell command string/u);
     assert.match(policy, /Do not put the raw or rendered reason inside double quotes, interpolate it as unquoted shell syntax,\s+`eval` it, use command substitution, a temporary file, or environment indirection/u);

@@ -47,6 +47,16 @@ Each omitted timeout independently defaults to `900000`; neither shares the othe
 operator-owned, committed, and protected as a privileged path: a run cannot create, write, merge,
 archive, package, or repair it.
 
+An inherited `FACTORY_PUBLISHING_IDENTITY` that exists and contains at least one character replaces the
+file value, used exactly as inherited. One repository may be published from more than one environment — a
+maintainer's own checkout and an automated host — while `.factory.json` is tracked and can carry only one
+value, so the expectation belongs with the environment and the file carries the fallback. An absent or
+zero-length override leaves the file value in force; it never means no declaration, and only an absent
+`.factory.json` skips the guards. That is what keeps a forgotten override a park rather than a publish
+under whatever credential happens to exist. Never derive the value from `gh`, the token, stored
+authentication, Git configuration, or any command result — an expectation read from the credential being
+checked would always match, and the guard would stop guarding.
+
 Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
 
 The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
