@@ -3,6 +3,29 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.7.4
+
+One change, and it closes a false green the contract only ever instructed against.
+
+- **`factory terminal <run-id> completed` now requires a recorded `pr_url`.** `completed` is the only terminal
+  status that asserts a run earned a result, but the ordering that gave it meaning — publish, then terminalize
+  with reason `draft-pr-recorded` — lived in `WORKFLOW.md` alone. `terminal` checked three things: that the
+  status was a known terminal value, that `--reason` was present, and that the run was not parked. It never
+  consulted `slices`, `pr_url`, or evidence, and `assertPublicationReady` was wired only into the `pr` and
+  `effective-push` paths. So a driver that skipped the work could record success, and the CLI reported it
+  faithfully. mimir 1483 is what that looks like from outside: a ~70-second run with no commits, no pushed
+  branch and no PR reported `completed`, and a controller binding on `status == "completed"` read a do-nothing
+  run as a shipped epic. Use `blocked` when nothing merged, or `partial` when some slices did; both stay
+  unguarded because they claim less.
+
+Consumers should still not treat `status` as sole proof of work: verify the PR's repository, base and head sha
+independently, and require at least one `:merged(` entry in `slices`. This guard removes a way to lie, not the
+reason to check.
+
+Production source moves 4550 → 4557, and the tripwire 4550 → 4560 by operator authorization recorded before the
+work. The two other `completed` terminalizations in the cleanup path re-terminalize an already-published run, so
+their `pr_url` is set and the guard does not reach them.
+
 ## 0.7.3
 
 One change, and it stops a field from depending on how a driver spelled a flag.

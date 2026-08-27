@@ -287,6 +287,25 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
 }
 
 test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only then removes the sandbox", () => {
+  // mimir 1483, as a negative control: a run that published nothing may not claim `completed`. Built inline
+  // rather than through createFixture, because every fixture there is deliberately post-publication -- the
+  // legacy path writes a `pr_url` outright -- and the defect only exists before a PR is recorded.
+  const bareRoot = realpathSync(mkdtempSync(join(tmpdir(), "factory-terminal-bare-")));
+  const bare = join(bareRoot, "operator");
+  mkdirSync(bare);
+  git(bare, "init", "--quiet", "--initial-branch=main");
+  git(bare, "config", "user.name", "Factory Test");
+  git(bare, "config", "user.email", "factory@example.test");
+  writeFileSync(join(bare, ".gitignore"), ".factory/\n/.factory-sandboxes/\n");
+  git(bare, "add", ".gitignore");
+  git(bare, "commit", "--quiet", "-m", "base");
+  const bareSandbox = initFresh(bare, ["bare-run", "--pr-base", "main", "--mode", "autonomous"]).repository;
+  const refused = spawnSync("node", [cli, "terminal", "bare-run", "completed", "--reason", "nothing-shipped", "--repo", bareSandbox, "--json"], { encoding: "utf8" });
+  assert.equal(refused.status, 1, refused.stdout);
+  assert.match(refused.stderr, /terminal completed requires a recorded pr_url/u);
+  assert.equal(factory(bareSandbox, "status", "bare-run").status, "running", "a refused terminalization leaves the run running");
+  assert.equal(factory(bareSandbox, "terminal", "bare-run", "blocked", "--reason", "nothing-shipped").status, "blocked");
+
   const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
   const start = skill.indexOf("## Step 7 — Summary and completed sandbox handoff");
   const end = skill.indexOf("## Resuming", start);

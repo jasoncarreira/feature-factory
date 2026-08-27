@@ -908,7 +908,22 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // **This lands exactly on the 4550 tripwire.** No authorization was needed, and none is left: the next
     // production line anywhere in this package requires an operator-authorized raise, recorded in the issue
     // body before the run. Read that as the ledger doing its job, not as room to round up.
-    assert.equal(total, 4550, "staging the workflow through the protected writer lands at 4550 production lines");
+    // 4545 -> 4550 was the `--issue-key` alias, not the workflow staging above: 0.7.3's edit renumbered this
+    // assertion but left the older description attached, so the message named the wrong change. Corrected here.
+    // 4550 -> 4557: `factory terminal <R> completed` now requires a recorded `pr_url`. `completed` is the only
+    // terminal status asserting the run earned a result, and the ordering that gave it meaning -- publish, then
+    // terminalize with reason `draft-pr-recorded` (WORKFLOW.md) -- was instruction alone. mimir 1483 showed the
+    // cost: a ~70-second run with no commits, no pushed branch and no PR recorded `completed`, and a consumer
+    // binding on `status == "completed"` read a do-nothing run as a shipped epic. That is a false green in the
+    // exact sense this file exists to price, and the CLI already held the state needed to refuse it.
+    // Enforcement, and it says so in place. `blocked` and `partial` stay unguarded because they claim less.
+    // Checked against what it must not block: WORKFLOW.md's two other `completed` terminalizations re-terminalize
+    // an already-published run to update a cleanup reason, so `pr_url` is set and both still pass -- verified by
+    // running the suite, not by reading it. Negative control run: with the guard deleted terminal-handoff fails,
+    // restored it passes.
+    // Tripwire raised 4550 -> 4560 by operator authorization given before this work began, for this one finding.
+    // 0.7.3 landed exactly on 4550 and recorded that the next line would need a raise; this is that line.
+    assert.equal(total, 4557, "requiring a recorded pr_url for terminal completed lands at 4557 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -939,7 +954,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
-    assert.ok(total <= 4550, `production source is ${total} lines; the tripwire is 4550`);
+    assert.ok(total <= 4560, `production source is ${total} lines; the tripwire is 4560`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

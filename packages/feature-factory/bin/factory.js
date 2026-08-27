@@ -1039,12 +1039,19 @@ const HANDLERS = {
     const at = stamp(flags);
     const next = await transition(runDir, {
       participants: [{ familyId: "envelope", mode: "terminalize" }],
-      apply: (state) => ({
-        ...state,
-        updated_at: at,
-        status,
-        terminal_result: { status, reason: flags.reason },
-      }),
+      apply: (state) => {
+        // Enforcement, not instruction: `completed` is the only terminal status that asserts the run earned a
+        // result, and the ordering that gave it meaning -- publish, then terminalize with reason
+        // `draft-pr-recorded` -- lived in WORKFLOW.md alone, so a driver that skipped the work could still
+        // record success. mimir 1483 did exactly that: ~70 seconds, no commits, no pushed branch, no PR, and
+        // a status a consumer binding on `status == "completed"` read as a shipped epic. `blocked` and
+        // `partial` stay unguarded because they claim less, and cleanup re-terminalizes an already-published
+        // run whose `pr_url` is set, so it still passes.
+        if (status === "completed" && !state.pr_url) {
+          throw new CliError("factory terminal completed requires a recorded pr_url; use blocked or partial");
+        }
+        return { ...state, updated_at: at, status, terminal_result: { status, reason: flags.reason } };
+      },
     });
     return emit(flags, { run_id: runId, status: next.status, reason: next.terminal_result.reason });
   },
