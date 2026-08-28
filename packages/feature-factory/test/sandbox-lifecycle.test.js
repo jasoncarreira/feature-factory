@@ -435,6 +435,9 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       ["identity-flag-only", ["--publishing-identity", "flag-account"], { FACTORY_PUBLISHING_IDENTITY: "" }, "flag-account"],
       ["identity-env-only", [], { FACTORY_PUBLISHING_IDENTITY: "env-account" }, "env-account"],
       ["identity-flag-wins", ["--publishing-identity", "flag-account"], { FACTORY_PUBLISHING_IDENTITY: "env-account" }, "flag-account"],
+      // An unbound shell variable expands to an empty argument. That must yield to the environment, not mask
+      // it: `??` fell through only on nullish, so an empty flag refused a run that had a valid value.
+      ["identity-empty-flag-yields", ["--publishing-identity", ""], { FACTORY_PUBLISHING_IDENTITY: "env-account" }, "env-account"],
     ]) {
       const identitySource = operator(root, label);
       mkdirSync(join(identitySource, ".factory-sandboxes"));

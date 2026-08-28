@@ -268,7 +268,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       /\{ writer = writeProtectedJsonAtomic, observeTarget = observeInitTarget \} = \{\},[\s\S]*?if \(finalGuard\) await finalGuard\(\);[\s\S]*?await writer\(runDir, "run\.json", candidate, \{ createOnly: true \}\)/u,
       "the private dispatcher must invoke the create-only protected writer");
     assert.ok(cliSource.includes("[--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET]"));
-    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--publishing-identity "$PUBLISHING_IDENTITY"] [--mode "$MODE"] --repo "$O" --json'));
+    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json'));
+    // The workflow must not construct `--publishing-identity`. It has no value to supply, so the flag would
+    // be built from an unbound shell variable, expand to an empty argument, and -- before the resolution
+    // fix below it -- mask a valid inherited value and refuse the run. Caught in review of 0.8.0.
+    assert.ok(!markdown.includes("--publishing-identity \"$PUBLISHING_IDENTITY\""),
+      "the workflow must not pass an identity flag it has no source for");
+    assert.ok(markdown.includes("Never pass `--publishing-identity` from this workflow."),
+      "and it must say so, or the next edit re-adds it");
     assert.ok(readme.includes("factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]"));
     assert.ok(markdown.includes('gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"'));
     assert.ok(markdown.includes('gh pr create --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"'));
@@ -947,7 +954,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // and `state/` -- the parser lives in `observe/`, so the claim was scoped too narrowly to be true, and the
     // 0.7.5 changelog says it. The allowed set is closed, so a config still carrying the key is malformed
     // rather than ignored, which is what makes the removal visible to whoever edits the file.
-    assert.equal(total, 4579, "moving the publishing identity into the run lands at 4579 production lines");
+    // 4579 -> 4584 in review: resolution was `flags.publishingIdentity ?? process.env.FACTORY_PUBLISHING_IDENTITY`,
+    // and `??` falls through only on nullish. The workflow line this change added constructed
+    // `--publishing-identity "$PUBLISHING_IDENTITY"` from a variable nothing binds, so under the documented
+    // environment-only migration it expanded to an empty argument, satisfied `??`, masked a valid inherited
+    // value, and refused init. Both sources now count only when they carry at least one character, and the
+    // workflow no longer constructs a flag it has no value for. mimir caught it; the runtime test proves an
+    // empty flag yields to the environment, and a contract test proves the workflow never builds the flag.
+    assert.equal(total, 4584, "resolving the identity without letting an empty flag mask the environment lands at 4584");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

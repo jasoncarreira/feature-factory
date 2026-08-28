@@ -1380,8 +1380,13 @@ function preflightInit(positional, flags) {
   // Resolved here instead, in code, so no agent has to comply: the flag wins, then the environment.
   // Absence refuses rather than skipping the guard, because a forgotten value must not silently publish
   // as whatever credential the host happens to carry.
-  const publishingIdentity = flags.publishingIdentity ?? process.env.FACTORY_PUBLISHING_IDENTITY;
-  if (typeof publishingIdentity !== "string" || publishingIdentity.length === 0) {
+  // `??` was wrong here: it falls through only on nullish, so `--publishing-identity ""` -- what an unbound
+  // shell variable expands to -- would mask a perfectly good inherited value and refuse the run. Both
+  // sources are held to the same rule instead: a source counts only if it carries at least one character,
+  // and the flag wins over the environment only when it actually supplies one.
+  const publishingIdentity = [flags.publishingIdentity, process.env.FACTORY_PUBLISHING_IDENTITY]
+    .find((candidate) => typeof candidate === "string" && candidate.length > 0);
+  if (publishingIdentity === undefined) {
     throw refusal("factory init requires a publishing identity; pass --publishing-identity <account> or set FACTORY_PUBLISHING_IDENTITY");
   }
   const runId = positional[0];

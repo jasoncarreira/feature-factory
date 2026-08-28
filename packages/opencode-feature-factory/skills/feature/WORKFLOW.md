@@ -281,6 +281,11 @@ the environment, a file, or anything else.
 Do not tighten the existing non-whitespace validation to the observed-login grammar: `init` requires only
 that the value contain at least one character, and a declared account name that the observed-login grammar
 would reject is still a legitimate declaration to compare against.
+Never pass `--publishing-identity` from this workflow. The driver has no source for the value -- that is
+the point of resolving it in the CLI -- so the flag would be constructed from an unbound shell variable,
+expand to an empty argument, and be indistinguishable from an operator supplying one. `init` reads the
+inherited environment itself. The flag exists for an explicit human or scripted invocation that has a value
+to state.
 Because init refuses without one, every run created at or after 0.8.0 carries a nonempty value; a manifest
 written earlier may report `null`, which is the only case that skips the publishing-identity guards.
 Never derive this value from `gh`, the token, stored authentication, or Git configuration: an expectation
@@ -590,7 +595,7 @@ with the operator repository as `--repo`, command first and repository flag last
 admitted mode flags only when present:
 
 ```sh
-INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--publishing-identity "$PUBLISHING_IDENTITY"] [--mode "$MODE"] --repo "$O" --json)"
+INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json)"
 ```
 
 The init request pre-reserves the deterministic sandbox, performs exactly one
