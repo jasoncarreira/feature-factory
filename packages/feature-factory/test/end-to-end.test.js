@@ -87,7 +87,7 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
   else if (verify !== null) {
     const config = {
       resolve: "true", verify: typeof verify === "function" ? verify(operator) : verify,
-      publish, publishing_identity: "factory-test",
+      publish,
     };
     if (verifyTimeout !== undefined) config.verify_timeout_ms = verifyTimeout;
     if (bootstrap !== undefined) config.bootstrap = typeof bootstrap === "function" ? bootstrap(operator) : bootstrap;
@@ -407,7 +407,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
 
     const unexpected = upToReview("unexpected-config-entry", undefined, { configBytes: `${JSON.stringify({
       resolve: "true", verify: "node -e \"require('fs').writeFileSync('unexpected-verify-ran','x')\"",
-      publish: "true", publishing_identity: "factory-test", unexpected: true,
+      publish: "true", unexpected: true,
     }, null, 2)}\n`, legacy: true });
     try {
       const mergeCommit = mergeIntoFeature(unexpected.repo);
@@ -421,7 +421,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     const invalidTimeouts = [0, -1, 1.5, "900000", null, Number.MAX_SAFE_INTEGER + 1];
     for (const [index, value] of invalidTimeouts.entries()) {
       const configBytes = `${JSON.stringify({
-        resolve: "true", verify: "true", publish: "true", publishing_identity: "factory-test",
+        resolve: "true", verify: "true", publish: "true",
         verify_timeout_ms: value,
       }, null, 2)}\n`;
       const invalid = index === 0
@@ -469,7 +469,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       { name: "valid", patch: { bootstrap: "node -e \"require('fs').writeFileSync('direct-bootstrap-marker','ran')\"" }, named: null },
     ];
     for (const row of bootstrapConfigCases) {
-      const configBytes = `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", publishing_identity: "test", ...row.patch })}\n`;
+      const configBytes = `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", ...row.patch })}\n`;
       const configured = project(`bootstrap-config-${row.name}`, { configBytes, legacy: true });
       try {
         const activated = factory(configured.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "feature", "--now", NOW(2)]);
@@ -706,7 +706,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     try {
       const command = "node -e \"const f=require('fs'),c=require('child_process'),m=f.existsSync('bootstrap-fail')?f.readFileSync('bootstrap-fail','utf8'):'';f.appendFileSync('bootstrap-resume-count','x');if(m==='dirty')f.writeFileSync('tracked-bootstrap.txt','dirty');if(m==='staged'){f.writeFileSync('tracked-bootstrap.txt','staged');c.execFileSync('git',['add','tracked-bootstrap.txt'])}if(m==='unobservable')f.renameSync('.git','.git-gone');if(m==='exit')process.exit(7);if(m==='timeout')setTimeout(()=>{},10000)\"";
       writeFileSync(join(configuredResume.repo, ".factory.json"), `${JSON.stringify({
-        resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
+        resolve: "true", verify: "true", publish: "true",
         bootstrap: command, bootstrap_timeout_ms: 500,
       })}\n`);
       writeFileSync(join(configuredResume.repo, "tracked-bootstrap.txt"), "clean\n");
@@ -783,7 +783,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         "if(m==='heartbeat')c.execFileSync(process.execPath,[process.env.FACTORY_TEST_CLI,'heartbeat','app-1','--session','owner-a','--repo',process.cwd(),'--json'],{stdio:'inherit'});",
         "if(m==='owner'){c.execFileSync(process.execPath,[process.env.FACTORY_TEST_CLI,'lock','app-1','steal','--session','owner-b','--branch','feature','--repo',process.cwd(),'--json'],{stdio:'inherit'});f.writeFileSync('owner-replacement-lock-bytes',f.readFileSync('.factory/app-1/factory.lock'))}",
       ].join("\n"));
-      writeFileSync(join(bound.repo, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", publishing_identity: "test", bootstrap: "node bootstrap-race.js" })}\n`);
+      writeFileSync(join(bound.repo, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", bootstrap: "node bootstrap-race.js" })}\n`);
       git(bound.repo, "add", ".factory.json", "bootstrap-race.js");
       git(bound.repo, "commit", "-q", "-m", "declare race bootstrap");
       assert.equal(factory(bound.repo, ["terminal", RUN, "needs-human", "--reason", "bound", "--now", NOW(3)]).ok, true);

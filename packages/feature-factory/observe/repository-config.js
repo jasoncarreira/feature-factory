@@ -11,7 +11,12 @@ export function parseRepositoryConfig(bytes) {
   } catch {
     throw new RepositoryConfigError("invalid .factory.json");
   }
-  const requiredKeys = ["publish", "publishing_identity", "resolve", "verify"];
+  // 0.8.0 dropped `publishing_identity`: the account a run publishes as belongs to the environment it runs
+  // in, not to a tracked file that can hold one value for a repository published from two of them. It is
+  // resolved by `init` from a flag or the environment and recorded in `run.json`. The allowed set below is
+  // closed, so a file still carrying the key is malformed rather than silently ignored -- which is what
+  // makes the removal visible to whoever has to edit it.
+  const requiredKeys = ["publish", "resolve", "verify"];
   const allowedKeys = [...requiredKeys, "pr_draft", "verify_timeout_ms", "bootstrap", "bootstrap_timeout_ms"];
   if (!config || typeof config !== "object" || Array.isArray(config)
     || Object.keys(config).some((keyName) => !allowedKeys.includes(keyName))) {

@@ -92,7 +92,6 @@ resolved Git top level:
   "resolve": "<non-empty shell command>",
   "verify": "<non-empty shell command>",
   "publish": "<non-empty shell command>",
-  "publishing_identity": "<non-empty account name>",
   "pr_draft": true,
   "verify_timeout_ms": 900000,
   "bootstrap": "<non-empty shell command>",
@@ -100,24 +99,24 @@ resolved Git top level:
 }
 ```
 
-The root has four required properties and four optional properties: `pr_draft`, `verify_timeout_ms`,
+The root has three required properties and four optional properties: `pr_draft`, `verify_timeout_ms`,
 `bootstrap`, and `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and a present `bootstrap` are non-empty command
-strings. `publishing_identity` is a static non-empty account name, not a command, token, credential, or
-command result. A present `pr_draft` must be a JSON boolean and omission means `true`.
+strings. There is no `publishing_identity` key, and a file carrying one is malformed because the
+optional set is closed. A present `pr_draft` must be a JSON boolean and omission means `true`.
 Both timeouts are positive safe integers. `bootstrap_timeout_ms` requires `bootstrap`.
 Each omitted timeout independently defaults to `900000`; neither shares the other's budget. The file is
 operator-owned, committed, and protected as a privileged path: a run cannot create, write, merge,
 archive, package, or repair it.
 
-An inherited `FACTORY_PUBLISHING_IDENTITY` that exists and contains at least one character replaces the
-file value, used exactly as inherited. One repository may be published from more than one environment — a
-maintainer's own checkout and an automated host — while `.factory.json` is tracked and can carry only one
-value, so the expectation belongs with the environment and the file carries the fallback. An absent or
-zero-length override leaves the file value in force; it never means no declaration, and only an absent
-`.factory.json` skips the guards. That is what keeps a forgotten override a park rather than a publish
-under whatever credential happens to exist. Never derive the value from `gh`, the token, stored
-authentication, Git configuration, or any command result — an expectation read from the credential being
-checked would always match, and the guard would stop guarding.
+The publishing identity is not a config key. `factory init` resolves it from `--publishing-identity
+<account>` or the inherited `FACTORY_PUBLISHING_IDENTITY`, refuses when neither supplies at least one
+character, and records the resolved value immutably in `run.json`, where `status --json` reports it as
+`publishing_identity`. The account a run publishes as is a property of the environment it runs in, not of
+the repository, and a tracked file cannot hold two values for one repository published from both a
+maintainer's checkout and an automated host. Absence refuses rather than skipping the guard, so a forgotten
+value stops the run instead of publishing under whatever credential the host happens to carry. Never derive
+it from `gh`, the token, stored authentication, or Git configuration: an expectation read from the
+credential being checked would always match.
 
 Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
 
@@ -203,18 +202,19 @@ Gate 3 always performs its own fresh integrated `test-verifier` observation at t
 the existing command mode. It overwrites the canonical evidence independently and never shares,
 substitutes, or optimizes from post-merge evidence, even when the head has not moved.
 
-`resolve`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
+`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` remains unconsumed and is not invoked.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
-The validated raw `publishing_identity` is retained exactly as parsed, without trimming, normalization,
-case-folding, or reserialization. A missing, non-string, or whitespace-only identity makes a present
-config malformed. `publishing_identity` itself adds no config key or syntax, run status, or factory command. The independent `factory effective-push` command adds no state or flag.
+The recorded `publishing_identity` is read from `status` exactly as reported, without trimming,
+normalization, case-folding, or reserialization. `init` refuses when neither the flag nor the environment
+supplies at least one character, so a created run always carries one; only a manifest written before 0.8.0
+can report `null`. `publishing_identity` is a recorded run field reported by `status`, resolved by `init` from a flag or the environment. The independent `factory effective-push` command adds no state or flag.
 
-With a present valid config, every mode checks that identity at exactly three boundaries: immediately
+With a recorded identity, every mode checks it at exactly three boundaries: immediately
 after verified post-lock ownership, or immediately after an explicit resume is verified running with
 the same fresh owner and before reconciliation or other work; immediately before `git push`, after
 effective push-target equality; and immediately before `gh pr create`, after the push is known
-successful. No operation intervenes across a guard boundary. An absent config skips all three guards and
-preserves existing behavior.
+successful. No operation intervenes across a guard boundary. Only a manifest written before 0.8.0, which can
+report `null`, skips all three guards; an absent config does not affect them.
 
 Before each guard, inherited `GH_TOKEN` must exist and contain at least one character. Missing or empty
 means identity is unobservable without invoking `gh`, the network, stored authentication, credential

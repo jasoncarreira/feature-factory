@@ -15,6 +15,10 @@ export const RUN_KEYS = Object.freeze([
   "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "pr_draft", "created_at", "updated_at",
   "status", "mode", "max_parallel_slices", "max_retries",
   "gates", "steps", "slices", "validator", "terminal_result", "pr_url",
+  // Recorded at init from the flag or the environment, never from a checked-in file: the account
+  // a run is expected to publish as is a property of where it runs, not of the repository. Absent
+  // only in manifests written before 0.8.0, which still read.
+  "publishing_identity",
   // Digest of the plan bytes the brief gate approved, so the seed ratifies that plan and not a
   // later edit of the same filename. See the check in `slices-seed`.
   "plan_digest",
@@ -109,7 +113,7 @@ export function validateRun(run) {
   for (const key of ["branch", "worktree"]) required(errors, run, key, "run");
   for (const key of ["created_at", "updated_at"]) pattern(errors, run, key, ISO, "run");
   for (const key of ["max_parallel_slices", "max_retries"]) positiveInt(errors, run, key, "run");
-  for (const key of ["issue_key", "pr_base", "pr_url", "plan_digest"]) optionalString(errors, run, key, "run");
+  for (const key of ["issue_key", "pr_base", "pr_url", "plan_digest", "publishing_identity"]) optionalString(errors, run, key, "run");
   if (Object.hasOwn(run, "pr_draft") && typeof run.pr_draft !== "boolean") {
     errors.push({ path: "run.pr_draft", message: "must be a boolean" });
   }

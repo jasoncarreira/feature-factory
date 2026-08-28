@@ -561,7 +561,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
 
     const resumeOrderSeven = seam("resume-order-seven", "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.");
     const resumeOrderEight = seam("resume-order-eight-reconciliation", "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.");
-    const resumeBoundary = seam("resume-identity-boundary", "When a validated present config declares `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may\nintervene between the verified running/same-owner result and that guard, or between a successful guard\nand reconciliation.");
+    const resumeBoundary = seam("resume-identity-boundary", "When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may");
     const resumePolicy = seam("resume-verified-running-guard", "For a parked resume, run it instead\nimmediately after explicit resume has been verified `running` with unchanged historical result, real\nnext action, and the same fresh owner. No operation may intervene on either side of this guard.");
     assert.ok(resumeOrderSeven < resumeOrderEight && resumeOrderEight < resumeBoundary && resumeBoundary < resumePolicy,
       "identity seam resume ordering must bind verified order 7 to the guard before order-8 reconciliation");
@@ -625,12 +625,13 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     assert.ok(policy.includes("publishing identity mismatch: declared <declared-ascii-json>, observed <observed-ascii-json>; authenticate as <declared-ascii-json> and retry."));
     assert.ok(policy.includes("publishing identity unobservable: declared <declared-ascii-json>; launch with inherited GH_TOKEN for <declared-ascii-json> as documented in OPERATING.md and retry."));
     assert.match(policy, /Never expose the token, raw stdout or stderr, diagnostics, status, command text, target, helper output,\s+or environment/u);
-    // The environment override, and the two properties that keep it a guard rather than an off switch: a
-    // zero-length value falls back to the file instead of disabling the check, and the expectation is never
-    // read from the credential being checked, which would always match. Fragments chosen to sit on one line.
-    assert.ok(source.includes("An absent or zero-length override leaves the file value in force."));
-    assert.match(source, /An inherited `FACTORY_PUBLISHING_IDENTITY` that exists and contains at least one character replaces the\s+file value/u);
-    assert.match(source, /Never derive this value from `gh`, the token, stored authentication, Git configuration, or any command\s+result/u);
+    // 0.8.0: the identity is resolved by the CLI and recorded in the run, not read from a checked-in file
+    // and not resolved by the driver -- 0.7.5 asked the driver to prefer an environment value and it never
+    // looked. Three properties pinned: where it comes from, that absence refuses rather than skipping the
+    // guard, and that it is never derived from the credential under test. Fragments sit on one line.
+    assert.ok(source.includes("The publishing identity is not read from this file and not resolved by the driver."));
+    assert.match(source, /`FACTORY_PUBLISHING_IDENTITY` -- and refuses when neither supplies at least one character, creating no\s+sandbox and no run/u);
+    assert.ok(source.includes("read from the credential being checked would always match, and the guard would stop guarding."));
     assert.match(policy, /quiesce every builder, tool, background task, and heartbeat call[\s\S]*Bind `PRE_QUOTING_REASON` to the complete already-rendered ASCII reason/u);
     assert.match(policy, /surrounding the complete reason with single quotes and replacing every literal\s+`'` inside it with the exact shell sequence `'\\''`[\s\S]*encoded token as the sole `--reason`\s+argument in the host shell command string/u);
     assert.match(policy, /Do not put the raw or rendered reason inside double quotes, interpolate it as unquoted shell syntax,\s+`eval` it, use command substitution, a temporary file, or environment indirection/u);
@@ -656,7 +657,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     ["fresh-first-probe", "After that preflight succeeds, submit exactly this command as one ordinary host shell step with cwd\nexactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin:\n\n```sh\ngh api --method GET /user --jq .login\n```"],
     ["resume-order-seven", "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner."],
     ["resume-order-eight-reconciliation", "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification."],
-    ["resume-identity-boundary", "When a validated present config declares `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may\nintervene between the verified running/same-owner result and that guard, or between a successful guard\nand reconciliation."],
+    ["resume-identity-boundary", "When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may"],
     ["resume-verified-running-guard", "For a parked resume, run it instead\nimmediately after explicit resume has been verified `running` with unchanged historical result, real\nnext action, and the same fresh owner. No operation may intervene on either side of this guard."],
   ]) assert.throws(() => checkIdentityPolicy(skill.replace(fragment, "")), new RegExp(`identity seam ${id}`, "u"),
     `removing ${id} must break the load-bearing identity seam`);
@@ -674,7 +675,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   const freshLockFragment = "immediately obtain qualified status and require a fresh lock owned by this driver's exact\n`SESSION_ID`.";
   assert.throws(() => checkIdentityPolicy(moveUnique(skill, freshNoWorkFragment, freshLockFragment, "before")),
     /identity seam fresh ordering/u, "moving the fresh no-work boundary before verified ownership must fail");
-  const resumeBoundaryFragment = "When a validated present config declares `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may\nintervene between the verified running/same-owner result and that guard, or between a successful guard\nand reconciliation.";
+  const resumeBoundaryFragment = "When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may";
   const resumeOrderSevenFragment = "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.";
   assert.throws(() => checkIdentityPolicy(moveUnique(skill, resumeBoundaryFragment, resumeOrderSevenFragment, "before")),
     /identity seam resume ordering/u, "moving the resume guard boundary outside order 7 to order 8 must fail");
