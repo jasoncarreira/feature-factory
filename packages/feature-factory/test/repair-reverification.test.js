@@ -35,8 +35,7 @@ function seedRepair({ verify = "exit 0", timeoutMs = 60_000, run = {} } = {}) {
     sh(repository, ["config", key, value]);
   }
   writeFileSync(join(repository, ".factory.json"), canonical({
-    resolve: "true", verify: verify.replace(/\{runDir\}/gu, runDir), publish: "true",
-    publishing_identity: "tester", verify_timeout_ms: timeoutMs,
+    resolve: "true", verify: verify.replace(/\{runDir\}/gu, runDir), publish: "true", verify_timeout_ms: timeoutMs,
   }));
   mkdirSync(join(repository, "test"), { recursive: true });
   writeFileSync(join(repository, TEST_PATH), "// seeded\n");

@@ -43,7 +43,6 @@ resolved Git top level of the invocation checkout:
   "resolve": "<non-empty shell command>",
   "verify": "<non-empty shell command>",
   "publish": "<non-empty shell command>",
-  "publishing_identity": "<non-empty account name>",
   "pr_draft": true,
   "verify_timeout_ms": 900000,
   "bootstrap": "<non-empty shell command>",
@@ -51,30 +50,30 @@ resolved Git top level of the invocation checkout:
 }
 ```
 
-The root object has four required properties and four optional properties: `pr_draft`,
+The root object has three required properties and four optional properties: `pr_draft`,
 `verify_timeout_ms`, `bootstrap`, and `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and a present `bootstrap` are
-non-empty command strings; `publishing_identity` is a static non-empty account name, not a command, token,
-credential, or command result. A present `pr_draft` must be a JSON boolean and omission means `true`.
+non-empty command strings. There is no `publishing_identity` key, and a file carrying one is malformed
+because the optional set is closed. A present `pr_draft` must be a JSON boolean and omission means `true`.
 Both timeouts must be positive safe integers. `bootstrap_timeout_ms`
 requires `bootstrap`. Each omitted timeout independently defaults to `900000` milliseconds and neither
 shares the other's budget. A command may name credentials supplied through inherited environment, but
 credential values must not appear in the file.
 
-An inherited `FACTORY_PUBLISHING_IDENTITY` that exists and contains at least one character replaces the
-file value, used exactly as inherited. One repository may be published from more than one environment — a
-maintainer's own checkout and an automated host — while `.factory.json` is tracked and can carry only one
-value, so the expectation belongs with the environment and the file carries the fallback. An absent or
-zero-length override leaves the file value in force; it never means no declaration, and only an absent
-`.factory.json` skips the guards. That is what keeps a forgotten override a park rather than a publish
-under whatever credential happens to exist. Never derive the value from `gh`, the token, stored
-authentication, Git configuration, or any command result — an expectation read from the credential being
-checked would always match, and the guard would stop guarding.
+The publishing identity is not a config key. `factory init` resolves it from `--publishing-identity
+<account>` or the inherited `FACTORY_PUBLISHING_IDENTITY`, refuses when neither supplies at least one
+character, and records the resolved value immutably in `run.json`, where `status --json` reports it as
+`publishing_identity`. The account a run publishes as is a property of the environment it runs in, not of
+the repository, and a tracked file cannot hold two values for one repository published from both a
+maintainer's checkout and an automated host. Absence refuses rather than skipping the guard, so a forgotten
+value stops the run instead of publishing under whatever credential the host happens to carry. Never derive
+it from `gh`, the token, stored authentication, or Git configuration: an expectation read from the
+credential being checked would always match.
 
 Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
 
 The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
 
-`resolve`, `bootstrap`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
+`resolve`, `bootstrap`, and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` remains unconsumed and is not invoked.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
 After mode admission, `resolve` runs as one ordinary shell step with its
 configured string submitted unchanged, exact cwd `O`, the inherited environment plus `FACTORY_INPUT`,
@@ -127,7 +126,7 @@ The entries have these execution contracts:
 | `bootstrap` | The exact string runs unchanged with `shell: true`, cwd exactly the selected sandbox, inherited environment and stdin, and child stdout and stderr both routed to CLI stderr. Each attempt gets the independent configured timeout or `900000` millisecond default. | Clean numeric zero succeeds. Tracked-state observation failure outranks named dirty worktree/index paths, which outrank unavailable or nonzero exit. | CLI-owned once during fresh init after clone, containment, and PR-base observation but before manifest publication, and again on every explicit resume while parked. No retry. |
 | `verify` | The unchanged string runs as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio; no structured stdin or factory payload. Each attempt gets the full configured timeout. Stdout and stderr are visible, informational, and unparsed rather than captured or persisted. | Numeric child exit status is authoritative. Zero succeeds; non-zero means repository verification failed; no numeric status is unavailable. | Invoked after each newly recorded merge with at most two executions per merge or replay invocation. Direct committed test-only repair observation remains one execution. |
 | `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by `factory effective-push`. |
-| `publishing_identity` | No runtime input; retain the raw validated string exactly as parsed, without trimming, normalization, case-folding, or reserialization. A nonempty inherited `FACTORY_PUBLISHING_IDENTITY` replaces it. | A missing, non-string, or whitespace-only identity makes the config malformed; the observed login is compared exactly and case-sensitively. | Active in every mode at exactly three guards; absent config preserves existing behavior. |
+| `publishing_identity` | No runtime input; read the value `status` reports for the run | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three guards; only a manifest written before 0.8.0 can report `null` and skip them. |
 
 Bootstrap cleanliness checks tracked worktree and index paths only, so untracked dependency installation is allowed. Clean zero publishes paired top-level `bootstrap_command` and `bootstrap_exit` evidence; the command is exact and the result is a non-negative integer or `null`. Ordinary transitions preserve the pair, while status response shape stays unchanged.
 
@@ -141,7 +140,7 @@ Publishing identity is checked immediately after verified post-lock ownership, o
 explicit resume is verified running with the same fresh owner and before reconciliation or other work;
 immediately before `git push`, after effective push-target equality; and immediately before
 `gh pr create`, after the push is known successful. No operation may intervene across any guard
-boundary. There is no separate guard before `factory pr`. `publishing_identity` itself adds no config key or syntax, run status, or factory command. The independent `factory effective-push` command adds no state or flag. Existing push, `gh pr create`, `factory pr`, Gate 3, merge, and approval semantics remain unchanged.
+boundary. There is no separate guard before `factory pr`. `publishing_identity` is a recorded run field reported by `status`, resolved by `init` from a flag or the environment. The independent `factory effective-push` command adds no state or flag. Existing push, `gh pr create`, `factory pr`, Gate 3, merge, and approval semantics remain unchanged.
 
 Before each guard, inherited `GH_TOKEN` must exist and contain at least one character. Missing or empty
 parks identity as unobservable without invoking `gh`, the network, stored authentication, credential
@@ -254,30 +253,31 @@ does not create, write, merge, archive, or package it.
 
 ### Publishing one repository as two identities
 
-A repository published both by hand and by an automated host needs two different publishing accounts while
-`.factory.json` is tracked and can hold only one. Declare the fallback in the file and override it per
-environment:
-
-```jsonc
-// .factory.json, committed — the identity for ad-hoc local runs
-{ "publishing_identity": "jasoncarreira" }
-```
+The account a run publishes as comes from the environment, never from a checked-in file, so one repository
+can be published by hand as one account and by an automated host as another. Supply it per environment:
 
 ```sh
+# a maintainer's own checkout
+export FACTORY_PUBLISHING_IDENTITY=jasoncarreira
+
 # the automated host, set beside GH_TOKEN so the two cannot drift
 FACTORY_PUBLISHING_IDENTITY=mimir-carreira
 ```
 
-Put the fallback where configuration is hardest to attach. An automated host has an image build and a
-dispatched environment to carry a variable; a hand-run checkout has neither, so the committed value should
-be the one that makes local runs work unconfigured.
+Or pass `--publishing-identity <account>` to `factory init` for a scripted invocation. The flag wins over
+the environment; `init` records the resolved value in `run.json` and `status --json` reports it, so a
+supervising controller can verify what a run will publish as before trusting it, instead of discovering a
+mismatch at the first guard.
 
-Set the override in the same place as `GH_TOKEN`. An identity pinned to a token for a different account
-parks before publication with both values named, which is the outcome you want; the failure to avoid is a
-silent publish under whatever credential the environment happened to carry, and a declared fallback is what
-makes that impossible. Do not remove `publishing_identity` from the file to "let the environment decide" —
-it is a required property, so the file becomes invalid and every run refuses; and were it optional, an
-absent declaration would disable the guard entirely and a forgotten variable would publish as anyone.
+**Absence refuses.** `init` creates no sandbox and no run when neither source supplies at least one
+character. That is deliberate: a forgotten value must stop the run rather than let it publish under
+whatever credential the host happens to carry. Put it somewhere durable — a shell profile for a hand-run
+checkout, the image or the dispatched environment for a host — because it is now required rather than
+advisory.
+
+**There is no `.factory.json` fallback**, and adding a `publishing_identity` key back to that file makes it
+malformed: the optional property set is closed. A tracked file cannot hold two values for one repository
+published from two environments, which is exactly why the value moved out of it.
 
 ### Launch command
 

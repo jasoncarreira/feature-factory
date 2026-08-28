@@ -20,7 +20,7 @@
     "test": "npm run test:packages && npm run test:pack",
     "test:ci": "npm ci && npm test",
     "test:packages": "npm test --workspaces",
-    "test:pack": "npm run build --workspace opencode-feature-factory && node --import ./tools/resolve-guard.mjs --test test/*.test.js",
+    "test:pack": "npm run build --workspace opencode-feature-factory && FACTORY_PUBLISHING_IDENTITY=factory-test node --import ./tools/resolve-guard.mjs --test test/*.test.js",
     "test:factory": "npm test --workspace feature-factory",
     "test:opencode": "npm test --workspace opencode-feature-factory",
     "test:prime": "npm test --workspace prime-agent-feature-factory",

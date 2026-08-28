@@ -1,6 +1,6 @@
 {
   "name": "feature-factory",
-  "version": "0.7.5",
+  "version": "0.8.0",
   "description": "Durable, observed control plane for /feature runs. Host-agnostic: no opencode dependency.",
   "type": "module",
   "license": "MIT",
@@ -30,6 +30,6 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --import ../../tools/resolve-guard.mjs --test test/*.test.js"
+    "test": "FACTORY_PUBLISHING_IDENTITY=factory-test node --import ../../tools/resolve-guard.mjs --test test/*.test.js"
   }
 }

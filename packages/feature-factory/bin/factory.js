@@ -27,7 +27,7 @@ import {
 } from "../state/session-lock.js";
 
 export const COMMANDS = Object.freeze({
-  init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--issue-key", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
+  init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--issue-key", "--publishing-identity", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
   status: Object.freeze(["--repo", "--json"]),
   "amend-paths": Object.freeze(["--repo", "--add", "--reason", "--session", "--now", "--json"]),
   resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
@@ -902,6 +902,7 @@ const HANDLERS = {
       mode: run.mode,
       branch: run.branch,
       pr_base: run.pr_base ?? null,
+      publishing_identity: run.publishing_identity ?? null,
       pr_draft: run.pr_draft ?? true,
       lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,
@@ -1372,6 +1373,17 @@ function preflightInit(positional, flags) {
   // the flag, so a run that had read its real issue recorded none. Disagreement refuses, because the key is
   // appended as `Closes #<key>` and preferring one silently would close a stranger's issue.
   if (flags.issue !== undefined && flags.issueKey !== undefined && flags.issue !== flags.issueKey) throw refusal("--issue and --issue-key disagree; pass one");
+  // Enforcement: the publishing identity is the expectation every publication guard compares the observed
+  // `gh api /user` login against, so a run without one publishes unchecked. It used to be a required key in
+  // the checked-in `.factory.json`, which cannot hold two values for one repository published from two
+  // environments -- 0.7.5 tried an environment override read by the driver, and the driver never looked.
+  // Resolved here instead, in code, so no agent has to comply: the flag wins, then the environment.
+  // Absence refuses rather than skipping the guard, because a forgotten value must not silently publish
+  // as whatever credential the host happens to carry.
+  const publishingIdentity = flags.publishingIdentity ?? process.env.FACTORY_PUBLISHING_IDENTITY;
+  if (typeof publishingIdentity !== "string" || publishingIdentity.length === 0) {
+    throw refusal("factory init requires a publishing identity; pass --publishing-identity <account> or set FACTORY_PUBLISHING_IDENTITY");
+  }
   const runId = positional[0];
   try {
     const at = stamp(flags);
@@ -1379,6 +1391,7 @@ function preflightInit(positional, flags) {
       version: SCHEMA_VERSION,
       run_id: runId,
       issue_key: flags.issue ?? flags.issueKey ?? null,
+        publishing_identity: publishingIdentity,
       branch: flags.branch ?? `feature/${runId}`,
       worktree: flags.worktree ?? ".",
       pr_base: flags.prBase ?? null,

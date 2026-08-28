@@ -36,6 +36,9 @@ const RUN_JSON_KEYS = [
   // the inherited fifteen
   "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "pr_draft", "created_at", "updated_at",
   "status", "max_parallel_slices", "max_retries", "gates", "steps", "slices", "validator", "pr_url",
+  // 0.8.0: the account a run publishes as, resolved at init from the flag or the environment and
+  // never from a checked-in file. Read by every publication guard as the compared expectation.
+  "publishing_identity",
   // the four justified additions. base_commit was dropped: it was written and never
   // read, which is the standard a durable field has to meet. plan_digest meets it: the seed reads
   // it and refuses on mismatch, which is the only thing binding the plan a human approved to the
@@ -103,7 +106,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.deepEqual(Object.keys(COMMANDS).sort(), [...CLI_COMMANDS].sort());
     assert.deepEqual(Object.keys(COMMANDS).slice(0, 4), ["init", "status", "amend-paths", "resume"]);
     assert.deepEqual(COMMANDS.init, [
-      "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--issue-key", "--mode",
+      "--repo", "--branch", "--worktree", "--pr-base", "--issue", "--issue-key", "--publishing-identity", "--mode",
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
@@ -265,7 +268,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       /\{ writer = writeProtectedJsonAtomic, observeTarget = observeInitTarget \} = \{\},[\s\S]*?if \(finalGuard\) await finalGuard\(\);[\s\S]*?await writer\(runDir, "run\.json", candidate, \{ createOnly: true \}\)/u,
       "the private dispatcher must invoke the create-only protected writer");
     assert.ok(cliSource.includes("[--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET]"));
-    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json'));
+    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--publishing-identity "$PUBLISHING_IDENTITY"] [--mode "$MODE"] --repo "$O" --json'));
     assert.ok(readme.includes("factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]"));
     assert.ok(markdown.includes('gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"'));
     assert.ok(markdown.includes('gh pr create --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"'));
@@ -559,7 +562,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 22, "twenty-two: the prior twenty-one plus immutable PR draft policy");
+    assert.equal(RUN_KEYS.length, 23, "twenty-three: the prior twenty-two plus the recorded publishing identity");
   });
 
   it("registers exactly the declared families", () => {
@@ -923,7 +926,28 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // restored it passes.
     // Tripwire raised 4550 -> 4560 by operator authorization given before this work began, for this one finding.
     // 0.7.3 landed exactly on 4550 and recorded that the next line would need a raise; this is that line.
-    assert.equal(total, 4557, "requiring a recorded pr_url for terminal completed lands at 4557 production lines");
+    // 4557 -> 4574: the publishing identity moves out of the checked-in config and into the run.
+    // It was a required key in `.factory.json`, which cannot hold two values for one repository published
+    // from two environments -- a maintainer's own checkout and an automated host. 0.7.5 tried an
+    // environment override expressed as contract text, and the driver never looked: `FACTORY_PUBLISHING_IDENTITY`
+    // reached the child's shell (proven by the resolver short-circuiting on `$MIMIR_WORK_ITEM_JSON` on the
+    // same injection path) and attempt 8's stderr contained no reference to it. A new instruction in a
+    // 143 KB contract is a compliance ask; this is the same fix expressed as code.
+    // Resolution is now `--publishing-identity` then the environment, in `init`, recorded immutably in
+    // `run.json` and reported by `status` -- which also makes it observable, so a controller can verify what
+    // a run will publish as instead of discovering a mismatch at Gate 1. The comparison against
+    // `gh api /user` stays instruction, because putting network calls and credentials in the CLI is a
+    // different and larger change; it is resolution that was unreliable, not the comparison.
+    // Absence refuses. The operator chose fail-closed over a checked-in fallback: a forgotten value must
+    // stop the run rather than silently publish as whatever credential the host happens to carry.
+    // Tripwire raised 4550 -> 4600 by operator authorization given before this work began, sized for this
+    // change plus review fixes so a second raise is not needed mid-flight.
+    // 4574 -> 4579: `observe/repository-config.js` drops the key from its required set. Worth recording that
+    // I first reported this mechanism as "zero references in production code" from a grep over `bin/`, `core/`
+    // and `state/` -- the parser lives in `observe/`, so the claim was scoped too narrowly to be true, and the
+    // 0.7.5 changelog says it. The allowed set is closed, so a config still carrying the key is malformed
+    // rather than ignored, which is what makes the removal visible to whoever edits the file.
+    assert.equal(total, 4579, "moving the publishing identity into the run lands at 4579 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -954,7 +978,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
-    assert.ok(total <= 4560, `production source is ${total} lines; the tripwire is 4560`);
+    assert.ok(total <= 4600, `production source is ${total} lines; the tripwire is 4600`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

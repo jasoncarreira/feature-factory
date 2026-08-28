@@ -113,7 +113,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const commands = documentedFactoryCommands(skill);
   assert.ok(commands.length >= 35, `expected every documented factory command shape, found ${commands.length}`);
   const nonSelectedRepositoryShapes = new Set([
-    'factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json)"',
+    'factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--publishing-identity "$PUBLISHING_IDENTITY"] [--mode "$MODE"] --repo "$O" --json)"',
     'factory status "$R" --json --repo "<candidate-repository>"',
   ]);
   for (const command of commands.filter((entry) => entry.includes('"$R"'))) {

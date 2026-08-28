@@ -243,7 +243,6 @@ The optional repository-owned file is `$O/.factory.json`:
   "resolve": "<non-empty shell command>",
   "verify": "<non-empty shell command>",
   "publish": "<non-empty shell command>",
-  "publishing_identity": "<non-empty account name>",
   "pr_draft": true,
   "verify_timeout_ms": 900000,
   "bootstrap": "<non-empty shell command>",
@@ -251,11 +250,13 @@ The optional repository-owned file is `$O/.factory.json`:
 }
 ```
 
-The root must be a JSON object with the four required own properties `resolve`, `verify`, `publish`, and
-`publishing_identity`, plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
+The root must be a JSON object with the three required own properties `resolve`, `verify`, and `publish`,
+plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
 `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
-command must be non-empty. `publishing_identity` is a static non-empty publishing account name in the
-file itself, not a command, token, credential, or command result. `pr_draft` must be a JSON boolean
+command must be non-empty. There is no `publishing_identity` key: the account a run publishes as is a
+property of the environment it runs in, not of the repository, and a tracked file cannot hold two values
+for one repository published from both a maintainer's checkout and an automated host. A file carrying that
+key is malformed, because the optional set above is closed. `pr_draft` must be a JSON boolean
 when present and defaults to `true` when absent. Both timeout values must be positive
 safe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`.
 `verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;
@@ -270,26 +271,26 @@ The two bootstrap keys are known keys. Invalid `bootstrap` outranks missing requ
 timeout defect, including an invalid or otherwise orphaned bootstrap timeout. An orphaned
 `bootstrap_timeout_ms` outranks its own invalid shape, and a valid bootstrap with an invalid timeout
 names only `bootstrap_timeout_ms`. Validate this order before executing `resolve`.
-Retain the validated `publishing_identity` string exactly as parsed, without trimming,
-normalizing, case-folding, or reserializing it, as `DECLARED_PUBLISHING_IDENTITY` for this driver
-invocation. Do not tighten the existing non-whitespace validation to the observed-login grammar.
-An inherited `FACTORY_PUBLISHING_IDENTITY` that exists and contains at least one character replaces the
-file value as `DECLARED_PUBLISHING_IDENTITY`, used exactly as inherited under the same no-trimming,
-no-normalizing, no-case-folding rule. One repository may be published from more than one environment -- a
-maintainer's own checkout and an automated host -- while `.factory.json` is tracked and can carry only one
-value, so the expectation belongs with the environment and the file carries the fallback.
-An absent or zero-length override leaves the file value in force.
-It never means no declaration; only an absent `.factory.json` skips the publishing-identity guards, which
-is what keeps a forgotten override a park rather than a publish under whatever credential happens to exist.
-Never derive this value from `gh`, the token, stored authentication, Git configuration, or any command
-result: an expectation read from the credential being checked would always match, and the guard would
-silently stop guarding.
+The publishing identity is not read from this file and not resolved by the driver. `factory init` resolves
+it in code -- `--publishing-identity <account>` when passed, otherwise the inherited
+`FACTORY_PUBLISHING_IDENTITY` -- and refuses when neither supplies at least one character, creating no
+sandbox and no run. It records the resolved value immutably in `run.json`, and `status --json` reports it
+as `publishing_identity`. Bind `DECLARED_PUBLISHING_IDENTITY` from that reported value exactly as
+reported, without trimming, normalizing, case-folding, or reserializing it, and never re-resolve it from
+the environment, a file, or anything else.
+Do not tighten the existing non-whitespace validation to the observed-login grammar: `init` requires only
+that the value contain at least one character, and a declared account name that the observed-login grammar
+would reject is still a legitimate declaration to compare against.
+Because init refuses without one, every run created at or after 0.8.0 carries a nonempty value; a manifest
+written earlier may report `null`, which is the only case that skips the publishing-identity guards.
+Never derive this value from `gh`, the token, stored authentication, or Git configuration: an expectation
+read from the credential being checked would always match, and the guard would stop guarding.
 Credential values must not appear in the file; command strings may refer only to credentials supplied
 through inherited environment-variable names.
 
-An absent `$O/.factory.json` means no resolver is declared and no publishing identity is declared, per
-the absence rule below. Do not bind `DECLARED_PUBLISHING_IDENTITY` and skip every publishing-identity
-guard, preserving the existing behavior. If the path is present but malformed, do not execute any entry
+An absent `$O/.factory.json` means no resolver is declared, per the absence rule below. It says nothing
+about the publishing identity, which comes from `init` rather than from this file, so a repository with no
+config file still carries a recorded identity and still runs every publishing-identity guard. If the path is present but malformed, do not execute any entry
 and refuse exactly:
 
 > invalid factory config: .factory.json; no session or run created.
@@ -405,7 +406,8 @@ init and explicit resume. Neither applies to `resolve`, slice observation, or Ga
 change platform placement, background-tool, title-association, host-session, or publication behavior.
 `story-reader` remains lookup-free and capability-free beyond its existing generic read tools.
 
-`resolve`, `verify`, and `publishing_identity` are consumed now. Configured `publish` remains unconsumed and is not invoked.
+`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the
+guards below. Configured `publish` remains unconsumed and is not invoked.
 
 Configured `bootstrap` is consumed only by CLI-owned fresh init and explicit resume; the workflow consumer validates it but never executes it itself.
 
@@ -416,7 +418,7 @@ Effective push-target capture and comparison are active through the package-owne
 | `bootstrap` | Exact configured string as one shell command with `shell: true`, inherited environment and stdin, cwd exactly the selected sandbox, and child stdout and stderr both routed to CLI stderr. Each execution receives its own `bootstrap_timeout_ms`, independently `900000` when omitted. | Numeric exit status or unavailable `null`; output is visible on CLI stderr and never parsed | Clean zero succeeds; dirty or unobservable tracked state outranks unavailable or nonzero exit | Invoked by the CLI once during configured fresh init and again on every explicit configured resume; never invoked by resolver, merge verification or replay, direct repository verification, slice or Gate 3 observation, effective push, or publication. |
 | `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status means unavailable | Invoked after each newly recorded merge through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
 | `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |
-| `publishing_identity` | No runtime input; retain the raw validated config string for this driver invocation | Exact case-sensitive string compared with the observed login | Missing, non-string, or whitespace-only makes the config malformed; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; absent config preserves existing behavior. |
+| `publishing_identity` | No runtime input; read the value `status` reports for the run, recorded at init from `--publishing-identity` or the inherited `FACTORY_PUBLISHING_IDENTITY` | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; only a manifest written before 0.8.0 can report `null` and skip them. |
 
 When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.
 
@@ -509,10 +511,10 @@ path not disclosed and verified for this recovery. Without a path omission, skip
 In either case order 7 remains the same explicit resume command; the resume command never amends paths,
 changes `test_plan`, or reseeds the plan.
 
-When a validated present config declares `publishing_identity`, the mandatory guard below is the exact
+When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact
 boundary between completion of resume order 7 and the first operation in resume order 8. Nothing may
 intervene between the verified running/same-owner result and that guard, or between a successful guard
-and reconciliation. An absent config preserves the nine orders without adding an operation.
+and reconciliation. A pre-0.8.0 manifest reporting `null` preserves the nine orders without adding an operation.
 
 For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment and before effective-push proof. Order 3 never absorbs containment, binding, or the post-selection exact-ref guard. During order 4 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 5 and claim or justified steal. Order 6 requires `lock_session === SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --session "$SESSION_ID" --repo "$RUN_REPO"` for order 7 — the same session order 6 just verified as the fresh owner — then require that owner unchanged. Resume refuses without it, and refuses a lock that is absent, stale, or held by anyone else. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 never uses the pre-resume observation or the stop reason.
 
@@ -588,7 +590,7 @@ with the operator repository as `--repo`, command first and repository flag last
 admitted mode flags only when present:
 
 ```sh
-INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json)"
+INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--publishing-identity "$PUBLISHING_IDENTITY"] [--mode "$MODE"] --repo "$O" --json)"
 ```
 
 The init request pre-reserves the deterministic sandbox, performs exactly one

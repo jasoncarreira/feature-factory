@@ -185,7 +185,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       const command = `mkdir -p .factory/${runId} && ${plant.replaceAll("$RUN", runId)}`;
       const source = operator(root, `stage-${name}-src`, (repository) => {
         writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
-          resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
+          resolve: "true", verify: "true", publish: "true",
           pr_draft: false, bootstrap: command, bootstrap_timeout_ms: 120000,
         }, null, 2)}\n`);
       });
@@ -356,12 +356,16 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       { args: ["init", "scalar", "--max-retries", "1.5"], positional: ["scalar"], flags: { maxRetries: "1.5" }, match: /positive integer/u },
       { args: ["init", "scalar", "--max-retries", "9007199254740992"], positional: ["scalar"], flags: { maxRetries: "9007199254740992" }, match: /positive integer/u },
       { args: ["init", "scalar", "--now", ""], positional: ["scalar"], flags: { now: "" }, match: /ISO timestamp/u },
+  // A run with no declared publishing identity would publish unchecked, so init refuses before deriving a
+  // sandbox path. Expressed as an empty environment value because that is how a launcher fails to set it.
+  { args: ["init", "scalar"], positional: ["scalar"], flags: {}, env: { FACTORY_PUBLISHING_IDENTITY: "" },
+    match: /requires a publishing identity; pass --publishing-identity <account> or set FACTORY_PUBLISHING_IDENTITY/u },
       { args: ["init", "scalar", "--now", "never"], positional: ["scalar"], flags: { now: "never" }, match: /ISO timestamp/u },
     ];
     for (const [index, row] of scalarCases.entries()) {
       const scalarSource = operator(root, `scalar-${index}`);
       const scalarRecord = recorder(join(root, `scalar-recorder-${index}`));
-      const observed = invoke(scalarSource, row.args, scalarRecord);
+      const observed = invoke(scalarSource, row.args, scalarRecord, row.env ?? {});
       assert.equal(observed.ok, false, row.args.join(" "));
       assert.match(observed.stderr, row.match);
       assert.match(observed.stderr, /no sandbox path was derived or created/u);
@@ -378,10 +382,19 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       const originalCwd = process.cwd;
       let cwdCalls = 0;
       process.cwd = () => { cwdCalls += 1; throw new Error("cwd accessed"); };
+      // A row that declares an environment must have it in force for the in-process arm too. Init reads
+      // `FACTORY_PUBLISHING_IDENTITY` itself, so leaving the suite-wide value in place would let a row that
+      // exists to prove absence sail past the check and trip an effect seam instead.
+      const restoreEnv = Object.entries(row.env ?? {}).map(([key, value]) => {
+        const previous = process.env[key];
+        if (value === "") delete process.env[key]; else process.env[key] = value;
+        return () => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; };
+      });
       try {
         await assert.rejects(() => dispatchInit(row.positional, row.flags, operations), row.match);
       } finally {
         process.cwd = originalCwd;
+        for (const restore of restoreEnv) restore();
       }
       assert.equal(cwdCalls, 0);
       assert.deepEqual(seamCalls, []);
@@ -415,6 +428,24 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.deepEqual({ branch: completeRun.branch, prBase: completeRun.pr_base, issue: completeRun.issue_key, mode: completeRun.mode, parallel: completeRun.max_parallel_slices }, {
       branch: "custom/branch", prBase: "main", issue: "ISSUE-1", mode: "autonomous", parallel: 1,
     });
+
+    // Resolution order, recorded rather than re-derived: the flag wins over the environment, and either
+    // alone is enough. `status` reports the recorded value, which is what makes it verifiable from outside.
+    for (const [label, args, extra, expected] of [
+      ["identity-flag-only", ["--publishing-identity", "flag-account"], { FACTORY_PUBLISHING_IDENTITY: "" }, "flag-account"],
+      ["identity-env-only", [], { FACTORY_PUBLISHING_IDENTITY: "env-account" }, "env-account"],
+      ["identity-flag-wins", ["--publishing-identity", "flag-account"], { FACTORY_PUBLISHING_IDENTITY: "env-account" }, "flag-account"],
+    ]) {
+      const identitySource = operator(root, label);
+      mkdirSync(join(identitySource, ".factory-sandboxes"));
+      const identityRecord = recorder(join(root, `${label}-recorder`));
+      const started = invoke(identitySource, ["init", label, ...args, "--now", NOW, "--json"], identityRecord, extra);
+      assert.equal(started.ok, true, started.stderr);
+      const recorded = JSON.parse(readFileSync(join(started.response.run_dir, "run.json"), "utf8"));
+      assert.equal(recorded.publishing_identity, expected, label);
+      const reported = invoke(identitySource, ["status", label, "--repo", started.response.sandbox_path, "--json"], identityRecord, extra);
+      assert.equal(reported.response.publishing_identity, expected, `${label} via status`);
+    }
 
     // The alias alone records the key: mimir 1606 reached `unknown option` here and dropped the flag,
     // so a run that had read its real issue published without the `Closes` linkage the key produces.
@@ -695,7 +726,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       { name: "oid", command: "git -c user.name=Factory -c user.email=factory@example.test commit --allow-empty --quiet -m moved" },
       { name: "reflog", command: "git reflog expire --expire=now --all" },
     ]) {
-      const bootstrapSource = operator(root, `invariant-${row.name}`, (repository) => writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", publishing_identity: "test", bootstrap: row.command })}\n`));
+      const bootstrapSource = operator(root, `invariant-${row.name}`, (repository) => writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "true", publish: "true", bootstrap: row.command })}\n`));
       const observed = invoke(bootstrapSource, ["init", `invariant-${row.name}`, "--pr-base", "main", "--now", NOW], recorder(join(root, `invariant-${row.name}-recorder`)));
       assert.equal(observed.ok, false, row.name);
       assert.match(observed.stderr, /sandbox .* was retained; run\.json is absent/u, row.name);
@@ -711,7 +742,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     const configuredCommand = "node -e \"const f=require('fs');if(f.existsSync('.factory/configured-bootstrap/run.json'))process.exit(9);f.appendFileSync('bootstrap-count','x');f.writeFileSync('bootstrap-cwd',process.cwd());f.writeFileSync('bootstrap-env',process.env.FACTORY_BOOTSTRAP_ENV_MARKER??'');f.writeFileSync('bootstrap-stdin',f.readFileSync(0,'utf8'));f.mkdirSync('node_modules',{recursive:true});console.log('bootstrap-out');console.error('bootstrap-err')\"";
     const configuredSource = operator(root, "configured-bootstrap", (repository) => {
       writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
-        resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
+        resolve: "true", verify: "true", publish: "true",
         pr_draft: false, bootstrap: configuredCommand, bootstrap_timeout_ms: 120000,
       }, null, 2)}\n`);
     });
@@ -768,7 +799,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
       const failedBootstrapSource = operator(root, `bootstrap-${row.name}`, (repository) => {
         writeFileSync(join(repository, "tracked dirty.txt"), "clean\n");
         writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
-          resolve: "true", verify: "true", publish: "true", publishing_identity: "test",
+          resolve: "true", verify: "true", publish: "true",
           bootstrap: row.command, bootstrap_timeout_ms: row.timeout,
         })}\n`);
       });
@@ -786,7 +817,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     }
 
     const truePolicySource = operator(root, "config-pr-draft-true", (repository) => writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
-      resolve: "true", verify: "true", publish: "true", publishing_identity: "test", pr_draft: true,
+      resolve: "true", verify: "true", publish: "true", pr_draft: true,
     })}\n`));
     const truePolicy = invoke(truePolicySource, ["init", "config-pr-draft-true", "--now", NOW, "--json"], recorder(join(root, "config-pr-draft-true-recorder")));
     assert.equal(truePolicy.ok, true, truePolicy.stderr);
@@ -803,7 +834,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     ];
     for (const row of configCases) {
       const configSource = operator(root, `config-${row.name}`, (repository) => writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
-        resolve: "true", verify: "true", publish: "true", publishing_identity: "test", ...row.patch,
+        resolve: "true", verify: "true", publish: "true", ...row.patch,
       })}\n`));
       const configRecord = recorder(join(root, `config-${row.name}-recorder`));
       const observed = invoke(configSource, ["init", `config-${row.name}`, "--now", NOW], configRecord);
@@ -816,7 +847,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     const resolutionSource = operator(root, "resolution", (repository) => {
       writeFileSync(join(repository, "bootstrap.js"), "const f=require('fs'),c=require('child_process');f.writeFileSync('pre-resolution',require.resolve('workspace-only'));f.mkdirSync('node_modules/workspace-only',{recursive:true});f.writeFileSync('node_modules/workspace-only/index.js','module.exports=\\\"sandbox\\\"');f.writeFileSync('post-resolution',c.execFileSync(process.execPath,['-p',\"require.resolve('workspace-only')\"],{encoding:'utf8'}).trim());\n");
       writeFileSync(join(repository, "verify.js"), "const p=require('path');if(!require.resolve('workspace-only').startsWith(process.cwd()+p.sep)||require('workspace-only')!=='sandbox')process.exit(1);\n");
-      writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "node verify.js", publish: "true", publishing_identity: "test", bootstrap: resolutionCommand })}\n`);
+      writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({ resolve: "true", verify: "node verify.js", publish: "true", bootstrap: resolutionCommand })}\n`);
     });
     mkdirSync(join(resolutionSource, "node_modules", "workspace-only"), { recursive: true });
     writeFileSync(join(resolutionSource, "node_modules", "workspace-only", "index.js"), "module.exports='parent';\n");

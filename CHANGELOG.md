@@ -3,6 +3,42 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.0
+
+**Breaking.** `publishing_identity` is removed from `.factory.json` and resolved by the CLI instead. A
+config file still carrying the key is malformed, because the optional property set is closed — so this
+version and the edit that removes the key must land together.
+
+- **`factory init` resolves the publishing identity from `--publishing-identity <account>` or the inherited
+  `FACTORY_PUBLISHING_IDENTITY`,** records it immutably in `run.json`, and `status --json` reports it as
+  `publishing_identity`. The flag wins over the environment. The account a run publishes as is a property of
+  the environment it runs in, not of the repository, and a tracked file cannot hold two values for one
+  repository published from both a maintainer's checkout and an automated host.
+- **Absence refuses.** No flag and no environment value means no sandbox and no run. A forgotten value stops
+  the run rather than letting it publish under whatever credential the host happens to carry. There is no
+  checked-in fallback, by choice: a fallback only helps when the override works, and it can also mask a
+  missing one.
+- **It is now observable.** Because the value is recorded and reported, a supervising controller can verify
+  what a run will publish as before trusting it, instead of discovering a mismatch at the first guard.
+- The comparison against `gh api /user` remains driver-executed instruction, unchanged. It was resolution
+  that was unreliable, not the comparison.
+
+**Why this replaces 0.7.5.** That release expressed the same intent as contract text: an environment
+override the driver was told to prefer. The driver never looked. `FACTORY_PUBLISHING_IDENTITY` reached the
+child's shell — proven by a resolver short-circuiting on a sibling variable injected the same way — and the
+run's stderr contained no reference to it. A new instruction in a 143 KB contract is a compliance ask, and
+the surrounding mechanism working as instruction did not make an addition to it safe. Same intent, expressed
+as code.
+
+**Migration.** Remove `publishing_identity` from `.factory.json`, then supply the value per environment:
+`export FACTORY_PUBLISHING_IDENTITY=<account>` for a hand-run checkout, and the same variable in the image or
+dispatched environment for an automated host. Consumers pinning an exact factory version must move that pin
+in the same change as the deployment that installs 0.8.0, since a version-mismatch probe that fails closed
+will otherwise refuse every dispatch.
+
+Production source moves 4557 → 4574, and the tripwire 4550 → 4600 by operator authorization recorded before
+the work. `run.json` gains its twenty-third key.
+
 ## 0.7.5
 
 Documentation only. No production lines, no CLI behaviour change beyond what the contract now permits.
