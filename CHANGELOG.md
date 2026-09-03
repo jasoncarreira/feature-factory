@@ -3,6 +3,52 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.1
+
+One change, in the OpenCode adapter, and it unblocks configured resolvers there entirely.
+
+- **The OpenCode `SKILL.md` now specifies the repository resolver intake, before any run-id allocation.**
+  The resolver must run before `factory init`, but since 0.7.2 `init` is what *stages* the canonical
+  workflow — so a driver that read the workflow first could never learn the rule in time. The skill also
+  claimed "admission and the `init` invocation are specified here", which was untrue: admission includes the
+  resolver, and the resolver lived only in the staged workflow. mimir chainlink 1521 is what that costs — the
+  driver initialized from the literal reference `chainlink-1521`, read the staged workflow afterwards, and
+  `story-reader` received a bare key instead of the rendered title and body the repository resolver had ready
+  in `MIMIR_WORK_ITEM_JSON`.
+- **The whole canonical pre-init region is restated, not a summary of it.** It begins where the canonical
+  workflow derives the operator repository root `O` from `INVOCATION_CHECKOUT` and
+  `git rev-parse --show-toplevel`, and requires an absolute nonempty `O` — without which there is no path to
+  `$O/.factory.json` and no cwd for `resolve`. It then covers the config schema,
+  the closed key set, required entries and their types, first-defect validation order, and the exact
+  malformed-config refusals. The first attempt began at "With a valid present file", which is circular: the
+  only definition of a valid `.factory.json` lived in the document the driver cannot read until `init` stages
+  it, so a pre-init driver could not decide whether a resolver was declared at all. Caught in review.
+- **The copy is bound to the canonical text as a region, not as selected sentences.** The region is located by
+  its headings and compared whole on whitespace-normalized text, so the files may wrap differently and cannot
+  disagree. A subset binding cannot fail for an omission, which is precisely the defect it should catch.
+- **The adapter's opening is now an explicit four-step order**: admission, repository resolver intake,
+  `factory init`, then read the staged workflow. It previously said to read the staged workflow "before any
+  state read", which forbade the pre-init intake it also required — a contradiction a driver resolves by
+  initializing first, which is the original defect. The intake's own reads and command executions are
+  exempted in place, because they are what that step is.
+- **Step 2 names its executable subset, and the region's post-init constraints are excluded from it.**
+  Copying the region whole is what protects it from drift, but the region also carries the
+  publishing-identity rules — which `factory init` itself resolves and records, and which the driver binds
+  from `status --json`. Declaring the whole region "before every `factory` command including `init`" made
+  those impossible. Step 2 is now exactly: derive and validate `O`, validate `.factory.json`, run `resolve`,
+  validate the payload, bind `R`.
+- **The test pins ordering, not presence.** A story containing the body would also be consistent with
+  resolving *after* `init`, which is not the contract and is not what failed.
+
+Verified in a live run before shipping: with the rule restated, the driver read `.factory.json`, executed the
+resolver before `init`, and the run advanced with the real work item as its story.
+
+**Prime is unaffected and needs nothing.** Its skill already reads the adjacent canonical `WORKFLOW.md` in
+full before inspecting intake or running any `factory` command, because Prime agents may read outside the
+workspace. The gap is specific to a host that denies `external_directory` and therefore depends on staging.
+
+No production lines change; the factory CLI, its schema, and the canonical workflow are untouched.
+
 ## 0.8.0
 
 **Breaking.** `publishing_identity` is removed from `.factory.json` and resolved by the CLI instead. A

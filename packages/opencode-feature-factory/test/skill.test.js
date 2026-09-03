@@ -11,12 +11,76 @@ const canonicalWorkflow = readFileSync(resolve(factoryRoot, "WORKFLOW.md"));
 
 describe("OpenCode skill adapter", () => {
   it("owns OpenCode mechanics and loads the exact canonical workflow before effects", () => {
+    // The resolver runs before `init`, but `init` is what stages the canonical workflow, so a driver that
+    // reads the workflow first can never learn the rule in time. mimir chainlink 1521 initialized from the
+    // literal reference, read the staged workflow afterwards, and story-reader got a bare key instead of the
+    // rendered work item. The rule is therefore restated in this skill.
+    //
+    // Bound as a WHOLE REGION, not as selected sentences. Review of the first attempt caught why that
+    // matters: the hand-picked subset started at "With a valid present file" and omitted the config
+    // schema, validation order and malformed-config refusals that decide validity -- so the restatement
+    // read as executable while leaving a pre-init driver unable to determine whether a resolver was even
+    // declared. A subset binding also cannot fail for an omission, which is the defect it should catch.
+    // Compared on whitespace-normalized text so the two files may wrap differently.
+    const flat = (text) => String(text).replace(/\s+/gu, " ").trim();
+    const canonicalText = String(canonicalWorkflow);
+    // The region starts at the `O` derivation, not at the config heading: the copied text reads
+    // `$O/.factory.json` and runs `resolve` with cwd `O`, so a copy that omits how `O` is bound is still
+    // not executable before `init`. Second review finding, same class as the first.
+    const regionStart = canonicalText.indexOf("Preserve the admitted request bytes for story content and adapter forwarding.");
+    const regionEnd = canonicalText.indexOf("#### Resolver and repository verification boundaries");
+    assert.ok(regionStart >= 0 && regionEnd > regionStart,
+      "the canonical pre-init region markers must both exist, in order");
+    const canonicalRegion = flat(canonicalText.slice(regionStart, regionEnd));
+    assert.ok(canonicalRegion.length > 9000,
+      `the canonical pre-init region looks truncated at ${canonicalRegion.length} chars`);
+    assert.ok(flat(skill).includes(canonicalRegion),
+      "SKILL.md must restate the complete canonical pre-init region verbatim, `O` derivation and config validation included");
+    assert.ok(canonicalRegion.includes("rev-parse --show-toplevel") && canonicalRegion.includes("Require an absolute, nonempty `O`"),
+      "the bound region must span the `O` derivation, or the copy cannot locate the repository config");
+
+    // Ordering is the defect, so pin ordering rather than presence: the restated region must precede the
+    // operating modes, and the skill must say `init` is not exempt from coming after it.
+    // The opening ordering contract, pinned as a sequence rather than as document position. The previous
+    // version told the driver to read the staged workflow "before any state read" while the intake it also
+    // mandates must read `$O/.factory.json` before `init` -- a contradiction a driver resolves by
+    // initializing first, which is the original defect. Third review finding.
+    const order = ["1. **Admission**", "2. **Repository resolver intake**", "3. **`factory init`**", "4. **Read that staged file completely**"];
+    let cursor = -1;
+    for (const step of order) {
+      const at = skill.indexOf(step);
+      assert.ok(at > cursor, `the opening order must list ${step} after the previous step`);
+      cursor = at;
+    }
+    assert.ok(skill.includes("those reads and executions are the step itself and are not covered by the restriction in 4"),
+      "the intake's own reads must be exempted from the staged-workflow restriction, or the order contradicts itself");
+    assert.doesNotMatch(skill, /\*\*Read that file completely before any state read/u,
+      "the blanket pre-read mandate must not return: it forbids the pre-init intake it also requires");
+    assert.ok(skill.indexOf("## Repository resolver intake") < skill.indexOf("## Operating modes"));
+    // The temporal split inside the copied region. The region is bound whole for drift protection, so it
+    // also carries constraints that only apply at or after `init` -- the publishing-identity rules are
+    // resolved BY `init` and bound from `status --json`. Declaring the whole region "step 2, before every
+    // factory command including init" made those impossible. Fourth review finding: name the executable
+    // pre-init subset, and exclude the rest from step 2, or the driver gets impossible sequencing again.
+    assert.match(skill, /\*\*Step 2 executes exactly this subset, and nothing else in the region:\*\* derive and validate `O`; read and\s+validate `\$O\/\.factory\.json`; execute a declared `resolve`; validate its payload; bind `R`/u,
+      "step 2 must name exactly the pre-init executable subset");
+    assert.match(skill, /also carries constraints that apply at or after\s+`init` — do not attempt them in step 2/u,
+      "the copied region's post-init constraints must be excluded from step 2");
+    assert.match(skill, /publishing-identity rules below describe what\s+`factory init` itself resolves and records/u,
+      "the post-init exclusion must name the publishing-identity rules, which are the ones in the region");
+    assert.match(skill, /Nothing in this region licenses running a `factory`\s+command during step 2\./u,
+      "step 2 must not be readable as permission to run a factory command");
+    // The excluded text must actually be present in the region, or the exclusion is describing nothing.
+    assert.ok(skill.includes("Bind `DECLARED_PUBLISHING_IDENTITY` from that reported value"),
+      "the region must still contain the post-init binding the exclusion refers to");
+    assert.match(skill, /Steps 1 and 2 are specified here, in full, because the document that specifies everything else does not\s+exist until step 3/u,
+      "the skill must say why admission and the intake are restated here, or a later edit removes them as duplication");
     assert.ok(skill.startsWith("---\nname: feature\n"));
     // The workflow is read from where `init` stages it, not from beside this file: that path is outside
     // the workspace and `external_directory` is denied for every agent, so a run depending on it fails on a
     // permission refusal. These pin the reordering, one fragment per line so the assertion can match.
     assert.match(skill, /`factory init` stages the canonical workflow at the `workflow` path/u);
-    assert.match(skill, /before any state read, dispatch, gate, or factory command other than/u);
+    assert.match(skill, /before any state read, dispatch, gate, or `?factory`? command other\s+than `init` itself/u);
     assert.match(skill, /Do not read `WORKFLOW\.md` next to this file/u);
     assert.match(skill, /feature_background/u);
     assert.match(skill, /FACTORY_SESSION_ID/u);

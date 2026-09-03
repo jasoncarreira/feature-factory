@@ -15,9 +15,18 @@ description: >
 # /feature — OpenCode adapter
 
 `factory init` stages the canonical workflow at the `workflow` path in its own response, inside the run
-directory. **Read that file completely before any state read, dispatch, gate, or factory command other than
-`init` itself** — admission and the `init` invocation are specified here, everything after it is specified
-there. Do not read `WORKFLOW.md` next to this file: it lives outside the workspace, `external_directory` is
+directory. This adapter therefore runs in a fixed order, and nothing may be reordered:
+
+1. **Admission** — the mode, base, retry and placement rules below.
+2. **Repository resolver intake** — derive `O`, read and validate `$O/.factory.json`, execute a declared
+   `resolve`, and bind `R`. This step necessarily reads that file and executes commands before `init`;
+   those reads and executions are the step itself and are not covered by the restriction in 4.
+3. **`factory init`**, which stages the canonical workflow and returns its path as `workflow`.
+4. **Read that staged file completely**, before any state read, dispatch, gate, or `factory` command other
+   than `init` itself.
+
+Steps 1 and 2 are specified here, in full, because the document that specifies everything else does not
+exist until step 3. Everything after `init` is specified there. Do not read `WORKFLOW.md` next to this file: it lives outside the workspace, `external_directory` is
 denied for every agent, and a run that depends on that read fails on a permission refusal rather than on
 anything about the work. If the staged file is absent or unreadable, stop without effects. That bundled file is an exact build-time copy of the factory-owned canonical workflow; it is authoritative for Steps 0–7, gates, evidence, repository lifecycle, and every
 durable transition. This skill is authoritative only for OpenCode invocation admission, session
@@ -94,6 +103,192 @@ For a new manifest, `--autonomous` maps only to `factory init --mode autonomous`
 to `factory init --mode headless`, and no admitted mode omits `--mode`. An existing manifest always
 resumes its immutable persisted mode, base, and retry budget. Invocation options never reinitialize or
 mutate it.
+
+## Repository resolver intake, before any run-id allocation
+
+Everything from here to the next `##` heading is the canonical pre-init section, restated verbatim: the
+derivation of the operator repository root `O`, the repository command configuration and its validation,
+the configured resolver path, and the absence rule. It is duplicated because a run cannot read the
+canonical workflow until `factory init` has staged it, and all of this must be executed before `init` —
+including deriving `O`, without which there is no path to `$O/.factory.json` and no cwd for `resolve`. The
+staged workflow stays authoritative; if the two appear inconsistent, stop without effects.
+
+A test binds this copy to the canonical text as one whole region rather than as selected sentences, so no
+clause can be dropped or reworded on either side without failing.
+
+**Step 2 executes exactly this subset, and nothing else in the region:** derive and validate `O`; read and
+validate `$O/.factory.json`; execute a declared `resolve`; validate its payload; bind `R`. Those reads and
+command executions are what step 2 is, so they are exempt from the step-4 restriction.
+
+**The region is copied whole for drift protection, so it also carries constraints that apply at or after
+`init` — do not attempt them in step 2.** In particular the publishing-identity rules below describe what
+`factory init` itself resolves and records, and require reading `status --json` to bind
+`DECLARED_PUBLISHING_IDENTITY` from the value the run reports; neither is possible before `init` exists.
+They apply at their own point in the staged workflow. Nothing in this region licenses running a `factory`
+command during step 2.
+
+Preserve the admitted request bytes for story content and adapter forwarding. Make a separate
+derivation copy and trim only its leading and trailing whitespace for classification. Capture the
+invocation checkout, resolve its Git top level, and then resolve that physically; the result is `O`:
+
+```sh
+INVOCATION_CHECKOUT="$PWD"
+O="$(cd "$(git -C "$INVOCATION_CHECKOUT" rev-parse --show-toplevel)" && pwd -P)"
+```
+
+Require an absolute, nonempty `O`. Every host adapter and run driver uses the following same
+configured-or-absent policy before canonical run selection, manifest or state reads, sandbox creation,
+any `factory` command, placement dispatch, or specialist dispatch.
+
+### Repository command configuration
+
+The optional repository-owned file is `$O/.factory.json`:
+
+```json
+{
+  "resolve": "<non-empty shell command>",
+  "verify": "<non-empty shell command>",
+  "publish": "<non-empty shell command>",
+  "pr_draft": true,
+  "verify_timeout_ms": 900000,
+  "bootstrap": "<non-empty shell command>",
+  "bootstrap_timeout_ms": 900000
+}
+```
+
+The root must be a JSON object with the three required own properties `resolve`, `verify`, and `publish`,
+plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
+`bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
+command must be non-empty. There is no `publishing_identity` key: the account a run publishes as is a
+property of the environment it runs in, not of the repository, and a tracked file cannot hold two values
+for one repository published from both a maintainer's checkout and an automated host. A file carrying that
+key is malformed, because the optional set above is closed. `pr_draft` must be a JSON boolean
+when present and defaults to `true` when absent. Both timeout values must be positive
+safe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`.
+`verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;
+neither timeout shares or consumes the other's budget.
+
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
+
+Do not use the obsolete summary “Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.” because it omits the earlier `pr_draft` check.
+
+`pr_draft` is a known key, and an invalid value outranks every timeout defect and missing required entry.
+The two bootstrap keys are known keys. Invalid `bootstrap` outranks missing required entries and every
+timeout defect, including an invalid or otherwise orphaned bootstrap timeout. An orphaned
+`bootstrap_timeout_ms` outranks its own invalid shape, and a valid bootstrap with an invalid timeout
+names only `bootstrap_timeout_ms`. Validate this order before executing `resolve`.
+The publishing identity is not read from this file and not resolved by the driver. `factory init` resolves
+it in code -- `--publishing-identity <account>` when passed, otherwise the inherited
+`FACTORY_PUBLISHING_IDENTITY` -- and refuses when neither supplies at least one character, creating no
+sandbox and no run. It records the resolved value immutably in `run.json`, and `status --json` reports it
+as `publishing_identity`. Bind `DECLARED_PUBLISHING_IDENTITY` from that reported value exactly as
+reported, without trimming, normalizing, case-folding, or reserializing it, and never re-resolve it from
+the environment, a file, or anything else.
+Do not tighten the existing non-whitespace validation to the observed-login grammar: `init` requires only
+that the value contain at least one character, and a declared account name that the observed-login grammar
+would reject is still a legitimate declaration to compare against.
+Never pass `--publishing-identity` from this workflow. The driver has no source for the value -- that is
+the point of resolving it in the CLI -- so the flag would be constructed from an unbound shell variable,
+expand to an empty argument, and be indistinguishable from an operator supplying one. `init` reads the
+inherited environment itself. The flag exists for an explicit human or scripted invocation that has a value
+to state.
+Because init refuses without one, every run created at or after 0.8.0 carries a nonempty value; a manifest
+written earlier may report `null`, which is the only case that skips the publishing-identity guards.
+Never derive this value from `gh`, the token, stored authentication, or Git configuration: an expectation
+read from the credential being checked would always match, and the guard would stop guarding.
+Credential values must not appear in the file; command strings may refer only to credentials supplied
+through inherited environment-variable names.
+
+An absent `$O/.factory.json` means no resolver is declared, per the absence rule below. It says nothing
+about the publishing identity, which comes from `init` rather than from this file, so a repository with no
+config file still carries a recorded identity and still runs every publishing-identity guard. If the path is present but malformed, do not execute any entry
+and refuse exactly:
+
+> invalid factory config: .factory.json; no session or run created.
+
+The named config refusals are exactly:
+
+> invalid factory config: .factory.json entry 'pr_draft' must be a boolean; no session or run created.
+>
+> invalid factory config: .factory.json entry 'bootstrap' must be a non-empty string; no session or run created.
+>
+> invalid factory config: .factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command; no session or run created.
+>
+> invalid factory config: .factory.json entry 'bootstrap_timeout_ms' must be a positive integer; no session or run created.
+>
+> invalid factory config: .factory.json entry 'verify_timeout_ms' must be a positive integer; no session or run created.
+
+This refusal stops under the same effect-free boundary as every configured resolver refusal below.
+
+#### Configured resolver path
+
+With a valid present file, execute `resolve` before issue, ticket, design, or free-text classification.
+Submit the configured string unchanged as one ordinary shell step, with exact cwd `O`, the inherited
+environment plus `FACTORY_INPUT`, and no positional argument or structured stdin. `FACTORY_INPUT` is
+the exact admitted request remainder after mode-prefix removal, preserving its whitespace and bytes.
+
+Interpret the ordinary shell result directly:
+
+1. Exit zero with exactly zero stdout bytes means the resolver did not recognize an issue reference.
+   Continue existing ticket, design, and free-text derivation from the original admitted request. Do
+   not use the compatibility issue resolver and do not dispatch `story-reader`.
+2. Exit zero with non-empty stdout means stdout itself is `ISSUE_PAYLOAD`. It must be one JSON object
+   with a canonical top-level string `run_id`, a non-empty string `title`, and a string `body` (a body
+   may be empty; a title may not) alongside any other repository issue fields:
+   ```json
+   {
+     "run_id": "205",
+     "title": "Issue title",
+     "body": "Issue body",
+     "url": "https://tracker.example/issues/205"
+   }
+   ```
+   Validate `run_id`, `title`, and `body` — presence and type — before binding `R` or dispatching
+   anything, without extracting, wrapping, reserializing, normalizing, or otherwise changing the
+   payload. A payload missing `title` or `body`, or carrying either at the wrong type, is malformed and
+   refuses below; it must not reach `story-reader` to be discovered as missing fields there. Give the exact same stdout bytes unchanged to `story-reader` as
+   `ISSUE_PAYLOAD` and untrusted supplied normalization input; the specialist performs no external
+   lookup.
+3. An observed non-zero exit refuses exactly:
+
+   > factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.
+
+4. A failure with no observable numeric status refuses exactly:
+
+   > factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.
+
+The configured `run_id` must match `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`. A digit-only value must be
+positive decimal without leading zeroes. Bind `R` exactly to that value; through existing Step 0
+behavior it becomes the adapter run ID, expected-ID comparison value, manifest candidate name,
+sandbox name, and default feature-branch suffix. Non-empty stdout that is not a single JSON object,
+lacks the canonical top-level `run_id`, or contains an invalid `run_id` refuses exactly:
+
+> factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.
+
+These refusals stop before canonical run selection, placement dispatch, manifest or state reads,
+sandbox creation, every `factory` command, or specialist dispatch. They never continue through the ticket, `story-reader`, or
+`story-writer` paths. `<reference>` is `FACTORY_INPUT` exactly as admitted, truncated to its
+first 200 characters — the operator's own input, which is why naming it discloses nothing. Never print,
+quote, reproduce, log, or persist the configured command string, an expanded or resolved command line,
+credentials, or shell/tool diagnostics. A refusal contains only the exact entry name, the reference, and
+the status classification above; without the reference an operator resolving several references cannot
+tell which one failed. Successful non-empty resolver stdout is the required payload and remains
+unchanged.
+
+#### Absence means no repository resolver
+
+An absent `$O/.factory.json` means this repository declares no resolver. Do not recognize, fetch, or
+resolve a reference: continue existing ticket, design, and free-text derivation from the original
+admitted request, exactly as for a declared resolver that exited zero with empty stdout. There is no
+built-in tracker grammar and no built-in fetch command anywhere in this skill.
+
+Reference intake exists only where a repository declares it. A repository that wants `205`, `#205`, or a
+tracker URL to select a run declares a `resolve` command recognizing those forms and returning the
+payload above. Recognition belongs to the declaration for the same reason fetching does: deciding that a
+bare integer is a reference, rather than a feature description, is repository-specific.
+
+This repository declares its own in `.factory.json`, so `205`, `#205`, and the canonical issue URL still
+select run `205` — through that declaration rather than through anything built in.
 
 ## Operating modes
 
