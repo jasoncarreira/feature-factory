@@ -15,10 +15,14 @@ One change, in the OpenCode adapter, and it unblocks configured resolvers there 
   driver initialized from the literal reference `chainlink-1521`, read the staged workflow afterwards, and
   `story-reader` received a bare key instead of the rendered title and body the repository resolver had ready
   in `MIMIR_WORK_ITEM_JSON`.
-- **The restated rule is bound to the canonical text by a test.** Every sentence is compared against
-  `feature-factory/WORKFLOW.md` on whitespace-normalized text, in both directions: deleting it from the skill
-  fails, and rewording the canonical workflow fails. A duplicated contract with nothing holding it is the
-  drift this repository keeps paying for, so the duplication is deliberate and held.
+- **The whole canonical pre-init region is restated, not a summary of it.** That includes the config schema,
+  the closed key set, required entries and their types, first-defect validation order, and the exact
+  malformed-config refusals. The first attempt began at "With a valid present file", which is circular: the
+  only definition of a valid `.factory.json` lived in the document the driver cannot read until `init` stages
+  it, so a pre-init driver could not decide whether a resolver was declared at all. Caught in review.
+- **The copy is bound to the canonical text as a region, not as selected sentences.** The region is located by
+  its headings and compared whole on whitespace-normalized text, so the files may wrap differently and cannot
+  disagree. A subset binding cannot fail for an omission, which is precisely the defect it should catch.
 - **The test pins ordering, not presence.** A story containing the body would also be consistent with
   resolving *after* `init`, which is not the contract and is not what failed.
 
