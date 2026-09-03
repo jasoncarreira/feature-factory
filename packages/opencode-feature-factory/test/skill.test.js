@@ -41,16 +41,31 @@ describe("OpenCode skill adapter", () => {
 
     // Ordering is the defect, so pin ordering rather than presence: the restated region must precede the
     // operating modes, and the skill must say `init` is not exempt from coming after it.
+    // The opening ordering contract, pinned as a sequence rather than as document position. The previous
+    // version told the driver to read the staged workflow "before any state read" while the intake it also
+    // mandates must read `$O/.factory.json` before `init` -- a contradiction a driver resolves by
+    // initializing first, which is the original defect. Third review finding.
+    const order = ["1. **Admission**", "2. **Repository resolver intake**", "3. **`factory init`**", "4. **Read that staged file completely**"];
+    let cursor = -1;
+    for (const step of order) {
+      const at = skill.indexOf(step);
+      assert.ok(at > cursor, `the opening order must list ${step} after the previous step`);
+      cursor = at;
+    }
+    assert.ok(skill.includes("those reads and executions are the step itself and are not covered by the restriction in 4"),
+      "the intake's own reads must be exempted from the staged-workflow restriction, or the order contradicts itself");
+    assert.doesNotMatch(skill, /\*\*Read that file completely before any state read/u,
+      "the blanket pre-read mandate must not return: it forbids the pre-init intake it also requires");
     assert.ok(skill.indexOf("## Repository resolver intake") < skill.indexOf("## Operating modes"));
-    assert.match(skill, /before run-id allocation,\s+config effects, state reads, tool calls, or any `factory` command, `init` included/u);
-    assert.ok(skill.includes("admission, the repository resolver intake below, and the `init` invocation are"),
-      "the skill must not claim admission is fully specified without the resolver intake");
+    assert.match(skill, /after admission, and before run-id allocation, manifest or state reads, specialist\s+dispatch, and every `factory` command including `init`/u);
+    assert.match(skill, /Steps 1 and 2 are specified here, in full, because the document that specifies everything else does not\s+exist until step 3/u,
+      "the skill must say why admission and the intake are restated here, or a later edit removes them as duplication");
     assert.ok(skill.startsWith("---\nname: feature\n"));
     // The workflow is read from where `init` stages it, not from beside this file: that path is outside
     // the workspace and `external_directory` is denied for every agent, so a run depending on it fails on a
     // permission refusal. These pin the reordering, one fragment per line so the assertion can match.
     assert.match(skill, /`factory init` stages the canonical workflow at the `workflow` path/u);
-    assert.match(skill, /before any state read, dispatch, gate, or factory command other than/u);
+    assert.match(skill, /before any state read, dispatch, gate, or `?factory`? command other\s+than `init` itself/u);
     assert.match(skill, /Do not read `WORKFLOW\.md` next to this file/u);
     assert.match(skill, /feature_background/u);
     assert.match(skill, /FACTORY_SESSION_ID/u);

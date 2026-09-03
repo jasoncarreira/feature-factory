@@ -26,6 +26,11 @@ One change, in the OpenCode adapter, and it unblocks configured resolvers there 
 - **The copy is bound to the canonical text as a region, not as selected sentences.** The region is located by
   its headings and compared whole on whitespace-normalized text, so the files may wrap differently and cannot
   disagree. A subset binding cannot fail for an omission, which is precisely the defect it should catch.
+- **The adapter's opening is now an explicit four-step order**: admission, repository resolver intake,
+  `factory init`, then read the staged workflow. It previously said to read the staged workflow "before any
+  state read", which forbade the pre-init intake it also required — a contradiction a driver resolves by
+  initializing first, which is the original defect. The intake's own reads and command executions are
+  exempted in place, because they are what that step is.
 - **The test pins ordering, not presence.** A story containing the body would also be consistent with
   resolving *after* `init`, which is not the contract and is not what failed.
 
