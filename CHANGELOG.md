@@ -3,6 +3,34 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.1
+
+One change, in the OpenCode adapter, and it unblocks configured resolvers there entirely.
+
+- **The OpenCode `SKILL.md` now specifies the repository resolver intake, before any run-id allocation.**
+  The resolver must run before `factory init`, but since 0.7.2 `init` is what *stages* the canonical
+  workflow — so a driver that read the workflow first could never learn the rule in time. The skill also
+  claimed "admission and the `init` invocation are specified here", which was untrue: admission includes the
+  resolver, and the resolver lived only in the staged workflow. mimir chainlink 1521 is what that costs — the
+  driver initialized from the literal reference `chainlink-1521`, read the staged workflow afterwards, and
+  `story-reader` received a bare key instead of the rendered title and body the repository resolver had ready
+  in `MIMIR_WORK_ITEM_JSON`.
+- **The restated rule is bound to the canonical text by a test.** Every sentence is compared against
+  `feature-factory/WORKFLOW.md` on whitespace-normalized text, in both directions: deleting it from the skill
+  fails, and rewording the canonical workflow fails. A duplicated contract with nothing holding it is the
+  drift this repository keeps paying for, so the duplication is deliberate and held.
+- **The test pins ordering, not presence.** A story containing the body would also be consistent with
+  resolving *after* `init`, which is not the contract and is not what failed.
+
+Verified in a live run before shipping: with the rule restated, the driver read `.factory.json`, executed the
+resolver before `init`, and the run advanced with the real work item as its story.
+
+**Prime is unaffected and needs nothing.** Its skill already reads the adjacent canonical `WORKFLOW.md` in
+full before inspecting intake or running any `factory` command, because Prime agents may read outside the
+workspace. The gap is specific to a host that denies `external_directory` and therefore depends on staging.
+
+No production lines change; the factory CLI, its schema, and the canonical workflow are untouched.
+
 ## 0.8.0
 
 **Breaking.** `publishing_identity` is removed from `.factory.json` and resolved by the CLI instead. A

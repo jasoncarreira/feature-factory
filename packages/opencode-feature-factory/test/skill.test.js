@@ -11,6 +11,39 @@ const canonicalWorkflow = readFileSync(resolve(factoryRoot, "WORKFLOW.md"));
 
 describe("OpenCode skill adapter", () => {
   it("owns OpenCode mechanics and loads the exact canonical workflow before effects", () => {
+    // The resolver runs before `init`, but `init` is what stages the canonical workflow, so a driver that
+    // reads the workflow first can never learn the rule in time. mimir chainlink 1521 initialized from the
+    // literal reference, read the staged workflow afterwards, and story-reader got a bare key instead of the
+    // rendered work item. The rule is therefore restated in this skill -- and bound to the canonical text
+    // here, because a duplicated contract with nothing holding it is the drift this repository keeps paying
+    // for. Compared on whitespace-normalized text so the two files may wrap differently.
+    const flat = (text) => String(text).replace(/\s+/gu, " ");
+    const skillFlat = flat(skill);
+    const canonicalFlat = flat(canonicalWorkflow);
+    for (const clause of [
+      "execute `resolve` before issue, ticket, design, or free-text classification",
+      "the inherited environment plus `FACTORY_INPUT`, and no positional argument or structured stdin",
+      "`FACTORY_INPUT` is the exact admitted request remainder after mode-prefix removal, preserving its whitespace and bytes",
+      "Exit zero with exactly zero stdout bytes means the resolver did not recognize an issue reference",
+      "Continue existing ticket, design, and free-text derivation from the original admitted request",
+      "not use the compatibility issue resolver and do not dispatch `story-reader`",
+      "Exit zero with non-empty stdout means stdout itself is `ISSUE_PAYLOAD`",
+      "Validate `run_id`, `title`, and `body` — presence and type — before binding `R` or dispatching anything",
+      "The configured `run_id` must match `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`",
+      "factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.",
+      "factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.",
+      "factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.",
+    ]) {
+      const wanted = flat(clause);
+      assert.ok(canonicalFlat.includes(wanted), `canonical workflow no longer states: ${clause}`);
+      assert.ok(skillFlat.includes(wanted), `SKILL.md must restate the pre-init resolver rule: ${clause}`);
+    }
+    // Ordering is the defect, so pin ordering rather than presence: the resolver section must precede the
+    // staged-workflow read in the document, and the skill must say `init` is not exempt from coming after it.
+    assert.ok(skill.indexOf("## Repository resolver intake") < skill.indexOf("## Operating modes"));
+    assert.match(skill, /before run-id allocation, config effects, state\s+reads, tool calls, or any `factory` command, `init` included/u);
+    assert.ok(skill.includes("admission, the repository resolver intake below, and the `init` invocation are"),
+      "the skill must not claim admission is fully specified without the resolver intake");
     assert.ok(skill.startsWith("---\nname: feature\n"));
     // The workflow is read from where `init` stages it, not from beside this file: that path is outside
     // the workspace and `external_directory` is denied for every agent, so a run depending on it fails on a

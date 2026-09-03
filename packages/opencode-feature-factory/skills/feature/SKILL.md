@@ -16,8 +16,8 @@ description: >
 
 `factory init` stages the canonical workflow at the `workflow` path in its own response, inside the run
 directory. **Read that file completely before any state read, dispatch, gate, or factory command other than
-`init` itself** — admission and the `init` invocation are specified here, everything after it is specified
-there. Do not read `WORKFLOW.md` next to this file: it lives outside the workspace, `external_directory` is
+`init` itself** — admission, the repository resolver intake below, and the `init` invocation are
+specified here; everything after `init` is specified there. Do not read `WORKFLOW.md` next to this file: it lives outside the workspace, `external_directory` is
 denied for every agent, and a run that depends on that read fails on a permission refusal rather than on
 anything about the work. If the staged file is absent or unreadable, stop without effects. That bundled file is an exact build-time copy of the factory-owned canonical workflow; it is authoritative for Steps 0–7, gates, evidence, repository lifecycle, and every
 durable transition. This skill is authoritative only for OpenCode invocation admission, session
@@ -94,6 +94,44 @@ For a new manifest, `--autonomous` maps only to `factory init --mode autonomous`
 to `factory init --mode headless`, and no admitted mode omits `--mode`. An existing manifest always
 resumes its immutable persisted mode, base, and retry budget. Invocation options never reinitialize or
 mutate it.
+
+## Repository resolver intake, before any run-id allocation
+
+The canonical workflow specifies this step, and a run cannot read the canonical workflow until `factory
+init` has staged it — so it is restated here, and only here, because it must happen before `init`. The
+staged workflow stays authoritative; if the two appear inconsistent, stop without effects. A test binds
+every sentence below to the canonical text, so this copy cannot drift silently.
+
+With the option prefix consumed and the request suffix preserved, read `$O/.factory.json` in the
+canonical local operator repository. An absent file means no resolver is declared: continue existing
+ticket, design, and free-text derivation unchanged. With a valid present file, execute `resolve` before
+issue, ticket, design, or free-text classification — and before run-id allocation, config effects, state
+reads, tool calls, or any `factory` command, `init` included.
+
+Submit the configured string unchanged as one ordinary shell step, with exact cwd `O`, the inherited
+environment plus `FACTORY_INPUT`, and no positional argument or structured stdin. `FACTORY_INPUT` is
+the exact admitted request remainder after mode-prefix removal, preserving its whitespace and bytes.
+
+1. Exit zero with exactly zero stdout bytes means the resolver did not recognize an issue reference.
+   Continue existing ticket, design, and free-text derivation from the original admitted request. Do
+   not use the compatibility issue resolver and do not dispatch `story-reader`.
+2. Exit zero with non-empty stdout means stdout itself is `ISSUE_PAYLOAD`. It must be one JSON object
+   with a canonical top-level string `run_id`, a non-empty string `title`, and a string `body` (a body
+   may be empty; a title may not) alongside any other repository issue fields. Validate `run_id`,
+   `title`, and `body` — presence and type — before binding `R` or dispatching anything, without
+   extracting, wrapping, reserializing, normalizing, or otherwise changing the payload. Give the exact
+   same stdout bytes unchanged to `story-reader` as `ISSUE_PAYLOAD`; the specialist performs no
+   external lookup.
+3. An observed non-zero exit refuses exactly:
+   `factory config entry 'resolve' failed for reference <reference> with exit status <status>; no session or run created.`
+4. A failure with no observable numeric status refuses exactly:
+   `factory config entry 'resolve' failed for reference <reference>; exit status unavailable; no session or run created.`
+
+The configured `run_id` must match `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`. A digit-only value must be
+positive decimal without leading zeroes. Bind `R` exactly to that value and pass it as the `factory
+init` run id. Non-empty stdout that is not a single JSON object, lacks the canonical top-level
+`run_id`, or contains an invalid `run_id` refuses exactly:
+`factory config entry 'resolve' returned malformed payload for reference <reference>; no session or run created.`
 
 ## Operating modes
 
