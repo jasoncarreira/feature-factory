@@ -15,7 +15,10 @@ One change, in the OpenCode adapter, and it unblocks configured resolvers there 
   driver initialized from the literal reference `chainlink-1521`, read the staged workflow afterwards, and
   `story-reader` received a bare key instead of the rendered title and body the repository resolver had ready
   in `MIMIR_WORK_ITEM_JSON`.
-- **The whole canonical pre-init region is restated, not a summary of it.** That includes the config schema,
+- **The whole canonical pre-init region is restated, not a summary of it.** It begins where the canonical
+  workflow derives the operator repository root `O` from `INVOCATION_CHECKOUT` and
+  `git rev-parse --show-toplevel`, and requires an absolute nonempty `O` — without which there is no path to
+  `$O/.factory.json` and no cwd for `resolve`. It then covers the config schema,
   the closed key set, required entries and their types, first-defect validation order, and the exact
   malformed-config refusals. The first attempt began at "With a valid present file", which is circular: the
   only definition of a valid `.factory.json` lived in the document the driver cannot read until `init` stages

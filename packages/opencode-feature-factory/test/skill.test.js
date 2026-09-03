@@ -24,15 +24,20 @@ describe("OpenCode skill adapter", () => {
     // Compared on whitespace-normalized text so the two files may wrap differently.
     const flat = (text) => String(text).replace(/\s+/gu, " ").trim();
     const canonicalText = String(canonicalWorkflow);
-    const regionStart = canonicalText.indexOf("### Repository command configuration");
+    // The region starts at the `O` derivation, not at the config heading: the copied text reads
+    // `$O/.factory.json` and runs `resolve` with cwd `O`, so a copy that omits how `O` is bound is still
+    // not executable before `init`. Second review finding, same class as the first.
+    const regionStart = canonicalText.indexOf("Preserve the admitted request bytes for story content and adapter forwarding.");
     const regionEnd = canonicalText.indexOf("#### Resolver and repository verification boundaries");
     assert.ok(regionStart >= 0 && regionEnd > regionStart,
       "the canonical pre-init region markers must both exist, in order");
     const canonicalRegion = flat(canonicalText.slice(regionStart, regionEnd));
-    assert.ok(canonicalRegion.length > 8000,
+    assert.ok(canonicalRegion.length > 9000,
       `the canonical pre-init region looks truncated at ${canonicalRegion.length} chars`);
     assert.ok(flat(skill).includes(canonicalRegion),
-      "SKILL.md must restate the complete canonical pre-init region verbatim, config validation included");
+      "SKILL.md must restate the complete canonical pre-init region verbatim, `O` derivation and config validation included");
+    assert.ok(canonicalRegion.includes("rev-parse --show-toplevel") && canonicalRegion.includes("Require an absolute, nonempty `O`"),
+      "the bound region must span the `O` derivation, or the copy cannot locate the repository config");
 
     // Ordering is the defect, so pin ordering rather than presence: the restated region must precede the
     // operating modes, and the skill must say `init` is not exempt from coming after it.

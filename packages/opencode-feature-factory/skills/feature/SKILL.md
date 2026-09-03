@@ -97,15 +97,29 @@ mutate it.
 
 ## Repository resolver intake, before any run-id allocation
 
-Everything from here to the next `##` heading is the canonical pre-init section, restated verbatim. It is
-duplicated because a run cannot read the canonical workflow until `factory init` has staged it, and this
-section must be executed before `init` — including the config validation that decides whether a resolver is
-declared at all, which no driver can perform from a document it cannot yet read. The staged workflow stays
-authoritative; if the two appear inconsistent, stop without effects.
+Everything from here to the next `##` heading is the canonical pre-init section, restated verbatim: the
+derivation of the operator repository root `O`, the repository command configuration and its validation,
+the configured resolver path, and the absence rule. It is duplicated because a run cannot read the
+canonical workflow until `factory init` has staged it, and all of this must be executed before `init` —
+including deriving `O`, without which there is no path to `$O/.factory.json` and no cwd for `resolve`. The
+staged workflow stays authoritative; if the two appear inconsistent, stop without effects.
 
-A test binds this copy to the canonical text as a whole region rather than as selected sentences, so a
-clause cannot be dropped or reworded on either side without failing. Execute it before run-id allocation,
+A test binds this copy to the canonical text as one whole region rather than as selected sentences, so no
+clause can be dropped or reworded on either side without failing. Execute it before run-id allocation,
 config effects, state reads, tool calls, or any `factory` command, `init` included.
+
+Preserve the admitted request bytes for story content and adapter forwarding. Make a separate
+derivation copy and trim only its leading and trailing whitespace for classification. Capture the
+invocation checkout, resolve its Git top level, and then resolve that physically; the result is `O`:
+
+```sh
+INVOCATION_CHECKOUT="$PWD"
+O="$(cd "$(git -C "$INVOCATION_CHECKOUT" rev-parse --show-toplevel)" && pwd -P)"
+```
+
+Require an absolute, nonempty `O`. Every host adapter and run driver uses the following same
+configured-or-absent policy before canonical run selection, manifest or state reads, sandbox creation,
+any `factory` command, placement dispatch, or specialist dispatch.
 
 ### Repository command configuration
 
