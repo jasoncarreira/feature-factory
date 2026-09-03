@@ -114,10 +114,18 @@ including deriving `O`, without which there is no path to `$O/.factory.json` and
 staged workflow stays authoritative; if the two appear inconsistent, stop without effects.
 
 A test binds this copy to the canonical text as one whole region rather than as selected sentences, so no
-clause can be dropped or reworded on either side without failing. Execute it as step 2 of the order at the
-top of this file: after admission, and before run-id allocation, manifest or state reads, specialist
-dispatch, and every `factory` command including `init`. Its own reads of `$O/.factory.json` and its own
-command executions are exempt, because they are what this step is.
+clause can be dropped or reworded on either side without failing.
+
+**Step 2 executes exactly this subset, and nothing else in the region:** derive and validate `O`; read and
+validate `$O/.factory.json`; execute a declared `resolve`; validate its payload; bind `R`. Those reads and
+command executions are what step 2 is, so they are exempt from the step-4 restriction.
+
+**The region is copied whole for drift protection, so it also carries constraints that apply at or after
+`init` — do not attempt them in step 2.** In particular the publishing-identity rules below describe what
+`factory init` itself resolves and records, and require reading `status --json` to bind
+`DECLARED_PUBLISHING_IDENTITY` from the value the run reports; neither is possible before `init` exists.
+They apply at their own point in the staged workflow. Nothing in this region licenses running a `factory`
+command during step 2.
 
 Preserve the admitted request bytes for story content and adapter forwarding. Make a separate
 derivation copy and trim only its leading and trailing whitespace for classification. Capture the

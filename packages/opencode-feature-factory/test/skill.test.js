@@ -57,7 +57,22 @@ describe("OpenCode skill adapter", () => {
     assert.doesNotMatch(skill, /\*\*Read that file completely before any state read/u,
       "the blanket pre-read mandate must not return: it forbids the pre-init intake it also requires");
     assert.ok(skill.indexOf("## Repository resolver intake") < skill.indexOf("## Operating modes"));
-    assert.match(skill, /after admission, and before run-id allocation, manifest or state reads, specialist\s+dispatch, and every `factory` command including `init`/u);
+    // The temporal split inside the copied region. The region is bound whole for drift protection, so it
+    // also carries constraints that only apply at or after `init` -- the publishing-identity rules are
+    // resolved BY `init` and bound from `status --json`. Declaring the whole region "step 2, before every
+    // factory command including init" made those impossible. Fourth review finding: name the executable
+    // pre-init subset, and exclude the rest from step 2, or the driver gets impossible sequencing again.
+    assert.match(skill, /\*\*Step 2 executes exactly this subset, and nothing else in the region:\*\* derive and validate `O`; read and\s+validate `\$O\/\.factory\.json`; execute a declared `resolve`; validate its payload; bind `R`/u,
+      "step 2 must name exactly the pre-init executable subset");
+    assert.match(skill, /also carries constraints that apply at or after\s+`init` — do not attempt them in step 2/u,
+      "the copied region's post-init constraints must be excluded from step 2");
+    assert.match(skill, /publishing-identity rules below describe what\s+`factory init` itself resolves and records/u,
+      "the post-init exclusion must name the publishing-identity rules, which are the ones in the region");
+    assert.match(skill, /Nothing in this region licenses running a `factory`\s+command during step 2\./u,
+      "step 2 must not be readable as permission to run a factory command");
+    // The excluded text must actually be present in the region, or the exclusion is describing nothing.
+    assert.ok(skill.includes("Bind `DECLARED_PUBLISHING_IDENTITY` from that reported value"),
+      "the region must still contain the post-init binding the exclusion refers to");
     assert.match(skill, /Steps 1 and 2 are specified here, in full, because the document that specifies everything else does not\s+exist until step 3/u,
       "the skill must say why admission and the intake are restated here, or a later edit removes them as duplication");
     assert.ok(skill.startsWith("---\nname: feature\n"));

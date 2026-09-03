@@ -31,6 +31,12 @@ One change, in the OpenCode adapter, and it unblocks configured resolvers there 
   state read", which forbade the pre-init intake it also required — a contradiction a driver resolves by
   initializing first, which is the original defect. The intake's own reads and command executions are
   exempted in place, because they are what that step is.
+- **Step 2 names its executable subset, and the region's post-init constraints are excluded from it.**
+  Copying the region whole is what protects it from drift, but the region also carries the
+  publishing-identity rules — which `factory init` itself resolves and records, and which the driver binds
+  from `status --json`. Declaring the whole region "before every `factory` command including `init`" made
+  those impossible. Step 2 is now exactly: derive and validate `O`, validate `.factory.json`, run `resolve`,
+  validate the payload, bind `R`.
 - **The test pins ordering, not presence.** A story containing the body would also be consistent with
   resolving *after* `init`, which is not the contract and is not what failed.
 
