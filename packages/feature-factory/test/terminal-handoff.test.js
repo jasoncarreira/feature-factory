@@ -334,17 +334,25 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.match(parkPolicy, /A park\s+is not reported until that snapshot is published or its failure is recorded in the report\./u,
     "the park report must depend on the snapshot, or the routing is advisory");
 
-  // Failure-safe replacement. The first attempt said "replaces its own prior snapshot", which permits
-  // delete-then-copy: a failed later park would erase the last known-good evidence and could leave a partial
-  // tree at the canonical path. Second review finding.
+  // Failure-safe publication, pinned as commit-point phases rather than as a flat rule. Two review rounds
+  // shaped this. First: "replaces its own prior snapshot" permitted delete-then-copy, so a failed second
+  // park could erase the last known-good evidence. Then the staged version still contradicted itself --
+  // after staging is renamed onto the canonical path the old snapshot IS `.prior-$R`, so "leave the previous
+  // snapshot exactly as it was" and "remove this procedure's prior path" were mutually impossible, and a
+  // partial removal could not be undone. The rule only closes if the rename is named as the commit point.
   const parkSection = parkPolicy.slice(sectionAt, parkPolicy.indexOf("At every interactive gate"));
   for (const fragment of [
-    "Publication is staged, verified, then swapped, so a later park can never degrade the last good snapshot",
+    "**Publication has exactly one commit point: the rename that puts a verified staging tree onto the canonical\npath.**",
     "$O/.factory/.parked/.staging-$R",
+    "A residual\n   `$O/.factory/.parked/.prior-$R` is the trace of an earlier publication whose cleanup did not finish",
+    "remove it before staging, and if that removal fails, report it and stop without\n   touching the canonical snapshot",
     "require exact equality. An unverified staging tree is never published",
-    "rename it to `$O/.factory/.parked/.prior-$R`",
-    "rename the prior copy back and report; never leave the canonical path\n   holding a partial tree",
-    "leave the previous snapshot exactly as it was",
+    "rename `.prior-$R` back onto the canonical path and report: nothing was\n   committed",
+    "**Before the commit point, no publication has occurred.**",
+    "restoring it from `.prior-$R` when it had already been moved",
+    "**After the commit point, the published snapshot is authoritative and is never rolled back.**",
+    "report a cleanup warning naming the\n   residual path and leave the published snapshot exactly as committed",
+    "A later park removes that residual\n   at preflight, as step 1 requires",
     "`.staging-$R` and `.prior-$R` cannot be run ids",
     "It never touches `S`",
     "does not prevent or undo the park",
@@ -352,8 +360,20 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   ]) {
     assert.ok(parkSection.includes(fragment), `the parked-snapshot contract must state: ${fragment}`);
   }
+  // The phases must be ordered, and the two failure rules must be stated relative to the commit point --
+  // a flat "on any failure" rule is what was contradictory.
+  const phases = ["**Preflight.**", "**Stage.**", "**Verify.**", "**Commit.**",
+    "**Before the commit point,", "**After the commit point,"];
+  let phaseCursor = -1;
+  for (const phase of phases) {
+    const at = parkSection.indexOf(phase);
+    assert.ok(at > phaseCursor, `publication phases must be ordered; ${phase} is out of place`);
+    phaseCursor = at;
+  }
   assert.doesNotMatch(parkSection, /replaces its own prior snapshot/u,
     "unstaged replacement must not return: it can destroy the last good snapshot on a failed park");
+  assert.doesNotMatch(parkSection, /On any failure in 1 through 3, leave the previous snapshot exactly as it was/u,
+    "the flat failure rule must not return: it is unimplementable once staging has been committed");
 
   const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
   const start = skill.indexOf("## Step 7 — Summary and completed sandbox handoff");

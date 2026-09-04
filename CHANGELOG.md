@@ -21,12 +21,19 @@ One change: a parked run's control plane is no longer destroyed with its sandbox
   attempt placed the mechanics inside `## Step 7`, whose entry conditions are post-draft-PR and whose first
   transition is `completed` — so no park path reached it. Prose nobody reaches is worse than none, because
   it reads as coverage. Caught in review.
-- **Publication is staged, verified, then swapped.** The copy goes to `.staging-$R`, source and destination
-  inventories must match exactly as the completed archive requires, and only then is it swapped in via
-  `.prior-$R`. On any failure the previous snapshot is left exactly as it was. A first attempt said the
-  snapshot "replaces its own prior snapshot", which permits delete-then-copy — so a failed second park would
-  have erased the last known-good evidence and could leave a partial tree at the canonical path. Also caught
-  in review. Neither `.staging-$R` nor `.prior-$R` can be a run id, so neither is ever a manifest candidate.
+- **Publication has exactly one commit point**, and every failure rule is stated relative to it: preflight,
+  stage to `.staging-$R`, verify source and destination inventories exactly as the completed archive
+  requires, then commit by renaming the verified tree onto the canonical path. Before that rename no
+  publication has occurred and a failure restores the untouched previous snapshot; after it the published
+  snapshot is authoritative and never rolled back, so a failure to remove `.prior-$R` is a reported cleanup
+  warning and a later park clears that residual at preflight.
+  Two review rounds shaped this. The first attempt said the snapshot "replaces its own prior snapshot",
+  permitting delete-then-copy, so a failed second park would erase the last known-good evidence. The staged
+  version then still contradicted itself: once staging is renamed onto the canonical path the old snapshot
+  *is* `.prior-$R`, so "leave the previous snapshot exactly as it was" and "remove this procedure's prior
+  path" were mutually impossible, and a partial removal could not be undone. Naming the rename as the commit
+  point is what closes it. Neither `.staging-$R` nor `.prior-$R` can be a run id, so neither is ever a
+  manifest candidate.
 - **Three properties make it safe at a park rather than only at completion**, and all three are stated in
   the contract: `.parked` cannot be a run id, so a snapshot never occupies the completed archive at
   `$O/.factory/$R` and never becomes a manifest candidate blocking a relaunch; it never touches the sandbox,

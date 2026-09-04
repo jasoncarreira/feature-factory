@@ -203,20 +203,31 @@ non-following metadata reads, creating each missing parent one directory at a ti
 one to be a real directory rather than a symbolic link. Never write through a symlinked parent, and never
 write anywhere but under `$O/.factory/.parked`.
 
-**Publication is staged, verified, then swapped, so a later park can never degrade the last good snapshot.**
+**Publication has exactly one commit point: the rename that puts a verified staging tree onto the canonical
+path.** Every failure rule below is stated relative to it, because "leave the previous snapshot untouched"
+and "clean up the prior copy" are contradictory instructions once that rename has happened.
 
-1. Copy `P` to `$O/.factory/.parked/.staging-$R`, preserving every entry, its mode, and symlinks as
-   symlinks. `W` is outside `P`; do not copy slice worktrees or any other part of `S`. Require no entry at
-   the staging path first; remove only a staging path this procedure itself left behind.
-2. Build source and destination inventories exactly as the completed archive does — every entry's relative
-   path, type and mode, a SHA-256 for each regular file, a link target for each symlink, sorted lexically —
-   and require exact equality. An unverified staging tree is never published.
-3. Only then swap. With no previous snapshot, rename staging to `$O/.factory/.parked/$R`. With one present,
-   rename it to `$O/.factory/.parked/.prior-$R`, rename staging into place, and only then remove the prior
-   copy. If the second rename fails, rename the prior copy back and report; never leave the canonical path
-   holding a partial tree.
-4. On any failure in 1 through 3, leave the previous snapshot exactly as it was, remove only this
-   procedure's staging or prior path, and record the failure in the park report.
+1. **Preflight.** Require no entry at `$O/.factory/.parked/.staging-$R`. A residual
+   `$O/.factory/.parked/.prior-$R` is the trace of an earlier publication whose cleanup did not finish, not
+   a snapshot to preserve: remove it before staging, and if that removal fails, report it and stop without
+   touching the canonical snapshot or staging anything.
+2. **Stage.** Copy `P` to `.staging-$R`, preserving every entry, its mode, and symlinks as symlinks. `W` is
+   outside `P`; do not copy slice worktrees or any other part of `S`.
+3. **Verify.** Build source and destination inventories exactly as the completed archive does — every
+   entry's relative path, type and mode, a SHA-256 for each regular file, a link target for each symlink,
+   sorted lexically — and require exact equality. An unverified staging tree is never published.
+4. **Commit.** With no snapshot at the canonical path, rename `.staging-$R` onto it; that rename is the
+   commit point. With one present, first rename the canonical snapshot to `.prior-$R`, then rename
+   `.staging-$R` onto the canonical path; that second rename is the commit point. If the first rename
+   succeeds and the second fails, rename `.prior-$R` back onto the canonical path and report: nothing was
+   committed.
+5. **Before the commit point, no publication has occurred.** Any failure leaves the previous canonical
+   snapshot in place — restoring it from `.prior-$R` when it had already been moved — removes only
+   `.staging-$R`, and records the failure in the park report.
+6. **After the commit point, the published snapshot is authoritative and is never rolled back.** Removing
+   `.prior-$R` is cleanup, not part of publication: if it fails, report a cleanup warning naming the
+   residual path and leave the published snapshot exactly as committed. A later park removes that residual
+   at preflight, as step 1 requires.
 
 `.staging-$R` and `.prior-$R` cannot be run ids, so neither is ever a manifest candidate.
 
