@@ -149,6 +149,9 @@ An inability to ask a human never promotes interactive or headless to autonomous
 
 Mode result needs-human means parked and explicitly resumable; only completed, partial, and blocked are final.
 Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --session $SESSION_ID --repo S, which refuses unless that session already holds a fresh lock: claim, then verify, then resume.
+Immediately after recording a `needs-human` terminalization, and before reporting the park to the operator,
+publish a parked control-plane snapshot exactly as *Parked control-plane snapshot* below requires. A park
+is not reported until that snapshot is published or its failure is recorded in the report.
 For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
 Report top-level needs-human as parked with its reason and explicit factory resume command.
 Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
@@ -187,6 +190,50 @@ written to the root is untracked output that makes the integration worktree dirt
 an observably clean tree: `worktree_clean` records false, the suite is skipped, and post-merge verify
 classifies `unavailable`, which parks the run. Ignoring the root paths instead is not the fix — `.gitignore`
 is privileged precisely because ignoring a file conceals it from these checks.
+
+### Parked control-plane snapshot
+
+A parked run waits for outside intervention, and its control plane otherwise exists only inside the
+sandbox: the completed handoff is the only thing that archives it, and that handoff is entered only for
+`completed`. So anything that removed the sandbox destroyed the manifest, the approved gates, the ratified
+plan and every review verdict, leaving the run neither resumable nor reconstructable.
+
+Publish the live plane `P` to `$O/.factory/.parked/$R`. Inspect `$O/.factory` and `$O/.factory/.parked` with
+non-following metadata reads, creating each missing parent one directory at a time and requiring any present
+one to be a real directory rather than a symbolic link. Never write through a symlinked parent, and never
+write anywhere but under `$O/.factory/.parked`.
+
+**Publication is staged, verified, then swapped, so a later park can never degrade the last good snapshot.**
+
+1. Copy `P` to `$O/.factory/.parked/.staging-$R`, preserving every entry, its mode, and symlinks as
+   symlinks. `W` is outside `P`; do not copy slice worktrees or any other part of `S`. Require no entry at
+   the staging path first; remove only a staging path this procedure itself left behind.
+2. Build source and destination inventories exactly as the completed archive does — every entry's relative
+   path, type and mode, a SHA-256 for each regular file, a link target for each symlink, sorted lexically —
+   and require exact equality. An unverified staging tree is never published.
+3. Only then swap. With no previous snapshot, rename staging to `$O/.factory/.parked/$R`. With one present,
+   rename it to `$O/.factory/.parked/.prior-$R`, rename staging into place, and only then remove the prior
+   copy. If the second rename fails, rename the prior copy back and report; never leave the canonical path
+   holding a partial tree.
+4. On any failure in 1 through 3, leave the previous snapshot exactly as it was, remove only this
+   procedure's staging or prior path, and record the failure in the park report.
+
+`.staging-$R` and `.prior-$R` cannot be run ids, so neither is ever a manifest candidate.
+
+Three properties make this safe to do at a park rather than only at completion:
+
+1. `.parked` cannot be a run id, so a snapshot never occupies the completed archive at `$O/.factory/$R` and
+   never becomes a manifest candidate. A run may park, resume, and later complete with its handoff archive
+   unaffected, and relaunching the same run id is not blocked by a snapshot left behind.
+2. It never touches `S`. The snapshot is a copy out; removal remains the completed handoff's guarded step
+   and nothing else's.
+3. A snapshot failure is reported and does not prevent or undo the park. Refusing to park because a copy
+   failed would leave `status: running` with nothing alive, which every health signal misreads — a worse
+   outcome than a missing snapshot.
+
+A snapshot is evidence for recovery, not a resumable run: resume operates on the sandbox manifest. Do not
+publish one for `blocked` or `partial`, which are not resumable, and never treat a snapshot as authority
+over the live plane.
 
 At every interactive gate, `changes: <feedback>` records `changes`, follows
 `changes-at-gate:<name>`, revises only the affected stage, and re-presents it pending. `stop` requires
@@ -1911,36 +1958,6 @@ git -C "$O" fetch --atomic --no-tags "$S" \
 Never add `--force`, a leading `+`, tags, one fetch per branch, or a push. If every destination already
 equals its source, run no fetch. Capture the complete inventory before preflight so a collision cannot
 leave only an earlier branch fetched.
-
-### Parked control-plane snapshot
-
-Immediately after recording a `needs-human` terminalization, and before reporting the park to the operator,
-snapshot the live control plane `P` to `$O/.factory/.parked/$R`. A parked run is by definition waiting for
-outside intervention, and until this its control plane existed only inside the sandbox — so anything that
-removed the sandbox destroyed the manifest, the approved gates, the ratified plan and every review verdict,
-and the run could then be neither resumed nor reconstructed.
-
-Inspect `$O/.factory` and `$O/.factory/.parked` with non-following metadata reads, creating each missing
-parent one directory at a time and requiring any present one to be a real directory rather than a symbolic
-link. Copy `P` preserving every entry, its mode, and symlinks as symlinks. `W` is outside `P`; do not copy
-slice worktrees or any other part of `S`. Unlike the completed archive, a snapshot **replaces its own prior
-snapshot** for the same `R`, because a run may park more than once and the newest park is the useful one.
-Never write through a symlinked parent, and never write anywhere but under `$O/.factory/.parked`.
-
-Three properties make this safe to do at a park rather than only at completion:
-
-1. `.parked` cannot be a run id, so a snapshot never occupies the completed archive at `$O/.factory/$R` and
-   never becomes a manifest candidate. A run may park, resume, and later complete with its handoff archive
-   unaffected, and a relaunch of the same run id is not blocked by a snapshot left behind.
-2. It never touches `S`. The snapshot is a copy out; removal, if it ever happens, remains the completed
-   handoff's guarded step and nothing else's.
-3. A snapshot failure is reported and does not prevent or undo the park. Refusing to park because a copy
-   failed would leave `status: running` with nothing alive, which every health signal misreads — a worse
-   outcome than a missing snapshot.
-
-A snapshot is evidence for recovery, not a resumable run: resume operates on the sandbox manifest. Do not
-snapshot for `blocked` or `partial`, which are not resumable, and never treat a snapshot as authority over
-the live plane.
 
 ### Completed sandbox archive
 

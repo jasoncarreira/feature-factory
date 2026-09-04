@@ -111,7 +111,8 @@ directory to `$O/.factory/.parked/<R>` immediately after recording the park. A p
 outside intervention, and its control plane otherwise exists only inside the sandbox, so anything that
 removed the sandbox destroyed the manifest and every accepted gate with it. `.parked` cannot be a run
 id, so a snapshot never occupies the completed archive at `$O/.factory/<R>` and never blocks
-re-initialising the same run id. A failed snapshot is reported and never prevents the park. `blocked`
+re-initialising the same run id. It is published by a staged, verified swap, so a failed later park cannot degrade the last good
+snapshot. A failed snapshot is reported and never prevents the park. `blocked`
 and `partial` are not snapshotted, and a snapshot is evidence for recovery rather than a resumable run.
 
 Malformed config, malformed payload, a non-zero exit, or unavailable exit status refuses before any

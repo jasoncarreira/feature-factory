@@ -15,6 +15,18 @@ One change: a parked run's control plane is no longer destroyed with its sandbox
   review verdicts when a controller misread a correct lock refusal as a failure and swept a parked sandbox.
   What survived was salvaged from opencode's session database rather than from the factory, which is the
   wrong way round.
+- **It is required by the shared park definition, not by a late subsection.** The requirement sits between
+  entering the parked stop and reporting it, in `## Operating modes` where every mode's park semantics are
+  defined, and a park is not reported until the snapshot is published or its failure recorded. A first
+  attempt placed the mechanics inside `## Step 7`, whose entry conditions are post-draft-PR and whose first
+  transition is `completed` — so no park path reached it. Prose nobody reaches is worse than none, because
+  it reads as coverage. Caught in review.
+- **Publication is staged, verified, then swapped.** The copy goes to `.staging-$R`, source and destination
+  inventories must match exactly as the completed archive requires, and only then is it swapped in via
+  `.prior-$R`. On any failure the previous snapshot is left exactly as it was. A first attempt said the
+  snapshot "replaces its own prior snapshot", which permits delete-then-copy — so a failed second park would
+  have erased the last known-good evidence and could leave a partial tree at the canonical path. Also caught
+  in review. Neither `.staging-$R` nor `.prior-$R` can be a run id, so neither is ever a manifest candidate.
 - **Three properties make it safe at a park rather than only at completion**, and all three are stated in
   the contract: `.parked` cannot be a run id, so a snapshot never occupies the completed archive at
   `$O/.factory/$R` and never becomes a manifest candidate blocking a relaunch; it never touches the sandbox,

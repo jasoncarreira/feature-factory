@@ -311,31 +311,49 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   // outside intervention -- was the one state with no durable copy, and mimir chainlink 1521 lost an accepted
   // brief, a ratified ten-slice plan and four review verdicts when a controller swept a parked sandbox.
   //
-  // Instruction, not code, and deliberately so: `sandbox-lifecycle` forbids copy and delete primitives in
-  // this CLI, and archiving is already a driver step -- the completed archive is prose too. A first attempt
-  // implemented this as `cpSync`/`rmSync` inside `terminal` and was rejected by that ban, correctly.
-  // Pinned here because prose with nothing holding it is the drift this repository keeps paying for.
+  // Instruction, not code: `sandbox-lifecycle` forbids copy and delete primitives in this CLI, and archiving
+  // is already a driver step -- the completed archive is prose too. A first attempt put this in `terminal`
+  // with `cpSync`/`rmSync` and that ban rejected it, correctly.
+  //
+  // ROUTING and ORDERING, not presence. Review of the first attempt caught why: the section sat inside
+  // `## Step 7`, whose entry conditions are post-draft-PR and whose first transition is `completed`, so no
+  // park path ever reached it. Prose nobody reaches is worse than none, because it reads as coverage.
   const parkPolicy = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
-  const parkSection = parkPolicy.slice(parkPolicy.indexOf("### Parked control-plane snapshot"),
-    parkPolicy.indexOf("### Completed sandbox archive"));
-  assert.ok(parkSection.length > 800, `the parked-snapshot section looks truncated at ${parkSection.length} chars`);
+  const modesStart = parkPolicy.indexOf("## Operating modes");
+  const modesEnd = parkPolicy.indexOf("## Autonomous mode");
+  assert.ok(modesStart >= 0 && modesEnd > modesStart);
+  const enterAt = parkPolicy.indexOf("Enter the parked stop with factory terminal R needs-human");
+  const routeAt = parkPolicy.indexOf("Immediately after recording a `needs-human` terminalization, and before reporting the park to the operator,");
+  const reportAt = parkPolicy.indexOf("Report top-level needs-human as parked with its reason");
+  const sectionAt = parkPolicy.indexOf("### Parked control-plane snapshot");
+  assert.ok(enterAt >= 0 && routeAt > enterAt && reportAt > routeAt,
+    "the snapshot must be required after entering the park and before reporting it");
+  assert.ok(sectionAt > modesStart && sectionAt < modesEnd,
+    "the mechanics must live inside Operating modes, not inside a completed-only step");
+  assert.ok(sectionAt < parkPolicy.indexOf("### Completed sandbox archive"));
+  assert.match(parkPolicy, /A park\s+is not reported until that snapshot is published or its failure is recorded in the report\./u,
+    "the park report must depend on the snapshot, or the routing is advisory");
+
+  // Failure-safe replacement. The first attempt said "replaces its own prior snapshot", which permits
+  // delete-then-copy: a failed later park would erase the last known-good evidence and could leave a partial
+  // tree at the canonical path. Second review finding.
+  const parkSection = parkPolicy.slice(sectionAt, parkPolicy.indexOf("At every interactive gate"));
   for (const fragment of [
-    "Immediately after recording a `needs-human` terminalization",
-    "snapshot the live control plane `P` to `$O/.factory/.parked/$R`",
-    "replaces its own prior\nsnapshot",
-    "`.parked` cannot be a run id",
-    "never becomes a manifest candidate",
+    "Publication is staged, verified, then swapped, so a later park can never degrade the last good snapshot",
+    "$O/.factory/.parked/.staging-$R",
+    "require exact equality. An unverified staging tree is never published",
+    "rename it to `$O/.factory/.parked/.prior-$R`",
+    "rename the prior copy back and report; never leave the canonical path\n   holding a partial tree",
+    "leave the previous snapshot exactly as it was",
+    "`.staging-$R` and `.prior-$R` cannot be run ids",
     "It never touches `S`",
-    "A snapshot failure is reported and does not prevent or undo the park",
-    "Do not\nsnapshot for `blocked` or `partial`",
+    "does not prevent or undo the park",
+    "Do not\npublish one for `blocked` or `partial`",
   ]) {
     assert.ok(parkSection.includes(fragment), `the parked-snapshot contract must state: ${fragment}`);
   }
-  // The snapshot must not be described as the completed archive's location, or a resumed run's handoff
-  // collides with it -- the interaction that makes the separate `.parked` prefix load-bearing.
-  assert.doesNotMatch(parkSection, /snapshot[^.]*to `\$O\/\.factory\/\$R`/u);
-  assert.ok(parkPolicy.indexOf("### Parked control-plane snapshot") < parkPolicy.indexOf("### Completed sandbox archive"),
-    "the park snapshot is described before the completed archive it must not collide with");
+  assert.doesNotMatch(parkSection, /replaces its own prior snapshot/u,
+    "unstaged replacement must not return: it can destroy the last good snapshot on a failed park");
 
   const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
   const start = skill.indexOf("## Step 7 — Summary and completed sandbox handoff");
