@@ -14,10 +14,17 @@ requirement reachable and its absence visible.
   reached it. mimir chainlink 1521 parked on a slice ownership omission while verifiably running 0.8.2 — the
   version pin fails closed — and no snapshot was written. The contract also now says what a partial park
   leaves behind: an unreported park with no recovery evidence.
-- **`status` reports `park_snapshot` for a parked run**: the published path, or `null` when none exists. It
-  is an existence check computed at read time, so there is no stored key to keep truthful and no answer that
-  can go stale against the filesystem. The copy itself remains a driver step, because this CLI is forbidden
-  copy and delete primitives.
+- **`status` reports `park_snapshot` for a parked run**: the published path, or `null`. It answers whether a
+  snapshot exists that corresponds to the *current* control plane, bound by comparing the snapshot's own
+  `run.json` with the live one — every transition rewrites that file, so equality means the plane has not
+  moved since the snapshot was taken. Two file reads at read time, so there is no stored key to keep truthful
+  and no answer that can go stale against the filesystem. `lstat` without following, so a file or symlink at
+  the canonical path is never mistaken for a snapshot. The copy itself remains a driver step, because this
+  CLI is forbidden copy and delete primitives.
+  A first attempt answered only "does the pathname exist", which is a false green in exactly the case this
+  change exists to catch: park, snapshot, resume, mutate the plane, park again with the snapshot skipped, and
+  a stale path still reported as evidence. Caught in review. `null` therefore also covers a snapshot left by
+  an earlier park; publishing again is what makes it correspond.
 - **Observability rather than enforcement.** It cannot make the snapshot happen; it makes a missing one a
   fact a controller can act on. That is the property that made the 0.8.0 publishing-identity work land, and
   prose alone has now failed twice in this same place — 0.7.5's environment override was the first, this the

@@ -153,18 +153,27 @@ function briefDigestFor(decision, state, runDir) {
   return state.plan_digest;
 }
 
-// Observability, not enforcement: an existence check, so a park that skipped its snapshot is a visible fact
-// rather than something discovered when the snapshot is needed and absent. The copy itself stays a driver
-// step -- this CLI is forbidden copy and delete primitives -- and prose alone has now failed twice in this
-// exact place: 0.7.5's environment override, and 0.8.2's snapshot, which did not fire on mimir chainlink
-// 1521's first real park because eleven one-line park rules deferred to a sequence the snapshot was merely
-// appended to. Computed at read time rather than stored, so there is no schema key to keep truthful and the
-// answer cannot go stale against the filesystem.
-function observedParkSnapshot(repo, runId) {
+// Observability, not enforcement: the copy stays a driver step, because this CLI is forbidden copy and
+// delete primitives. What this answers is narrower and has to be exact -- does a snapshot exist that
+// corresponds to the CURRENT control plane -- because the first version answered "does the pathname exist"
+// and that is a false green in the case this whole change exists to catch: park, snapshot, resume, mutate
+// the plane, park again with step 2 skipped, and a stale path still reported as evidence. Caught in review.
+// The binding is the snapshot's own `run.json` compared byte-for-byte with the live one. Every transition
+// rewrites that file, so equality means nothing has changed in the manifest since the snapshot was taken --
+// which is the question, and is two file reads rather than a walk of the whole plane on every status call.
+// A snapshot that no longer matches is reported as absent, because a snapshot that does not correspond to
+// this plane is not recovery evidence for this park. `lstat` without following, so a file or a symlink at
+// the canonical path is never mistaken for a published snapshot.
+function observedParkSnapshot(repo, runId, runDir) {
   const container = dirname(repo);
   if (basename(container) !== ".factory-sandboxes" || basename(repo) !== runId) return null;
   const candidate = join(dirname(container), CONTROL_PLANE, ".parked", runId);
-  return existsSync(candidate) ? candidate : null;
+  try {
+    if (!lstatSync(candidate).isDirectory()) return null;
+    return readFileSync(join(candidate, "run.json")).equals(readFileSync(join(runDir, "run.json"))) ? candidate : null;
+  } catch {
+    return null;
+  }
 }
 
 function runDirFor(flags, runId) {
@@ -917,7 +926,7 @@ const HANDLERS = {
       branch: run.branch,
       pr_base: run.pr_base ?? null,
       publishing_identity: run.publishing_identity ?? null,
-      park_snapshot: run.status === "needs-human" ? observedParkSnapshot(resolve(flags.repo ?? process.cwd()), runId) : null,
+      park_snapshot: run.status === "needs-human" ? observedParkSnapshot(resolve(flags.repo ?? process.cwd()), runId, runDir) : null,
       pr_draft: run.pr_draft ?? true,
       lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,

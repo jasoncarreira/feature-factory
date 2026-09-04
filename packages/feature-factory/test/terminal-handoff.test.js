@@ -408,11 +408,34 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   factory(obsSandbox, "terminal", "obs-run", "needs-human", "--reason", "parked without a snapshot");
   assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
     "a park whose snapshot was skipped must report null, not silence");
+  // The observation must prove the snapshot corresponds to THIS plane, not merely that the pathname exists.
+  // Review of the first attempt caught the false green: park, snapshot, resume, mutate the plane, park again
+  // with step 2 skipped, and `existsSync` still reported the stale path as evidence -- the exact omission
+  // this change exists to expose. The binding is the snapshot's own `run.json` against the live one, because
+  // every transition rewrites that file.
   const published = join(obsOperator, ".factory", ".parked", "obs-run");
   mkdirSync(published, { recursive: true });
   writeFileSync(join(published, "run.json"), "{}\n");
+  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
+    "a directory whose manifest does not match the live plane is not this park's evidence");
+  const liveManifest = join(obsSandbox, ".factory", "obs-run", "run.json");
+  writeFileSync(join(published, "run.json"), readFileSync(liveManifest));
   assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, published,
-    "a published snapshot must be reported by path, so a controller can verify it without guessing");
+    "a snapshot matching the live plane is reported by path, so a controller can verify it without guessing");
+  // Stale: the snapshot was published for an earlier park, the plane has since moved on.
+  const staleManifest = JSON.parse(readFileSync(liveManifest, "utf8"));
+  writeFileSync(join(published, "run.json"), `${JSON.stringify({ ...staleManifest, updated_at: "2026-01-01T00:00:00.000Z" }, null, 2)}\n`);
+  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
+    "a snapshot from an earlier park must not be reported as this park's evidence");
+  // Neither a file nor a symlink at the canonical path is a published snapshot.
+  rmSync(published, { recursive: true, force: true });
+  writeFileSync(published, "not a snapshot\n");
+  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
+    "a file at the canonical path is not a published snapshot");
+  rmSync(published, { force: true });
+  symlinkSync(join(obsSandbox, ".factory", "obs-run"), published);
+  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
+    "a symlink at the canonical path is not a published snapshot, even one pointing at the live plane");
 
   const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
   const start = skill.indexOf("## Step 7 — Summary and completed sandbox handoff");

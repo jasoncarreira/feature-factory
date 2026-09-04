@@ -160,7 +160,10 @@ reporting anything:
 
 A park that completes only step 1 is an unreported park with no recovery evidence, which is the state
 this sequence exists to prevent. Verify step 2 the way an outside observer would: qualified status
-reports `park_snapshot` as the published path, or `null` when no snapshot exists.
+reports `park_snapshot` as the published path, or `null` when no snapshot exists. `null` also covers a
+snapshot left by an earlier park: status reports the path only while the snapshot's own manifest still
+matches the live one, because a snapshot that no longer corresponds to this plane is not evidence for
+this park. Publishing again is what makes it correspond.
 
 For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
 Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.

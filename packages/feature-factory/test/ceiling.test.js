@@ -975,7 +975,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Tripwire 4600 -> 4650, using the authorization given during the 0.8.2 discussion for this same feature
     // area. It went unused then because that implementation turned out to be prose; the observability half is
     // code, and landing on 4599 would leave one line before a review fix needed a raise mid-flight.
-    assert.equal(total, 4599, "reporting park_snapshot from status lands at 4599 production lines");
+    // 4599 -> 4608 in review: the observation now proves the snapshot corresponds to the current plane.
+    // The first version answered "does the pathname exist", which is a false green in exactly the case this
+    // change exists to catch -- park, snapshot, resume, mutate, park again with step 2 skipped, and a stale
+    // path still reported as evidence. It also accepted a file or a symlink there. The binding is the
+    // snapshot's own `run.json` against the live one, since every transition rewrites that file, plus an
+    // `lstat` that does not follow. Two file reads, not a walk of the plane on every status call.
+    assert.equal(total, 4608, "binding the snapshot observation to the live plane lands at 4608 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
