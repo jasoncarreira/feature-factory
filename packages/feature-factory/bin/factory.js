@@ -4,7 +4,7 @@
 // The orchestrator calls this CLI instead of writing control-plane state directly.
 // Flags are declared per command; unknown options fail rather than becoming missing fields.
 // Schema validation surrounds every state write.
-import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
@@ -154,22 +154,47 @@ function briefDigestFor(decision, state, runDir) {
 }
 
 // Observability, not enforcement: the copy stays a driver step, because this CLI is forbidden copy and
-// delete primitives. What this answers is narrower and has to be exact -- does a snapshot exist that
-// corresponds to the CURRENT control plane -- because the first version answered "does the pathname exist"
-// and that is a false green in the case this whole change exists to catch: park, snapshot, resume, mutate
-// the plane, park again with step 2 skipped, and a stale path still reported as evidence. Caught in review.
-// The binding is the snapshot's own `run.json` compared byte-for-byte with the live one. Every transition
-// rewrites that file, so equality means nothing has changed in the manifest since the snapshot was taken --
-// which is the question, and is two file reads rather than a walk of the whole plane on every status call.
-// A snapshot that no longer matches is reported as absent, because a snapshot that does not correspond to
-// this plane is not recovery evidence for this park. `lstat` without following, so a file or a symlink at
-// the canonical path is never mistaken for a published snapshot.
+// delete primitives. What this answers has to be exact, and two earlier versions were not. "Does the
+// pathname exist" reported a snapshot from an earlier park as this park's evidence. Matching only `run.json`
+// then proved one file was copied after the current terminalization, not that the publication finished --
+// a driver that created the directory and copied that file first, or an interrupted copy, still read as
+// published. Both were false greens in the exact case this exists to catch, and both were caught in review.
+// So compare inventories, which is the property the publication contract already defines: every entry's
+// relative path and type, a size for regular files, a target for symlinks, sorted. That detects a partial or
+// interrupted publication and any missing, extra or resized artifact. It is not a content digest -- sizes,
+// not hashes, because `status` is polled continuously and the plane carries a 143 KB workflow copy, and the
+// failure mode here is a driver that did not finish rather than someone forging a snapshot. The manifest is
+// the exception and is compared by bytes: it is what identifies which park a snapshot belongs to, and an
+// earlier park's `updated_at` is the same length as this one's, so size alone would call a stale snapshot
+// current. My own regression caught that, which is the argument for writing the stale case first.
+// Every path component is checked with `lstat` and never followed, since `lstat` on the final entry alone
+// still follows intermediate symlinks.
+function planeInventory(root) {
+  const entries = [];
+  const walk = (dir, prefix) => {
+    for (const name of readdirSync(dir).sort()) {
+      const full = join(dir, name);
+      const rel = prefix ? `${prefix}/${name}` : name;
+      const stat = lstatSync(full);
+      if (stat.isSymbolicLink()) entries.push(`l ${rel} ${readlinkSync(full)}`);
+      else if (stat.isDirectory()) { entries.push(`d ${rel}`); walk(full, rel); }
+      else entries.push(`f ${rel} ${stat.size}`);
+    }
+  };
+  walk(root, "");
+  return entries.join("\n");
+}
+
 function observedParkSnapshot(repo, runId, runDir) {
   const container = dirname(repo);
   if (basename(container) !== ".factory-sandboxes" || basename(repo) !== runId) return null;
-  const candidate = join(dirname(container), CONTROL_PLANE, ".parked", runId);
+  const operatorRoot = dirname(container);
+  const candidate = join(operatorRoot, CONTROL_PLANE, ".parked", runId);
   try {
-    if (!lstatSync(candidate).isDirectory()) return null;
+    for (const component of [join(operatorRoot, CONTROL_PLANE), join(operatorRoot, CONTROL_PLANE, ".parked"), candidate]) {
+      if (!lstatSync(component).isDirectory()) return null;
+    }
+    if (planeInventory(candidate) !== planeInventory(runDir)) return null;
     return readFileSync(join(candidate, "run.json")).equals(readFileSync(join(runDir, "run.json"))) ? candidate : null;
   } catch {
     return null;

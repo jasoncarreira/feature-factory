@@ -15,16 +15,22 @@ requirement reachable and its absence visible.
   version pin fails closed — and no snapshot was written. The contract also now says what a partial park
   leaves behind: an unreported park with no recovery evidence.
 - **`status` reports `park_snapshot` for a parked run**: the published path, or `null`. It answers whether a
-  snapshot exists that corresponds to the *current* control plane, bound by comparing the snapshot's own
-  `run.json` with the live one — every transition rewrites that file, so equality means the plane has not
-  moved since the snapshot was taken. Two file reads at read time, so there is no stored key to keep truthful
-  and no answer that can go stale against the filesystem. `lstat` without following, so a file or symlink at
-  the canonical path is never mistaken for a snapshot. The copy itself remains a driver step, because this
-  CLI is forbidden copy and delete primitives.
-  A first attempt answered only "does the pathname exist", which is a false green in exactly the case this
-  change exists to catch: park, snapshot, resume, mutate the plane, park again with the snapshot skipped, and
-  a stale path still reported as evidence. Caught in review. `null` therefore also covers a snapshot left by
-  an earlier park; publishing again is what makes it correspond.
+  complete publication exists for the *current* control plane. Completeness is inventory equality over the
+  whole plane — relative path, type, size for regular files, target for symlinks, sorted — which is the
+  property the publication contract already defines. Currency is the manifest compared by bytes, because an
+  earlier park's `updated_at` is the same length as this one's and size alone would call a stale snapshot
+  current. Sizes rather than hashes for everything else: `status` is polled continuously and the plane
+  carries a 143 KB workflow copy, and the failure mode is a driver that did not finish rather than a forged
+  snapshot. Every path component is `lstat`ed and never followed, since `lstat` on the final entry still
+  follows intermediate symlinks. Computed at read time, so there is no stored key to keep truthful. The copy
+  itself remains a driver step, because this CLI is forbidden copy and delete primitives.
+  Two earlier versions were false greens of their own, both caught in review. "Does the pathname exist"
+  reported a snapshot from an earlier park as this park's evidence. Matching only `run.json` proved one file
+  was copied after the current terminalization, not that publication finished — a driver that created the
+  directory and copied that file first, or an interrupted copy, still read as published.
+  `null` therefore covers a snapshot left by an earlier park, an incomplete or altered tree, a file or
+  symlink at the canonical path, and a symlinked parent component. Publishing again is what makes it
+  correspond.
 - **Observability rather than enforcement.** It cannot make the snapshot happen; it makes a missing one a
   fact a controller can act on. That is the property that made the 0.8.0 publishing-identity work land, and
   prose alone has now failed twice in this same place — 0.7.5's environment override was the first, this the

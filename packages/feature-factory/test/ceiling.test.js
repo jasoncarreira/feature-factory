@@ -975,13 +975,21 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Tripwire 4600 -> 4650, using the authorization given during the 0.8.2 discussion for this same feature
     // area. It went unused then because that implementation turned out to be prose; the observability half is
     // code, and landing on 4599 would leave one line before a review fix needed a raise mid-flight.
-    // 4599 -> 4608 in review: the observation now proves the snapshot corresponds to the current plane.
-    // The first version answered "does the pathname exist", which is a false green in exactly the case this
-    // change exists to catch -- park, snapshot, resume, mutate, park again with step 2 skipped, and a stale
-    // path still reported as evidence. It also accepted a file or a symlink there. The binding is the
-    // snapshot's own `run.json` against the live one, since every transition rewrites that file, plus an
-    // `lstat` that does not follow. Two file reads, not a walk of the plane on every status call.
-    assert.equal(total, 4608, "binding the snapshot observation to the live plane lands at 4608 production lines");
+    // 4599 -> 4633 across two review rounds, because the observation was twice a false green of its own.
+    // "Does the pathname exist" reported a snapshot from an earlier park as this park's evidence. Matching
+    // only `run.json` then proved one file was copied after the current terminalization, not that the
+    // publication finished -- a driver that created the directory and copied that file first, or an
+    // interrupted copy, still read as published. The test written for that version constructed exactly the
+    // accepting shape, so it demonstrated the hole rather than catching it.
+    // The property is now the one the publication contract already defines: inventory equality over the whole
+    // plane -- relative path, type, size for files, target for links, sorted -- plus the manifest compared by
+    // bytes, because an earlier park's `updated_at` is the same length as this one's and size alone would
+    // call a stale snapshot current. My own stale regression caught that, which is the argument for writing
+    // the failing case before the passing one. Sizes rather than hashes for the rest: `status` is polled
+    // continuously and the plane carries a 143 KB workflow copy, and the failure mode is an unfinished
+    // driver, not a forged snapshot. Every path component is `lstat`ed and never followed, since `lstat` on
+    // the final entry still follows intermediate symlinks.
+    assert.equal(total, 4633, "proving the publication happened lands at 4633 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

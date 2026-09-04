@@ -408,34 +408,53 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   factory(obsSandbox, "terminal", "obs-run", "needs-human", "--reason", "parked without a snapshot");
   assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
     "a park whose snapshot was skipped must report null, not silence");
-  // The observation must prove the snapshot corresponds to THIS plane, not merely that the pathname exists.
-  // Review of the first attempt caught the false green: park, snapshot, resume, mutate the plane, park again
-  // with step 2 skipped, and `existsSync` still reported the stale path as evidence -- the exact omission
-  // this change exists to expose. The binding is the snapshot's own `run.json` against the live one, because
-  // every transition rewrites that file.
+  // The observation must prove the publication HAPPENED, not that a pathname exists and not that one file
+  // was copied. Three versions of this were wrong and each was caught in review. `existsSync` reported a
+  // snapshot from an earlier park as this park's evidence. Matching only `run.json` proved one file was
+  // copied after the current terminalization -- a driver that created the directory and copied that file
+  // first, or an interrupted copy, still read as published; the test for it constructed exactly that shape,
+  // so the test demonstrated the hole rather than catching it. The property is inventory equality, which is
+  // what the publication contract already requires.
   const published = join(obsOperator, ".factory", ".parked", "obs-run");
+  const livePlane = join(obsSandbox, ".factory", "obs-run");
+  const snapshotOf = (parked) => factory(obsSandbox, "status", "obs-run", "--json").park_snapshot;
   mkdirSync(published, { recursive: true });
-  writeFileSync(join(published, "run.json"), "{}\n");
-  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
-    "a directory whose manifest does not match the live plane is not this park's evidence");
-  const liveManifest = join(obsSandbox, ".factory", "obs-run", "run.json");
-  writeFileSync(join(published, "run.json"), readFileSync(liveManifest));
-  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, published,
-    "a snapshot matching the live plane is reported by path, so a controller can verify it without guessing");
-  // Stale: the snapshot was published for an earlier park, the plane has since moved on.
-  const staleManifest = JSON.parse(readFileSync(liveManifest, "utf8"));
+  cpSync(join(livePlane, "run.json"), join(published, "run.json"));
+  assert.equal(snapshotOf(), null,
+    "a directory holding only a current run.json is not a published snapshot");
+  cpSync(livePlane, published, { recursive: true });
+  assert.equal(snapshotOf(), published,
+    "a complete publication is reported by path, so a controller can verify it without guessing");
+  // A missing artifact, with run.json still matching: the case the manifest-only check accepted.
+  const workflowCopy = join(published, "WORKFLOW.md");
+  const workflowBytes = readFileSync(workflowCopy);
+  rmSync(workflowCopy);
+  assert.equal(snapshotOf(), null, "a publication missing an artifact is not complete, even with a current run.json");
+  writeFileSync(workflowCopy, Buffer.concat([workflowBytes, Buffer.from("x")]));
+  assert.equal(snapshotOf(), null, "a resized artifact is not a faithful copy of the plane");
+  writeFileSync(workflowCopy, workflowBytes);
+  assert.equal(snapshotOf(), published, "restoring the artifact restores the observation");
+  // Stale: published for an earlier park, the plane has since moved on.
+  const staleManifest = JSON.parse(readFileSync(join(livePlane, "run.json"), "utf8"));
   writeFileSync(join(published, "run.json"), `${JSON.stringify({ ...staleManifest, updated_at: "2026-01-01T00:00:00.000Z" }, null, 2)}\n`);
-  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
-    "a snapshot from an earlier park must not be reported as this park's evidence");
-  // Neither a file nor a symlink at the canonical path is a published snapshot.
+  assert.equal(snapshotOf(), null, "a snapshot from an earlier park is not this park's evidence");
+  // Neither a file, a symlink, nor a symlinked parent component is a published snapshot. `lstat` on the
+  // final entry alone follows intermediate components, so every component is checked.
   rmSync(published, { recursive: true, force: true });
   writeFileSync(published, "not a snapshot\n");
-  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
-    "a file at the canonical path is not a published snapshot");
+  assert.equal(snapshotOf(), null, "a file at the canonical path is not a published snapshot");
   rmSync(published, { force: true });
-  symlinkSync(join(obsSandbox, ".factory", "obs-run"), published);
-  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
-    "a symlink at the canonical path is not a published snapshot, even one pointing at the live plane");
+  symlinkSync(livePlane, published);
+  assert.equal(snapshotOf(), null, "a symlink at the canonical path is not a published snapshot");
+  // Moved aside rather than removed: `rmSync` without `recursive` throws EISDIR on a symlink to a directory,
+  // and with `recursive` it would follow the link into the live plane and delete it.
+  renameSync(published, join(obsRoot, "discarded-symlink"));
+  const elsewhere = join(obsRoot, "elsewhere");
+  mkdirSync(elsewhere, { recursive: true });
+  cpSync(livePlane, join(elsewhere, "obs-run"), { recursive: true });
+  rmSync(join(obsOperator, ".factory", ".parked"), { recursive: true, force: true });
+  symlinkSync(elsewhere, join(obsOperator, ".factory", ".parked"));
+  assert.equal(snapshotOf(), null, "a symlinked parent component is not a published snapshot path");
 
   const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
   const start = skill.indexOf("## Step 7 — Summary and completed sandbox handoff");
