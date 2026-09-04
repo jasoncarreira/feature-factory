@@ -5,7 +5,7 @@
 // Flags are declared per command; unknown options fail rather than becoming missing fields.
 // Schema validation surrounds every state write.
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -151,6 +151,20 @@ function briefDigestFor(decision, state, runDir) {
     throw new CliError("plan/slices.json changed since the brief gate was presented; re-present it before approving");
   }
   return state.plan_digest;
+}
+
+// Observability, not enforcement: an existence check, so a park that skipped its snapshot is a visible fact
+// rather than something discovered when the snapshot is needed and absent. The copy itself stays a driver
+// step -- this CLI is forbidden copy and delete primitives -- and prose alone has now failed twice in this
+// exact place: 0.7.5's environment override, and 0.8.2's snapshot, which did not fire on mimir chainlink
+// 1521's first real park because eleven one-line park rules deferred to a sequence the snapshot was merely
+// appended to. Computed at read time rather than stored, so there is no schema key to keep truthful and the
+// answer cannot go stale against the filesystem.
+function observedParkSnapshot(repo, runId) {
+  const container = dirname(repo);
+  if (basename(container) !== ".factory-sandboxes" || basename(repo) !== runId) return null;
+  const candidate = join(dirname(container), CONTROL_PLANE, ".parked", runId);
+  return existsSync(candidate) ? candidate : null;
 }
 
 function runDirFor(flags, runId) {
@@ -903,6 +917,7 @@ const HANDLERS = {
       branch: run.branch,
       pr_base: run.pr_base ?? null,
       publishing_identity: run.publishing_identity ?? null,
+      park_snapshot: run.status === "needs-human" ? observedParkSnapshot(resolve(flags.repo ?? process.cwd()), runId) : null,
       pr_draft: run.pr_draft ?? true,
       lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,

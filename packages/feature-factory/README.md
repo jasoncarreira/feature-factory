@@ -115,6 +115,8 @@ re-initialising the same run id. It is published by a staged, verified swap, so 
 snapshot. A failed snapshot is reported and never prevents the park. `blocked`
 and `partial` are not snapshotted, and a snapshot is evidence for recovery rather than a resumable run.
 
+Qualified status reports `park_snapshot` for a parked run: the published path, or `null` when no snapshot
+exists. That is how an outside observer verifies the snapshot happened rather than assuming it.
 Malformed config, malformed payload, a non-zero exit, or unavailable exit status refuses before any
 run effect and never falls back:
 

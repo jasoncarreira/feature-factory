@@ -148,12 +148,21 @@ resume; invocation flags do not select resumed behavior:
 An inability to ask a human never promotes interactive or headless to autonomous.
 
 Mode result needs-human means parked and explicitly resumable; only completed, partial, and blocked are final.
-Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --session $SESSION_ID --repo S, which refuses unless that session already holds a fresh lock: claim, then verify, then resume.
-Immediately after recording a `needs-human` terminalization, and before reporting the park to the operator,
-publish a parked control-plane snapshot exactly as *Parked control-plane snapshot* below requires. A park
-is not reported until that snapshot is published or its failure is recorded in the report.
+**The parked stop is one ordered sequence, and every rule in this document that says a run parks enters
+it.** Those rules name the cause; they do not restate the steps. Execute all three, in order, before
+reporting anything:
+
+1. Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --session $SESSION_ID --repo S, which refuses unless that session already holds a fresh lock: claim, then verify, then resume.
+2. Immediately after recording a `needs-human` terminalization, and before reporting the park to the operator,
+   publish a parked control-plane snapshot exactly as *Parked control-plane snapshot* below requires. A park
+   is not reported until that snapshot is published or its failure is recorded in the report.
+3. Report top-level needs-human as parked with its reason and explicit factory resume command.
+
+A park that completes only step 1 is an unreported park with no recovery evidence, which is the state
+this sequence exists to prevent. Verify step 2 the way an outside observer would: qualified status
+reports `park_snapshot` as the published path, or `null` when no snapshot exists.
+
 For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
-Report top-level needs-human as parked with its reason and explicit factory resume command.
 Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
 A park that asks a question about the request itself -- a contradiction between criteria, a scope lock,
 or a pinned constraint -- is not fixed by resuming. Resume continues from the existing manifest and

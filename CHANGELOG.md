@@ -3,6 +3,30 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.3
+
+0.8.2 required a parked control-plane snapshot and it did not happen on the first real park. This makes the
+requirement reachable and its absence visible.
+
+- **The parked stop is now one numbered, ordered sequence** — enter the park, publish the snapshot, report —
+  and the eleven one-line rules that say a run parks enter *that*, rather than each restating steps. 0.8.2
+  appended the snapshot to the shared park semantics as a sentence; a driver walking a step list never
+  reached it. mimir chainlink 1521 parked on a slice ownership omission while verifiably running 0.8.2 — the
+  version pin fails closed — and no snapshot was written. The contract also now says what a partial park
+  leaves behind: an unreported park with no recovery evidence.
+- **`status` reports `park_snapshot` for a parked run**: the published path, or `null` when none exists. It
+  is an existence check computed at read time, so there is no stored key to keep truthful and no answer that
+  can go stale against the filesystem. The copy itself remains a driver step, because this CLI is forbidden
+  copy and delete primitives.
+- **Observability rather than enforcement.** It cannot make the snapshot happen; it makes a missing one a
+  fact a controller can act on. That is the property that made the 0.8.0 publishing-identity work land, and
+  prose alone has now failed twice in this same place — 0.7.5's environment override was the first, this the
+  second. Both failures were silent, which is the part worth fixing.
+
+Production source moves 4584 → 4599, and the tripwire 4600 → 4650 using the authorization given during the
+0.8.2 discussion for this feature area, which went unused then because that implementation turned out to be
+prose.
+
 ## 0.8.2
 
 One change: a parked run's control plane is no longer destroyed with its sandbox.

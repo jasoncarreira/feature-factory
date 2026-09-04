@@ -375,6 +375,45 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.doesNotMatch(parkSection, /On any failure in 1 through 3, leave the previous snapshot exactly as it was/u,
     "the flat failure rule must not return: it is unimplementable once staging has been committed");
 
+  // ROUTING, take two. 0.8.2 required the snapshot and it did not fire on the first real park: eleven
+  // one-line rules say a run parks and defer to the shared semantics, and the snapshot was appended to those
+  // semantics as a sentence rather than being a step of an ordered sequence those rules enter. The parked
+  // stop is now numbered, and the numbering is what a driver walking a list actually follows.
+  const seqLead = parkPolicy.indexOf("**The parked stop is one ordered sequence, and every rule in this document that says a run parks enters");
+  assert.ok(seqLead >= 0, "the parked stop must be introduced as one ordered sequence every park rule enters");
+  const stepPositions = ["1. Enter the parked stop with factory terminal R needs-human",
+    "2. Immediately after recording a `needs-human` terminalization",
+    "3. Report top-level needs-human as parked with its reason"].map((step) => parkPolicy.indexOf(step));
+  assert.ok(stepPositions.every((at, index) => at > (index === 0 ? seqLead : stepPositions[index - 1])),
+    `the three park steps must be numbered and ordered: ${stepPositions.join(", ")}`);
+  assert.match(parkPolicy, /A park that completes only step 1 is an unreported park with no recovery evidence/u,
+    "the sequence must say what a partial park leaves behind, or step 2 reads as optional");
+  assert.match(parkPolicy, /qualified status\s+reports `park_snapshot` as the published path, or `null` when no snapshot exists/u,
+    "the contract must name how an outside observer verifies step 2");
+
+  // And the observable half, live: a park with no snapshot on disk reports null rather than nothing at all.
+  // This is what would have caught 0.8.2's miss without waiting for a real run to need the snapshot.
+  const obsRoot = realpathSync(mkdtempSync(join(tmpdir(), "factory-terminal-obs-")));
+  const obsOperator = join(obsRoot, "operator");
+  mkdirSync(obsOperator);
+  git(obsOperator, "init", "--quiet", "--initial-branch=main");
+  git(obsOperator, "config", "user.name", "Factory Test");
+  git(obsOperator, "config", "user.email", "factory@example.test");
+  writeFileSync(join(obsOperator, ".gitignore"), ".factory/\n/.factory-sandboxes/\n");
+  git(obsOperator, "add", ".gitignore");
+  git(obsOperator, "commit", "--quiet", "-m", "base");
+  const obsSandbox = initFresh(obsOperator, ["obs-run", "--pr-base", "main", "--mode", "autonomous"]).repository;
+  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
+    "a running run reports no park snapshot");
+  factory(obsSandbox, "terminal", "obs-run", "needs-human", "--reason", "parked without a snapshot");
+  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, null,
+    "a park whose snapshot was skipped must report null, not silence");
+  const published = join(obsOperator, ".factory", ".parked", "obs-run");
+  mkdirSync(published, { recursive: true });
+  writeFileSync(join(published, "run.json"), "{}\n");
+  assert.equal(factory(obsSandbox, "status", "obs-run", "--json").park_snapshot, published,
+    "a published snapshot must be reported by path, so a controller can verify it without guessing");
+
   const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
   const start = skill.indexOf("## Step 7 — Summary and completed sandbox handoff");
   const end = skill.indexOf("## Resuming", start);
