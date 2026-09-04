@@ -94,6 +94,10 @@ function seeded(operator) {
 }
 
 const NEEDS_HUMAN_PROSE = [
+  // Registered rather than reworded around: every `needs-human` mention in the contract must be a named
+  // policy with a forbidden counter-claim, so an unregistered one cannot creep in. The forbidden token
+  // is the mistake this section exists to prevent -- a snapshot is evidence, not something to resume.
+  ["park-snapshot", "Immediately after recording a `needs-human` terminalization, and before reporting the park to the operator,", "resume from the snapshot"],
   ["persisted-mode", "Persisted mode parks a top-level needs-human stop; after the cause is fixed, explicitly resume it with factory resume before continuing.", "needs-human is final"],
   ["headless", "Headless mode exits its host turn with top-level needs-human parked; a later host must explicitly resume it with factory resume.", "headless needs-human is terminal"],
   ["mode-result", "Mode result needs-human means parked and explicitly resumable; only completed, partial, and blocked are final.", "needs-human is a final result"],

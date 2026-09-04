@@ -961,7 +961,19 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // value, and refused init. Both sources now count only when they carry at least one character, and the
     // workflow no longer constructs a flag it has no value for. mimir caught it; the runtime test proves an
     // empty flag yields to the environment, and a contract test proves the workflow never builds the flag.
-    assert.equal(total, 4584, "resolving the identity without letting an empty flag mask the environment lands at 4584");
+    // 4584 unchanged for the parked control-plane snapshot, and the reason is worth keeping. A parked run's
+    // control plane lived only inside the sandbox -- the completed handoff is the only thing that archives it
+    // and it is entered only for `completed` -- so `needs-human`, the state that by definition waits for
+    // outside intervention, had no durable copy. mimir chainlink 1521 lost an accepted 44.8 KB brief, a
+    // ratified ten-slice plan and four review verdicts when a controller misread a correct lock refusal as a
+    // failure and swept a parked sandbox; the salvage came from opencode's session database rather than from
+    // the factory, which is the wrong way round.
+    // I first built it as ~29 lines in `terminal` using `cpSync` and `rmSync`, and `sandbox-lifecycle`
+    // rejected it: this CLI is forbidden copy and delete primitives, and archiving is a driver step by
+    // design -- the completed archive is prose too. So the fix is prose, symmetric with the archive it sits
+    // beside, and costs no production lines. An operator-authorized raise to 4650 was available and went
+    // unused; the tripwire stays at 4600 rather than banking headroom nobody needed.
+    assert.equal(total, 4584, "the parked-snapshot contract is prose, so production is unchanged at 4584");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

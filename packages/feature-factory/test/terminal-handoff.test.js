@@ -306,6 +306,37 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.equal(factory(bareSandbox, "status", "bare-run").status, "running", "a refused terminalization leaves the run running");
   assert.equal(factory(bareSandbox, "terminal", "bare-run", "blocked", "--reason", "nothing-shipped").status, "blocked");
 
+  // A parked run's control plane was archived nowhere: the completed handoff is the only thing that archives
+  // it, and it is entered only for `completed`. So `needs-human` -- the state that by definition waits for
+  // outside intervention -- was the one state with no durable copy, and mimir chainlink 1521 lost an accepted
+  // brief, a ratified ten-slice plan and four review verdicts when a controller swept a parked sandbox.
+  //
+  // Instruction, not code, and deliberately so: `sandbox-lifecycle` forbids copy and delete primitives in
+  // this CLI, and archiving is already a driver step -- the completed archive is prose too. A first attempt
+  // implemented this as `cpSync`/`rmSync` inside `terminal` and was rejected by that ban, correctly.
+  // Pinned here because prose with nothing holding it is the drift this repository keeps paying for.
+  const parkPolicy = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
+  const parkSection = parkPolicy.slice(parkPolicy.indexOf("### Parked control-plane snapshot"),
+    parkPolicy.indexOf("### Completed sandbox archive"));
+  assert.ok(parkSection.length > 800, `the parked-snapshot section looks truncated at ${parkSection.length} chars`);
+  for (const fragment of [
+    "Immediately after recording a `needs-human` terminalization",
+    "snapshot the live control plane `P` to `$O/.factory/.parked/$R`",
+    "replaces its own prior\nsnapshot",
+    "`.parked` cannot be a run id",
+    "never becomes a manifest candidate",
+    "It never touches `S`",
+    "A snapshot failure is reported and does not prevent or undo the park",
+    "Do not\nsnapshot for `blocked` or `partial`",
+  ]) {
+    assert.ok(parkSection.includes(fragment), `the parked-snapshot contract must state: ${fragment}`);
+  }
+  // The snapshot must not be described as the completed archive's location, or a resumed run's handoff
+  // collides with it -- the interaction that makes the separate `.parked` prefix load-bearing.
+  assert.doesNotMatch(parkSection, /snapshot[^.]*to `\$O\/\.factory\/\$R`/u);
+  assert.ok(parkPolicy.indexOf("### Parked control-plane snapshot") < parkPolicy.indexOf("### Completed sandbox archive"),
+    "the park snapshot is described before the completed archive it must not collide with");
+
   const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
   const start = skill.indexOf("## Step 7 — Summary and completed sandbox handoff");
   const end = skill.indexOf("## Resuming", start);

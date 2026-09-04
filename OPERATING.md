@@ -547,6 +547,15 @@ its child processes instead.
 
 ## 4. Recovery
 
+A `needs-human` terminalization is followed by a control-plane snapshot: the driver copies the run
+directory to `$O/.factory/.parked/<R>` immediately after recording the park. A parked run waits for
+outside intervention, and its control plane otherwise exists only inside the sandbox, so anything that
+removed the sandbox destroyed the manifest and every accepted gate with it. `.parked` cannot be a run
+id, so a snapshot never occupies the completed archive at `$O/.factory/<R>` and never blocks
+re-initialising the same run id. A failed snapshot is reported and never prevents the park. `blocked`
+and `partial` are not snapshotted, and a snapshot is evidence for recovery rather than a resumable run.
+
+
 **A crashed run** — `running`, nothing alive:
 
 ```sh

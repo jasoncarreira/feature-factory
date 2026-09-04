@@ -1912,6 +1912,36 @@ Never add `--force`, a leading `+`, tags, one fetch per branch, or a push. If ev
 equals its source, run no fetch. Capture the complete inventory before preflight so a collision cannot
 leave only an earlier branch fetched.
 
+### Parked control-plane snapshot
+
+Immediately after recording a `needs-human` terminalization, and before reporting the park to the operator,
+snapshot the live control plane `P` to `$O/.factory/.parked/$R`. A parked run is by definition waiting for
+outside intervention, and until this its control plane existed only inside the sandbox — so anything that
+removed the sandbox destroyed the manifest, the approved gates, the ratified plan and every review verdict,
+and the run could then be neither resumed nor reconstructed.
+
+Inspect `$O/.factory` and `$O/.factory/.parked` with non-following metadata reads, creating each missing
+parent one directory at a time and requiring any present one to be a real directory rather than a symbolic
+link. Copy `P` preserving every entry, its mode, and symlinks as symlinks. `W` is outside `P`; do not copy
+slice worktrees or any other part of `S`. Unlike the completed archive, a snapshot **replaces its own prior
+snapshot** for the same `R`, because a run may park more than once and the newest park is the useful one.
+Never write through a symlinked parent, and never write anywhere but under `$O/.factory/.parked`.
+
+Three properties make this safe to do at a park rather than only at completion:
+
+1. `.parked` cannot be a run id, so a snapshot never occupies the completed archive at `$O/.factory/$R` and
+   never becomes a manifest candidate. A run may park, resume, and later complete with its handoff archive
+   unaffected, and a relaunch of the same run id is not blocked by a snapshot left behind.
+2. It never touches `S`. The snapshot is a copy out; removal, if it ever happens, remains the completed
+   handoff's guarded step and nothing else's.
+3. A snapshot failure is reported and does not prevent or undo the park. Refusing to park because a copy
+   failed would leave `status: running` with nothing alive, which every health signal misreads — a worse
+   outcome than a missing snapshot.
+
+A snapshot is evidence for recovery, not a resumable run: resume operates on the sandbox manifest. Do not
+snapshot for `blocked` or `partial`, which are not resumable, and never treat a snapshot as authority over
+the live plane.
+
 ### Completed sandbox archive
 
 Only after fetch succeeds or is unnecessary, inspect `O/.factory` with a non-following metadata read. If
