@@ -149,6 +149,9 @@ An inability to ask a human never promotes interactive or headless to autonomous
 
 Mode result needs-human means parked and explicitly resumable; only completed, partial, and blocked are final.
 Enter the parked stop with factory terminal R needs-human --reason TEXT; leave it only by explicit factory resume R --session $SESSION_ID --repo S, which refuses unless that session already holds a fresh lock: claim, then verify, then resume.
+Immediately after recording a `needs-human` terminalization, and before reporting the park to the operator,
+publish a parked control-plane snapshot exactly as *Parked control-plane snapshot* below requires. A park
+is not reported until that snapshot is published or its failure is recorded in the report.
 For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
 Report top-level needs-human as parked with its reason and explicit factory resume command.
 Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
@@ -187,6 +190,61 @@ written to the root is untracked output that makes the integration worktree dirt
 an observably clean tree: `worktree_clean` records false, the suite is skipped, and post-merge verify
 classifies `unavailable`, which parks the run. Ignoring the root paths instead is not the fix — `.gitignore`
 is privileged precisely because ignoring a file conceals it from these checks.
+
+### Parked control-plane snapshot
+
+A parked run waits for outside intervention, and its control plane otherwise exists only inside the
+sandbox: the completed handoff is the only thing that archives it, and that handoff is entered only for
+`completed`. So anything that removed the sandbox destroyed the manifest, the approved gates, the ratified
+plan and every review verdict, leaving the run neither resumable nor reconstructable.
+
+Publish the live plane `P` to `$O/.factory/.parked/$R`. Inspect `$O/.factory` and `$O/.factory/.parked` with
+non-following metadata reads, creating each missing parent one directory at a time and requiring any present
+one to be a real directory rather than a symbolic link. Never write through a symlinked parent, and never
+write anywhere but under `$O/.factory/.parked`.
+
+**Publication has exactly one commit point: the rename that puts a verified staging tree onto the canonical
+path.** Every failure rule below is stated relative to it, because "leave the previous snapshot untouched"
+and "clean up the prior copy" are contradictory instructions once that rename has happened.
+
+1. **Preflight.** Require no entry at `$O/.factory/.parked/.staging-$R`. A residual
+   `$O/.factory/.parked/.prior-$R` is the trace of an earlier publication whose cleanup did not finish, not
+   a snapshot to preserve: remove it before staging, and if that removal fails, report it and stop without
+   touching the canonical snapshot or staging anything.
+2. **Stage.** Copy `P` to `.staging-$R`, preserving every entry, its mode, and symlinks as symlinks. `W` is
+   outside `P`; do not copy slice worktrees or any other part of `S`.
+3. **Verify.** Build source and destination inventories exactly as the completed archive does — every
+   entry's relative path, type and mode, a SHA-256 for each regular file, a link target for each symlink,
+   sorted lexically — and require exact equality. An unverified staging tree is never published.
+4. **Commit.** With no snapshot at the canonical path, rename `.staging-$R` onto it; that rename is the
+   commit point. With one present, first rename the canonical snapshot to `.prior-$R`, then rename
+   `.staging-$R` onto the canonical path; that second rename is the commit point. If the first rename
+   succeeds and the second fails, rename `.prior-$R` back onto the canonical path and report: nothing was
+   committed.
+5. **Before the commit point, no publication has occurred.** Any failure leaves the previous canonical
+   snapshot in place — restoring it from `.prior-$R` when it had already been moved — removes only
+   `.staging-$R`, and records the failure in the park report.
+6. **After the commit point, the published snapshot is authoritative and is never rolled back.** Removing
+   `.prior-$R` is cleanup, not part of publication: if it fails, report a cleanup warning naming the
+   residual path and leave the published snapshot exactly as committed. A later park removes that residual
+   at preflight, as step 1 requires.
+
+`.staging-$R` and `.prior-$R` cannot be run ids, so neither is ever a manifest candidate.
+
+Three properties make this safe to do at a park rather than only at completion:
+
+1. `.parked` cannot be a run id, so a snapshot never occupies the completed archive at `$O/.factory/$R` and
+   never becomes a manifest candidate. A run may park, resume, and later complete with its handoff archive
+   unaffected, and relaunching the same run id is not blocked by a snapshot left behind.
+2. It never touches `S`. The snapshot is a copy out; removal remains the completed handoff's guarded step
+   and nothing else's.
+3. A snapshot failure is reported and does not prevent or undo the park. Refusing to park because a copy
+   failed would leave `status: running` with nothing alive, which every health signal misreads — a worse
+   outcome than a missing snapshot.
+
+A snapshot is evidence for recovery, not a resumable run: resume operates on the sandbox manifest. Do not
+publish one for `blocked` or `partial`, which are not resumable, and never treat a snapshot as authority
+over the live plane.
 
 At every interactive gate, `changes: <feedback>` records `changes`, follows
 `changes-at-gate:<name>`, revises only the affected stage, and re-presents it pending. `stop` requires

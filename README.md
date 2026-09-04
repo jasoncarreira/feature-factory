@@ -133,6 +133,15 @@ selects the run and reaches `story-reader` without extraction, wrapping, reseria
 normalization. The value matches `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; digit-only values are positive
 decimal without leading zeroes.
 
+A `needs-human` terminalization is followed by a control-plane snapshot: the driver copies the run
+directory to `$O/.factory/.parked/<R>` immediately after recording the park. A parked run waits for
+outside intervention, and its control plane otherwise exists only inside the sandbox, so anything that
+removed the sandbox destroyed the manifest and every accepted gate with it. `.parked` cannot be a run
+id, so a snapshot never occupies the completed archive at `$O/.factory/<R>` and never blocks
+re-initialising the same run id. It is published by a staged, verified swap, so a failed later park cannot degrade the last good
+snapshot. A failed snapshot is reported and never prevents the park. `blocked`
+and `partial` are not snapshotted, and a snapshot is evidence for recovery rather than a resumable run.
+
 Malformed config, malformed payload, a non-zero exit, or unavailable exit status refuses before any
 run effect and never falls back. Resolver diagnostics name `resolve`, the status classification, and the admitted reference bounded to 200
 characters; neither

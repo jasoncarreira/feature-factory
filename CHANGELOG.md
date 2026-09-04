@@ -3,6 +3,52 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.2
+
+One change: a parked run's control plane is no longer destroyed with its sandbox.
+
+- **A `needs-human` terminalization is now followed by a control-plane snapshot** to
+  `$O/.factory/.parked/$R`, performed by the driver immediately after the park is recorded. The completed
+  handoff is the only thing that archives a control plane and it is entered only for `completed`, so
+  `needs-human` — the state that by definition waits for outside intervention — was the one state with no
+  durable copy. mimir chainlink 1521 lost an accepted 44.8 KB brief, a ratified ten-slice plan and four
+  review verdicts when a controller misread a correct lock refusal as a failure and swept a parked sandbox.
+  What survived was salvaged from opencode's session database rather than from the factory, which is the
+  wrong way round.
+- **It is required by the shared park definition, not by a late subsection.** The requirement sits between
+  entering the parked stop and reporting it, in `## Operating modes` where every mode's park semantics are
+  defined, and a park is not reported until the snapshot is published or its failure recorded. A first
+  attempt placed the mechanics inside `## Step 7`, whose entry conditions are post-draft-PR and whose first
+  transition is `completed` — so no park path reached it. Prose nobody reaches is worse than none, because
+  it reads as coverage. Caught in review.
+- **Publication has exactly one commit point**, and every failure rule is stated relative to it: preflight,
+  stage to `.staging-$R`, verify source and destination inventories exactly as the completed archive
+  requires, then commit by renaming the verified tree onto the canonical path. Before that rename no
+  publication has occurred and a failure restores the untouched previous snapshot; after it the published
+  snapshot is authoritative and never rolled back, so a failure to remove `.prior-$R` is a reported cleanup
+  warning and a later park clears that residual at preflight.
+  Two review rounds shaped this. The first attempt said the snapshot "replaces its own prior snapshot",
+  permitting delete-then-copy, so a failed second park would erase the last known-good evidence. The staged
+  version then still contradicted itself: once staging is renamed onto the canonical path the old snapshot
+  *is* `.prior-$R`, so "leave the previous snapshot exactly as it was" and "remove this procedure's prior
+  path" were mutually impossible, and a partial removal could not be undone. Naming the rename as the commit
+  point is what closes it. Neither `.staging-$R` nor `.prior-$R` can be a run id, so neither is ever a
+  manifest candidate.
+- **Three properties make it safe at a park rather than only at completion**, and all three are stated in
+  the contract: `.parked` cannot be a run id, so a snapshot never occupies the completed archive at
+  `$O/.factory/$R` and never becomes a manifest candidate blocking a relaunch; it never touches the sandbox,
+  so removal stays the completed handoff's guarded step alone; and a snapshot failure is reported without
+  preventing the park, because refusing to park would leave `status: running` with nothing alive.
+- **A snapshot is evidence for recovery, not a resumable run.** Resume still operates on the sandbox
+  manifest. `blocked` and `partial` are not snapshotted — neither is resumable, so the case there is
+  diagnosis rather than recovery.
+
+**Instruction rather than code, and not by preference.** This was first built as ~29 production lines in
+`factory terminal` using `cpSync` and `rmSync`, and the suite rejected it: this CLI is forbidden copy and
+delete primitives, and archiving is a driver step by design — the completed archive beside it is prose too.
+An operator-authorized ceiling raise to 4650 was available and went unused. Production stays at **4584** and
+the tripwire stays at **4600**.
+
 ## 0.8.1
 
 One change, in the OpenCode adapter, and it unblocks configured resolvers there entirely.
