@@ -982,14 +982,21 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // interrupted copy, still read as published. The test written for that version constructed exactly the
     // accepting shape, so it demonstrated the hole rather than catching it.
     // The property is now the one the publication contract already defines: inventory equality over the whole
-    // plane -- relative path, type, size for files, target for links, sorted -- plus the manifest compared by
-    // bytes, because an earlier park's `updated_at` is the same length as this one's and size alone would
-    // call a stale snapshot current. My own stale regression caught that, which is the argument for writing
-    // the failing case before the passing one. Sizes rather than hashes for the rest: `status` is polled
-    // continuously and the plane carries a 143 KB workflow copy, and the failure mode is an unfinished
-    // driver, not a forged snapshot. Every path component is `lstat`ed and never followed, since `lstat` on
-    // the final entry still follows intermediate symlinks.
-    assert.equal(total, 4633, "proving the publication happened lands at 4633 production lines");
+    // plane -- relative path, type, mode, SHA-256 for files, target for links, sorted -- plus the manifest
+    // compared by bytes, because an earlier park's `updated_at` is the same length as this one's and size
+    // alone would call a stale snapshot current. My own stale regression caught that, which is the argument
+    // for writing the failing case before the passing one.
+    // 4633 -> 4635, round three. That version recorded file sizes rather than digests, arguing `status` is
+    // polled continuously and the plane carries a 143 KB workflow copy. The cost estimate was right and the
+    // conclusion was wrong: a same-length byte change and a mode-only change both compared equal, so an
+    // altered tree reported as published while the contract said altered trees yield `null`. A signal that
+    // disagrees with its own description is the defect this change exists to remove, and it had reappeared
+    // inside the fix for it. Both halves are pinned by regressions with independent negative controls --
+    // dropping the digest fails the same-size case alone, dropping the mode fails the mode case alone.
+    // Every path component is `lstat`ed and never followed, since `lstat` on the final entry still follows
+    // intermediate symlinks, and an entry that is neither file, directory, nor link is rejected rather than
+    // silently skipped.
+    assert.equal(total, 4635, "proving the publication happened lands at 4635 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

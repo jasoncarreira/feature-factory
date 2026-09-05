@@ -16,18 +16,21 @@ requirement reachable and its absence visible.
   leaves behind: an unreported park with no recovery evidence.
 - **`status` reports `park_snapshot` for a parked run**: the published path, or `null`. It answers whether a
   complete publication exists for the *current* control plane. Completeness is inventory equality over the
-  whole plane — relative path, type, size for regular files, target for symlinks, sorted — which is the
-  property the publication contract already defines. Currency is the manifest compared by bytes, because an
-  earlier park's `updated_at` is the same length as this one's and size alone would call a stale snapshot
-  current. Sizes rather than hashes for everything else: `status` is polled continuously and the plane
-  carries a 143 KB workflow copy, and the failure mode is a driver that did not finish rather than a forged
-  snapshot. Every path component is `lstat`ed and never followed, since `lstat` on the final entry still
-  follows intermediate symlinks. Computed at read time, so there is no stored key to keep truthful. The copy
-  itself remains a driver step, because this CLI is forbidden copy and delete primitives.
-  Two earlier versions were false greens of their own, both caught in review. "Does the pathname exist"
+  whole plane — relative path, type, mode, SHA-256 for regular files, target for symlinks, sorted — which is
+  the property the publication contract already defines; an entry that is none of those three types is
+  rejected rather than skipped. Currency is the manifest compared by bytes, because an earlier park's
+  `updated_at` is the same length as this one's and size alone would call a stale snapshot current. Every
+  path component is `lstat`ed and never followed, since `lstat` on the final entry still follows
+  intermediate symlinks. Computed at read time, so there is no stored key to keep truthful. The copy itself
+  remains a driver step, because this CLI is forbidden copy and delete primitives.
+  Three earlier versions were false greens of their own, all caught in review. "Does the pathname exist"
   reported a snapshot from an earlier park as this park's evidence. Matching only `run.json` proved one file
   was copied after the current terminalization, not that publication finished — a driver that created the
-  directory and copied that file first, or an interrupted copy, still read as published.
+  directory and copied that file first, or an interrupted copy, still read as published. Comparing file
+  sizes rather than digests — on the theory that hashing was too costly for a continuously polled command —
+  passed a same-length byte change and a mode-only change as faithful copies, so this same defect had
+  reappeared inside its own fix. The cost estimate was right and the conclusion was wrong: hashing the plane
+  costs about a millisecond.
   `null` therefore covers a snapshot left by an earlier park, an incomplete or altered tree, a file or
   symlink at the canonical path, and a symlinked parent component. Publishing again is what makes it
   correspond.
@@ -36,9 +39,9 @@ requirement reachable and its absence visible.
   prose alone has now failed twice in this same place — 0.7.5's environment override was the first, this the
   second. Both failures were silent, which is the part worth fixing.
 
-Production source moves 4584 → 4599, and the tripwire 4600 → 4650 using the authorization given during the
-0.8.2 discussion for this feature area, which went unused then because that implementation turned out to be
-prose.
+Production source moves 4584 → 4635 across three review rounds, and the tripwire 4600 → 4650 using the
+authorization given during the 0.8.2 discussion for this feature area, which went unused then because that
+implementation turned out to be prose.
 
 ## 0.8.2
 

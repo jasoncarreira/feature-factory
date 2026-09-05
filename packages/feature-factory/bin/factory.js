@@ -159,14 +159,14 @@ function briefDigestFor(decision, state, runDir) {
 // then proved one file was copied after the current terminalization, not that the publication finished --
 // a driver that created the directory and copied that file first, or an interrupted copy, still read as
 // published. Both were false greens in the exact case this exists to catch, and both were caught in review.
-// So compare inventories, which is the property the publication contract already defines: every entry's
-// relative path and type, a size for regular files, a target for symlinks, sorted. That detects a partial or
-// interrupted publication and any missing, extra or resized artifact. It is not a content digest -- sizes,
-// not hashes, because `status` is polled continuously and the plane carries a 143 KB workflow copy, and the
-// failure mode here is a driver that did not finish rather than someone forging a snapshot. The manifest is
-// the exception and is compared by bytes: it is what identifies which park a snapshot belongs to, and an
-// earlier park's `updated_at` is the same length as this one's, so size alone would call a stale snapshot
-// current. My own regression caught that, which is the argument for writing the stale case first.
+// So compare the inventory the publication contract already defines, in the same terms it defines it:
+// relative path, type, permission mode, SHA-256 for every regular file, link target for every symlink,
+// sorted, with unsupported entry types rejected. An earlier version recorded sizes instead, on the theory
+// that hashing was too costly for a continuously polled command -- but a same-length byte change or a
+// mode-only change then compared equal, so a tree that is not a verified copy reported as published while
+// the documentation said altered trees yield `null`. A signal that disagrees with its own description is
+// the thing this whole change exists to remove. Hashing the plane costs about a millisecond; the theory was
+// wrong. Caught in review.
 // Every path component is checked with `lstat` and never followed, since `lstat` on the final entry alone
 // still follows intermediate symlinks.
 function planeInventory(root) {
@@ -176,9 +176,11 @@ function planeInventory(root) {
       const full = join(dir, name);
       const rel = prefix ? `${prefix}/${name}` : name;
       const stat = lstatSync(full);
-      if (stat.isSymbolicLink()) entries.push(`l ${rel} ${readlinkSync(full)}`);
-      else if (stat.isDirectory()) { entries.push(`d ${rel}`); walk(full, rel); }
-      else entries.push(`f ${rel} ${stat.size}`);
+      const mode = (stat.mode & 0o7777).toString(8);
+      if (stat.isSymbolicLink()) entries.push(`l ${rel} ${mode} ${readlinkSync(full)}`);
+      else if (stat.isDirectory()) { entries.push(`d ${rel} ${mode}`); walk(full, rel); }
+      else if (stat.isFile()) entries.push(`f ${rel} ${mode} ${createHash("sha256").update(readFileSync(full)).digest("hex")}`);
+      else throw new CliError(`unsupported entry type in '${full}'`);
     }
   };
   walk(root, "");

@@ -432,7 +432,19 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.equal(snapshotOf(), null, "a publication missing an artifact is not complete, even with a current run.json");
   writeFileSync(workflowCopy, Buffer.concat([workflowBytes, Buffer.from("x")]));
   assert.equal(snapshotOf(), null, "a resized artifact is not a faithful copy of the plane");
+  // Length is not content and length is not mode. Comparing sizes accepted both of the next two shapes,
+  // and both are reachable: a one-character edit inside a fixed-width timestamp keeps the length, and a
+  // copy made by a driver with a different umask keeps the bytes. The publication contract requires the
+  // whole entry -- path, type, mode, digest -- so the observation compares the whole entry.
+  const sameSizeDrift = Buffer.from(workflowBytes);
+  sameSizeDrift[sameSizeDrift.length - 1] ^= 0x20;
+  writeFileSync(workflowCopy, sameSizeDrift);
+  assert.equal(snapshotOf(), null, "an artifact of the plane's length holding different bytes is not a faithful copy");
   writeFileSync(workflowCopy, workflowBytes);
+  const liveMode = lstatSync(join(livePlane, "WORKFLOW.md")).mode & 0o7777;
+  chmodSync(workflowCopy, liveMode ^ 0o004);
+  assert.equal(snapshotOf(), null, "an artifact whose mode drifted from the plane is not a faithful copy");
+  chmodSync(workflowCopy, liveMode);
   assert.equal(snapshotOf(), published, "restoring the artifact restores the observation");
   // Stale: published for an earlier park, the plane has since moved on.
   const staleManifest = JSON.parse(readFileSync(join(livePlane, "run.json"), "utf8"));
