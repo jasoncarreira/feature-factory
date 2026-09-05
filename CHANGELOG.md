@@ -3,6 +3,47 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.3
+
+0.8.2 required a parked control-plane snapshot and it did not happen on the first real park. This makes the
+requirement reachable and its absence visible.
+
+- **The parked stop is now one numbered, ordered sequence** — enter the park, publish the snapshot, report —
+  and the eleven one-line rules that say a run parks enter *that*, rather than each restating steps. 0.8.2
+  appended the snapshot to the shared park semantics as a sentence; a driver walking a step list never
+  reached it. mimir chainlink 1521 parked on a slice ownership omission while verifiably running 0.8.2 — the
+  version pin fails closed — and no snapshot was written. The contract also now says what a partial park
+  leaves behind: an unreported park with no recovery evidence.
+- **`status` reports `park_snapshot` for a parked run**: the published path, or `null`. It answers whether a
+  complete publication exists for the *current* control plane. Completeness is inventory equality over the
+  whole plane — `.` and every descendant, each recording relative path, type, mode, SHA-256 for a regular
+  file, target for a symlink, sorted lexically by relative path — which is the property the publication
+  contract already defines; an entry that is none of those three types is rejected rather than skipped. Currency is the manifest compared by bytes, because an earlier park's
+  `updated_at` is the same length as this one's and size alone would call a stale snapshot current. Every
+  path component is `lstat`ed and never followed, since `lstat` on the final entry still follows
+  intermediate symlinks. Computed at read time, so there is no stored key to keep truthful. The copy itself
+  remains a driver step, because this CLI is forbidden copy and delete primitives.
+  Three earlier versions were false greens of their own, all caught in review. "Does the pathname exist"
+  reported a snapshot from an earlier park as this park's evidence. Matching only `run.json` proved one file
+  was copied after the current terminalization, not that publication finished — a driver that created the
+  directory and copied that file first, or an interrupted copy, still read as published. Comparing file
+  sizes rather than digests — on the theory that hashing was too costly for a continuously polled command —
+  passed a same-length byte change and a mode-only change as faithful copies, so this same defect had
+  reappeared inside its own fix. The cost estimate was right and the conclusion was wrong: hashing the plane
+  costs about a millisecond. Walking into the root without recording it then passed a snapshot whose own
+  directory mode differed from the plane's — narrower, again, than the contract it claimed to check.
+  `null` therefore covers a snapshot left by an earlier park, an incomplete or altered tree, a file or
+  symlink at the canonical path, and a symlinked parent component. Publishing again is what makes it
+  correspond.
+- **Observability rather than enforcement.** It cannot make the snapshot happen; it makes a missing one a
+  fact a controller can act on. That is the property that made the 0.8.0 publishing-identity work land, and
+  prose alone has now failed twice in this same place — 0.7.5's environment override was the first, this the
+  second. Both failures were silent, which is the part worth fixing.
+
+Production source moves 4584 → 4636 across four review rounds, and the tripwire 4600 → 4650 using the
+authorization given during the 0.8.2 discussion for this feature area, which went unused then because that
+implementation turned out to be prose.
+
 ## 0.8.2
 
 One change: a parked run's control plane is no longer destroyed with its sandbox.

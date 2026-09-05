@@ -4,8 +4,8 @@
 // The orchestrator calls this CLI instead of writing control-plane state directly.
 // Flags are declared per command; unknown options fail rather than becoming missing fields.
 // Schema validation surrounds every state write.
-import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -151,6 +151,57 @@ function briefDigestFor(decision, state, runDir) {
     throw new CliError("plan/slices.json changed since the brief gate was presented; re-present it before approving");
   }
   return state.plan_digest;
+}
+
+// Observability, not enforcement: the copy stays a driver step, because this CLI is forbidden copy and
+// delete primitives. What this answers has to be exact, and two earlier versions were not. "Does the
+// pathname exist" reported a snapshot from an earlier park as this park's evidence. Matching only `run.json`
+// then proved one file was copied after the current terminalization, not that the publication finished --
+// a driver that created the directory and copied that file first, or an interrupted copy, still read as
+// published. Both were false greens in the exact case this exists to catch, and both were caught in review.
+// So compare the inventory the publication contract already defines, in the same terms it defines it:
+// `.` and every descendant, each recording relative path, type, permission mode, SHA-256 for a regular
+// file and link target for a symlink, sorted lexically by relative path, with unsupported entry types
+// rejected. Two earlier versions of this comparison were narrower than the contract they claimed to check.
+// Recording sizes rather than digests -- on the theory that hashing was too costly for a continuously
+// polled command -- passed a same-length byte change and a mode-only change as faithful. Then walking into
+// the root without recording it passed a snapshot whose own directory mode differed from the plane's. Both
+// reported a tree that fails the contract's verification as published, while the documentation said altered
+// trees yield `null`, and a signal that disagrees with its own description is the thing this whole change
+// exists to remove. Hashing the plane costs about a millisecond; the cost theory was right and its
+// conclusion was wrong. Both caught in review.
+// Every path component is checked with `lstat` and never followed, since `lstat` on the final entry alone
+// still follows intermediate symlinks.
+function planeInventory(root) {
+  const entries = [];
+  const record = (rel, full) => {
+    const stat = lstatSync(full);
+    const mode = (stat.mode & 0o7777).toString(8);
+    if (stat.isSymbolicLink()) entries.push(`${rel} l ${mode} ${readlinkSync(full)}`);
+    else if (stat.isDirectory()) {
+      entries.push(`${rel} d ${mode}`);
+      for (const name of readdirSync(full)) record(rel === "." ? name : `${rel}/${name}`, join(full, name));
+    } else if (stat.isFile()) entries.push(`${rel} f ${mode} ${createHash("sha256").update(readFileSync(full)).digest("hex")}`);
+    else throw new CliError(`unsupported entry type in '${full}'`);
+  };
+  record(".", root);
+  return entries.sort().join("\n");
+}
+
+function observedParkSnapshot(repo, runId, runDir) {
+  const container = dirname(repo);
+  if (basename(container) !== ".factory-sandboxes" || basename(repo) !== runId) return null;
+  const operatorRoot = dirname(container);
+  const candidate = join(operatorRoot, CONTROL_PLANE, ".parked", runId);
+  try {
+    for (const component of [join(operatorRoot, CONTROL_PLANE), join(operatorRoot, CONTROL_PLANE, ".parked"), candidate]) {
+      if (!lstatSync(component).isDirectory()) return null;
+    }
+    if (planeInventory(candidate) !== planeInventory(runDir)) return null;
+    return readFileSync(join(candidate, "run.json")).equals(readFileSync(join(runDir, "run.json"))) ? candidate : null;
+  } catch {
+    return null;
+  }
 }
 
 function runDirFor(flags, runId) {
@@ -903,6 +954,7 @@ const HANDLERS = {
       branch: run.branch,
       pr_base: run.pr_base ?? null,
       publishing_identity: run.publishing_identity ?? null,
+      park_snapshot: run.status === "needs-human" ? observedParkSnapshot(resolve(flags.repo ?? process.cwd()), runId, runDir) : null,
       pr_draft: run.pr_draft ?? true,
       lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,

@@ -961,19 +961,48 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // value, and refused init. Both sources now count only when they carry at least one character, and the
     // workflow no longer constructs a flag it has no value for. mimir caught it; the runtime test proves an
     // empty flag yields to the environment, and a contract test proves the workflow never builds the flag.
-    // 4584 unchanged for the parked control-plane snapshot, and the reason is worth keeping. A parked run's
-    // control plane lived only inside the sandbox -- the completed handoff is the only thing that archives it
-    // and it is entered only for `completed` -- so `needs-human`, the state that by definition waits for
-    // outside intervention, had no durable copy. mimir chainlink 1521 lost an accepted 44.8 KB brief, a
-    // ratified ten-slice plan and four review verdicts when a controller misread a correct lock refusal as a
-    // failure and swept a parked sandbox; the salvage came from opencode's session database rather than from
-    // the factory, which is the wrong way round.
-    // I first built it as ~29 lines in `terminal` using `cpSync` and `rmSync`, and `sandbox-lifecycle`
-    // rejected it: this CLI is forbidden copy and delete primitives, and archiving is a driver step by
-    // design -- the completed archive is prose too. So the fix is prose, symmetric with the archive it sits
-    // beside, and costs no production lines. An operator-authorized raise to 4650 was available and went
-    // unused; the tripwire stays at 4600 rather than banking headroom nobody needed.
-    assert.equal(total, 4584, "the parked-snapshot contract is prose, so production is unchanged at 4584");
+    // 4584 -> 4599: `status` reports `park_snapshot` for a parked run.
+    // 0.8.2 made the snapshot a contract requirement and it did not fire on mimir chainlink 1521's first real
+    // park -- the run was verifiably on 0.8.2, since the pin fails closed. The cause was mine: eleven
+    // one-line rules say a run parks and defer to the shared semantics, and I appended the snapshot to those
+    // semantics as a sentence rather than making the parked stop an ordered sequence the rules enter. Prose
+    // has now failed twice in exactly this place -- 0.7.5's environment override was the first.
+    // So the copy stays a driver step, because this CLI is forbidden copy and delete primitives, but whether
+    // it happened is now observable: an existence check, computed at read time so there is no stored key to
+    // keep truthful and no answer that can go stale against the filesystem. Observability, not enforcement --
+    // it cannot make the snapshot happen, it makes a missing one a fact a controller can act on, which is
+    // the property that made the 0.8.0 identity work land.
+    // Tripwire 4600 -> 4650, using the authorization given during the 0.8.2 discussion for this same feature
+    // area. It went unused then because that implementation turned out to be prose; the observability half is
+    // code, and landing on 4599 would leave one line before a review fix needed a raise mid-flight.
+    // 4599 -> 4633 across two review rounds, because the observation was twice a false green of its own.
+    // "Does the pathname exist" reported a snapshot from an earlier park as this park's evidence. Matching
+    // only `run.json` then proved one file was copied after the current terminalization, not that the
+    // publication finished -- a driver that created the directory and copied that file first, or an
+    // interrupted copy, still read as published. The test written for that version constructed exactly the
+    // accepting shape, so it demonstrated the hole rather than catching it.
+    // The property is now the one the publication contract already defines: inventory equality over the whole
+    // plane -- relative path, type, mode, SHA-256 for files, target for links, sorted -- plus the manifest
+    // compared by bytes, because an earlier park's `updated_at` is the same length as this one's and size
+    // alone would call a stale snapshot current. My own stale regression caught that, which is the argument
+    // for writing the failing case before the passing one.
+    // 4633 -> 4635, round three. That version recorded file sizes rather than digests, arguing `status` is
+    // polled continuously and the plane carries a 143 KB workflow copy. The cost estimate was right and the
+    // conclusion was wrong: a same-length byte change and a mode-only change both compared equal, so an
+    // altered tree reported as published while the contract said altered trees yield `null`. A signal that
+    // disagrees with its own description is the defect this change exists to remove, and it had reappeared
+    // inside the fix for it. Both halves are pinned by regressions with independent negative controls --
+    // dropping the digest fails the same-size case alone, dropping the mode fails the mode case alone.
+    // 4635 -> 4636, round four. The inventory walked into the root without recording it, so a snapshot whose
+    // own directory mode differed from the plane's compared equal -- while the contract inventories `.` and
+    // every descendant, meaning that copy fails the verification the snapshot is supposed to have passed.
+    // The same round made the sort lexical by relative path, which is what the contract says and what the
+    // completed archive does; ordering was never a false green, since both sides ran the same walk, but
+    // "the same inventory the publication step verifies" is the whole claim being made here.
+    // Every path component is `lstat`ed and never followed, since `lstat` on the final entry still follows
+    // intermediate symlinks, and an entry that is neither file, directory, nor link is rejected rather than
+    // silently skipped.
+    assert.equal(total, 4636, "proving the publication happened lands at 4636 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1004,7 +1033,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
-    assert.ok(total <= 4600, `production source is ${total} lines; the tripwire is 4600`);
+    assert.ok(total <= 4650, `production source is ${total} lines; the tripwire is 4650`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
