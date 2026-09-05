@@ -446,6 +446,15 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.equal(snapshotOf(), null, "an artifact whose mode drifted from the plane is not a faithful copy");
   chmodSync(workflowCopy, liveMode);
   assert.equal(snapshotOf(), published, "restoring the artifact restores the observation");
+  // The root directory is an entry too. An inventory of descendants only walks INTO the root without ever
+  // recording it, so a snapshot whose own directory mode differs from the plane's compared equal -- and the
+  // publication contract inventories `.` and every descendant, so that copy fails the verification the
+  // snapshot is supposed to have passed. Caught in review.
+  const liveRootMode = lstatSync(livePlane).mode & 0o7777;
+  chmodSync(published, liveRootMode ^ 0o004);
+  assert.equal(snapshotOf(), null, "a snapshot whose own directory mode drifted from the plane is not a faithful copy");
+  chmodSync(published, liveRootMode);
+  assert.equal(snapshotOf(), published, "restoring the root mode restores the observation");
   // Stale: published for an earlier park, the plane has since moved on.
   const staleManifest = JSON.parse(readFileSync(join(livePlane, "run.json"), "utf8"));
   writeFileSync(join(published, "run.json"), `${JSON.stringify({ ...staleManifest, updated_at: "2026-01-01T00:00:00.000Z" }, null, 2)}\n`);

@@ -160,31 +160,32 @@ function briefDigestFor(decision, state, runDir) {
 // a driver that created the directory and copied that file first, or an interrupted copy, still read as
 // published. Both were false greens in the exact case this exists to catch, and both were caught in review.
 // So compare the inventory the publication contract already defines, in the same terms it defines it:
-// relative path, type, permission mode, SHA-256 for every regular file, link target for every symlink,
-// sorted, with unsupported entry types rejected. An earlier version recorded sizes instead, on the theory
-// that hashing was too costly for a continuously polled command -- but a same-length byte change or a
-// mode-only change then compared equal, so a tree that is not a verified copy reported as published while
-// the documentation said altered trees yield `null`. A signal that disagrees with its own description is
-// the thing this whole change exists to remove. Hashing the plane costs about a millisecond; the theory was
-// wrong. Caught in review.
+// `.` and every descendant, each recording relative path, type, permission mode, SHA-256 for a regular
+// file and link target for a symlink, sorted lexically by relative path, with unsupported entry types
+// rejected. Two earlier versions of this comparison were narrower than the contract they claimed to check.
+// Recording sizes rather than digests -- on the theory that hashing was too costly for a continuously
+// polled command -- passed a same-length byte change and a mode-only change as faithful. Then walking into
+// the root without recording it passed a snapshot whose own directory mode differed from the plane's. Both
+// reported a tree that fails the contract's verification as published, while the documentation said altered
+// trees yield `null`, and a signal that disagrees with its own description is the thing this whole change
+// exists to remove. Hashing the plane costs about a millisecond; the cost theory was right and its
+// conclusion was wrong. Both caught in review.
 // Every path component is checked with `lstat` and never followed, since `lstat` on the final entry alone
 // still follows intermediate symlinks.
 function planeInventory(root) {
   const entries = [];
-  const walk = (dir, prefix) => {
-    for (const name of readdirSync(dir).sort()) {
-      const full = join(dir, name);
-      const rel = prefix ? `${prefix}/${name}` : name;
-      const stat = lstatSync(full);
-      const mode = (stat.mode & 0o7777).toString(8);
-      if (stat.isSymbolicLink()) entries.push(`l ${rel} ${mode} ${readlinkSync(full)}`);
-      else if (stat.isDirectory()) { entries.push(`d ${rel} ${mode}`); walk(full, rel); }
-      else if (stat.isFile()) entries.push(`f ${rel} ${mode} ${createHash("sha256").update(readFileSync(full)).digest("hex")}`);
-      else throw new CliError(`unsupported entry type in '${full}'`);
-    }
+  const record = (rel, full) => {
+    const stat = lstatSync(full);
+    const mode = (stat.mode & 0o7777).toString(8);
+    if (stat.isSymbolicLink()) entries.push(`${rel} l ${mode} ${readlinkSync(full)}`);
+    else if (stat.isDirectory()) {
+      entries.push(`${rel} d ${mode}`);
+      for (const name of readdirSync(full)) record(rel === "." ? name : `${rel}/${name}`, join(full, name));
+    } else if (stat.isFile()) entries.push(`${rel} f ${mode} ${createHash("sha256").update(readFileSync(full)).digest("hex")}`);
+    else throw new CliError(`unsupported entry type in '${full}'`);
   };
-  walk(root, "");
-  return entries.join("\n");
+  record(".", root);
+  return entries.sort().join("\n");
 }
 
 function observedParkSnapshot(repo, runId, runDir) {

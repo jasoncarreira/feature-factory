@@ -993,10 +993,16 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // disagrees with its own description is the defect this change exists to remove, and it had reappeared
     // inside the fix for it. Both halves are pinned by regressions with independent negative controls --
     // dropping the digest fails the same-size case alone, dropping the mode fails the mode case alone.
+    // 4635 -> 4636, round four. The inventory walked into the root without recording it, so a snapshot whose
+    // own directory mode differed from the plane's compared equal -- while the contract inventories `.` and
+    // every descendant, meaning that copy fails the verification the snapshot is supposed to have passed.
+    // The same round made the sort lexical by relative path, which is what the contract says and what the
+    // completed archive does; ordering was never a false green, since both sides ran the same walk, but
+    // "the same inventory the publication step verifies" is the whole claim being made here.
     // Every path component is `lstat`ed and never followed, since `lstat` on the final entry still follows
     // intermediate symlinks, and an entry that is neither file, directory, nor link is rejected rather than
     // silently skipped.
-    assert.equal(total, 4635, "proving the publication happened lands at 4635 production lines");
+    assert.equal(total, 4636, "proving the publication happened lands at 4636 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
