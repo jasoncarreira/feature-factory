@@ -99,36 +99,50 @@ must APPROVE before you accept that step. Story, research, and design are not au
 
 Before any intake action, including ticket, story, or design detection, branch intent, run-id
 derivation, manifest or state reads, and every `factory` command, process the raw invocation arguments
-as follows. The platform skill first performs any host-specific placement admission and supplies this
-workflow the unchanged admitted request. Placement is not a run mode.
+as follows.
 
-Ignore leading whitespace. The **mode prefix** is the maximal consecutive sequence of
-whitespace-delimited tokens that are exactly and case-sensitively `--autonomous` or `--headless`.
-The first other token ends the prefix.
+**The platform skill owns invocation-option admission, and this workflow never parses the
+invocation.** Each host skill defines the complete leading option prefix its `/feature` invocation
+accepts -- placement, mode, and host options such as `--base` and `--max-retries` -- consumes exactly
+those spans and their separators, and supplies this workflow two things: the **admitted mode tokens**,
+which are the exact case-sensitive `--autonomous` and `--headless` tokens it consumed, and the
+**admitted remainder**, the request bytes beginning at the first token it did not consume, preserved
+unchanged. This workflow never decides where that prefix ends. Placement is not a run mode.
 
-1. If both distinct flags occur in that prefix, in either order, return exactly:
+Defining a terminator here would contradict the skill that already applied one, and every option later
+added to a host would become request content on this side only. That is not hypothetical. `--base` and
+`--max-retries` were added to the host skills while this section still ended the prefix at the first
+non-mode token, so the two documents disagreed over whether `--max-retries 5 <run-id>` was an option
+pair or part of the run id. Read alone, this section silently derived the run id `max-retries-5-1606`;
+read alongside the skill, a driver correctly refused to run at all. Both documents governing the same
+bytes is the defect, so only one of them does.
+
+The rules below are host-independent and are stated over the admitted mode tokens and the admitted
+remainder.
+
+1. If both distinct mode tokens were admitted, in either order, return exactly:
    `conflicting mode flags: --autonomous and --headless; choose one`. Return immediately, before any
    intake, run-id derivation, state read, or CLI action. Never fall back to interactive or another
    mode.
-2. Otherwise remove every token in the recognized prefix and its separating whitespace. Use only the
-   unchanged remainder for ticket detection, story content, design detection, branch intent, and
-   run-id derivation.
+2. Otherwise use only the unchanged admitted remainder for ticket detection, story content, design
+   detection, branch intent, and run-id derivation.
 3. Apply exactly one mapping for a new manifest:
    - `--autonomous` maps only to `factory init --mode autonomous`.
    - `--headless` maps only to `factory init --mode headless`.
-   - With no recognized leading mode token, omit `--mode`; existing `factory init` records
+   - With no admitted mode token, omit `--mode`; existing `factory init` records
      `interactive`.
 
 Those three compatibility phrases name init command stems, not runnable invocations. The selected
 fresh-run invocation is fully qualified in Step 0 and ends with `--repo "$RUN_REPO"`.
 
-Repeated copies of one recognized flag are idempotent: remove them all and select that mode once. An
-exact mode token after the first other token is request content and neither selects nor conflicts.
+Repeated copies of one mode token are idempotent: the skill consumes them all and this workflow
+selects that mode once. A mode token the skill did not admit, standing after the first request token,
+is request content and neither selects nor conflicts.
 Natural-language intent, `--interactive`, capitalization variants, abbreviations, assignment or
 punctuation forms, quoted lookalikes, and near misses are request content, not selectors. Do not add a
 generic malformed-option rejection.
 
-After successful nonconflicting admission, reject an empty, whitespace-only, or mode-only remainder
+After successful nonconflicting admission, reject an empty or whitespace-only admitted remainder
 with exactly `missing /feature request; no run created.` This rejection and a mode conflict precede
 run-id derivation and every tool, client, state, or CLI action.
 

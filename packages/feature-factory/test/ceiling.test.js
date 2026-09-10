@@ -174,22 +174,38 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "mode admission must run before operating-mode behavior and all intake");
     for (const fragment of [
       "Before any intake action, including ticket, story, or design detection, branch intent, run-id\nderivation, manifest or state reads, and every `factory` command, process the raw invocation arguments",
-      "Ignore leading whitespace.",
-      "The **mode prefix** is the maximal consecutive sequence of\nwhitespace-delimited tokens that are exactly and case-sensitively `--autonomous` or `--headless`.",
-      "The first other token ends the prefix.",
-      "If both distinct flags occur in that prefix, in either order, return exactly:",
+      "**The platform skill owns invocation-option admission, and this workflow never parses the\ninvocation.**",
+      "the **admitted mode tokens**,\nwhich are the exact case-sensitive `--autonomous` and `--headless` tokens it consumed",
+      "This workflow never decides where that prefix ends.",
+      "If both distinct mode tokens were admitted, in either order, return exactly:",
       "`conflicting mode flags: --autonomous and --headless; choose one`.",
       "Return immediately, before any\n   intake, run-id derivation, state read, or CLI action. Never fall back to interactive or another\n   mode.",
-      "remove every token in the recognized prefix and its separating whitespace. Use only the\n   unchanged remainder for ticket detection, story content, design detection, branch intent, and\n   run-id derivation.",
+      "Otherwise use only the unchanged admitted remainder for ticket detection, story content, design\n   detection, branch intent, and run-id derivation.",
       "`--autonomous` maps only to `factory init --mode autonomous`.",
       "`--headless` maps only to `factory init --mode headless`.",
-      "With no recognized leading mode token, omit `--mode`; existing `factory init` records\n     `interactive`.",
-      "Repeated copies of one recognized flag are idempotent: remove them all and select that mode once.",
-      "An\nexact mode token after the first other token is request content and neither selects nor conflicts.",
+      "With no admitted mode token, omit `--mode`; existing `factory init` records\n     `interactive`.",
+      "Repeated copies of one mode token are idempotent: the skill consumes them all and this workflow\nselects that mode once.",
+      "A mode token the skill did not admit, standing after the first request token,\nis request content and neither selects nor conflicts.",
       "Natural-language intent, `--interactive`, capitalization variants, abbreviations, assignment or\npunctuation forms, quoted lookalikes, and near misses are request content, not selectors.",
       "an existing manifest always resumes its immutable persisted\nmode. Invocation flags never reinitialize, compare, or mutate an existing run's mode.",
       "Using only the request remainder produced by mode admission:",
     ]) assert.ok(markdown.includes(fragment), `skill mode-admission contract is missing: ${fragment}`);
+    // ENFORCEMENT, not instruction: two documents parsing the same bytes is a false-green generator, and
+    // this one already fired. `--base` and `--max-retries` were added to the host skills and never here,
+    // while this section went on ending the prefix at the first non-mode token -- so the documents
+    // disagreed over whether `--max-retries 5 <run-id>` was an option pair or part of the run id. Read
+    // alone this section derived the run id `max-retries-5-1606`; read alongside the skill it halted a run
+    // outright, which is the better failure but still a halt. The drift was invisible because the 0.8.1
+    // verbatim-restatement guard binds a later region of this file and never reached this section. Any
+    // future host option recreates the defect the moment this section starts parsing again, so the
+    // property pinned is that it does not parse.
+    const admission = markdown.slice(admissionIndex, operatingModesIndex);
+    assert.match(admission, /This workflow never decides where that prefix ends\./u,
+      "the admission section must concede the whole option prefix to the platform skill");
+    for (const terminator of [/ends the prefix/u, /maximal consecutive sequence/u, /remove every token in the recognized prefix/u]) {
+      assert.doesNotMatch(admission, terminator,
+        `the admission section must not define its own prefix terminator: ${terminator}`);
+    }
     assert.equal(markdown.includes("Only when the invocation explicitly requests it."), false);
     assert.equal(markdown.includes("Never infer it from vague wording."), false);
     // Join shell continuations so one command is one string, then read only code — fenced
