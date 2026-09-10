@@ -3,6 +3,36 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.4
+
+One change: the canonical workflow and the host skills no longer both parse the invocation.
+
+- **The platform skill owns invocation-option admission; `WORKFLOW.md` concedes it.** Its `## Mode
+  admission` section defined its own prefix — "the maximal consecutive sequence of tokens that are exactly
+  `--autonomous` or `--headless`", with "the first other token ends the prefix" — and named the remainder as
+  the input to run-id derivation. The host skills define a wider prefix that also admits `--base` and
+  `--max-retries`. `--max-retries` was added to the skills in #281 and never reached the workflow;
+  `--base` had the same gap. For `--autonomous --max-retries 5 chainlink-1610`, one document made
+  `--max-retries 5` an option pair and the other made it part of the run id.
+  The section now states that each host skill defines the complete option prefix, consumes it, and supplies
+  the workflow two things — the admitted mode tokens and the byte-preserved admitted remainder — and that
+  the workflow never decides where the prefix ends. Everything downstream is unchanged: the same mode
+  conflict refusal, the same `--mode` mapping, the same missing-request refusal, the same immutability of a
+  persisted mode. `OPERATING.md` already described admission this way; only the canonical workflow had not
+  caught up.
+- **What this cost, twice.** Read alone, the workflow's grammar derived the run id `max-retries-5-1606` and
+  parked that run. Read together with the skill — which 0.8.1 made mandatory, in a defined order, under a
+  rule to stop rather than improvise when the two disagree — a driver correctly refused to start
+  `chainlink-1610` at all, after eight workflow steps. The second failure is much better than the first and
+  is still a halt. Both are one defect: two documents governing the same bytes.
+- **A guard, because this drifted invisibly.** 0.8.1's verbatim-restatement test binds a later region of
+  `WORKFLOW.md` and never reached this section, so nothing compared the two grammars. The admission section
+  must now contain the concession and must not define a prefix terminator. The negative control that matters
+  is additive: a re-parsing sentence added while every pinned fragment stays intact is caught by the
+  terminator guard alone, which is the shape this drift actually takes.
+
+No production lines: the fix is contract text plus a test. The ledger stays at 4636.
+
 ## 0.8.3
 
 0.8.2 required a parked control-plane snapshot and it did not happen on the first real park. This makes the

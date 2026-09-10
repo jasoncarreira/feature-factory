@@ -1627,7 +1627,7 @@ const CLAIMS = [
   {
     id: "no-mode-persists-interactive",
     file: "WORKFLOW.md",
-    fragment: "With no recognized leading mode token, omit `--mode`; existing `factory init` records\n     `interactive`.",
+    fragment: "With no admitted mode token, omit `--mode`; existing `factory init` records\n     `interactive`.",
     expect: "allowed",
     matches: /"mode": "interactive"/u,
     act(repo) {
