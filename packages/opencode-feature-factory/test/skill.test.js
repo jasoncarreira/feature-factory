@@ -80,6 +80,21 @@ describe("OpenCode skill adapter", () => {
     // the workspace and `external_directory` is denied for every agent, so a run depending on it fails on a
     // permission refusal. These pin the reordering, one fragment per line so the assertion can match.
     assert.match(skill, /`factory init` stages the canonical workflow at the `workflow` path/u);
+    // ENFORCEMENT, not instruction: this prevents a false green. A driver runs `factory init` at step 3,
+    // before the canonical workflow is readable, so this skill is the only place the invocation can come
+    // from -- and it used to describe init only as three isolated flag fragments (`--pr-base`,
+    // `--max-retries`, `--mode`) with no `--repo` and no `--json` anywhere. A model assembled exactly those
+    // fragments, omitted `--json`, and got a successful init whose response the workflow refuses to bind
+    // from; repeating init is forbidden, so the run published `run.json`, stopped, and exited 0 leaving a
+    // live sandbox at `status: running`. The fix is one source of truth, so the property pinned is byte
+    // equality with the canonical block rather than the presence of any particular flag.
+    const canonicalInit = String(canonicalWorkflow).split("\n").find((line) => line.startsWith("INIT_RESPONSE="));
+    assert.ok(canonicalInit && canonicalInit.includes("factory init") && canonicalInit.endsWith("--json)\""),
+      `the canonical workflow no longer carries a single --json-terminated init block: ${canonicalInit}`);
+    assert.ok(skill.includes(canonicalInit),
+      "SKILL.md must carry the canonical init invocation verbatim; step 3 runs it before the workflow exists");
+    assert.match(skill, /`--json` is mandatory\./u,
+      "the skill must say --json is mandatory, which is the flag whose absence stranded a run");
     assert.match(skill, /before any state read, dispatch, gate, or `?factory`? command other\s+than `init` itself/u);
     assert.match(skill, /Do not read `WORKFLOW\.md` next to this file/u);
     assert.match(skill, /feature_background/u);

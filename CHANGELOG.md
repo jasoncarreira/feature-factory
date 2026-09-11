@@ -3,6 +3,60 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.5
+
+The init invocation has one source of truth, and it lives where a driver can reach it.
+
+- **The host skill now carries the complete `factory init` command, verbatim.** A driver runs `init` at
+  step 3; the canonical workflow is not readable until step 3 stages it. So the skill was the only
+  document available at the moment of the call, and it described `init` only as three isolated flag
+  fragments — `factory init --pr-base`, `factory init --max-retries`, `factory init --mode` — never
+  pairing it with `--repo` or `--json` anywhere. A model assembled exactly those fragments and guessed the
+  rest:
+
+  ```
+  init chainlink-1610 --mode autonomous --max-retries 5 --repo <checkout>
+  ```
+
+  No `--json`. Init succeeded and published `run.json`, but this workflow binds paths only from a JSON
+  response and forbids repeating init, so the run correctly stopped — leaving a live sandbox at
+  `status: running` with no driver, and a host exit code of 0.
+- **The canonical block gained `--max-retries`.** The skills instruct drivers to forward it and the block
+  omitted it, so every run with a retry budget had to improvise the one command that must not be
+  improvised.
+- **Two prose sentences contradicted the block and are gone.** `## Mode admission` said the fresh-run
+  invocation "ends with `--repo \"$RUN_REPO\"`" — wrong twice, since init is the one command taking
+  `--repo \"$O\"` (`RUN_REPO` is bound *from* its response) and the block ends with `--json`. Step 0 said
+  "command first and repository flag last", which the block it introduced contradicts. Every other `"$R"`
+  invocation does end with `--repo \"$RUN_REPO\"`, which is why the over-generalization read as correct;
+  `state-relocation.test.js` had already allowlisted init as the exception, and an assertion there was
+  pinning the wrong claim.
+- **Enforcement: byte equality, not flag presence.** The canonical `INIT_RESPONSE=` line is extracted from
+  `WORKFLOW.md` and both skills must contain it verbatim. Dropping `--json` from a copy, or adding a flag
+  to the block and leaving a copy behind, fails the test. The skills must also state that `--json` is
+  mandatory.
+
+Verified end to end with the launcher argv that produced the failure, leading space included —
+`opencode run --dir <checkout> --command feature " --autonomous --max-retries 5 chainlink-1610"` — which
+now yields `init "chainlink-1610" --branch "feature/chainlink-1610" --issue "chainlink-1610" --mode
+"autonomous" --max-retries "5" --repo "<checkout>" --json` and a run that binds its paths and proceeds.
+
+- **`status` reports `max_retries`.** Init has recorded it since the flag existed and nothing read it
+  back, so an operator forwarding `--max-retries` could not distinguish a budget that took effect from
+  one that silently fell back to the default 3 — a run bounded at the wrong number looked exactly like a
+  correct one. Emitted unguarded, because `max_retries` is a required schema-validated positive integer:
+  a manifest without one is invalid and never reaches the emitter.
+- **The Prime copy is Prime-specific.** The first version of this change pasted OpenCode's bootstrap
+  rationale into the Prime skill — "the workflow is not readable until init stages it", "Step 3 runs
+  `factory init`" — both false for Prime, which loads the canonical workflow before intake, admission and
+  `feature_factory_context`, and whose step 3 applies host bindings. That is the contradictory-instruction
+  defect this release exists to remove, reintroduced inside its own fix, and byte equality could not see
+  it because the command was identical. Caught in review. Prime now states that the section adds no
+  ordering and routes the call through the `feature_factory_context` CLI path, and a guard rejects the
+  OpenCode-only claims and requires the workflow-load section to precede it.
+
+Production moves 4636 → 4641 for the `max_retries` field; the tripwire stays 4650.
+
 ## 0.8.4
 
 One change: the canonical workflow and the host skills no longer both parse the invocation.

@@ -284,7 +284,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       /\{ writer = writeProtectedJsonAtomic, observeTarget = observeInitTarget \} = \{\},[\s\S]*?if \(finalGuard\) await finalGuard\(\);[\s\S]*?await writer\(runDir, "run\.json", candidate, \{ createOnly: true \}\)/u,
       "the private dispatcher must invoke the create-only protected writer");
     assert.ok(cliSource.includes("[--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET]"));
-    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json'));
+    assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json'));
     // The workflow must not construct `--publishing-identity`. It has no value to supply, so the flag would
     // be built from an unbound shell variable, expand to an empty argument, and -- before the resolution
     // fix below it -- mask a valid inherited value and refuse the run. Caught in review of 0.8.0.
@@ -1018,7 +1018,15 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Every path component is `lstat`ed and never followed, since `lstat` on the final entry still follows
     // intermediate symlinks, and an entry that is neither file, directory, nor link is rejected rather than
     // silently skipped.
-    assert.equal(total, 4636, "proving the publication happened lands at 4636 production lines");
+    // 4636 -> 4641. `status` now reports `max_retries`. Init has recorded it since the flag existed and
+    // nothing ever read it back, so an operator forwarding `--max-retries` could not tell a budget that
+    // took effect from one that silently fell back to the default 3 -- which is how a run bounded at the
+    // wrong number looks exactly like a correct one. Observability, not enforcement: it cannot make a
+    // budget correct, it makes a wrong one visible, which is the same argument that carried the 0.8.0
+    // identity field and the 0.8.3 park snapshot. The field is emitted unguarded because `max_retries` is
+    // a required schema-validated positive integer; a manifest without one is invalid and never reaches
+    // the emitter, so a `?? null` here would be describing a state that cannot exist.
+    assert.equal(total, 4641, "proving the publication happened lands at 4641 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

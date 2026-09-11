@@ -75,6 +75,34 @@ numerically as `max_retries` in `run.json`, so `003` persists as `3`. When retry
 `--max-retries <n>` argv pair. Pass a supplied base unchanged only as `factory init --pr-base <value>` and,
 for no-base input, omit `--pr-base` without changing the preserved request suffix or other effects.
 
+## The init invocation
+
+This section adds no ordering. Prime loads the canonical workflow first -- before intake inspection,
+admission, `feature_factory_context`, and every `factory` command -- so its Step 0 block is already in
+hand and remains authoritative. The same command is reproduced here, byte for byte from that block and
+bound to it by a test, so that every host runs an identical invocation and no driver re-derives one:
+
+```sh
+INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"
+```
+
+Invoke it through the exact absolute `cli` path returned by `feature_factory_context`, as
+`node <cli> init ...`, never from `PATH`. Include each bracketed flag only when admission supplied its
+value.
+
+`--json` is mandatory. Without it init still succeeds and still publishes `run.json`, but the canonical
+workflow binds paths only from a JSON response and forbids repeating init, so the run can do nothing
+but stop -- leaving a live sandbox with `status: running` and no driver. `--repo` is the operator
+repository `$O`, not `$RUN_REPO`: `RUN_REPO` is bound from this response and does not exist yet.
+
+Never assemble this command from the `factory init --pr-base`, `factory init --max-retries` and
+`factory init --mode` phrases elsewhere in this file. Those name single flags to forward, not the
+invocation; assembling from them is what produced an init without `--json` on a host that had no
+copy of the block.
+
+If you stop for any reason after init has succeeded, park the run rather than ending the turn: an
+abandoned `status: running` is indistinguishable from a driver still working.
+
 ## Prime session ownership
 
 Use the exact non-empty `sessionId` returned by `feature_factory_context` as `SESSION_ID` for every

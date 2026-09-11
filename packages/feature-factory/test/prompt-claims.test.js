@@ -1625,6 +1625,19 @@ const CLAIMS = [
     },
   },
   {
+    // A data row on an existing site. `--max-retries 7` rather than the default 3 or mimir's 5, so a run
+    // that silently fell back to the default fails the match instead of passing on a coincidence.
+    id: "status-reports-retry-budget",
+    file: "WORKFLOW.md",
+    fragment: "Qualified status reports the run's `max_retries`, so the budget a run is actually bounded by is\n  observable rather than assumed",
+    expect: "allowed",
+    matches: /"max_retries": 7/u,
+    act(repo) {
+      const initialized = initFresh(repo, [RUN, "--branch", "work", "--max-retries", "7", "--now", NOW]);
+      return factory(initialized.repository, ["status", RUN, "--json"]);
+    },
+  },
+  {
     id: "no-mode-persists-interactive",
     file: "WORKFLOW.md",
     fragment: "With no admitted mode token, omit `--mode`; existing `factory init` records\n     `interactive`.",
