@@ -563,7 +563,8 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   const autonomousEnd = skill.indexOf("## Step 0", autonomousStart);
   const autonomous = skill.slice(autonomousStart, autonomousEnd);
   for (const fragment of [
-    "The draft PR is the last externally publishing side effect an autonomous run",
+    "Recording the pull request is the last externally publishing side effect an\n  autonomous run may perform.",
+    "autonomous does not imply draft, and `pr_draft: false` is a supported",
     "the mandatory local completed handoff in Step 7 still follows and\n  is required in every mode",
     "terminalize, fetch the permitted local refs, archive and verify the control\n  plane, and remove only the guarded sandbox",
     "Autonomous mode never merges an external PR or performs\n  unrelated work after PR recording.",
@@ -577,16 +578,54 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   for (const fragment of [
     "During bootstrap and active sandbox\nexecution, do not switch, reset, clean, stash, create a branch or worktree, write Git configuration, or\ninitialize factory state directly in `O`.",
     "The only operator-checkout operations before the completed\nhandoff are reads and the Step 6 forge command.",
-    "The explicit Step 7 exclusion applies only after the\ndraft PR is recorded",
+    "The explicit Step 7 exclusion applies only after the\npull request is recorded",
     "guarded local-ref fetch, archive, verification, and deterministic sandbox\nremoval remain the sole completed-handoff exception to bootstrap/refusal state preservation.",
   ]) assert.ok(operatorBoundary.includes(fragment), `AC10 operator boundary is missing: ${fragment}`);
 
-  const sharedModeRule = "After draft PR recording, `interactive`, `headless`, and `autonomous` modes all enter this same mandatory\nlocal completed handoff.";
+  // The wording moved off "draft" deliberately: `pr_draft: false` publishes ready-for-review, and prose
+  // asserting a draft unconditionally is what made an agent read autonomous as draft-only and park.
+  const sharedModeRule = "After the pull request is recorded -- draft or ready for review, as `pr_draft`\nselected -- `interactive`, `headless`, and `autonomous` modes all enter this same mandatory\nlocal completed handoff.";
   assert.ok(handoff.includes(sharedModeRule), "AC10 all modes must enter the same local completed handoff after PR recording");
   assert.ok(handoff.includes("perform only the terminalize, local-ref fetch, archive, verification, and guarded sandbox-removal\nsequence below"),
     "AC10 autonomous post-PR exception must be limited to the local completed handoff sequence");
   assert.ok(handoff.includes("with no external PR merge or unrelated work after PR recording"),
     "AC10 autonomous post-PR exception must prohibit external PR merge and unrelated work");
+
+  // ENFORCEMENT, not instruction, and derived from the code rather than from a list of banned phrases.
+  // Three releases running, the executable block was right and prose restating its decision drifted:
+  // 0.8.4 the option prefix, 0.8.5 the init invocation, and here PR publication. The block selects
+  // `gh pr create --draft` on `PR_DRAFT=true` and plain `gh pr create` otherwise, so `pr_draft: false`
+  // is fully supported -- but prose asserted "the draft PR" unconditionally in seven places, one of them
+  // putting "draft" and "autonomous" in a single clause. An agent read autonomous as draft-only, found
+  // the run's `pr_draft: false`, and parked on a contradiction between two instructions it must obey.
+  //
+  // The rule: for every variable a fenced block branches on, prose that names one of its branch outcomes
+  // must also name the variable, so a reader always sees that the outcome is selected rather than fixed.
+  // The variable list is EXTRACTED from the blocks, so adding a new branch automatically extends the
+  // guard, and a branch whose vocabulary is undeclared fails rather than going unpoliced -- that is the
+  // part a hand-written phrase list cannot do. My own manual sweep of this file found four of the seven
+  // sites; this found the rest, including the section heading.
+  const canonical = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
+  const fenced = [...canonical.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)].map(([, body]) => body);
+  const branchVars = new Set();
+  for (const body of fenced) {
+    for (const [, name] of body.matchAll(/(?:if\s+\[\s+|case\s+)"\$(\w+)"/gu)) branchVars.add(name);
+  }
+  // Outcome vocabulary per branch variable. A phrase is listed only when it names an outcome; "draft a
+  // ticket" is a different word sense and is not one.
+  const OUTCOME_WORDS = { PR_DRAFT: [/draft PR\b/iu, /\bdraft publication\b/iu, /PR is a draft\b/iu] };
+  for (const name of branchVars) {
+    assert.ok(OUTCOME_WORDS[name], `a fenced block branches on $${name} with no declared outcome vocabulary; add one so prose about it is guarded`);
+  }
+  const proseOnly = canonical.replace(/```[a-z]*\n[\s\S]*?```/gu, "");
+  for (const [name, patterns] of Object.entries(OUTCOME_WORDS)) {
+    if (!branchVars.has(name)) continue;
+    for (const line of proseOnly.split("\n")) {
+      if (!patterns.some((pattern) => pattern.test(line))) continue;
+      assert.match(line, new RegExp(name, "iu"),
+        `prose states a ${name} outcome as if it were fixed; name ${name} so it reads as selected: ${line.trim()}`);
+    }
+  }
 
   const fixtures = [];
   try {
