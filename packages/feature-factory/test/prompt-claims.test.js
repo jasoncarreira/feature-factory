@@ -1280,7 +1280,7 @@ const CLAIMS = [
   {
     id: "explicit-false-status-exposes-ready-policy",
     file: "WORKFLOW.md",
-    fragment: 'The ready-for-review publication signature is `gh pr create --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`.',
+    fragment: 'The `PR_DRAFT=false` ready-for-review publication signature is `gh pr create --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`.',
     expect: "allowed",
     matches: /pr_draft: false/u,
     act(repo) {

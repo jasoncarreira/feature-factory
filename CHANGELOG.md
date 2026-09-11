@@ -3,6 +3,43 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.6
+
+`pr_draft` is a repository setting, not a property of autonomous mode — and a guard so the next one of
+these fails a test instead of a run.
+
+- **Nothing in the executable layer was wrong.** The publication block selects `gh pr create --draft` on
+  `PR_DRAFT=true` and plain `gh pr create` otherwise, and the surrounding text already said draft
+  publication for `true` and ready-for-review "only for `PR_DRAFT=false`". A `pr_draft: false` repository
+  has always been supported.
+- **Eight prose passages asserted a draft unconditionally**, one of them putting "draft" and "autonomous"
+  in a single clause: "The draft PR is the last externally publishing side effect an autonomous run may
+  perform." A driver read autonomous as draft-only, found its run recorded `pr_draft: false`, and parked
+  on a contradiction between two instructions it is required to obey. Parking was correct. All eight are
+  now mode-neutral, including the `## Step 6` heading and the two publication signatures, which are
+  labelled with the `PR_DRAFT` value that selects them.
+- **`draft-pr-recorded` is declared a fixed protocol token** meaning the run's pull request was created
+  and recorded. It does not assert draft-ness; a `pr_draft: false` run terminalizes with the same reason.
+  Kept verbatim rather than varied, because downstream consumers match it exactly.
+- **The guard is derived from the code, not from a phrase list.** For every selector a fenced block
+  branches on, prose naming one of its outcomes must also name the selector, so an outcome reads as
+  chosen rather than fixed. A selector found with no declared outcome vocabulary fails rather than going
+  unpoliced, and word senses are distinguished: "draft a ticket" is not a `PR_DRAFT` outcome.
+  It is a regex over shell text, not a shell parser, and the first version **failed open** — the same
+  defect it exists to catch. Rewriting the condition as `[[ … ]]` or `${PR_DRAFT}` made it discover
+  nothing, and with nothing discovered every prose check was skipped and the whole guard passed while
+  proving nothing. Caught in review. The extractor now reads those forms, and a list of known selectors
+  must still be discovered, so a rewrite it cannot parse fails loudly and gets fixed in the extractor
+  instead of silently tolerated. Eight table-driven controls pin the guard's own failure modes, including
+  both rewrites and a selector that has vanished entirely.
+
+This is the third consecutive release fixing the same shape — executable block correct, prose restating
+its decision and drifting. 0.8.4 was the option prefix, 0.8.5 the init invocation. A manual sweep of this
+file found four of the eight sites; the guard found the rest, including the section heading, which is the
+argument for having built it.
+
+No production lines; the ledger stays at 4641.
+
 ## 0.8.5
 
 The init invocation has one source of truth, and it lives where a driver can reach it.

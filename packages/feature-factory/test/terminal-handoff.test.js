@@ -563,7 +563,8 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   const autonomousEnd = skill.indexOf("## Step 0", autonomousStart);
   const autonomous = skill.slice(autonomousStart, autonomousEnd);
   for (const fragment of [
-    "The draft PR is the last externally publishing side effect an autonomous run",
+    "Recording the pull request is the last externally publishing side effect an\n  autonomous run may perform.",
+    "autonomous does not imply draft, and `pr_draft: false` is a supported",
     "the mandatory local completed handoff in Step 7 still follows and\n  is required in every mode",
     "terminalize, fetch the permitted local refs, archive and verify the control\n  plane, and remove only the guarded sandbox",
     "Autonomous mode never merges an external PR or performs\n  unrelated work after PR recording.",
@@ -577,16 +578,90 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   for (const fragment of [
     "During bootstrap and active sandbox\nexecution, do not switch, reset, clean, stash, create a branch or worktree, write Git configuration, or\ninitialize factory state directly in `O`.",
     "The only operator-checkout operations before the completed\nhandoff are reads and the Step 6 forge command.",
-    "The explicit Step 7 exclusion applies only after the\ndraft PR is recorded",
+    "The explicit Step 7 exclusion applies only after the\npull request is recorded",
     "guarded local-ref fetch, archive, verification, and deterministic sandbox\nremoval remain the sole completed-handoff exception to bootstrap/refusal state preservation.",
   ]) assert.ok(operatorBoundary.includes(fragment), `AC10 operator boundary is missing: ${fragment}`);
 
-  const sharedModeRule = "After draft PR recording, `interactive`, `headless`, and `autonomous` modes all enter this same mandatory\nlocal completed handoff.";
+  // The wording moved off "draft" deliberately: `pr_draft: false` publishes ready-for-review, and prose
+  // asserting a draft unconditionally is what made an agent read autonomous as draft-only and park.
+  const sharedModeRule = "After the pull request is recorded -- draft or ready for review, as `pr_draft`\nselected -- `interactive`, `headless`, and `autonomous` modes all enter this same mandatory\nlocal completed handoff.";
   assert.ok(handoff.includes(sharedModeRule), "AC10 all modes must enter the same local completed handoff after PR recording");
   assert.ok(handoff.includes("perform only the terminalize, local-ref fetch, archive, verification, and guarded sandbox-removal\nsequence below"),
     "AC10 autonomous post-PR exception must be limited to the local completed handoff sequence");
   assert.ok(handoff.includes("with no external PR merge or unrelated work after PR recording"),
     "AC10 autonomous post-PR exception must prohibit external PR merge and unrelated work");
+
+  // ENFORCEMENT, not instruction, and derived from the code rather than from a list of banned phrases.
+  // Three releases running, the executable block was right and prose restating its decision drifted:
+  // 0.8.4 the option prefix, 0.8.5 the init invocation, and here PR publication. The block selects
+  // `gh pr create --draft` on `PR_DRAFT=true` and plain `gh pr create` otherwise, so `pr_draft: false`
+  // is fully supported -- but prose asserted "the draft PR" unconditionally in eight places, one of them
+  // putting "draft" and "autonomous" in a single clause. An agent read autonomous as draft-only, found
+  // the run's `pr_draft: false`, and parked on a contradiction between two instructions it must obey.
+  //
+  // The rule: for every selector a fenced block branches on, prose naming one of its outcomes must also
+  // name the selector, so an outcome reads as chosen rather than fixed.
+  //
+  // The first version of this FAILED OPEN, which is the same defect it exists to catch. The extractor is
+  // a regex over shell, not a shell parser, so rewriting the condition as `[[ ... ]]` or `${PR_DRAFT}`
+  // made it discover nothing -- and with nothing discovered every prose check below was skipped and the
+  // whole guard passed while proving nothing. Caught in review. Two changes close it: the extractor
+  // recognises the forms this file can plausibly use, and KNOWN_SELECTORS must still be discovered, so a
+  // rewrite the extractor cannot read fails loudly and is fixed in the extractor rather than silently
+  // tolerated. It remains a heuristic over shell text; the known-selector assertion is what makes an
+  // unreadable rewrite fail closed instead of open.
+  const SELECTOR_FORMS = /(?:if\s+\[{1,2}\s+|case\s+|elif\s+\[{1,2}\s+)"?\$\{?(\w+)\}?"?/gu;
+  // Outcome vocabulary per selector. Listed only when the phrase names an outcome: "draft a ticket" is a
+  // different word sense and is deliberately absent.
+  const OUTCOME_WORDS = { PR_DRAFT: [/draft PR\b/iu, /\bdraft publication\b/iu, /PR is a draft\b/iu] };
+  // Selectors this file is known to branch on. Discovery of each is asserted, so an equivalent rewrite
+  // cannot quietly empty the set.
+  const KNOWN_SELECTORS = ["PR_DRAFT"];
+
+  const outcomeViolations = (markdown) => {
+    const blocks = [...markdown.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)].map(([, body]) => body);
+    const selectors = new Set();
+    for (const body of blocks) for (const [, name] of body.matchAll(SELECTOR_FORMS)) selectors.add(name);
+    const undeclared = [...selectors].filter((name) => !OUTCOME_WORDS[name]);
+    const missing = KNOWN_SELECTORS.filter((name) => !selectors.has(name));
+    const prose = markdown.replace(/```[a-z]*\n[\s\S]*?```/gu, "");
+    const unqualified = [];
+    for (const [name, patterns] of Object.entries(OUTCOME_WORDS)) {
+      if (!selectors.has(name)) continue;
+      for (const line of prose.split("\n")) {
+        if (patterns.some((pattern) => pattern.test(line)) && !new RegExp(name, "iu").test(line)) unqualified.push(line.trim());
+      }
+    }
+    return { undeclared, missing, unqualified };
+  };
+
+  const canonical = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
+  const live = outcomeViolations(canonical);
+  assert.deepEqual(live.missing, [],
+    `the extractor no longer discovers a known branch selector, which would skip every prose check below and pass: ${live.missing.join(", ")}`);
+  assert.deepEqual(live.undeclared, [],
+    `a fenced block branches on a selector with no declared outcome vocabulary, so prose about it is unguarded: ${live.undeclared.join(", ")}`);
+  assert.deepEqual(live.unqualified, [],
+    `prose states a branch outcome as if it were fixed; name the selector so it reads as chosen:\n  ${live.unqualified.join("\n  ")}`);
+
+  // The controls are table-driven rather than run by hand, so the guard's own failure modes stay proven.
+  // The `missing` row is the one review added: it is the rewrite that used to switch the guard off.
+  const guardBlock = '```sh\nif [ "$PR_DRAFT" = true ]; then\n  gh pr create --draft\nelse\n  gh pr create\nfi\n```\n';
+  for (const [name, markdown, expected] of [
+    ["clean baseline", `${guardBlock}\nPublication follows PR_DRAFT.\n`, { undeclared: [], missing: [], unqualifiedCount: 0 }],
+    ["unconditional outcome claim", `${guardBlock}\nAn autonomous run always finishes with a draft PR.\n`, { undeclared: [], missing: [], unqualifiedCount: 1 }],
+    ["qualified outcome claim", `${guardBlock}\nWith PR_DRAFT true the draft PR is published.\n`, { undeclared: [], missing: [], unqualifiedCount: 0 }],
+    ["unrelated word sense", `${guardBlock}\nThe story agent may draft a ticket.\n`, { undeclared: [], missing: [], unqualifiedCount: 0 }],
+    ["selector rewritten as [[ ]]", `${guardBlock.replace('if [ "$PR_DRAFT"', 'if [[ "$PR_DRAFT"')}\nAn autonomous run always finishes with a draft PR.\n`, { undeclared: [], missing: [], unqualifiedCount: 1 }],
+    ["selector rewritten as ${}", `${guardBlock.replace('"$PR_DRAFT"', '"${PR_DRAFT}"')}\nAn autonomous run always finishes with a draft PR.\n`, { undeclared: [], missing: [], unqualifiedCount: 1 }],
+    ["selector absent entirely", "No fenced block here.\nAn autonomous run always finishes with a draft PR.\n", { undeclared: [], missing: ["PR_DRAFT"], unqualifiedCount: 0 }],
+    ["new selector, no vocabulary", `\`\`\`sh\nif [ "$PR_SQUASH" = true ]; then :; fi\n\`\`\`\n${guardBlock}`, { undeclared: ["PR_SQUASH"], missing: [], unqualifiedCount: 0 }],
+  ]) {
+    const got = outcomeViolations(markdown);
+    assert.deepEqual(got.undeclared, expected.undeclared, `guard control '${name}': undeclared selectors`);
+    assert.deepEqual(got.missing, expected.missing, `guard control '${name}': undiscovered known selectors`);
+    assert.equal(got.unqualified.length, expected.unqualifiedCount, `guard control '${name}': unqualified prose lines`);
+  }
 
   const fixtures = [];
   try {

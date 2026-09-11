@@ -295,8 +295,12 @@ fresh run; an existing run follows these rules solely because its manifest alrea
   every acceptance criterion maps to a slice, and same-wave slices are file-disjoint.
 - **Gate 3 (pre-PR)**: approve only on a GO or GO-WITH-NITS validator verdict with `review_ready`
   observed evidence for the integrated branch. A NO-GO is a NO-GO.
-- **Never auto-merge.** The draft PR is the last externally publishing side effect an autonomous run
-  may perform. After it is recorded, the mandatory local completed handoff in Step 7 still follows and
+- **Never auto-merge.** Recording the pull request is the last externally publishing side effect an
+  autonomous run may perform. Whether that PR is a draft is the repository's `pr_draft` choice and is
+  independent of the run mode: autonomous does not imply draft, and `pr_draft: false` is a supported
+  configuration that publishes ready-for-review in every mode. The constraint here is about stopping
+  after publication, not about draft-ness.
+  After it is recorded, the mandatory local completed handoff in Step 7 still follows and
   is required in every mode: terminalize, fetch the permitted local refs, archive and verify the control
   plane, and remove only the guarded sandbox. Autonomous mode never merges an external PR or performs
   unrelated work after PR recording.
@@ -562,7 +566,7 @@ After derivation, `O` is the physically resolved operator checkout. During boots
 execution, do not switch, reset, clean, stash, create a branch or worktree, write Git configuration, or
 initialize factory state directly in `O`. The only operator-checkout operations before the completed
 handoff are reads and the Step 6 forge command. The explicit Step 7 exclusion applies only after the
-draft PR is recorded: its guarded local-ref fetch, archive, verification, and deterministic sandbox
+pull request is recorded: its guarded local-ref fetch, archive, verification, and deterministic sandbox
 removal remain the sole completed-handoff exception to bootstrap/refusal state preservation.
 
 ### Resume or collision
@@ -1816,10 +1820,10 @@ command; never move it earlier or present stale evidence.
 The compatibility transition name is `factory gate <run-id> pre_pr pending`; the runnable form is the
 repository-qualified command above.
 
-The draft publication signature is `gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`.
-The ready-for-review publication signature is `gh pr create --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`.
+The `PR_DRAFT=true` draft publication signature is `gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`.
+The `PR_DRAFT=false` ready-for-review publication signature is `gh pr create --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"`.
 
-## Step 6 — Draft PR
+## Step 6 — Draft PR (ready-for-review when `pr_draft` is false)
 
 Immediately before any publication effect, read the delivery intent from the selected run repository,
 then, for a sandbox-selected run, repeat the operator exact-ref-absent and sandbox
@@ -1951,12 +1955,13 @@ whatever mapping the repository documents, and update the tracker only through *
 
 ## Step 7 — Summary and completed sandbox handoff
 
-After draft PR recording, `interactive`, `headless`, and `autonomous` modes all enter this same mandatory
+After the pull request is recorded -- draft or ready for review, as `pr_draft`
+selected -- `interactive`, `headless`, and `autonomous` modes all enter this same mandatory
 local completed handoff. In autonomous mode this is the sole narrow exception to the external-side-effect
 stop: perform only the terminalize, local-ref fetch, archive, verification, and guarded sandbox-removal
 sequence below, with no external PR merge or unrelated work after PR recording.
 
-After `factory pr` records the draft PR, stop the heartbeat loop and wait for any heartbeat call already
+After `factory pr` records the pull request, stop the heartbeat loop and wait for any heartbeat call already
 in flight to return. Before terminalization or any filesystem or Git side effect, require that the loop
 is no longer active and no dispatched agent call remains in flight, directly read and validate exactly
 `RUN_MANIFEST`, and require no step with status `running` and no slice with status `running` or `review`.
@@ -1974,6 +1979,12 @@ Terminalize before any housekeeping, through the repository selected in Step 0:
 ```sh
 factory terminal "$R" completed --reason "draft-pr-recorded" --repo "$RUN_REPO"
 ```
+
+`draft-pr-recorded` is a fixed protocol token meaning this run's pull request was created and recorded.
+It does not assert the PR is a draft: a `pr_draft: false` run records a ready-for-review PR and
+terminalizes with this same reason. Never vary it by mode or by `pr_draft`; downstream consumers match
+it exactly.
+
 
 Do not replay or retry any handoff phase. A later invocation that finds a completed sandbox reports its
 path for manual recovery and leaves it intact. For the same reason, do not invent durable phase state or
@@ -2118,7 +2129,8 @@ Never re-do a side effect the manifest shows already done — ticket creation, p
   Qualified status reports the run's `max_retries`, so the budget a run is actually bounded by is
   observable rather than assumed: a forwarded `--max-retries` that never reached the manifest is visible
   as a different number instead of silently running at the default.
-- **Draft PR only.** Never merge, force-push, or close tickets. Humans merge.
+- **Publish a PR and stop.** Never merge, force-push, or close tickets. Humans merge. Draft or
+  ready-for-review is `pr_draft`'s decision, not this rule's.
 - **Scope discipline and no fabrication.** Flag out-of-scope work at the next gate. Never invent paths,
   keys, versions, or test passes — if the evidence is thin, say so and ask.
 - **A repository may lock its own scope, and a lock is not a defect.** A check whose assertion *is* a
