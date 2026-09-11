@@ -104,6 +104,29 @@ to `factory init --mode headless`, and no admitted mode omits `--mode`. An exist
 resumes its immutable persisted mode, base, and retry budget. Invocation options never reinitialize or
 mutate it.
 
+## The init invocation
+
+Step 3 runs `factory init`, and this is the only document available when it does: the canonical
+workflow is not readable until init stages it. So the complete invocation is reproduced here, byte for
+byte from the canonical Step 0 block, and a test fails if the two ever differ. Run exactly this,
+including each bracketed flag only when admission supplied its value:
+
+```sh
+INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"
+```
+
+`--json` is mandatory. Without it init still succeeds and still publishes `run.json`, but the canonical
+workflow binds paths only from a JSON response and forbids repeating init, so the run can do nothing
+but stop -- leaving a live sandbox with `status: running` and no driver. `--repo` is the operator
+repository `$O`, not `$RUN_REPO`: `RUN_REPO` is bound from this response and does not exist yet.
+
+Never assemble this command from the `factory init --pr-base`, `factory init --max-retries` and
+`factory init --mode` phrases elsewhere in this file. Those name single flags to forward, not the
+invocation, and assembling from them is what once produced an init without `--json`.
+
+If you stop for any reason after init has succeeded, park the run rather than ending the turn: an
+abandoned `status: running` is indistinguishable from a driver still working.
+
 ## Repository resolver intake, before any run-id allocation
 
 Everything from here to the next `##` heading is the canonical pre-init section, restated verbatim: the

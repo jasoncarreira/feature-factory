@@ -132,8 +132,10 @@ remainder.
    - With no admitted mode token, omit `--mode`; existing `factory init` records
      `interactive`.
 
-Those three compatibility phrases name init command stems, not runnable invocations. The selected
-fresh-run invocation is fully qualified in Step 0 and ends with `--repo "$RUN_REPO"`.
+Those three compatibility phrases name init command stems, not runnable invocations. The one runnable
+fresh-run invocation is the fully qualified command block in Step 0; copy that block rather than
+assembling init from the phrases here. It is the single factory invocation whose repository flag is
+`--repo "$O"`, and it ends with `--json`.
 
 Repeated copies of one mode token are idempotent: the skill consumes them all and this workflow
 selects that mode once. A mode token the skill did not admit, standing after the first request token,
@@ -675,11 +677,19 @@ present and every other result is a lookup error; either refuses before init.
 
 An explicit `PR_BASE` wins. Otherwise require the symbolic branch in the configured operator worktree;
 detached, missing, escaping, or unprovable worktree state is refused by init. Request one fresh sandbox
-with the operator repository as `--repo`, command first and repository flag last, and include issue and
-admitted mode flags only when present:
+by running exactly the command below, command first, including each bracketed flag only when its value
+is present. Do not reconstruct this command from prose anywhere in this document: the block is the only
+shape, and every host skill carries it verbatim because a driver must run it before this file exists.
+
+Two properties of it are not guesses. Init is the one factory command whose repository flag is the
+operator repository `$O` rather than `$RUN_REPO`, because `RUN_REPO` does not exist until this response
+binds it. And `--json` is mandatory and terminal: without it a successful init still changes state and
+publishes `run.json`, but this workflow binds paths only from a JSON response, repeating init is
+forbidden, and the run can then do nothing but stop -- a live sandbox with `status: running` and no
+driver, which is the worst outcome this document has.
 
 ```sh
-INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] --repo "$O" --json)"
+INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"
 ```
 
 The init request pre-reserves the deterministic sandbox, performs exactly one

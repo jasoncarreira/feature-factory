@@ -75,6 +75,29 @@ numerically as `max_retries` in `run.json`, so `003` persists as `3`. When retry
 `--max-retries <n>` argv pair. Pass a supplied base unchanged only as `factory init --pr-base <value>` and,
 for no-base input, omit `--pr-base` without changing the preserved request suffix or other effects.
 
+## The init invocation
+
+Step 3 runs `factory init`, and this is the only document available when it does: the canonical
+workflow is not readable until init stages it. So the complete invocation is reproduced here, byte for
+byte from the canonical Step 0 block, and a test fails if the two ever differ. Run exactly this,
+including each bracketed flag only when admission supplied its value:
+
+```sh
+INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"
+```
+
+`--json` is mandatory. Without it init still succeeds and still publishes `run.json`, but the canonical
+workflow binds paths only from a JSON response and forbids repeating init, so the run can do nothing
+but stop -- leaving a live sandbox with `status: running` and no driver. `--repo` is the operator
+repository `$O`, not `$RUN_REPO`: `RUN_REPO` is bound from this response and does not exist yet.
+
+Never assemble this command from the `factory init --pr-base`, `factory init --max-retries` and
+`factory init --mode` phrases elsewhere in this file. Those name single flags to forward, not the
+invocation, and assembling from them is what once produced an init without `--json`.
+
+If you stop for any reason after init has succeeded, park the run rather than ending the turn: an
+abandoned `status: running` is indistinguishable from a driver still working.
+
 ## Prime session ownership
 
 Use the exact non-empty `sessionId` returned by `feature_factory_context` as `SESSION_ID` for every

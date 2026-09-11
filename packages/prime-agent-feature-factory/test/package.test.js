@@ -90,6 +90,21 @@ describe("Prime package contract", () => {
     }
     assert.ok(skill.indexOf("This is the closed pre-context order:") < skill.indexOf("Only after successful admission"));
     assert.equal(workflow, canonicalWorkflow);
+    // ENFORCEMENT, not instruction: this prevents a false green. A driver runs `factory init` at step 3,
+    // before the canonical workflow is readable, so this skill is the only place the invocation can come
+    // from -- and it used to describe init only as three isolated flag fragments (`--pr-base`,
+    // `--max-retries`, `--mode`) with no `--repo` and no `--json` anywhere. A model assembled exactly those
+    // fragments, omitted `--json`, and got a successful init whose response the workflow refuses to bind
+    // from; repeating init is forbidden, so the run published `run.json`, stopped, and exited 0 leaving a
+    // live sandbox at `status: running`. The fix is one source of truth, so the property pinned is byte
+    // equality with the canonical block rather than the presence of any particular flag.
+    const canonicalInit = String(canonicalWorkflow).split("\n").find((line) => line.startsWith("INIT_RESPONSE="));
+    assert.ok(canonicalInit && canonicalInit.includes("factory init") && canonicalInit.endsWith("--json)\""),
+      `the canonical workflow no longer carries a single --json-terminated init block: ${canonicalInit}`);
+    assert.ok(skill.includes(canonicalInit),
+      "SKILL.md must carry the canonical init invocation verbatim; step 3 runs it before the workflow exists");
+    assert.match(skill, /`--json` is mandatory\./u,
+      "the skill must say --json is mandatory, which is the flag whose absence stranded a run");
     const firstMatch = "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.";
     const noOp = "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.";
     const checkBootstrapPolicy = (text) => {
