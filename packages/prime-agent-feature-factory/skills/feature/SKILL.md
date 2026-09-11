@@ -77,14 +77,18 @@ for no-base input, omit `--pr-base` without changing the preserved request suffi
 
 ## The init invocation
 
-Step 3 runs `factory init`, and this is the only document available when it does: the canonical
-workflow is not readable until init stages it. So the complete invocation is reproduced here, byte for
-byte from the canonical Step 0 block, and a test fails if the two ever differ. Run exactly this,
-including each bracketed flag only when admission supplied its value:
+This section adds no ordering. Prime loads the canonical workflow first -- before intake inspection,
+admission, `feature_factory_context`, and every `factory` command -- so its Step 0 block is already in
+hand and remains authoritative. The same command is reproduced here, byte for byte from that block and
+bound to it by a test, so that every host runs an identical invocation and no driver re-derives one:
 
 ```sh
 INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"
 ```
+
+Invoke it through the exact absolute `cli` path returned by `feature_factory_context`, as
+`node <cli> init ...`, never from `PATH`. Include each bracketed flag only when admission supplied its
+value.
 
 `--json` is mandatory. Without it init still succeeds and still publishes `run.json`, but the canonical
 workflow binds paths only from a JSON response and forbids repeating init, so the run can do nothing
@@ -93,7 +97,8 @@ repository `$O`, not `$RUN_REPO`: `RUN_REPO` is bound from this response and doe
 
 Never assemble this command from the `factory init --pr-base`, `factory init --max-retries` and
 `factory init --mode` phrases elsewhere in this file. Those name single flags to forward, not the
-invocation, and assembling from them is what once produced an init without `--json`.
+invocation; assembling from them is what produced an init without `--json` on a host that had no
+copy of the block.
 
 If you stop for any reason after init has succeeded, park the run rather than ending the turn: an
 abandoned `status: running` is indistinguishable from a driver still working.

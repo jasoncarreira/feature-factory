@@ -2115,6 +2115,9 @@ Never re-do a side effect the manifest shows already done — ticket creation, p
   answer; do not work around it by editing state.
 - **Bounded loops.** `max_retries` per slice and per step, recorded as attempts. On exhaustion mark
   `blocked` or `partial` with a reason and stop. A bounded loop parks top-level needs-human; explicit resume may repark it if the external cause remains unfixed.
+  Qualified status reports the run's `max_retries`, so the budget a run is actually bounded by is
+  observable rather than assumed: a forwarded `--max-retries` that never reached the manifest is visible
+  as a different number instead of silently running at the default.
 - **Draft PR only.** Never merge, force-push, or close tickets. Humans merge.
 - **Scope discipline and no fabrication.** Flag out-of-scope work at the next gate. Never invent paths,
   keys, versions, or test passes — if the evidence is thin, say so and ask.

@@ -953,6 +953,11 @@ const HANDLERS = {
       mode: run.mode,
       branch: run.branch,
       pr_base: run.pr_base ?? null,
+      // Reported, not defaulted: `max_retries` is a required schema-validated positive integer, so an
+      // absent value is an invalid manifest that never reaches here. An operator forwarding
+      // `--max-retries` previously had no way to confirm the budget took effect -- init recorded it and
+      // nothing read it back.
+      max_retries: run.max_retries,
       publishing_identity: run.publishing_identity ?? null,
       park_snapshot: run.status === "needs-human" ? observedParkSnapshot(resolve(flags.repo ?? process.cwd()), runId, runDir) : null,
       pr_draft: run.pr_draft ?? true,

@@ -90,14 +90,13 @@ describe("Prime package contract", () => {
     }
     assert.ok(skill.indexOf("This is the closed pre-context order:") < skill.indexOf("Only after successful admission"));
     assert.equal(workflow, canonicalWorkflow);
-    // ENFORCEMENT, not instruction: this prevents a false green. A driver runs `factory init` at step 3,
-    // before the canonical workflow is readable, so this skill is the only place the invocation can come
-    // from -- and it used to describe init only as three isolated flag fragments (`--pr-base`,
-    // `--max-retries`, `--mode`) with no `--repo` and no `--json` anywhere. A model assembled exactly those
-    // fragments, omitted `--json`, and got a successful init whose response the workflow refuses to bind
-    // from; repeating init is forbidden, so the run published `run.json`, stopped, and exited 0 leaving a
-    // live sandbox at `status: running`. The fix is one source of truth, so the property pinned is byte
-    // equality with the canonical block rather than the presence of any particular flag.
+    // ENFORCEMENT, not instruction: this prevents a false green. Prime does load the canonical workflow
+    // before init, so unlike OpenCode it is not bootstrapping blind -- but a skill that describes init
+    // only as isolated flag fragments still invites a driver to assemble one, and on OpenCode exactly
+    // that produced an init without `--json`: a successful init whose response the workflow refuses to
+    // bind from, with repeating init forbidden, so the run published `run.json`, stopped, and exited 0
+    // leaving a live sandbox at `status: running`. One invocation across hosts is the fix, so the
+    // property pinned is byte equality with the canonical block rather than any particular flag.
     const canonicalInit = String(canonicalWorkflow).split("\n").find((line) => line.startsWith("INIT_RESPONSE="));
     assert.ok(canonicalInit && canonicalInit.includes("factory init") && canonicalInit.endsWith("--json)\""),
       `the canonical workflow no longer carries a single --json-terminated init block: ${canonicalInit}`);
@@ -105,6 +104,21 @@ describe("Prime package contract", () => {
       "SKILL.md must carry the canonical init invocation verbatim; step 3 runs it before the workflow exists");
     assert.match(skill, /`--json` is mandatory\./u,
       "the skill must say --json is mandatory, which is the flag whose absence stranded a run");
+    // The shared command must not drag OpenCode's bootstrap rationale with it. Prime loads the canonical
+    // workflow BEFORE intake, admission and `feature_factory_context`, so "the workflow is unreadable
+    // until init" and "step 3 runs init" are both false here -- Prime's step 3 applies host bindings --
+    // and they contradict this file's own preflight. That is the contradictory-instruction defect this
+    // change exists to remove, reintroduced by the fix for it, and the byte-equality assertion above
+    // cannot see it because the command was identical. Caught in review. Lexical, like any prose guard:
+    // it pins the claims that were actually made, not every way the order could be misstated.
+    for (const openCodeOnly of [/not readable until init/u, /only document available/u, /Step 3 runs `factory init`/u]) {
+      assert.doesNotMatch(skill, openCodeOnly, `Prime skill carries an OpenCode-only bootstrap claim: ${openCodeOnly}`);
+    }
+    assert.ok(skill.indexOf("## Load the canonical contract first") >= 0
+      && skill.indexOf("## Load the canonical contract first") < skill.indexOf("## The init invocation"),
+      "Prime's canonical-workflow load must precede the init invocation section, which is its real order");
+    assert.match(skill, /This section adds no ordering\./u,
+      "the Prime copy must say it adds no ordering, or it reads as a competing sequence");
     const firstMatch = "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.";
     const noOp = "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.";
     const checkBootstrapPolicy = (text) => {

@@ -41,7 +41,21 @@ Verified end to end with the launcher argv that produced the failure, leading sp
 now yields `init "chainlink-1610" --branch "feature/chainlink-1610" --issue "chainlink-1610" --mode
 "autonomous" --max-retries "5" --repo "<checkout>" --json` and a run that binds its paths and proceeds.
 
-No production lines; the ledger stays at 4636.
+- **`status` reports `max_retries`.** Init has recorded it since the flag existed and nothing read it
+  back, so an operator forwarding `--max-retries` could not distinguish a budget that took effect from
+  one that silently fell back to the default 3 — a run bounded at the wrong number looked exactly like a
+  correct one. Emitted unguarded, because `max_retries` is a required schema-validated positive integer:
+  a manifest without one is invalid and never reaches the emitter.
+- **The Prime copy is Prime-specific.** The first version of this change pasted OpenCode's bootstrap
+  rationale into the Prime skill — "the workflow is not readable until init stages it", "Step 3 runs
+  `factory init`" — both false for Prime, which loads the canonical workflow before intake, admission and
+  `feature_factory_context`, and whose step 3 applies host bindings. That is the contradictory-instruction
+  defect this release exists to remove, reintroduced inside its own fix, and byte equality could not see
+  it because the command was identical. Caught in review. Prime now states that the section adds no
+  ordering and routes the call through the `feature_factory_context` CLI path, and a guard rejects the
+  OpenCode-only claims and requires the workflow-load section to precede it.
+
+Production moves 4636 → 4641 for the `max_retries` field; the tripwire stays 4650.
 
 ## 0.8.4
 
