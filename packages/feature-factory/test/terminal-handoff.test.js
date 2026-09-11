@@ -595,36 +595,72 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   // Three releases running, the executable block was right and prose restating its decision drifted:
   // 0.8.4 the option prefix, 0.8.5 the init invocation, and here PR publication. The block selects
   // `gh pr create --draft` on `PR_DRAFT=true` and plain `gh pr create` otherwise, so `pr_draft: false`
-  // is fully supported -- but prose asserted "the draft PR" unconditionally in seven places, one of them
+  // is fully supported -- but prose asserted "the draft PR" unconditionally in eight places, one of them
   // putting "draft" and "autonomous" in a single clause. An agent read autonomous as draft-only, found
   // the run's `pr_draft: false`, and parked on a contradiction between two instructions it must obey.
   //
-  // The rule: for every variable a fenced block branches on, prose that names one of its branch outcomes
-  // must also name the variable, so a reader always sees that the outcome is selected rather than fixed.
-  // The variable list is EXTRACTED from the blocks, so adding a new branch automatically extends the
-  // guard, and a branch whose vocabulary is undeclared fails rather than going unpoliced -- that is the
-  // part a hand-written phrase list cannot do. My own manual sweep of this file found four of the seven
-  // sites; this found the rest, including the section heading.
-  const canonical = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
-  const fenced = [...canonical.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)].map(([, body]) => body);
-  const branchVars = new Set();
-  for (const body of fenced) {
-    for (const [, name] of body.matchAll(/(?:if\s+\[\s+|case\s+)"\$(\w+)"/gu)) branchVars.add(name);
-  }
-  // Outcome vocabulary per branch variable. A phrase is listed only when it names an outcome; "draft a
-  // ticket" is a different word sense and is not one.
+  // The rule: for every selector a fenced block branches on, prose naming one of its outcomes must also
+  // name the selector, so an outcome reads as chosen rather than fixed.
+  //
+  // The first version of this FAILED OPEN, which is the same defect it exists to catch. The extractor is
+  // a regex over shell, not a shell parser, so rewriting the condition as `[[ ... ]]` or `${PR_DRAFT}`
+  // made it discover nothing -- and with nothing discovered every prose check below was skipped and the
+  // whole guard passed while proving nothing. Caught in review. Two changes close it: the extractor
+  // recognises the forms this file can plausibly use, and KNOWN_SELECTORS must still be discovered, so a
+  // rewrite the extractor cannot read fails loudly and is fixed in the extractor rather than silently
+  // tolerated. It remains a heuristic over shell text; the known-selector assertion is what makes an
+  // unreadable rewrite fail closed instead of open.
+  const SELECTOR_FORMS = /(?:if\s+\[{1,2}\s+|case\s+|elif\s+\[{1,2}\s+)"?\$\{?(\w+)\}?"?/gu;
+  // Outcome vocabulary per selector. Listed only when the phrase names an outcome: "draft a ticket" is a
+  // different word sense and is deliberately absent.
   const OUTCOME_WORDS = { PR_DRAFT: [/draft PR\b/iu, /\bdraft publication\b/iu, /PR is a draft\b/iu] };
-  for (const name of branchVars) {
-    assert.ok(OUTCOME_WORDS[name], `a fenced block branches on $${name} with no declared outcome vocabulary; add one so prose about it is guarded`);
-  }
-  const proseOnly = canonical.replace(/```[a-z]*\n[\s\S]*?```/gu, "");
-  for (const [name, patterns] of Object.entries(OUTCOME_WORDS)) {
-    if (!branchVars.has(name)) continue;
-    for (const line of proseOnly.split("\n")) {
-      if (!patterns.some((pattern) => pattern.test(line))) continue;
-      assert.match(line, new RegExp(name, "iu"),
-        `prose states a ${name} outcome as if it were fixed; name ${name} so it reads as selected: ${line.trim()}`);
+  // Selectors this file is known to branch on. Discovery of each is asserted, so an equivalent rewrite
+  // cannot quietly empty the set.
+  const KNOWN_SELECTORS = ["PR_DRAFT"];
+
+  const outcomeViolations = (markdown) => {
+    const blocks = [...markdown.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)].map(([, body]) => body);
+    const selectors = new Set();
+    for (const body of blocks) for (const [, name] of body.matchAll(SELECTOR_FORMS)) selectors.add(name);
+    const undeclared = [...selectors].filter((name) => !OUTCOME_WORDS[name]);
+    const missing = KNOWN_SELECTORS.filter((name) => !selectors.has(name));
+    const prose = markdown.replace(/```[a-z]*\n[\s\S]*?```/gu, "");
+    const unqualified = [];
+    for (const [name, patterns] of Object.entries(OUTCOME_WORDS)) {
+      if (!selectors.has(name)) continue;
+      for (const line of prose.split("\n")) {
+        if (patterns.some((pattern) => pattern.test(line)) && !new RegExp(name, "iu").test(line)) unqualified.push(line.trim());
+      }
     }
+    return { undeclared, missing, unqualified };
+  };
+
+  const canonical = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
+  const live = outcomeViolations(canonical);
+  assert.deepEqual(live.missing, [],
+    `the extractor no longer discovers a known branch selector, which would skip every prose check below and pass: ${live.missing.join(", ")}`);
+  assert.deepEqual(live.undeclared, [],
+    `a fenced block branches on a selector with no declared outcome vocabulary, so prose about it is unguarded: ${live.undeclared.join(", ")}`);
+  assert.deepEqual(live.unqualified, [],
+    `prose states a branch outcome as if it were fixed; name the selector so it reads as chosen:\n  ${live.unqualified.join("\n  ")}`);
+
+  // The controls are table-driven rather than run by hand, so the guard's own failure modes stay proven.
+  // The `missing` row is the one review added: it is the rewrite that used to switch the guard off.
+  const guardBlock = '```sh\nif [ "$PR_DRAFT" = true ]; then\n  gh pr create --draft\nelse\n  gh pr create\nfi\n```\n';
+  for (const [name, markdown, expected] of [
+    ["clean baseline", `${guardBlock}\nPublication follows PR_DRAFT.\n`, { undeclared: [], missing: [], unqualifiedCount: 0 }],
+    ["unconditional outcome claim", `${guardBlock}\nAn autonomous run always finishes with a draft PR.\n`, { undeclared: [], missing: [], unqualifiedCount: 1 }],
+    ["qualified outcome claim", `${guardBlock}\nWith PR_DRAFT true the draft PR is published.\n`, { undeclared: [], missing: [], unqualifiedCount: 0 }],
+    ["unrelated word sense", `${guardBlock}\nThe story agent may draft a ticket.\n`, { undeclared: [], missing: [], unqualifiedCount: 0 }],
+    ["selector rewritten as [[ ]]", `${guardBlock.replace('if [ "$PR_DRAFT"', 'if [[ "$PR_DRAFT"')}\nAn autonomous run always finishes with a draft PR.\n`, { undeclared: [], missing: [], unqualifiedCount: 1 }],
+    ["selector rewritten as ${}", `${guardBlock.replace('"$PR_DRAFT"', '"${PR_DRAFT}"')}\nAn autonomous run always finishes with a draft PR.\n`, { undeclared: [], missing: [], unqualifiedCount: 1 }],
+    ["selector absent entirely", "No fenced block here.\nAn autonomous run always finishes with a draft PR.\n", { undeclared: [], missing: ["PR_DRAFT"], unqualifiedCount: 0 }],
+    ["new selector, no vocabulary", `\`\`\`sh\nif [ "$PR_SQUASH" = true ]; then :; fi\n\`\`\`\n${guardBlock}`, { undeclared: ["PR_SQUASH"], missing: [], unqualifiedCount: 0 }],
+  ]) {
+    const got = outcomeViolations(markdown);
+    assert.deepEqual(got.undeclared, expected.undeclared, `guard control '${name}': undeclared selectors`);
+    assert.deepEqual(got.missing, expected.missing, `guard control '${name}': undiscovered known selectors`);
+    assert.equal(got.unqualified.length, expected.unqualifiedCount, `guard control '${name}': unqualified prose lines`);
   }
 
   const fixtures = [];
