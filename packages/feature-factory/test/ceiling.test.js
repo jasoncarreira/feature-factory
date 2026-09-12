@@ -1026,7 +1026,20 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // identity field and the 0.8.3 park snapshot. The field is emitted unguarded because `max_retries` is
     // a required schema-validated positive integer; a manifest without one is invalid and never reaches
     // the emitter, so a `?? null` here would be describing a state that cannot exist.
-    assert.equal(total, 4641, "proving the publication happened lands at 4641 production lines");
+    // 4641 -> 4650, found in production rather than in review. A live park published a complete,
+    // byte-correct control plane and `status` reported `park_snapshot: null` eleven seconds later: the
+    // copy held `heartbeat_at` 23:28:25 and the plane had moved to 23:28:36. The inventory compared the
+    // whole plane including `factory.lock`, the one entry whose purpose is to change on a timer, so any
+    // snapshot was invalid by the next heartbeat and the field answered "no park" about a park that was
+    // sitting on disk. Every test published and read back with nothing touching the plane in between,
+    // which is exactly why three review rounds and one real park all missed it; the regression now ticks
+    // a heartbeat between the two, and a second one plants a nested `factory.lock` so the exclusion
+    // cannot widen from an exact root path to a name match.
+    //
+    // **This lands exactly on the 4650 tripwire, with zero headroom.** That is a report, not a request:
+    // nothing here was trimmed to fit, and the next change in this file needs an operator decision on the
+    // tripwire before it can land.
+    assert.equal(total, 4650, "proving the publication happened lands at 4650 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

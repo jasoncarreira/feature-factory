@@ -23,7 +23,7 @@ import { resolveSpawnExecutable } from "../core/executable.js";
 import { dispatchInitPublication } from "./init-publication.js";
 import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, repositoryRelativePath, validateRun } from "../state/schema.js";
 import {
-  claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SessionLockHeldError,
+  claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SESSION_LOCK_FILE, SessionLockHeldError,
 } from "../state/session-lock.js";
 
 export const COMMANDS = Object.freeze({
@@ -175,6 +175,15 @@ function briefDigestFor(decision, state, runDir) {
 function planeInventory(root) {
   const entries = [];
   const record = (rel, full) => {
+    // The session lock is liveness, not run state, and it is the one entry in the plane designed to change
+    // on a timer. Comparing it made every snapshot invalid within one heartbeat: a live park published a
+    // complete, byte-correct plane and `status` reported `park_snapshot: null` eleven seconds later,
+    // because the copy held `heartbeat_at` 23:28:25 and the plane had moved to 23:28:36. The whole point
+    // of the field was to answer "did the driver publish it", and it answered "no" for a snapshot that was
+    // there -- the same disagree-with-your-own-description defect the 0.8.3 work existed to remove,
+    // reintroduced by the check built to remove it. Every existing test publishes and reads back with no
+    // heartbeat in between, which is why three review rounds and a real park all missed it.
+    if (rel === SESSION_LOCK_FILE) return;
     const stat = lstatSync(full);
     const mode = (stat.mode & 0o7777).toString(8);
     if (stat.isSymbolicLink()) entries.push(`${rel} l ${mode} ${readlinkSync(full)}`);

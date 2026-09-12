@@ -346,7 +346,8 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     "$O/.factory/.parked/.staging-$R",
     "A residual\n   `$O/.factory/.parked/.prior-$R` is the trace of an earlier publication whose cleanup did not finish",
     "remove it before staging, and if that removal fails, report it and stop without\n   touching the canonical snapshot",
-    "require exact equality. An unverified staging tree is never published",
+    "require exact equality, **excluding the plane-root `factory.lock` only**",
+    "the plane root is run state and must match.",
     "rename `.prior-$R` back onto the canonical path and report: nothing was\n   committed",
     "**Before the commit point, no publication has occurred.**",
     "restoring it from `.prior-$R` when it had already been moved",
@@ -455,6 +456,35 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.equal(snapshotOf(), null, "a snapshot whose own directory mode drifted from the plane is not a faithful copy");
   chmodSync(published, liveRootMode);
   assert.equal(snapshotOf(), published, "restoring the root mode restores the observation");
+  // THE HEARTBEAT. Every case above publishes and reads back with nothing touching the plane in between,
+  // which is why three review rounds and a real park all missed this: the plane carries `factory.lock`,
+  // whose whole job is to change on a timer. Comparing it made a snapshot invalid within one heartbeat --
+  // a live park published a byte-correct plane and `status` said `park_snapshot: null` eleven seconds
+  // later, copy at `heartbeat_at` 23:28:25 against a plane at 23:28:36. The field exists to answer "did
+  // the driver publish it" and it answered "no" about a snapshot that was sitting right there.
+  const liveLock = join(livePlane, "factory.lock");
+  const lockRecord = (heartbeat) => `${JSON.stringify({ session: "ses_probe", run_id: "obs-run", branch: null, claimed_at: "2026-09-11T22:01:54.328Z", heartbeat_at: heartbeat }, null, 2)}\n`;
+  writeFileSync(liveLock, lockRecord("2026-09-11T23:28:25.920Z"));
+  writeFileSync(join(published, "factory.lock"), lockRecord("2026-09-11T23:28:25.920Z"));
+  assert.equal(snapshotOf(), published, "a plane carrying a lock still reports its published snapshot");
+  writeFileSync(liveLock, lockRecord("2026-09-11T23:28:36.538Z"));
+  assert.equal(snapshotOf(), published,
+    "a heartbeat after the copy must not invalidate the snapshot; the lock is liveness, not run state");
+  // Scoped to the plane ROOT lock by exact path, not by name. A substring or basename test would excuse a
+  // `factory.lock` anywhere in the tree, so a nested one is planted and must still be compared.
+  mkdirSync(join(livePlane, "nested"), { recursive: true });
+  mkdirSync(join(published, "nested"), { recursive: true });
+  writeFileSync(join(livePlane, "nested", "factory.lock"), "durable\n");
+  writeFileSync(join(published, "nested", "factory.lock"), "durable\n");
+  assert.equal(snapshotOf(), published, "an identical nested lock-named file leaves the snapshot valid");
+  writeFileSync(join(published, "nested", "factory.lock"), "drifted\n");
+  assert.equal(snapshotOf(), null, "a lock-named file below the plane root is run state and must still match");
+  writeFileSync(join(published, "nested", "factory.lock"), "durable\n");
+  // Scoped to the lock, and to the lock at the plane root: everything else still has to match.
+  writeFileSync(workflowCopy, Buffer.concat([workflowBytes, Buffer.from("x")]));
+  assert.equal(snapshotOf(), null, "excluding the lock must not excuse any other drift");
+  writeFileSync(workflowCopy, workflowBytes);
+  assert.equal(snapshotOf(), published, "restoring the artifact restores the observation");
   // Stale: published for an earlier park, the plane has since moved on.
   const staleManifest = JSON.parse(readFileSync(join(livePlane, "run.json"), "utf8"));
   writeFileSync(join(published, "run.json"), `${JSON.stringify({ ...staleManifest, updated_at: "2026-01-01T00:00:00.000Z" }, null, 2)}\n`);

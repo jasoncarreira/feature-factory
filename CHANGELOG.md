@@ -3,6 +3,28 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.7
+
+The park snapshot stopped reporting itself. Found on a live park, not in review.
+
+- **`status` reported `park_snapshot: null` for a snapshot that was on disk, complete and byte-correct.**
+  A real parked run published its control plane at 23:28:25 and `status` denied it eleven seconds later.
+  The two planes were identical — 32 entries, same modes, same digests — except `factory.lock`, whose
+  `heartbeat_at` had moved from `23:28:25.920Z` to `23:28:36.538Z`.
+- **The lock is liveness, not run state**, and it is the one entry in the plane designed to change on a
+  timer. Comparing it made every snapshot invalid within one heartbeat, so the field built to answer "did
+  the driver publish it" answered "no" about a park sitting right there — the same
+  signal-disagrees-with-its-own-description defect 0.8.3 existed to remove, reintroduced by the check
+  built to remove it. It is excluded now, by exact root path, from the qualified-status comparison and
+  from the contract's staging verification, which had the same race between reading source and copy.
+- **Why the suite could not have caught it.** Every existing case publishes and reads back with nothing
+  touching the plane in between. The regression now ticks a heartbeat between the two, and a second plants
+  a nested `factory.lock` so the exclusion cannot widen from an exact root path to a name match — without
+  that, a `rel.includes("lock")` implementation passes.
+
+Production moves 4641 → 4650, which is **exactly the tripwire, with zero headroom**. Nothing was trimmed
+to fit; the next change in this file needs an operator decision on the tripwire first.
+
 ## 0.8.6
 
 `pr_draft` is a repository setting, not a property of autonomous mode — and a guard so the next one of
