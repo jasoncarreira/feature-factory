@@ -244,10 +244,12 @@ and "clean up the prior copy" are contradictory instructions once that rename ha
    outside `P`; do not copy slice worktrees or any other part of `S`.
 3. **Verify.** Build source and destination inventories exactly as the completed archive does — every
    entry's relative path, type and mode, a SHA-256 for each regular file, a link target for each symlink,
-   sorted lexically — and require exact equality, **excluding `factory.lock`**. The lock is session
-   liveness rather than run state and is the one entry designed to change on a timer, so comparing it fails
-   whenever a heartbeat lands between reading the source and reading the copy. Qualified status excludes it
-   for the same reason. An unverified staging tree is never published.
+   sorted lexically — and require exact equality, **excluding the plane-root `factory.lock` only**. That
+   one entry is session liveness rather than run state and is the only thing in the plane designed to
+   change on a timer, so comparing it fails whenever a heartbeat lands between reading the source and
+   reading the copy. The exclusion is that exact path and nothing else: a `factory.lock` anywhere below
+   the plane root is run state and must match. Qualified status excludes the same single path for the same
+   reason. An unverified staging tree is never published.
 4. **Commit.** With no snapshot at the canonical path, rename `.staging-$R` onto it; that rename is the
    commit point. With one present, first rename the canonical snapshot to `.prior-$R`, then rename
    `.staging-$R` onto the canonical path; that second rename is the commit point. If the first rename
