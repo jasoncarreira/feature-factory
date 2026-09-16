@@ -1036,10 +1036,34 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // a heartbeat between the two, and a second one plants a nested `factory.lock` so the exclusion
     // cannot widen from an exact root path to a name match.
     //
-    // **This lands exactly on the 4650 tripwire, with zero headroom.** That is a report, not a request:
-    // nothing here was trimmed to fit, and the next change in this file needs an operator decision on the
-    // tripwire before it can land.
-    assert.equal(total, 4650, "proving the publication happened lands at 4650 production lines");
+    // 0.8.7 landed exactly on the 4650 tripwire with zero headroom, reported as a fact rather than used
+    // to ask for room. 4650 -> 4656 here, and the tripwire 4650 -> 4700 on the operator's explicit
+    // instruction in the session that requested this change ("do the structured steps/slices change,
+    // raise the tripwire"), given before the work rather than after the number was known.
+    //
+    // What the six lines bought: `status --json` projected step and slice rows as
+    // `${agent}:${status}(${attempts})`, so `attempts` -- the single field a controller reads to decide
+    // whether an attempt was consumed -- had to be regexed back out of a rendering. mimir's escalation
+    // epic stalled on exactly that, having to classify outcomes by parsing prose. Nothing in the suite
+    // asserted the string form, so it was a public shape with no coverage, which is how a display
+    // artifact survived inside a machine contract. The content did not change; only the shape did.
+    // 4656 -> 4682, same PR, same defect class, three more fields. The projection is the ONLY lossy layer
+    // in this system: `run.json` holds records and `status --json` narrowed them on the way out. Gates
+    // came out as a bare status string with `at` and `artifact` dropped -- and `at` is most of what "is
+    // this run stuck" means. The validator came out as a bare verdict, losing `loops`, which says whether
+    // validation is converging. `next` packed a kind and a subject into one string, so the field a
+    // controller most needs to branch on had to be split on a colon.
+    //
+    // `nextActionRecord` is now the single computation and `nextAction` is a one-line formatter over it,
+    // so the string cannot drift from the record; a test asserts `next` is exactly that formatting.
+    // The narrowing guard reads GATE_KEYS and VALIDATOR_KEYS from the schema rather than a hand-written
+    // list, so a field added to either must be exposed or consciously excluded here. Its first draft was
+    // itself a no-op TWICE over: the validator half sat behind a `!== null` where no validator exists, and
+    // the step half looped over an array that is empty in all 23 invocations of that fixture -- so the
+    // step projection could have reverted to display strings and passed. Both read as coverage and proved
+    // nothing; both were caught by running the control rather than by the suite going green. Each now sits
+    // at the first fixture where the record it checks actually exists.
+    assert.equal(total, 4682, "proving the publication happened lands at 4682 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1070,7 +1094,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
-    assert.ok(total <= 4650, `production source is ${total} lines; the tripwire is 4650`);
+    assert.ok(total <= 4700, `production source is ${total} lines; the tripwire is 4700`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

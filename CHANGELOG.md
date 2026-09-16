@@ -3,6 +3,50 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.8
+
+`status --json` projects step and slice rows as structured records. **Breaking for anyone parsing the
+previous strings.**
+
+- **`attempts` had to be regexed out of a rendering.** The projection emitted
+  `${agent}:${status}(${attempts})` — `spec-writer:rejected(1)` — inside an otherwise machine-readable
+  payload. `attempts` is the single field a controller reads to decide whether an attempt was consumed,
+  and reaching it meant parsing a display string. Rows are now
+  `{agent, status, attempts}` and `{id, status, attempts}`. The content is unchanged; only the shape is.
+- **It was a public shape with no coverage.** No assertion in the suite referenced the string form, which
+  is how a display artifact survived inside a machine contract. The end-to-end path now pins both the
+  exact `be-thing` slice row and the structural property of every row, so a return to strings fails.
+- **Why breaking is acceptable here.** An exact-match `FACTORY_VERSION` pin already forces a consumer to
+  move deliberately on any version change, so there is no silent-upgrade path. The raw `run.json` manifest
+  always carried objects, and the TUI and `observe/runs.js` read that rather than the projection, so they
+  are unaffected.
+
+Context: mimir's escalation epic stalled because outcomes could only be classified by reading prose. Most
+of that gap is not the factory's to close — "infrastructure failure versus genuine build outcome" is
+knowable by the controller and frequently not by a run that was killed. This is the part that *was* ours:
+structured attempt counts, which the factory already knows and was rendering instead of reporting.
+
+- **`gates` carried only a status.** The record is `{status, at, artifact}` and the projection emitted the
+  status alone, so `at` — most of what "is this run stuck" means — was thrown away at the boundary while
+  sitting intact in `run.json`. Gate rows are now the whole record.
+- **`validator` carried only a verdict**, dropping `report`, `reviewed_head` and `loops`. `loops` is what
+  says whether validation is converging. It is now the whole record.
+- **`next` packed two facts into one string.** `gate:story`, `observe-slice:protocol`,
+  `stopped-at-gate:brief` — a kind and a subject a consumer had to split on a colon, in the field most
+  worth branching on. `status --json` now also emits `next_action: {kind, subject}`. `nextActionRecord` is
+  the single computation and `nextAction` is a one-line formatter over it, so the string is a projection
+  of the record rather than a second implementation; a test asserts exactly that. `next` is retained
+  because the driver contract, the sidebar and a lot of prose name `next: gate:story`.
+- **A narrowing guard, read from the schema.** `GATE_KEYS` and `VALIDATOR_KEYS` come from
+  `state/schema.js`, so a field added to either must be exposed or consciously excluded rather than
+  silently forgotten — which is exactly how all three of the above happened. Steps and slices expose a
+  deliberate subset, pinned explicitly. The guard's first draft was itself a no-op: its validator half sat
+  behind a `!== null` at a point where no validator exists, so it read as coverage and proved nothing
+  until a control caught it.
+
+Production moves 4650 → 4682, and the tripwire 4650 → 4700 on explicit operator instruction given before
+the work.
+
 ## 0.8.7
 
 The park snapshot stopped reporting itself. Found on a live park, not in review.
