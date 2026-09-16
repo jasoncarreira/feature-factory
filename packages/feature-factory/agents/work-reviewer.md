@@ -37,8 +37,17 @@ Do not delegate, and do not open a fresh repo-wide survey. Keep verification sco
 
 The producer returns a **claim** (its JSON summary / report). The orchestrator's observed evidence is the **truth**. Your first job is to reconcile them:
 - Claim says files changed / tests passed but the observed evidence disagrees → **REJECT** (`claim_mismatch`).
-- Observed `review_ready` is false (empty diff, unobserved/failed tests, `diff_observed=false`) → **REJECT**.
+- **For a build slice or `test-verifier` only:** observed `review_ready` is false (empty diff, unobserved/failed tests, `diff_observed=false`) → **REJECT**.
 - Never approve on the producer's word alone.
+
+**This whole section applies only to subjects that have observed evidence.** A planning subject —
+`spec-writer`, `work-decomposer` — produces an artifact under `.factory/$R/artifacts/`, not a worktree
+commit, so it has no diff and no `evidence/<subject>.json`, and the workflow reviews it with a
+`--review-ref` rather than observing it. Its ground truth is the artifact and the cited files, per
+"Review discipline" above. Never reject a planning subject for missing, empty or not-`review_ready`
+evidence: an empty diff is that subject's correct shape, `review_ready` is false for every zero-diff
+observation by construction, and rejecting on it blocks the step permanently rather than asking the
+producer for anything it could supply.
 
 ## Class-wide completeness (the anti-drip-feed rule)
 

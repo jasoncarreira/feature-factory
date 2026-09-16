@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, observeAncestry,
   observeWorktree, privilegedPaths, reconcileClaim, runTests, unownedPaths,
@@ -171,6 +172,27 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
     // A dirty tree cannot produce evidence about the commit it claims, whatever the
     // tests said: the bytes tested are not the bytes that merge.
     assert.equal(deriveReviewReady({ ...green, worktree_clean: false }), false);
+
+    // The reviewer prompt has to agree with the line above, and for one release it did not. A planning
+    // subject -- `spec-writer`, `work-decomposer` -- produces an artifact under `.factory/$R/artifacts/`
+    // and no worktree commit, so its correct shape is a zero diff, and the assertion two lines up says a
+    // zero diff can never be review-ready. `work-reviewer.md` nonetheless carried an unqualified
+    // "Observed `review_ready` is false ... REJECT", so a planning step could not pass at any attempt
+    // count. mimir's chainlink-1762 parked on exactly that with `spec-writer:blocked(2)`, and its own
+    // report attributed the contradiction to its adapter rather than to this prompt.
+    //
+    // ENFORCEMENT, not instruction: the premise is executed rather than restated, so the guard rests on
+    // what the code does. `deriveReviewReady` is the reason an unqualified rule is unsatisfiable, and the
+    // prompt must therefore scope it and say the planning case out loud.
+    assert.equal(deriveReviewReady({ ...green, files_changed: [] }), false,
+      "premise: a zero-diff observation is never review-ready, so an unqualified reject rule is unsatisfiable");
+    const reviewer = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "..", "agents", "work-reviewer.md"), "utf8");
+    assert.match(reviewer, /\*\*For a build slice or `test-verifier` only:\*\* observed `review_ready` is false/u,
+      "the review_ready reject rule must name the subjects that actually have observed evidence");
+    assert.doesNotMatch(reviewer, /^- Observed `review_ready` is false/mu,
+      "an unqualified review_ready reject rule permanently blocks every planning subject");
+    assert.match(reviewer, /Never reject a planning subject for missing, empty or not-`review_ready`/u,
+      "the prompt must state the planning-subject exemption, not leave it inferable from scope alone");
   });
 
   it("refuses review_ready on a claim mismatch even when the observed run passes", () => {

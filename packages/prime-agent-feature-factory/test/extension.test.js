@@ -19,6 +19,18 @@ const resolveFeatureFactory = () => "/opt/prime/node_modules/feature-factory/sta
 
 describe("Prime extension", () => {
   it("derives installed resources and a stable session owner", () => {
+    // A failed resolution used to propagate the resolver's bare "Cannot find module 'feature-factory'",
+    // which the host prints under "Failed to load extension" and which names no remedy. Seen for real on a
+    // global install where the dependency WAS present and the same specifier resolved fine from this
+    // file's own path -- so the message has to point at both possibilities, not just a missing package.
+    assert.throws(() => factoryResources(() => { throw new Error("Cannot find module 'feature-factory'"); }), (error) => {
+      assert.match(error.message, /could not resolve its 'feature-factory' dependency from .+extensions/u,
+        "the error must name the file resolution was attempted from");
+      assert.match(error.message, /npm install -g prime-agent-feature-factory/u, "and the remedy");
+      assert.match(error.message, /loads this extension from `?its installed path/u, "and the other cause");
+      assert.match(error.cause.message, /Cannot find module/u, "the original resolver error must survive as the cause");
+      return true;
+    });
     assert.deepEqual(factoryResources(resolveFeatureFactory), {
       agents: "/opt/prime/node_modules/feature-factory/agents",
       cli: "/opt/prime/node_modules/feature-factory/bin/factory.js",

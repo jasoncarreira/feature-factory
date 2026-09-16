@@ -3,6 +3,45 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.9
+
+`work-reviewer` could never approve a planning step. One unqualified sentence made it unsatisfiable.
+
+- **The rule and the code disagreed.** `deriveReviewReady` returns false for any zero-diff observation —
+  correctly, since "no files changed, tests pass" is the shape of a false green for an implementation
+  slice. But `work-reviewer.md` carried an unqualified *"Observed `review_ready` is false … REJECT"*,
+  while a planning subject (`spec-writer`, `work-decomposer`) produces an artifact under
+  `.factory/$R/artifacts/` and no worktree commit. A zero diff is its **correct** shape, so the step could
+  not pass at any attempt count.
+- **The prompt already knew better in two other places** — it scopes observed evidence to "build/test
+  subjects" at one point and tells the reviewer to judge `spec-writer`/`work-decomposer` from the artifact
+  and cited files at another. Only the reject bullet dropped the qualifier. The reject rule now names the
+  subjects that have evidence, and the section states outright that a planning subject is never rejected
+  for missing, empty or not-`review_ready` evidence.
+- **`deriveReviewReady` is unchanged, deliberately.** Relaxing it so an empty diff could be review-ready
+  would destroy the guard that stops a builder who did nothing from reading as reviewable — the exact
+  false green this codebase spends production lines to prevent.
+- **The guard executes its premise.** Rather than pinning one string against another, the test runs
+  `deriveReviewReady` with an empty `files_changed`, proving the rule is unsatisfiable, and only then
+  requires the prompt to scope it and state the planning case. Controls: restoring the unqualified bullet
+  fails, and keeping the scope while deleting the exemption fails a different assertion.
+
+Observed on mimir's `chainlink-1762`, which parked with `spec-writer:blocked(2)` and attributed the
+contradiction to its own adapter policy. It was ours. `work-reviewer.md` had never been covered by the
+drift guards added in 0.8.4 through 0.8.8, all of which pin `WORKFLOW.md`.
+
+- **An unresolvable `feature-factory` now says what to do.** The Prime extension resolves its dependency
+  as a bare specifier relative to its own file, and on failure propagated the resolver's bare
+  `Cannot find module 'feature-factory'`, which the host prints under "Failed to load extension" and which
+  names no remedy. It now identifies the file resolution was attempted from, gives the reinstall command,
+  and points at the other possibility — a host loading the extension from somewhere other than its
+  installed path, since resolution is relative to that file. The original resolver error is preserved as
+  `cause`. Reported from a global install where the dependency was in fact present and the same specifier
+  resolved correctly when asked directly from that path, which is exactly the case the old message could
+  not distinguish from a missing package.
+
+No production lines in `feature-factory`; the ledger stays at 4682.
+
 ## 0.8.8
 
 `status --json` projects step and slice rows as structured records. **Breaking for anyone parsing the
