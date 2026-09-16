@@ -1058,8 +1058,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // so the string cannot drift from the record; a test asserts `next` is exactly that formatting.
     // The narrowing guard reads GATE_KEYS and VALIDATOR_KEYS from the schema rather than a hand-written
     // list, so a field added to either must be exposed or consciously excluded here. Its first draft was
-    // itself a no-op -- the validator half sat behind a `!== null` at a point in the fixture where no
-    // validator exists, so it read as coverage and tested nothing until the control caught it.
+    // itself a no-op TWICE over: the validator half sat behind a `!== null` where no validator exists, and
+    // the step half looped over an array that is empty in all 23 invocations of that fixture -- so the
+    // step projection could have reverted to display strings and passed. Both read as coverage and proved
+    // nothing; both were caught by running the control rather than by the suite going green. Each now sits
+    // at the first fixture where the record it checks actually exists.
     assert.equal(total, 4682, "proving the publication happened lands at 4682 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never

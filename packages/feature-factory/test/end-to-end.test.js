@@ -215,9 +215,6 @@ describe("end to end — a merge is refused through the real CLI", () => {
     assert.ok(projected.slices.every((slice) => slice !== null && typeof slice === "object"
       && typeof slice.id === "string" && typeof slice.status === "string" && Number.isInteger(slice.attempts)),
       "every slice row must be a structured record, not a formatted string");
-    assert.ok(projected.steps.every((step) => step !== null && typeof step === "object"
-      && typeof step.agent === "string" && typeof step.status === "string" && Number.isInteger(step.attempts)),
-      "status must project step rows as structured records with an integer attempt count");
     // THE NARROWING GUARD, derived from the schema rather than from a hand-written list. `run.json` holds
     // records and the projection is the only lossy layer: gates arrived as a bare status string with `at`
     // and `artifact` dropped, validator as a bare verdict with `report`, `reviewed_head` and `loops`
@@ -231,9 +228,10 @@ describe("end to end — a merge is refused through the real CLI", () => {
     // Steps and slices expose a deliberate subset of their schema keys -- a slice row carries paths,
     // test_plan, refs and merge state that a status reader has no business paging through -- so the subset
     // is pinned explicitly here. Dropping one of these three still fails.
-    for (const step of projected.steps) {
-      assert.deepEqual(Object.keys(step).sort(), ["agent", "attempts", "status"]);
-    }
+    // The step-row assertions used to sit here and were vacuous: `upToReview` records no step, so
+    // `projected.steps` is empty in all 23 invocations and both checks passed over nothing -- the step
+    // projection could have reverted to strings without failing. Caught in review, and measured before
+    // being believed. They now live at the first fixture that records a step.
     for (const slice of projected.slices) {
       assert.deepEqual(Object.keys(slice).sort(), ["attempts", "id", "status"]);
     }
@@ -1721,6 +1719,12 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       assert.equal(factory(p.repo, ["heartbeat", RUN, "--session", "legacy", "--now", NOW(5)]).ok, true);
       assert.equal(factory(p.repo, ["lock", RUN, "release", "--session", "legacy", "--now", NOW(5)]).ok, true);
       assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--now", NOW(5)]).ok, true);
+      // The step half of the projection guard, at the first point a step row exists. An exact object,
+      // because the vacuous version this replaces would have accepted the old `test-verifier:accepted(1)`
+      // display string, which is the shape this release exists to remove.
+      assert.deepEqual(factory(p.repo, ["status", RUN, "--json"]).out.steps,
+        [{ agent: "test-verifier", status: "accepted", attempts: 1 }],
+        "status must project step rows as structured records, not formatted strings");
       assert.equal(Object.hasOwn(runJson(p.runDir), "pr_base"), false);
       // Gate 3 is the last transition before the skill pushes and opens the PR, so the
       // readiness refusal has to be able to land here. Isolated: the slice is merged, the
