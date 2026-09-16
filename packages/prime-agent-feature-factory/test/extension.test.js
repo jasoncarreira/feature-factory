@@ -23,7 +23,17 @@ describe("Prime extension", () => {
     // which the host prints under "Failed to load extension" and which names no remedy. Seen for real on a
     // global install where the dependency WAS present and the same specifier resolved fine from this
     // file's own path -- so the message has to point at both possibilities, not just a missing package.
-    assert.throws(() => factoryResources(() => { throw new Error("Cannot find module 'feature-factory'"); }), (error) => {
+    // The fix for the Prime Agent regression: bare resolution is the host's to control, the install layout
+    // is not. When the host's resolver cannot see this package's dependency, the walk up from this file
+    // finds it, so the extension loads rather than dying at startup.
+    const beside = "/install/node_modules/prime-agent-feature-factory/node_modules/feature-factory";
+    assert.deepEqual(
+      factoryResources(() => { throw new Error("Cannot find module 'feature-factory'"); }, () => beside),
+      { agents: `${beside}/agents`, cli: `${beside}/bin/factory.js` },
+      "a host resolver that cannot see the dependency must not stop the extension loading",
+    );
+    // Only when the install genuinely lacks it does this fail -- and then it says what to do.
+    assert.throws(() => factoryResources(() => { throw new Error("Cannot find module 'feature-factory'"); }, () => null), (error) => {
       assert.match(error.message, /could not resolve its 'feature-factory' dependency from .+extensions/u,
         "the error must name the file resolution was attempted from");
       assert.match(error.message, /npm install -g prime-agent-feature-factory/u, "and the remedy");

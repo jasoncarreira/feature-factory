@@ -1,13 +1,35 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { basename, dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, dirname, join, parse } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export function factoryResources(resolve = createRequire(import.meta.url).resolve) {
+// Bare-specifier resolution is correct when this file is imported by Node, and it is not ours to control
+// when a host loads it some other way. Prime Agent now loads extensions through jiti, rooted at the
+// HOST's own module URL, and a bare `feature-factory` is then looked up from the host's directory rather
+// than from this package -- where the dependency this package declares is not installed. So bare
+// resolution is attempted first, and a walk up from this file's own location is the fallback: this
+// package declares `feature-factory` as a dependency, so a package manager put it either beside this
+// package or in a parent `node_modules`, and that is a fact about the install rather than about whoever
+// is doing the importing.
+function resolveFromOwnPath() {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  const { root } = parse(dir);
+  for (;;) {
+    const candidate = join(dir, "node_modules", "feature-factory");
+    if (existsSync(join(candidate, "package.json"))) return candidate;
+    if (dir === root) return null;
+    dir = dirname(dir);
+  }
+}
+
+export function factoryResources(resolve = createRequire(import.meta.url).resolve, findBeside = resolveFromOwnPath) {
   let entry;
   try {
     entry = resolve("feature-factory");
   } catch (cause) {
+    const fallback = findBeside();
+    if (fallback) return resourcesFor(fallback);
     // The host reports "Failed to load extension" and the resolver's bare "Cannot find module
     // 'feature-factory'", which together tell an operator nothing about what to do. Observed on a global
     // install whose dependency was present and resolvable when the same specifier was resolved directly
@@ -21,7 +43,11 @@ export function factoryResources(resolve = createRequire(import.meta.url).resolv
       { cause },
     );
   }
-  const root = dirname(dirname(entry));
+  // `resolve` yields the package's main module, one level below the package root.
+  return resourcesFor(dirname(dirname(entry)));
+}
+
+function resourcesFor(root) {
   return { agents: join(root, "agents"), cli: join(root, "bin", "factory.js") };
 }
 

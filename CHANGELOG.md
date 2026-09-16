@@ -30,8 +30,15 @@ Observed on mimir's `chainlink-1762`, which parked with `spec-writer:blocked(2)`
 contradiction to its own adapter policy. It was ours. `work-reviewer.md` had never been covered by the
 drift guards added in 0.8.4 through 0.8.8, all of which pin `WORKFLOW.md`.
 
-- **An unresolvable `feature-factory` now says what to do.** The Prime extension resolves its dependency
-  as a bare specifier relative to its own file, and on failure propagated the resolver's bare
+- **The Prime extension no longer depends on the host's resolver root.** Prime Agent now loads extensions
+  through jiti, created with the **host's** own module URL as its root, so a bare `feature-factory` is
+  looked up from Prime's directory rather than from this package — where the dependency this package
+  declares is not installed. Bare resolution is still tried first, since it is correct when Node imports
+  the file; when it fails, a walk up from this file's own location finds the dependency beside the
+  package. Which resolver is doing the asking is the host's business; where a package manager put a
+  declared dependency is not.
+- **And when it genuinely is missing, the error says what to do.** Previously it propagated the resolver's
+  bare
   `Cannot find module 'feature-factory'`, which the host prints under "Failed to load extension" and which
   names no remedy. It now identifies the file resolution was attempted from, gives the reinstall command,
   and points at the other possibility — a host loading the extension from somewhere other than its
