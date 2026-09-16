@@ -30,13 +30,17 @@ Observed on mimir's `chainlink-1762`, which parked with `spec-writer:blocked(2)`
 contradiction to its own adapter policy. It was ours. `work-reviewer.md` had never been covered by the
 drift guards added in 0.8.4 through 0.8.8, all of which pin `WORKFLOW.md`.
 
-- **The Prime extension no longer depends on the host's resolver root.** Prime Agent now loads extensions
-  through jiti, created with the **host's** own module URL as its root, so a bare `feature-factory` is
-  looked up from Prime's directory rather than from this package — where the dependency this package
-  declares is not installed. Bare resolution is still tried first, since it is correct when Node imports
-  the file; when it fails, a walk up from this file's own location finds the dependency beside the
-  package. Which resolver is doing the asking is the host's business; where a package manager put a
-  declared dependency is not.
+- **The Prime extension no longer depends on the host's resolver root.** Observed: Prime Agent failed to
+  load the extension with `Cannot find module 'feature-factory'` on an install where the dependency was
+  present, and where the same specifier resolved from that file's own path under Node by both `import`
+  and `require`. Bare resolution is still tried first, since it is correct when Node imports the file;
+  when it throws, a walk up from this file's own location finds the dependency beside the package, and a
+  build carrying that fallback was confirmed to start where the same install previously failed.
+  The suspected mechanism — Prime creating jiti with its **own** module URL as the resolution root, so a
+  bare specifier is looked up from Prime's directory — is the best explanation for those observations
+  rather than an established cause: three reproductions of that loader shape resolved successfully here.
+  The fallback stands either way. Which resolver is doing the asking is the host's business; where a
+  package manager put a declared dependency is not.
 - **And when it genuinely is missing, the error says what to do.** Previously it propagated the resolver's
   bare
   `Cannot find module 'feature-factory'`, which the host prints under "Failed to load extension" and which

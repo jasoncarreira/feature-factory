@@ -5,13 +5,19 @@ import { basename, dirname, join, parse } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Bare-specifier resolution is correct when this file is imported by Node, and it is not ours to control
-// when a host loads it some other way. Prime Agent now loads extensions through jiti, rooted at the
-// HOST's own module URL, and a bare `feature-factory` is then looked up from the host's directory rather
-// than from this package -- where the dependency this package declares is not installed. So bare
-// resolution is attempted first, and a walk up from this file's own location is the fallback: this
-// package declares `feature-factory` as a dependency, so a package manager put it either beside this
-// package or in a parent `node_modules`, and that is a fact about the install rather than about whoever
-// is doing the importing.
+// when a host loads it some other way.
+//
+// Observed: Prime Agent failed to load this extension with "Cannot find module 'feature-factory'" on an
+// install where the dependency was present, and where the same specifier resolved from this file's own
+// path under Node by both import and require. A path walk finds it in that layout, and the operator
+// confirmed a build carrying this fallback starts where the same install previously failed.
+//
+// Suspected, not proven: Prime loads extensions through jiti created with the HOST's module URL as its
+// root, so a bare specifier is looked up from Prime's directory rather than from this package. Three
+// reproductions of that loader shape here all resolved successfully, so the mechanism is the best
+// explanation for the observations rather than an established cause -- and the fallback is worth having
+// either way, because which resolver is asking is the host's business while where a package manager put
+// a declared dependency is not.
 function resolveFromOwnPath() {
   let dir = dirname(fileURLToPath(import.meta.url));
   const { root } = parse(dir);
