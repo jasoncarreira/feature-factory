@@ -3,7 +3,7 @@ name: feature
 description: >
   Software-factory orchestrator. Drives a feature from idea or ticket through a chain of focused
   agents — research, story, design, spec, decompose, parallel build, test, validate — pausing at
-  three approval gates and ending in a draft PR. State is durable (a per-run manifest on disk,
+  three approval gates and ending in a pull request. State is durable (a per-run manifest on disk,
   written only by the `factory` CLI), evidence is observed rather than trusted from agent prose,
   high-risk steps are reviewed, and independent slices build in parallel. The compatibility shorthand
   remains `/feature [--autonomous | --headless] [--base <branch>] [--max-retries <n>] <ticket key | feature idea>`.
@@ -21,9 +21,14 @@ directory. This adapter therefore runs in a fixed order, and nothing may be reor
 2. **Repository resolver intake** — derive `O`, read and validate `$O/.factory.json`, execute a declared
    `resolve`, and bind `R`. This step necessarily reads that file and executes commands before `init`;
    those reads and executions are the step itself and are not covered by the restriction in 4.
-3. **`factory init`**, which stages the canonical workflow and returns its path as `workflow`.
-4. **Read that staged file completely**, before any state read, dispatch, gate, or `factory` command other
-   than `init` itself.
+3. **`factory init`** for a **fresh** run, which stages the canonical workflow and returns its path as
+   `workflow`. A run whose manifest already exists is never initialized again: inspect the two
+   deterministic manifest candidates the canonical workflow names, select one with qualified
+   `factory status`, and take the staged workflow from the selected run directory. Those candidate reads
+   are this step, exactly as the resolver reads are step 2, and they are the only state reads step 4
+   permits before the workflow is in hand.
+4. **Read that staged file completely**, before any dispatch, gate, further state read, or `factory`
+   command other than the `init` or `status` named above.
 
 Steps 1 and 2 are specified here, in full, because the document that specifies everything else does not
 exist until step 3. Everything after `init` is specified there. Do not read `WORKFLOW.md` next to this file: it lives outside the workspace, `external_directory` is
@@ -124,8 +129,11 @@ Never assemble this command from the `factory init --pr-base`, `factory init --m
 `factory init --mode` phrases elsewhere in this file. Those name single flags to forward, not the
 invocation, and assembling from them is what once produced an init without `--json`.
 
-If you stop for any reason after init has succeeded, park the run rather than ending the turn: an
-abandoned `status: running` is indistinguishable from a driver still working.
+If you stop after init has succeeded, do not simply end the turn: an abandoned `status: running` is
+indistinguishable from a driver still working. Park the run **unless the canonical workflow defines that
+stop as something else** — it defines two, and both forbid terminalizing. An interactive `stop` at a gate
+is an unlocked nonterminal stop, and clean verification exhaustion releases the lock and leaves the run
+`running`. Follow the workflow's own sequence for those; park everything else.
 
 ## Repository resolver intake, before any run-id allocation
 
@@ -385,7 +393,7 @@ Persisted mode determines what each driver may do:
 |---|---|---|---|
 | `interactive` | Persist and present the pending gate, then wait for a real human | Perform the verified park below, release its lock, and end the turn | Route only to the associated same session after an explicit human response |
 | `headless` | Preserve terminal `needs-human` | Terminalize `needs-human`; never masquerade as an interactive parked gate | Refused |
-| `autonomous` | Decide only when the existing preconditions authorize it | Decide under the same rules and continue through draft PR and mandatory Step 7 | Refused |
+| `autonomous` | Decide only when the existing preconditions authorize it | Decide under the same rules and continue through PR publication and mandatory Step 7 | Refused |
 
 An inability to ask a human never promotes interactive or headless to autonomous. When a headless run
 reaches a human gate, terminalize with reason exactly `headless run reached a human gate`:
@@ -394,8 +402,10 @@ reaches a human gate, terminalize with reason exactly `headless run reached a hu
 factory terminal "$R" needs-human --reason "headless run reached a human gate" --repo "$RUN_REPO"
 ```
 
-Verify qualified status durably reports `terminal:needs-human` and that exact terminal reason, retain
-the selected sandbox and repository, and stop.
+Verify qualified status durably reports top-level `status: "needs-human"` with that exact terminal
+reason, retain the selected sandbox and repository, and stop. Do not look for `next: terminal:needs-human`:
+`next` names terminal only for `completed`, `partial` and `blocked`, so a parked run still reports the
+action that would resume it, and waiting for a string the CLI cannot produce hangs the handoff.
 
 The gate artifact map is exact:
 

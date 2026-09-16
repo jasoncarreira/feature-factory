@@ -51,6 +51,45 @@ drift guards added in 0.8.4 through 0.8.8, all of which pin `WORKFLOW.md`.
   resolved correctly when asked directly from that path, which is exactly the case the old message could
   not distinguish from a missing package.
 
+### Ten contract contradictions, found by audit rather than by a run
+
+An outside scan for this defect class turned up ten more. All ten were verified against the code before
+being fixed; all ten were real. Two came from the release series that was fixing this class.
+
+1. **Approved test waivers became reviewer blockers.** `WORKFLOW.md` exempts a slice with an empty
+   ratified `test_plan` and `deriveReviewReady` honours it, while the reviewer blocked on "an AC unmet or
+   untested" with no qualifier — so a ratified docs-only slice was rejected forever.
+2. **Required regeneration read as prohibited editing.** The reviewer banned "edits to vendored or
+   generated trees" absolutely; `frontend-builder` correctly requires the source-owning slice to
+   regenerate. Only hand-editing is prohibited.
+3. **`test-verifier`'s claim described a different diff from its observation.** Its prompt said the
+   orchestrator passes its claim to `observe --claim`; the integration observation covers the whole
+   integrated diff and passes no claim, so following the prompt manufactured a `claim_mismatch`.
+4. **The fresh-init sequence was imposed on existing runs.** The OpenCode skill required `init` before any
+   state read; the workflow requires selecting an existing manifest and never initializing it again. This
+   was the 0.8.5 ordering, correct to state and wrong to state unconditionally.
+5. **"Park on any stop" erased intentional nonterminal exits.** Added to both adapters in 0.8.5. An
+   interactive `stop` is an unlocked nonterminal stop the contract says not to terminalize, and clean
+   verification exhaustion forbids terminalizing too.
+6. **Verification exhaustion assumed the run had never parked.** It required `terminal_result: null`,
+   which no resumed run can satisfy, since resume preserves the historical result by design.
+7. **Configuration validation restated an obsolete schema** — "four required properties plus optional
+   `verify_timeout_ms`" against an actual three required and four optional. It now points at the
+   authoritative statement instead of restating a shape that goes stale.
+8. **Headless parking waited for an impossible status.** `terminal:needs-human` cannot occur: `next` names
+   terminal only for `completed`, `partial` and `blocked`, so a parked run still reports a resume action.
+9. **The reviewer granted an integration waiver that does not exist** — WRITTEN-NOT-RUN for
+   `test-verifier`, where the workflow says there is no waiver.
+10. **The root README dropped two qualifiers** — an unconditional `gh pr create --draft`, and a validator
+    verdict required without the single-slice exemption.
+
+**The guard now covers where restatements live.** 0.8.6 derived a rule — prose naming a branch outcome
+must name the selector that chooses it — and scoped it to `WORKFLOW.md`. That scope is why #10 survived it.
+The rule now runs over every shipped prose document, including fenced examples, which is the shape #10
+actually took; each adapter runs the same check over its own skill using its own bundled workflow, so no
+package reaches into another. It also moved from line to paragraph granularity, because a correctly
+qualified sentence routinely wraps the selector onto the line above.
+
 No production lines in `feature-factory`; the ledger stays at 4682.
 
 ## 0.8.8

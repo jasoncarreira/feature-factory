@@ -658,8 +658,14 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     const unqualified = [];
     for (const [name, patterns] of Object.entries(OUTCOME_WORDS)) {
       if (!selectors.has(name)) continue;
-      for (const line of prose.split("\n")) {
-        if (patterns.some((pattern) => pattern.test(line)) && !new RegExp(name, "iu").test(line)) unqualified.push(line.trim());
+      // By paragraph, not by line. These documents hard-wrap at about a hundred columns, so a correctly
+      // qualified sentence routinely puts the selector on the line above the outcome -- checking lines
+      // reported those as violations. A paragraph is also the unit a reader actually takes in, which is
+      // the property being guarded: that the outcome does not READ as fixed.
+      for (const paragraph of prose.split(/\n\s*\n/u)) {
+        if (patterns.some((pattern) => pattern.test(paragraph)) && !new RegExp(name, "iu").test(paragraph)) {
+          unqualified.push(paragraph.split("\n").find((line) => patterns.some((pattern) => pattern.test(line)))?.trim() ?? paragraph.trim());
+        }
       }
     }
     return { undeclared, missing, unqualified };
@@ -673,6 +679,38 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     `a fenced block branches on a selector with no declared outcome vocabulary, so prose about it is unguarded: ${live.undeclared.join(", ")}`);
   assert.deepEqual(live.unqualified, [],
     `prose states a branch outcome as if it were fixed; name the selector so it reads as chosen:\n  ${live.unqualified.join("\n  ")}`);
+
+  // EVERY shipped prose document, not just this one. 0.8.6 added the rule above and scoped it to
+  // WORKFLOW.md, so the identical defect sat unread in README.md -- an unconditional `gh pr create
+  // --draft` -- until an outside audit found it. A rule that holds for the canonical contract holds
+  // wherever the contract is restated, and restatement elsewhere is how every defect in this series
+  // travelled. The selectors still come from WORKFLOW.md's fenced blocks, because that is where the
+  // branching code lives; only the set of documents checked against them widens. The adapter skills are
+  // deliberately absent: this package must not know the adapter packages exist, which is its own enforced
+  // boundary, so each adapter runs the same check over its own skill in its own suite.
+  const restatements = [
+    ["README.md", resolve(pkg, "..", "..", "README.md")],
+    ["OPERATING.md", resolve(pkg, "..", "..", "OPERATING.md")],
+    ["feature-factory/README.md", join(pkg, "README.md")],
+    ["agents/work-reviewer.md", join(pkg, "agents", "work-reviewer.md")],
+    ["agents/test-verifier.md", join(pkg, "agents", "test-verifier.md")],
+  ];
+  for (const [label, path] of restatements) {
+    const text = readFileSync(path, "utf8");
+    const found = outcomeViolations(`${canonical}\n${text}`).unqualified;
+    const own = found.filter((line) => !live.unqualified.includes(line));
+    assert.deepEqual(own, [],
+      `${label} states a branch outcome as if it were fixed; name the selector so it reads as chosen:\n  ${own.join("\n  ")}`);
+    // Including inside fenced examples, which the prose scan strips. The defect this whole guard exists
+    // to catch was exactly that shape: README showed `gh pr create --draft` as the invocation, with no
+    // `pr_draft` anywhere near it, so a reader took the draft flag for the command rather than for one
+    // branch of it. The canonical workflow's own block is allowed to spell it, because that block IS the
+    // selection; a restatement has to say which branch it is showing.
+    const invocations = text.split(/\n\s*\n/u)
+      .filter((block) => /gh pr create --draft/u.test(block) && !/PR_DRAFT|pr_draft/iu.test(block));
+    assert.deepEqual(invocations, [],
+      `${label} shows an unconditional draft PR invocation; show the choice or name pr_draft beside it:\n  ${invocations.join("\n  ")}`);
+  }
 
   // The controls are table-driven rather than run by hand, so the guard's own failure modes stay proven.
   // The `missing` row is the one review added: it is the rewrite that used to switch the guard off.

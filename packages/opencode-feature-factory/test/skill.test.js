@@ -80,6 +80,22 @@ describe("OpenCode skill adapter", () => {
     // the workspace and `external_directory` is denied for every agent, so a run depending on it fails on a
     // permission refusal. These pin the reordering, one fragment per line so the assertion can match.
     assert.match(skill, /`factory init` stages the canonical workflow at the `workflow` path/u);
+    // The same rule 0.8.6 applied to WORKFLOW.md, applied to this skill. Scoping it to the canonical
+    // contract is why an unconditional `--draft` survived in README.md until an outside audit found it;
+    // a rule that holds for the contract holds wherever the contract is restated. Selectors come from the
+    // WORKFLOW.md this package bundles, so nothing here reaches into another package.
+    const bundled = readFileSync(new URL("../skills/feature/WORKFLOW.md", import.meta.url), "utf8");
+    const selectors = new Set();
+    for (const [, body] of bundled.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)) {
+      for (const [, name] of body.matchAll(/(?:if\s+\[{1,2}\s+|case\s+|elif\s+\[{1,2}\s+)"?\$\{?(\w+)\}?"?/gu)) selectors.add(name);
+    }
+    assert.ok(selectors.has("PR_DRAFT"), "the bundled workflow must still expose PR_DRAFT, or this check is vacuous");
+    const skillProse = skill.replace(/```[a-z]*\n[\s\S]*?```/gu, "");
+    const offending = skillProse.split(/\n\s*\n/u)
+      .filter((para) => /draft PR\b|\bdraft publication\b/iu.test(para) && !/PR_DRAFT|pr_draft/iu.test(para));
+    assert.deepEqual(offending, [],
+      `the skill states a PR_DRAFT outcome as if it were fixed:\n  ${offending.join("\n  ")}`);
+
     // ENFORCEMENT, not instruction: this prevents a false green. A driver runs `factory init` at step 3,
     // before the canonical workflow is readable, so this skill is the only place the invocation can come
     // from -- and it used to describe init only as three isolated flag fragments (`--pr-base`,
@@ -95,7 +111,7 @@ describe("OpenCode skill adapter", () => {
       "SKILL.md must carry the canonical init invocation verbatim; step 3 runs it before the workflow exists");
     assert.match(skill, /`--json` is mandatory\./u,
       "the skill must say --json is mandatory, which is the flag whose absence stranded a run");
-    assert.match(skill, /before any state read, dispatch, gate, or `?factory`? command other\s+than `init` itself/u);
+    assert.match(skill, /before any dispatch, gate, further state read, or `?factory`?\s+command other than the `init` or `status` named above/u);
     assert.match(skill, /Do not read `WORKFLOW\.md` next to this file/u);
     assert.match(skill, /feature_background/u);
     assert.match(skill, /FACTORY_SESSION_ID/u);

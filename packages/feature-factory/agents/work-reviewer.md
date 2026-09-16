@@ -86,10 +86,16 @@ When the subject is a **class-wide** requirement — one that **cannot be establ
   - Backend: the repo's layering, its projection/read path, its API boundary.
   - Frontend: the repo's component conventions, binding forms, state approach and design tokens.
   - Migrations: the repo's filename, author, context, manifest-registration and permission steps.
-  - No edits to vendored or generated trees. No stray code comments.
+  - No **hand**-edits to vendored or generated trees. Regeneration is different and is required: the
+    slice that changes the source owns regenerating what derives from it, so a regenerated client or
+    type set in that slice's lane is expected output, not a finding.
+  - No stray code comments.
   - **Slice discipline:** the diff stays within the slice's `paths` (out-of-lane edits are a finding).
-  - The slice's `acceptance` is actually implemented, and the observed tests cover it.
-- **Test step (`test-verifier`):** each AC maps to a real assertion that would fail if the behavior broke; no test weakened to pass; the observed command is the suite the plan named and was not narrowed to exclude failures, which is a separate finding from weakening a test; observed test run is green (or honestly WRITTEN-NOT-RUN with a reason).
+  - The slice's `acceptance` is actually implemented, and the observed tests cover it — **unless the
+    slice's ratified `test_plan` is empty**, which the plan decided at Gate 2 and which the workflow
+    and `deriveReviewReady` both honour. A docs-only slice reviewed against tests it was ratified
+    not to have is rejected forever; that exemption is a plan decision, not yours to re-open here.
+- **Test step (`test-verifier`):** each AC maps to a real assertion that would fail if the behavior broke; no test weakened to pass; the observed command is the suite the plan named and was not narrowed to exclude failures, which is a separate finding from weakening a test; observed test run is green. **There is no WRITTEN-NOT-RUN waiver for this subject:** the stage exists to run the tests, so the evidence must record an observed run that exited zero. Reporting WRITTEN-NOT-RUN honestly is valid; approving on it is not.
 
 ## Security proportionality
 
@@ -97,7 +103,7 @@ The repository's real trust boundaries stay fully blocking: unauthenticated or a
 
 ## Severity
 
-- **BLOCKER** — claim/observation mismatch, `review_ready=false`, an AC unmet or untested, a convention violation a human reviewer would bounce (unguarded prod migration, subtree edit, out-of-lane file), a correctness/security bug.
+- **BLOCKER** — claim/observation mismatch, `review_ready=false` on a subject that has observed evidence, an AC unmet or untested against a non-empty ratified `test_plan`, a convention violation a human reviewer would bounce (unguarded prod migration, subtree edit, out-of-lane file), a correctness/security bug.
 - **MAJOR** — deviates from brief/conventions in a way that will draw review friction; secondary AC untested.
 - **MINOR** — nits; safe to proceed.
 
@@ -135,6 +141,6 @@ Write this structure to the narrative report:
 1. <the specific change the producer must make>
 ```
 
-Cite `path:line` for every finding — an unsourced finding is noise. If it's genuinely clean and the evidence is review-ready, APPROVE without manufacturing problems. If evidence is missing when it should exist (a build slice with no observed diff/tests), that itself is a BLOCKER — do not approve unobserved work.
+Cite `path:line` for every finding — an unsourced finding is noise. If it's genuinely clean and the evidence is review-ready, APPROVE without manufacturing problems. If evidence is missing when it should exist (a build slice with no observed diff/tests), that itself is a BLOCKER — do not approve unobserved work. "When it should exist" excludes a planning subject, which has none by design, and a slice whose ratified `test_plan` is empty.
 
 Your final response may confirm both file writes, but it must not substitute for either file.

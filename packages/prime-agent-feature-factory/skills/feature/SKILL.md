@@ -1,6 +1,6 @@
 ---
 name: feature
-description: Drive a software feature from request to an observed implementation and draft PR with feature-factory. Use for /feature requests that need durable state, specialist delegation, approval gates, tested slices, and resumability in Prime Agent.
+description: Drive a software feature from request to an observed implementation and pull request with feature-factory. Use for /feature requests that need durable state, specialist delegation, approval gates, tested slices, and resumability in Prime Agent.
 license: MIT
 compatibility: Requires Prime Agent with RLM subagents, Node.js 22+, git, and the bundled feature-factory CLI dependency.
 ---
@@ -100,8 +100,11 @@ Never assemble this command from the `factory init --pr-base`, `factory init --m
 invocation; assembling from them is what produced an init without `--json` on a host that had no
 copy of the block.
 
-If you stop for any reason after init has succeeded, park the run rather than ending the turn: an
-abandoned `status: running` is indistinguishable from a driver still working.
+If you stop after init has succeeded, do not simply end the turn: an abandoned `status: running` is
+indistinguishable from a driver still working. Park the run **unless the canonical workflow defines that
+stop as something else** — it defines two, and both forbid terminalizing. An interactive `stop` at a gate
+is an unlocked nonterminal stop, and clean verification exhaustion releases the lock and leaves the run
+`running`. Follow the workflow's own sequence for those; park everything else.
 
 ## Prime session ownership
 
@@ -143,4 +146,4 @@ In interactive mode, present each canonical gate to the user and wait for an exp
 Headless and autonomous behavior comes only from the persisted mode and canonical preconditions. Before
 pausing, failing, or completing, quiesce children and heartbeats, make the required CLI transition,
 release the exact owning session where required, and verify qualified status. Report the run id, status,
-next action, worktree/branch, evidence or blocker, and draft PR URL when one exists.
+next action, worktree/branch, evidence or blocker, and the PR URL when one exists.

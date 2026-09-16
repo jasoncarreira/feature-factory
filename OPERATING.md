@@ -469,7 +469,7 @@ the declared identity, so that any invocation is correct without preparation —
 ```sh
 # rejected: this is a factory credential manager wearing a one-liner
 PUBLISHING_TOKEN="$(gh auth token --user "$DECLARED_PUBLISHING_IDENTITY")"
-GH_TOKEN="$PUBLISHING_TOKEN" gh pr create --draft ...
+GH_TOKEN="$PUBLISHING_TOKEN" gh pr create ...
 ```
 
 It works, and it is what makes an unprepared launch publish. The line it crosses is not whether a run

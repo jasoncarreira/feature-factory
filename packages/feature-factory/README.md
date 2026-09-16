@@ -1,6 +1,6 @@
 # feature-factory
 
-A durable, observed control plane for running a feature from idea to draft PR through a chain of
+A durable, observed control plane for running a feature from idea to pull request through a chain of
 focused agents, with human approval gates. Host-agnostic, zero dependencies.
 
 ```sh

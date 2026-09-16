@@ -1171,8 +1171,9 @@ CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quie
 
 Require it to equal `FEATURE_BRANCH` and require `HEAD^{commit}` to equal
 `refs/heads/$FEATURE_BRANCH^{commit}` as one 40-character SHA. If no slice is merged, or `.factory.json`
-is absent, preserve the existing progression and output exactly. A present config must validate as the
-four required properties plus optional `verify_timeout_ms` object above before any entry is used.
+is absent, preserve the existing progression and output exactly. A present config must validate against the
+repository-configuration schema stated above before any entry is used; that statement is authoritative and
+is deliberately not restated here, because a restated shape goes stale as the schema gains properties.
 
 With valid config, validate canonical `evidence/test-verifier.json` as untrusted input using the same
 closed schema and derived `review_ready` rules as the CLI. Classify it into exactly four outcomes:
@@ -1420,7 +1421,11 @@ factory lock "$R" release --session "$SESSION_ID" --repo "$RUN_REPO"
 ```
 
 Run qualified `factory status "$R" --json --repo "$RUN_REPO"` and require valid durable
-`status: "running"`, `terminal_result: null`, and proof that this `SESSION_ID` no longer owns the lock.
+`status: "running"`, a `terminal_result` unchanged from the one this invocation began with, and proof
+that this `SESSION_ID` no longer owns the lock. For a run that has never parked that value is `null`; a
+run continued by explicit resume keeps its historical result by design, since resume preserves
+`terminal_result` rather than clearing it, so requiring `null` would report every resumed run as a
+retained-lock error.
 In the uncontended orderly path require `lock: "absent"`. Only after every task and heartbeat is
 quiescent, the owning release succeeds, and qualified status proves those values may the driver report:
 
