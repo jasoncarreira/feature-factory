@@ -973,8 +973,14 @@ const HANDLERS = {
       lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,
       gates: Object.fromEntries(GATE_NAMES.filter((name) => run.gates[name]).map((name) => [name, run.gates[name].status])),
-      steps: run.steps.map((step) => `${step.agent}:${step.status}(${step.attempts})`),
-      slices: run.slices.map((slice) => `${slice.id}:${slice.status}(${slice.attempts})`),
+      // Structured, not `${agent}:${status}(${attempts})`. Attempts are the field a controller reads to
+      // decide whether an attempt was consumed, and reaching them meant regexing a display string out of
+      // a JSON contract. Nothing in the suite asserted the string form, so it was a public shape with no
+      // coverage -- which is how a rendering artifact survived in a machine-readable payload. The content
+      // is unchanged; only the shape is. Breaking for anyone parsing the strings, which is safe here
+      // because an exact-match `FACTORY_VERSION` pin already forces consumers to move deliberately.
+      steps: run.steps.map((step) => ({ agent: step.agent, status: step.status, attempts: step.attempts })),
+      slices: run.slices.map((slice) => ({ id: slice.id, status: slice.status, attempts: slice.attempts })),
       validator: run.validator?.verdict ?? null,
       pr_url: run.pr_url,
       terminal_result: run.terminal_result,

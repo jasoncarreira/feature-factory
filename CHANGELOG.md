@@ -3,6 +3,32 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.8
+
+`status --json` projects step and slice rows as structured records. **Breaking for anyone parsing the
+previous strings.**
+
+- **`attempts` had to be regexed out of a rendering.** The projection emitted
+  `${agent}:${status}(${attempts})` — `spec-writer:rejected(1)` — inside an otherwise machine-readable
+  payload. `attempts` is the single field a controller reads to decide whether an attempt was consumed,
+  and reaching it meant parsing a display string. Rows are now
+  `{agent, status, attempts}` and `{id, status, attempts}`. The content is unchanged; only the shape is.
+- **It was a public shape with no coverage.** No assertion in the suite referenced the string form, which
+  is how a display artifact survived inside a machine contract. The end-to-end path now pins both the
+  exact `be-thing` slice row and the structural property of every row, so a return to strings fails.
+- **Why breaking is acceptable here.** An exact-match `FACTORY_VERSION` pin already forces a consumer to
+  move deliberately on any version change, so there is no silent-upgrade path. The raw `run.json` manifest
+  always carried objects, and the TUI and `observe/runs.js` read that rather than the projection, so they
+  are unaffected.
+
+Context: mimir's escalation epic stalled because outcomes could only be classified by reading prose. Most
+of that gap is not the factory's to close — "infrastructure failure versus genuine build outcome" is
+knowable by the controller and frequently not by a run that was killed. This is the part that *was* ours:
+structured attempt counts, which the factory already knows and was rendering instead of reporting.
+
+Production moves 4650 → 4656, and the tripwire 4650 → 4700 on explicit operator instruction given before
+the work.
+
 ## 0.8.7
 
 The park snapshot stopped reporting itself. Found on a live park, not in review.

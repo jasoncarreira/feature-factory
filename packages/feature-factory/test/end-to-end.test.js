@@ -200,6 +200,20 @@ describe("end to end — a merge is refused through the real CLI", () => {
     const reviewRef = writeReview(p.runDir, "be-thing", sliceHead);
     assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef,
       "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]).ok, true);
+    // `status --json` is a machine contract, so its step and slice rows are objects. They used to arrive
+    // as `be-thing:review(1)`, and `attempts` is exactly the field a controller reads to decide whether an
+    // attempt was consumed -- so the one number that mattered had to be regexed back out of a rendering.
+    // Nothing in this suite asserted the string form, which is how it survived; this is that coverage.
+    const projected = factory(p.repo, ["status", RUN, "--json"]).out;
+    assert.deepEqual(projected.slices.find((slice) => slice?.id === "be-thing"),
+      { id: "be-thing", status: "review", attempts: 1 },
+      "status must project slice rows as structured records");
+    assert.ok(projected.slices.every((slice) => slice !== null && typeof slice === "object"
+      && typeof slice.id === "string" && typeof slice.status === "string" && Number.isInteger(slice.attempts)),
+      "every slice row must be a structured record, not a formatted string");
+    assert.ok(projected.steps.every((step) => step !== null && typeof step === "object"
+      && typeof step.agent === "string" && typeof step.status === "string" && Number.isInteger(step.attempts)),
+      "status must project step rows as structured records with an integer attempt count");
     return { ...p, sliceHead, basePoint };
   }
 
