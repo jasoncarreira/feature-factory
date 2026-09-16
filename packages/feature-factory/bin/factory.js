@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readFileSync } from "node:fs";
-import { nextAction, readRun, readRunUnchecked } from "../state/index.js";
+import { nextAction, nextActionRecord, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { buildEvidence, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
@@ -972,7 +972,11 @@ const HANDLERS = {
       pr_draft: run.pr_draft ?? true,
       lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,
-      gates: Object.fromEntries(GATE_NAMES.filter((name) => run.gates[name]).map((name) => [name, run.gates[name].status])),
+      // The whole gate record, not just its status. `at` and `artifact` were dropped here while sitting
+      // intact in `run.json` -- and `at` is what tells a controller whether "approved" happened a minute
+      // ago or three hours ago, which is most of what "is this run stuck" means.
+      gates: Object.fromEntries(GATE_NAMES.filter((name) => run.gates[name])
+        .map((name) => [name, { status: run.gates[name].status, at: run.gates[name].at ?? null, artifact: run.gates[name].artifact ?? null }])),
       // Structured, not `${agent}:${status}(${attempts})`. Attempts are the field a controller reads to
       // decide whether an attempt was consumed, and reaching them meant regexing a display string out of
       // a JSON contract. Nothing in the suite asserted the string form, so it was a public shape with no
@@ -981,9 +985,18 @@ const HANDLERS = {
       // because an exact-match `FACTORY_VERSION` pin already forces consumers to move deliberately.
       steps: run.steps.map((step) => ({ agent: step.agent, status: step.status, attempts: step.attempts })),
       slices: run.slices.map((slice) => ({ id: slice.id, status: slice.status, attempts: slice.attempts })),
-      validator: run.validator?.verdict ?? null,
+      // Same narrowing: the record carries `report`, `reviewed_head` and `loops`, and only the verdict
+      // came out. `loops` says whether validation is converging; `reviewed_head` says what it judged.
+      validator: run.validator
+        ? { verdict: run.validator.verdict, report: run.validator.report ?? null,
+            reviewed_head: run.validator.reviewed_head ?? null, loops: run.validator.loops ?? null }
+        : null,
       pr_url: run.pr_url,
       terminal_result: run.terminal_result,
+      // Both, deliberately. `next_action` is the machine answer; `next` is its rendering, derived from the
+      // same record by one formatter so they cannot drift, and kept because the driver contract, the
+      // sidebar and a lot of prose name `next: gate:story`.
+      next_action: nextActionRecord(run),
       next: nextAction(run),
     });
   },
@@ -1178,7 +1191,8 @@ const HANDLERS = {
     });
     if (outcome?.refusal) throw new CliError(`${outcome.refusal}; run remains needs-human and its historical terminal result is preserved`);
     return emit(flags, {
-      run_id: runId, status: next.status, terminal_result: next.terminal_result, next: nextAction(next),
+      run_id: runId, status: next.status, terminal_result: next.terminal_result,
+      next_action: nextActionRecord(next), next: nextAction(next),
     });
   },
 };

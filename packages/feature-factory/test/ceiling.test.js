@@ -1047,7 +1047,20 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // epic stalled on exactly that, having to classify outcomes by parsing prose. Nothing in the suite
     // asserted the string form, so it was a public shape with no coverage, which is how a display
     // artifact survived inside a machine contract. The content did not change; only the shape did.
-    assert.equal(total, 4656, "proving the publication happened lands at 4656 production lines");
+    // 4656 -> 4682, same PR, same defect class, three more fields. The projection is the ONLY lossy layer
+    // in this system: `run.json` holds records and `status --json` narrowed them on the way out. Gates
+    // came out as a bare status string with `at` and `artifact` dropped -- and `at` is most of what "is
+    // this run stuck" means. The validator came out as a bare verdict, losing `loops`, which says whether
+    // validation is converging. `next` packed a kind and a subject into one string, so the field a
+    // controller most needs to branch on had to be split on a colon.
+    //
+    // `nextActionRecord` is now the single computation and `nextAction` is a one-line formatter over it,
+    // so the string cannot drift from the record; a test asserts `next` is exactly that formatting.
+    // The narrowing guard reads GATE_KEYS and VALIDATOR_KEYS from the schema rather than a hand-written
+    // list, so a field added to either must be exposed or consciously excluded here. Its first draft was
+    // itself a no-op -- the validator half sat behind a `!== null` at a point in the fixture where no
+    // validator exists, so it read as coverage and tested nothing until the control caught it.
+    assert.equal(total, 4682, "proving the publication happened lands at 4682 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

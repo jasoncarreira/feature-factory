@@ -734,7 +734,7 @@ const CLAIMS = [
     file: "WORKFLOW.md",
     fragment: "On approval, record only the Brief decision. This produces a durable Brief-approved, zero-slices state",
     expect: "allowed",
-    matches: /"brief": "approved"[\s\S]*"slices": \[\][\s\S]*"next": "seed-slices"/u,
+    matches: /"brief": \{[\s\S]*"status": "approved"[\s\S]*"slices": \[\][\s\S]*"next": "seed-slices"/u,
     act(repo) {
       const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "plan", "slices.json"), JSON.stringify(PLAN));
@@ -803,7 +803,7 @@ const CLAIMS = [
       assert.equal(failed.ok, false);
       assert.match(failed.out, /^could not read plan\/slices\.json:/u);
       const status = JSON.parse(factory(repository, ["status", RUN, "--json"]).out);
-      assert.equal(status.gates.brief, "approved");
+      assert.equal(status.gates.brief.status, "approved");
       assert.deepEqual(status.slices, []);
       assert.equal(status.next, "seed-slices");
       writeFileSync(planPath, presented);
@@ -857,7 +857,7 @@ const CLAIMS = [
     file: "WORKFLOW.md",
     fragment: "The active run driver owns every state-changing `factory` command for\nits run.",
     expect: "allowed",
-    matches: /"story": "pending"/u,
+    matches: /"story": \{[\s\S]*"status": "pending"/u,
     act(repo) {
       const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "artifacts", "story.md"), "story\n");
@@ -936,7 +936,7 @@ const CLAIMS = [
       assert.equal(factory(repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
       const verified = JSON.parse(factory(repository, ["status", RUN, "--json"]).out);
       assert.equal(verified.mode, "interactive");
-      assert.equal(verified.gates.story, "pending");
+      assert.equal(verified.gates.story.status, "pending");
       assert.equal(verified.lock_session, "session-a");
       assert.equal(factory(repository, ["gate", RUN, "story", "changes", "--now", NOW]).ok, true);
       assert.equal(JSON.parse(factory(repository, ["status", RUN, "--json"]).out).next, "changes-at-gate:story");
@@ -949,7 +949,7 @@ const CLAIMS = [
     file: "WORKFLOW.md",
     fragment: "This is an unlocked\nnonterminal stop: do not terminalize it",
     expect: "allowed",
-    matches: /"lock": "absent"[\s\S]*"story": "stop"[\s\S]*"terminal_result": null[\s\S]*"next": "stopped-at-gate:story"/u,
+    matches: /"lock": "absent"[\s\S]*"story": \{[\s\S]*"status": "stop"[\s\S]*"terminal_result": null[\s\S]*"next": "stopped-at-gate:story"/u,
     act(repo) {
       const { repository, runDir } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
       writeFileSync(join(runDir, "artifacts", "story.md"), "story\n");
@@ -959,7 +959,7 @@ const CLAIMS = [
       assert.equal(factory(repository, ["lock", RUN, "claim", "--session", "session-a", "--now", NOW]).ok, true);
       const verified = JSON.parse(factory(repository, ["status", RUN, "--json"]).out);
       assert.equal(verified.mode, "interactive");
-      assert.equal(verified.gates.story, "pending");
+      assert.equal(verified.gates.story.status, "pending");
       assert.equal(verified.lock_session, "session-a");
       assert.equal(factory(repository, ["gate", RUN, "story", "stop", "--now", NOW]).ok, true);
       const stopped = JSON.parse(factory(repository, ["status", RUN, "--json"]).out);
@@ -996,7 +996,7 @@ const CLAIMS = [
     file: "WORKFLOW.md",
     fragment: "**Before the plan is seeded, an approved gate still re-opens**",
     expect: "allowed",
-    matches: /"story": "approved"/u,
+    matches: /"story": \{[\s\S]*"status": "approved"/u,
     act(repo) {
       // Initialized but *not* seeded — that is the whole distinction.
       const { repository } = initFresh(repo, [RUN, "--branch", "work", "--worktree", ".", "--now", NOW]);
@@ -1014,7 +1014,7 @@ const CLAIMS = [
     file: "WORKFLOW.md",
     fragment: "**`changes` is a request for another round, not the end of the run.**",
     expect: "allowed",
-    matches: /"story": "approved"/u,
+    matches: /"story": \{[\s\S]*"status": "approved"/u,
     act(repo) {
       const { repository } = seeded(repo);
       assert.equal(decide(repository, "story", "changes").ok, true);

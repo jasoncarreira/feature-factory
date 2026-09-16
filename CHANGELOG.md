@@ -26,7 +26,25 @@ of that gap is not the factory's to close — "infrastructure failure versus gen
 knowable by the controller and frequently not by a run that was killed. This is the part that *was* ours:
 structured attempt counts, which the factory already knows and was rendering instead of reporting.
 
-Production moves 4650 → 4656, and the tripwire 4650 → 4700 on explicit operator instruction given before
+- **`gates` carried only a status.** The record is `{status, at, artifact}` and the projection emitted the
+  status alone, so `at` — most of what "is this run stuck" means — was thrown away at the boundary while
+  sitting intact in `run.json`. Gate rows are now the whole record.
+- **`validator` carried only a verdict**, dropping `report`, `reviewed_head` and `loops`. `loops` is what
+  says whether validation is converging. It is now the whole record.
+- **`next` packed two facts into one string.** `gate:story`, `observe-slice:protocol`,
+  `stopped-at-gate:brief` — a kind and a subject a consumer had to split on a colon, in the field most
+  worth branching on. `status --json` now also emits `next_action: {kind, subject}`. `nextActionRecord` is
+  the single computation and `nextAction` is a one-line formatter over it, so the string is a projection
+  of the record rather than a second implementation; a test asserts exactly that. `next` is retained
+  because the driver contract, the sidebar and a lot of prose name `next: gate:story`.
+- **A narrowing guard, read from the schema.** `GATE_KEYS` and `VALIDATOR_KEYS` come from
+  `state/schema.js`, so a field added to either must be exposed or consciously excluded rather than
+  silently forgotten — which is exactly how all three of the above happened. Steps and slices expose a
+  deliberate subset, pinned explicitly. The guard's first draft was itself a no-op: its validator half sat
+  behind a `!== null` at a point where no validator exists, so it read as coverage and proved nothing
+  until a control caught it.
+
+Production moves 4650 → 4682, and the tripwire 4650 → 4700 on explicit operator instruction given before
 the work.
 
 ## 0.8.7

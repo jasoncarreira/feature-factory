@@ -1004,8 +1004,11 @@ describe("package boundary", () => {
     // `factory status` and the sidebar must agree on, and the alternative was a second copy of
     // resume order in the TUI. One read-only export removes a drift risk; it does not grant
     // authority, and the reachability check below still proves it cannot write.
+    // `nextActionRecord` joins it on the same terms and for the same reason: it IS that derivation,
+    // and `nextAction` is now a one-line formatter over it, so exporting only the string would leave
+    // a consumer parsing `kind:subject` back apart — the defect this release exists to remove.
     const allowed = [
-      "readRun", "readRunUnchecked", "nextAction", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION", "CONTROL_PLANE",
+      "readRun", "readRunUnchecked", "nextAction", "nextActionRecord", "validateRun", "SchemaError", "RUN_KEYS", "SCHEMA_VERSION", "CONTROL_PLANE",
       "RUN_STATUSES", "TERMINAL_STATUSES", "MODES", "GATE_NAMES", "GATE_STATUSES",
       "STEP_STATUSES", "SLICE_STATUSES", "VALIDATOR_VERDICTS",
     ];

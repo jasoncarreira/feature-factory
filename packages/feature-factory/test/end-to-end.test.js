@@ -14,6 +14,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as cli } from "../bin/factory.js";
 import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
+// Straight from the schema rather than the package surface: the narrowing guard below needs these, and
+// widening the public read-only export list to satisfy a test would be the boundary moving for the
+// convenience of its own coverage.
+import { GATE_KEYS, VALIDATOR_KEYS } from "../state/schema.js";
 import { assertPublicationReady, REVIEW_KEYS } from "../observe/review.js";
 import { resolveSpawnExecutable } from "../core/executable.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
@@ -214,6 +218,29 @@ describe("end to end — a merge is refused through the real CLI", () => {
     assert.ok(projected.steps.every((step) => step !== null && typeof step === "object"
       && typeof step.agent === "string" && typeof step.status === "string" && Number.isInteger(step.attempts)),
       "status must project step rows as structured records with an integer attempt count");
+    // THE NARROWING GUARD, derived from the schema rather than from a hand-written list. `run.json` holds
+    // records and the projection is the only lossy layer: gates arrived as a bare status string with `at`
+    // and `artifact` dropped, validator as a bare verdict with `report`, `reviewed_head` and `loops`
+    // dropped, and steps and slices as display strings. None of it was caught because nothing asserted the
+    // projection's shape at all. Reading GATE_KEYS and VALIDATOR_KEYS means a field added to either schema
+    // must be either exposed or consciously excluded here -- forgetting is what used to happen silently.
+    for (const name of Object.keys(projected.gates)) {
+      assert.deepEqual(Object.keys(projected.gates[name]).sort(), [...GATE_KEYS].sort(),
+        `status must project the whole gate record for '${name}', not a narrowed one`);
+    }
+    // Steps and slices expose a deliberate subset of their schema keys -- a slice row carries paths,
+    // test_plan, refs and merge state that a status reader has no business paging through -- so the subset
+    // is pinned explicitly here. Dropping one of these three still fails.
+    for (const step of projected.steps) {
+      assert.deepEqual(Object.keys(step).sort(), ["agent", "attempts", "status"]);
+    }
+    for (const slice of projected.slices) {
+      assert.deepEqual(Object.keys(slice).sort(), ["attempts", "id", "status"]);
+    }
+    // `next` must be exactly the rendering of `next_action`, so the pair cannot drift into two answers.
+    const { kind, subject } = projected.next_action;
+    assert.equal(projected.next, subject === null ? kind : `${kind}:${subject}`,
+      "the `next` string must be a projection of `next_action`, not a second computation of it");
     return { ...p, sliceHead, basePoint };
   }
 
@@ -332,6 +359,12 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x");
       assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "post-merge verify must not bootstrap");
       assert.equal(recordValidator(green.repo, green.runDir, mergeCommit, "GO", NOW(4)).ok, true);
+      // The validator half of the narrowing guard, placed here because it is the first point a validator
+      // record exists -- asserted in the slice helper it sat behind a `!== null` that never fired, which
+      // is a guard that reads as coverage while testing nothing. Verified by control: dropping `loops`
+      // from the projection fails here and passed there.
+      assert.deepEqual(Object.keys(factory(green.repo, ["status", RUN, "--json"]).out.validator).sort(),
+        [...VALIDATOR_KEYS].sort(), "status must project the whole validator record, not just its verdict");
       assert.equal(approveGate(green.repo, "pre_pr", NOW(4)).ok, true);
       assert.equal(factory(green.repo, ["pr", RUN, "--url", "https://example.test/pr/bootstrap-exclusion", "--now", NOW(4)]).ok, true);
       assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "Gate 3 and publication must not bootstrap or run configured publish");
@@ -661,7 +694,8 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const resume = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
       assert.equal(resume.ok, true, resume.stderr);
       assert.deepEqual(resume.out, {
-        run_id: RUN, status: "running", terminal_result: { status: "needs-human", reason }, next: "gate:pre_pr",
+        run_id: RUN, status: "running", terminal_result: { status: "needs-human", reason },
+        next_action: { kind: "gate", subject: "pre_pr" }, next: "gate:pre_pr",
       });
       status = factory(resumed.repo, ["status", RUN]);
       assert.equal(status.out.status, "running");
@@ -1569,7 +1603,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.match(missing.stderr, /could not read plan\/slices\.json/u);
       const recoverable = factory(p.repo, ["status", RUN]);
       assert.equal(recoverable.ok, true, recoverable.stderr);
-      assert.equal(recoverable.out.gates.brief, "approved");
+      assert.equal(recoverable.out.gates.brief.status, "approved");
       assert.deepEqual(recoverable.out.slices, []);
       assert.equal(recoverable.out.next, "seed-slices");
       writeFileSync(planFile, presentedPlan);
