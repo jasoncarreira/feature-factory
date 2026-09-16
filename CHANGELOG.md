@@ -90,7 +90,40 @@ actually took; each adapter runs the same check over its own skill using its own
 package reaches into another. It also moved from line to paragraph granularity, because a correctly
 qualified sentence routinely wraps the selector onto the line above.
 
-No production lines in `feature-factory`; the ledger stays at 4682.
+### A second audit pass: four regressions in the first, and five pre-existing defects
+
+The first pass was re-reviewed. It found four problems **in those fixes** and five pre-existing defects
+reproduced through the CLI. All are fixed here.
+
+**In the first pass's fixes.** The empty-`test_plan` waiver was written as an exception to a conjunction,
+so it waived "acceptance is implemented" as well as test coverage, and a closing sentence excused a missing
+observed *diff*. It now waives test execution only. The OpenCode resume exception permitted candidate
+reads the canonical opening still forbade, and pointed at candidate paths defined only in the file not yet
+readable — the opening now allows that bounded lookup and the skill states the paths inline. Exhaustion's
+corrected check kept three stale `terminal_result: null` restatements, including the required report, so
+the check passed while the report lied. And the reviewer still rejected any producer/observation file-list
+disagreement, which for `test-verifier` is the integrated diff and legitimately contains builder files.
+
+**Pre-existing, and reproduced through the CLI.** A reviewed step consumed nothing: `accepted` was
+recorded against a missing review file, a REJECT with blocking fixes, and an approval naming a nonexistent
+commit. A `pre_pr` approval named no commit, so a single-slice run — which skips the validator that
+carries that binding — could approve at A, commit B, re-observe tests at B and publish under the older
+approval; the gate already observed the head to prove readiness and now records it. An accepted step could
+not record a rejection, so a Gate 2 revision could record success but never its REJECT. A NO-GO finding in
+production source had no legal path and is now an explicit park rather than an instruction the contract
+cannot carry out. Autonomous Gate 3 required the validator that single-slice runs must skip. And a
+background driver was told to read durable state only through `status`, while the workflow requires direct
+manifest reads for fields `status` does not expose.
+
+**The guard, again.** Its inventory listed two of eleven specialist prompts, the adapter checks stripped
+fences, and a `DRAFT PR` chain diagram survived in two files. Inventory is now every document this package
+owns, fences included, and each adapter checks its own examples too. Its limits are now stated in the test
+rather than implied: it matches tokens in a block and cannot tell whether a qualifier *governs* an
+outcome, so `"Read PR_DRAFT for logging. Always publish a draft PR."` passes and
+`"Never assume the result is a draft PR."` fails. It catches the shape every defect in this series took —
+an outcome stated with no selector near it — and nothing subtler.
+
+Production moves 4682 → 4724, and the tripwire 4700 → 4750 on explicit operator instruction.
 
 ## 0.8.8
 

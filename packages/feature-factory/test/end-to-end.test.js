@@ -1718,7 +1718,10 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       assert.equal(factory(p.repo, ["lock", RUN, "claim", "--session", "legacy", "--branch", "feature", "--now", NOW(5)]).ok, true);
       assert.equal(factory(p.repo, ["heartbeat", RUN, "--session", "legacy", "--now", NOW(5)]).ok, true);
       assert.equal(factory(p.repo, ["lock", RUN, "release", "--session", "legacy", "--now", NOW(5)]).ok, true);
-      assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--now", NOW(5)]).ok, true);
+      // A reviewed step now consumes its review: accepting one without an approval is refused, which is
+      // the point of that change. This fixture supplies the approval the workflow always required.
+      const verifierReview = writeReview(p.runDir, "test-verifier", p.head ?? p.sliceHead ?? null);
+      assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--review-ref", verifierReview, "--now", NOW(5)]).ok, true);
       // The step half of the projection guard, at the first point a step row exists. An exact object,
       // because the vacuous version this replaces would have accepted the old `test-verifier:accepted(1)`
       // display string, which is the shape this release exists to remove.

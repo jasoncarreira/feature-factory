@@ -102,9 +102,16 @@ describe("Prime package contract", () => {
     assert.ok(selectors.has("PR_DRAFT"), "the bundled workflow must still expose PR_DRAFT, or this check is vacuous");
     const skillProse = skill.replace(/```[a-z]*\n[\s\S]*?```/gu, "");
     const offending = skillProse.split(/\n\s*\n/u)
-      .filter((para) => /draft PR\b|\bdraft publication\b/iu.test(para) && !/PR_DRAFT|pr_draft/iu.test(para));
+      .filter((para) => /draft PR\b|\bdraft publication\b|PR is a draft\b/iu.test(para) && !/PR_DRAFT|pr_draft/iu.test(para));
     assert.deepEqual(offending, [],
       `the skill states a PR_DRAFT outcome as if it were fixed:\n  ${offending.join("\n  ")}`);
+    // Fences too. The first version of this guard stripped them, so appending an unconditional
+    // ```sh\ngh pr create --draft\n``` to the skill passed -- which is exactly the shape the README
+    // defect took. Checked over the whole file, examples included.
+    const inFences = skill.split(/\n\s*\n/u)
+      .filter((block) => /gh pr create --draft|\bDRAFT PR\b/u.test(block) && !/PR_DRAFT|pr_draft/iu.test(block));
+    assert.deepEqual(inFences, [],
+      `the skill shows an unconditional draft outcome in an example:\n  ${inFences.join("\n  ")}`);
 
     // ENFORCEMENT, not instruction: this prevents a false green. Prime does load the canonical workflow
     // before init, so unlike OpenCode it is not bootstrapping blind -- but a skill that describes init

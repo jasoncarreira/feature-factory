@@ -194,8 +194,12 @@ const steps = contract({
       }
       if (step.attempts < prior.attempts) throw new Error(`step '${step.agent}' attempts cannot decrease`);
       if (step.attempts > prior.attempts + 1) throw new Error(`step '${step.agent}' attempts cannot skip`);
-      if (prior.status === "accepted" && step.status !== "accepted") {
-        throw new Error(`step '${step.agent}' is already accepted`);
+      // An accepted step was frozen in every direction except accepted -> accepted, so a Gate 2 revision
+      // could record its success and never its rejection: the reviewer's REJECT on the revised artifact
+      // had no legal transition. Reopening is legal only WITH a new attempt, which is what a revision is;
+      // without one, "already accepted" still holds, so this does not reopen a settled step in place.
+      if (prior.status === "accepted" && step.status !== "accepted" && step.attempts === prior.attempts) {
+        throw new Error(`step '${step.agent}' is already accepted; a revision must raise --attempts`);
       }
       if (!STEP_STATUSES.includes(step.status)) throw new Error(`step '${step.agent}' status is invalid`);
     }

@@ -680,36 +680,36 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.deepEqual(live.unqualified, [],
     `prose states a branch outcome as if it were fixed; name the selector so it reads as chosen:\n  ${live.unqualified.join("\n  ")}`);
 
-  // EVERY shipped prose document, not just this one. 0.8.6 added the rule above and scoped it to
-  // WORKFLOW.md, so the identical defect sat unread in README.md -- an unconditional `gh pr create
-  // --draft` -- until an outside audit found it. A rule that holds for the canonical contract holds
-  // wherever the contract is restated, and restatement elsewhere is how every defect in this series
-  // travelled. The selectors still come from WORKFLOW.md's fenced blocks, because that is where the
-  // branching code lives; only the set of documents checked against them widens. The adapter skills are
-  // deliberately absent: this package must not know the adapter packages exist, which is its own enforced
-  // boundary, so each adapter runs the same check over its own skill in its own suite.
-  const restatements = [
+  // EVERY shipped document this package owns, prose AND fenced examples. 0.8.6 scoped this rule to
+  // WORKFLOW.md, which is why an unconditional `gh pr create --draft` sat unread in README.md; the first
+  // widening then listed two of eleven specialist prompts and still stripped fences, so an audit found a
+  // `DRAFT PR` chain diagram surviving in two files. Both misses were the inventory, not the rule.
+  //
+  // WHAT THIS CANNOT DO, stated because an overstated guard is worse than a narrow one. It matches tokens
+  // in a block; it does not parse English and cannot tell whether a qualifier GOVERNS the outcome. These
+  // pass and should not: "Read PR_DRAFT for logging. Always publish a draft PR." and "With PR_DRAFT=false,
+  // always publish a draft PR." These fail and should not: "Never assume the result is a draft PR."
+  // Proximity is the property being checked. It catches the shape every defect in this series actually
+  // took -- an outcome stated with no selector anywhere near it -- and nothing subtler.
+  const agentsDir = join(pkg, "agents");
+  const owned = [
     ["README.md", resolve(pkg, "..", "..", "README.md")],
     ["OPERATING.md", resolve(pkg, "..", "..", "OPERATING.md")],
     ["feature-factory/README.md", join(pkg, "README.md")],
-    ["agents/work-reviewer.md", join(pkg, "agents", "work-reviewer.md")],
-    ["agents/test-verifier.md", join(pkg, "agents", "test-verifier.md")],
+    ...readdirSync(agentsDir).filter((name) => name.endsWith(".md")).map((name) => [`agents/${name}`, join(agentsDir, name)]),
   ];
-  for (const [label, path] of restatements) {
+  assert.ok(owned.length >= 14, `the document inventory looks truncated at ${owned.length}; every agent prompt must be covered`);
+  for (const [label, path] of owned) {
     const text = readFileSync(path, "utf8");
     const found = outcomeViolations(`${canonical}\n${text}`).unqualified;
     const own = found.filter((line) => !live.unqualified.includes(line));
     assert.deepEqual(own, [],
       `${label} states a branch outcome as if it were fixed; name the selector so it reads as chosen:\n  ${own.join("\n  ")}`);
-    // Including inside fenced examples, which the prose scan strips. The defect this whole guard exists
-    // to catch was exactly that shape: README showed `gh pr create --draft` as the invocation, with no
-    // `pr_draft` anywhere near it, so a reader took the draft flag for the command rather than for one
-    // branch of it. The canonical workflow's own block is allowed to spell it, because that block IS the
-    // selection; a restatement has to say which branch it is showing.
-    const invocations = text.split(/\n\s*\n/u)
-      .filter((block) => /gh pr create --draft/u.test(block) && !/PR_DRAFT|pr_draft/iu.test(block));
-    assert.deepEqual(invocations, [],
-      `${label} shows an unconditional draft PR invocation; show the choice or name pr_draft beside it:\n  ${invocations.join("\n  ")}`);
+    // Fences too, which the prose scan strips -- the shape the README defect actually took.
+    const inFences = text.split(/\n\s*\n/u)
+      .filter((block) => /gh pr create --draft|\bDRAFT PR\b/u.test(block) && !/PR_DRAFT|pr_draft/iu.test(block));
+    assert.deepEqual(inFences, [],
+      `${label} shows an unconditional draft outcome in an example; show the choice or name pr_draft beside it:\n  ${inFences.join("\n  ")}`);
   }
 
   // The controls are table-driven rather than run by hand, so the guard's own failure modes stay proven.

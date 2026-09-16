@@ -37,7 +37,7 @@ rest.*
 INTAKE ─▶ [GATE 1: Story] ─▶ RESEARCH + DESIGN ─▶ SPEC ─▶ DECOMPOSE ─▶ [GATE 2: Brief + Plan]
        ─▶ BUILD  (waves of parallel slices; per-slice OBSERVE ▶ REVIEW ▶ serial MERGE)
        ─▶ INTEGRATE: TEST + VALIDATE (on the merged feature branch)
-       ─▶ [GATE 3: Pre-PR] ─▶ DRAFT PR
+       ─▶ [GATE 3: Pre-PR] ─▶ PR (draft per pr_draft)
 ```
 
 Builds run in parallel; merges are serial, which is what makes the parallelism safe. The
@@ -202,7 +202,7 @@ re-seeded, re-observed, remerged, or re-dispatched.
 Two clean, unchanged unavailable executions end only the current merge/replay CLI invocation and its
 enclosing driver invocation; they do not invoke the irreversible `factory terminal` transition. The
 driver awaits all specialist tasks, stops and awaits heartbeats, releases its owning session, and uses
-qualified status to prove `status: "running"`, `terminal_result: null`, and no remaining ownership before
+qualified status to prove `status: "running"`, an unchanged `terminal_result`, and no remaining ownership before
 reporting `repository-verify-exhausted`. A failed release or unverified ownership reports
 `retained-lock-error` without claiming resumability. A later invocation repeats every normal selection,
 manifest, provenance, branch, worktree, push-target, and operator-ref guard, claims with its actual

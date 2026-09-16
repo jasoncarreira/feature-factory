@@ -221,7 +221,8 @@ repair-journal retry policy.
 
 After two clean, unchanged unavailable executions, the current merge/replay CLI invocation and enclosing
 driver invocation terminate, but the irreversible `factory terminal` transition does not run. Durable
-state remains `running` with `terminal_result: null`. The driver stops dispatch and `status.next`, awaits
+state remains `running` with `terminal_result` unchanged — `null` for a run that has never parked, the
+preserved historical result for a resumed one. The driver stops dispatch and `status.next`, awaits
 all specialist tasks, stops and awaits all heartbeats, releases exactly its owning session, then requires
 qualified status to prove that durable state and that the session no longer owns the lock. In the normal
 uncontended path the lock must be absent before it reports `repository-verify-exhausted`.

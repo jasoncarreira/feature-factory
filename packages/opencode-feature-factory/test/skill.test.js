@@ -45,7 +45,7 @@ describe("OpenCode skill adapter", () => {
     // version told the driver to read the staged workflow "before any state read" while the intake it also
     // mandates must read `$O/.factory.json` before `init` -- a contradiction a driver resolves by
     // initializing first, which is the original defect. Third review finding.
-    const order = ["1. **Admission**", "2. **Repository resolver intake**", "3. **`factory init`**", "4. **Read that staged file completely**"];
+    const order = ["1. **Admission**", "2. **Repository resolver intake**", "3. **Reach the staged canonical workflow.**", "4. **Read that staged file completely**"];
     let cursor = -1;
     for (const step of order) {
       const at = skill.indexOf(step);
@@ -92,9 +92,16 @@ describe("OpenCode skill adapter", () => {
     assert.ok(selectors.has("PR_DRAFT"), "the bundled workflow must still expose PR_DRAFT, or this check is vacuous");
     const skillProse = skill.replace(/```[a-z]*\n[\s\S]*?```/gu, "");
     const offending = skillProse.split(/\n\s*\n/u)
-      .filter((para) => /draft PR\b|\bdraft publication\b/iu.test(para) && !/PR_DRAFT|pr_draft/iu.test(para));
+      .filter((para) => /draft PR\b|\bdraft publication\b|PR is a draft\b/iu.test(para) && !/PR_DRAFT|pr_draft/iu.test(para));
     assert.deepEqual(offending, [],
       `the skill states a PR_DRAFT outcome as if it were fixed:\n  ${offending.join("\n  ")}`);
+    // Fences too. The first version of this guard stripped them, so appending an unconditional
+    // ```sh\ngh pr create --draft\n``` to the skill passed -- which is exactly the shape the README
+    // defect took. Checked over the whole file, examples included.
+    const inFences = skill.split(/\n\s*\n/u)
+      .filter((block) => /gh pr create --draft|\bDRAFT PR\b/u.test(block) && !/PR_DRAFT|pr_draft/iu.test(block));
+    assert.deepEqual(inFences, [],
+      `the skill shows an unconditional draft outcome in an example:\n  ${inFences.join("\n  ")}`);
 
     // ENFORCEMENT, not instruction: this prevents a false green. A driver runs `factory init` at step 3,
     // before the canonical workflow is readable, so this skill is the only place the invocation can come

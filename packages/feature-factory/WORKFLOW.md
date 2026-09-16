@@ -5,9 +5,14 @@ skill by itself. A host integration must ship its own `SKILL.md` and place an ex
 to that skill as `WORKFLOW.md`.
 
 **Where the driver reads this file from, and when.** `factory init` stages an exact copy into the run
-directory and returns its path as `workflow`. The driver reads THAT copy, completely, before any state read,
-dispatch, gate, or factory command other than `init` itself — admission and the `init` invocation are
-specified by the host `SKILL.md`, everything after them here. A host whose agents may read outside the
+directory and returns its path as `workflow`. The driver reads THAT copy, completely, before any
+dispatch, gate, or factory command other than the bounded opening this paragraph names — admission, that
+opening, and the `init` invocation are specified by the host `SKILL.md`, everything after them here. The
+opening is: inspect the two deterministic manifest candidates, and where one exists, qualify it with
+`factory status` and take the staged workflow from the run directory it reports. A fresh run reaches the
+staged copy through `init`; an existing one must never be initialized again, so it reaches the same copy
+through that lookup. Those two candidate reads and that one `status` call are the only state reads
+permitted before this file is in hand. A host whose agents may read outside the
 workspace may instead read the copy beside its skill; a host that denies such reads must use the staged copy,
 because the packaged one is unreadable there and a run that depends on it fails on a permission refusal
 rather than on anything about the work. Either way the bytes are identical, and a driver that cannot read
@@ -88,7 +93,7 @@ repository and the host is inside your trust boundary by construction. What that
 INTAKE ─▶ [GATE 1: Story] ─▶ RESEARCH + DESIGN ─▶ SPEC ─▶ DECOMPOSE ─▶ [GATE 2: Brief + Plan]
        ─▶ BUILD  (waves of parallel slices; per-slice OBSERVE ▶ REVIEW ▶ serial MERGE)
        ─▶ INTEGRATE: TEST + VALIDATE (on the merged feature branch)
-       ─▶ [GATE 3: Pre-PR] ─▶ DRAFT PR
+       ─▶ [GATE 3: Pre-PR] ─▶ PR (draft per pr_draft)
 ```
 
 `work-reviewer` runs on **high-risk steps only** — spec, decompose, each slice build, and test — and
@@ -299,8 +304,10 @@ fresh run; an existing run follows these rules solely because its manifest alrea
   unresolved product, UX, security, or external-policy decision.
 - **Gate 2 (brief + plan)**: approve only after `work-reviewer` approves both spec and decomposition,
   every acceptance criterion maps to a slice, and same-wave slices are file-disjoint.
-- **Gate 3 (pre-PR)**: approve only on a GO or GO-WITH-NITS validator verdict with `review_ready`
-  observed evidence for the integrated branch. A NO-GO is a NO-GO.
+- **Gate 3 (pre-PR)**: approve only with `review_ready` observed evidence for the integrated branch, and
+  on a GO or GO-WITH-NITS validator verdict **for a multi-slice run**. A NO-GO is a NO-GO. A single-slice
+  run skips the validator exactly as Step 5 specifies, so requiring a verdict here would make the one
+  case Step 5 exempts unapprovable; if such a run recorded a verdict anyway, it binds.
 - **Never auto-merge.** Recording the pull request is the last externally publishing side effect an
   autonomous run may perform. Whether that PR is a draft is the repository's `pr_draft` choice and is
   independent of the run mode: autonomous does not imply draft, and `pr_draft: false` is a supported
@@ -1407,9 +1414,10 @@ Per slice:
 
 For AC6 and AC7, terminalize means terminate the current `factory slice … merged` CLI invocation and
 its enclosing run-driver invocation after two unavailable executions; it does not mean the irreversible
-factory terminal transition. Clean, unchanged exhaustion leaves durable `status: "running"` and
-`terminal_result: null`, so a later explicit invocation may reconcile the same merge with a fresh local
-budget. Top-level needs-human remains parked while replay safety is false; explicit resume does not bypass the same safety check.
+factory terminal transition. Clean, unchanged exhaustion leaves durable `status: "running"` with its
+`terminal_result` unchanged — `null` for a run that has never parked, and the preserved historical result
+for one continued by explicit resume — so a later explicit invocation may reconcile the same merge with a
+fresh local budget. Top-level needs-human remains parked while replay safety is false; explicit resume does not bypass the same safety check.
 
 After a clean, unchanged second `unavailable`, stop dispatching and processing `status.next`, and never
 issue another same-SHA replay in this driver invocation. Await every in-flight specialist task. Stop
@@ -1434,7 +1442,7 @@ Run: <R>
 Run repository: <RUN_REPO>
 Outcome: repository-verify-exhausted
 Status: running
-Terminal result: null
+Terminal result: <unchanged from this invocation's start: null, or the preserved historical result>
 Lock: released
 ```
 
@@ -1726,8 +1734,12 @@ HEAD, a branch name, or an unpersisted variable.
    **before** presenting Gate 3: the gate cannot be approved without it.
 
 On NO-GO, classify each finding against the prior round and find its design-level root cause before
-spending a retry; route the top finding to the owning builder in a fresh slice worktree, or fix in the
-integration branch if it is test-only. A test-only fix there touches test files only — never production
+spending a retry. A **test-only** finding is fixed in the integration branch under the rules below. A
+finding in production source has no legal path at this point and must **park top-level needs-human**
+naming the finding and its root cause: every slice is merged, a merged slice cannot reopen or redispatch,
+seeding is one-time, and the integration fix is test-only by construction — so "route it to the owning
+builder in a fresh slice worktree" is an instruction the contract cannot carry out. Parking is the honest
+outcome and leaves the work recoverable; improvising a reopen is not. A test-only fix there touches test files only — never production
 source, never a privileged control-plane path — preserves the property under test or records why it
 cannot, lands as its own commit rather than folded into a merge, and is disclosed in the PR body naming
 the file and the cause. Respect `max_retries`.

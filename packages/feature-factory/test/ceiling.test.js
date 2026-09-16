@@ -1063,7 +1063,22 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // step projection could have reverted to display strings and passed. Both read as coverage and proved
     // nothing; both were caught by running the control rather than by the suite going green. Each now sits
     // at the first fixture where the record it checks actually exists.
-    assert.equal(total, 4682, "proving the publication happened lands at 4682 production lines");
+    // 4682 -> 4724, and the tripwire 4700 -> 4750 on the operator's explicit instruction ("raise it to
+    // 4750"), alongside the instruction to fix the audit's pre-existing findings as well as the ones this
+    // PR introduced -- given knowing three of them are state-machine defects rather than prose. Reproduced through
+    // the CLI by the auditor, each of them:
+    //
+    // - A reviewed step consumed nothing. `accepted` was recorded against a missing review file, a REJECT
+    //   with blocking fixes, and an approval naming a nonexistent commit. The reference was stored and
+    //   never read, which made the README's enforcement claim and the workflow's "must APPROVE before you
+    //   accept that step" instruction rather than fact.
+    // - A `pre_pr` approval named no commit, so on a single-slice run -- which skips the validator that
+    //   carries that binding for multi-slice runs -- approving at A, committing B and re-observing tests
+    //   at B published under the older approval. Fresh evidence is not fresh approval. The gate already
+    //   observed the head to prove readiness; it now records it, and publication compares it.
+    // - An accepted step could not record a rejection, so a Gate 2 revision could record its success and
+    //   never its REJECT. Reopening is legal only with a raised attempt, which is what a revision is.
+    assert.equal(total, 4724, "proving the publication happened lands at 4724 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1094,7 +1109,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
-    assert.ok(total <= 4700, `production source is ${total} lines; the tripwire is 4700`);
+    assert.ok(total <= 4750, `production source is ${total} lines; the tripwire is 4750`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

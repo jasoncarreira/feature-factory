@@ -21,12 +21,15 @@ directory. This adapter therefore runs in a fixed order, and nothing may be reor
 2. **Repository resolver intake** — derive `O`, read and validate `$O/.factory.json`, execute a declared
    `resolve`, and bind `R`. This step necessarily reads that file and executes commands before `init`;
    those reads and executions are the step itself and are not covered by the restriction in 4.
-3. **`factory init`** for a **fresh** run, which stages the canonical workflow and returns its path as
-   `workflow`. A run whose manifest already exists is never initialized again: inspect the two
-   deterministic manifest candidates the canonical workflow names, select one with qualified
-   `factory status`, and take the staged workflow from the selected run directory. Those candidate reads
-   are this step, exactly as the resolver reads are step 2, and they are the only state reads step 4
-   permits before the workflow is in hand.
+3. **Reach the staged canonical workflow.** The two deterministic manifest candidates are
+   `$O/.factory/$R/run.json` (legacy) and `$O/.factory-sandboxes/$R/.factory/$R/run.json` (sandbox) —
+   stated here because this step runs before that workflow is readable. If both exist, print both
+   absolute paths and refuse as ambiguous. If neither exists, the run is fresh: call `factory init`,
+   which stages the workflow and returns its path as `workflow`. If exactly one exists, the run already
+   has a manifest and is **never initialized again**: qualify it with
+   `factory status "$R" --json --repo "<candidate-repository>"` and take the staged workflow from the
+   run directory it reports. Those two candidate reads and that one `status` call are this step, exactly
+   as the resolver reads are step 2, and they are the only state reads step 4 permits.
 4. **Read that staged file completely**, before any dispatch, gate, further state read, or `factory`
    command other than the `init` or `status` named above.
 
@@ -383,9 +386,11 @@ A `run-orchestrator` must not dispatch itself, `feature-factory`, another `run-o
 arbitrary project-owned agent. It accepts one admitted request, loads and follows this skill, and drives
 exactly one run. It selects or resumes only the deterministic existing sandbox path defined in Step 0
 and never creates a different worktree, clone, isolation directory, replacement run, or orchestration
-layer. It reads durable state only through
-`factory status "$R" --json --repo "$RUN_REPO"`, claims through Step 0, and continues solely from
-`status.next` or `nextAction`. It never hand-writes `run.json`.
+layer. It claims through Step 0 and continues solely from `status.next` or `nextAction`, and it never
+hand-writes `run.json`. It reads durable state through
+`factory status "$R" --json --repo "$RUN_REPO"` wherever status reports the field; where the canonical
+workflow requires a direct manifest read for fields status does not expose, it performs that read as the
+workflow specifies. Never hand-writing state is the rule; never reading it is not.
 
 Persisted mode determines what each driver may do:
 
