@@ -13,9 +13,11 @@ asserting that it agrees with this contract, and three things here change what t
   contract's own advice — record the decision in the issue — named the one place a retained run never
   re-reads. mimir's `chainlink-1762` parked after six and a half hours asking whether a ceiling was
   authoritative, and the only supported reply was to destroy the sandbox and relaunch, discarding planning
-  the run had already done. The text is appended to `artifacts/operator-decisions.md`, bound to the
-  manifest by SHA-256, and reported by `status` as `operator_decision`. Answers append rather than
-  replace, and deciding leaves the run parked: answering the question is not deciding to continue.
+  the run had already done. The cumulative text is published as
+  `artifacts/operator-decisions-<sha256hex>.md` — content-addressed, so the name and the manifest's
+  `operator_decision.digest` identify the same bytes — and `operator_decision.artifact` is the
+  authoritative pointer to read; `status` reports the record. Answers accumulate rather than replace, and
+  deciding leaves the run parked: answering the question is not deciding to continue.
   Recording is enforced; **reading it is instruction**, because no CLI can make an agent read a file. The
   digest identifies the recorded bytes; it does not prove a driver applied them.
 - **The 4500 production-line ceiling is gone.** That number was this repository's own ledger value, copied
