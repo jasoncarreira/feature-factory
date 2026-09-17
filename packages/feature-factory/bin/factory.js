@@ -1101,12 +1101,31 @@ const HANDLERS = {
     // "must APPROVE before you accept that step", instruction rather than fact. A reviewed step now
     // consumes its review the way a slice does, minus the head binding: a planning subject's output is
     // an artifact in the control plane, not a commit, so there is no head for the review to name.
-    const reviewedRef = flags.reviewRef ?? readRunUnchecked(runDir).run?.steps?.find((step) => step.agent === agent)?.review_ref ?? null;
+    const priorStep = readRunUnchecked(runDir).run?.steps?.find((step) => step.agent === agent) ?? null;
+    const reviewedRef = flags.reviewRef ?? priorStep?.review_ref ?? null;
     if (status === "accepted" && REVIEWED_STEPS.includes(agent)) {
       if (!reviewedRef) throw new CliError(`step '${agent}' cannot be accepted without --review-ref; work-reviewer must approve it first`);
       const review = readReview(runDir, reviewedRef);
       if (review.subject !== agent) throw new CliError(`review '${reviewedRef}' approved '${review.subject}', not '${agent}'`);
       if (!isApproving(review.verdict)) throw new CliError(`review '${reviewedRef}' verdict is ${review.verdict}, not an approval`);
+      // The attempt, or the reference fallback silently re-consumes the previous round's approval: accept
+      // attempt 1, record `running --attempts 2`, then accept again with no `--review-ref` and the stored
+      // attempt-1 review approves attempt 2. Reproduced through the CLI. The fallback stays -- re-passing
+      // an unchanged reference is ordinary -- but it must still be an approval OF THIS attempt.
+      const attempt = flags.attempts === undefined ? priorStep?.attempts ?? 1 : integer(flags.attempts, 1, "--attempts");
+      if (review.attempt !== attempt) {
+        throw new CliError(`review '${reviewedRef}' is for attempt ${review.attempt}, step is at attempt ${attempt}`);
+      }
+      // A planning subject has no commit to bind to, which is why this check omits the head that a slice
+      // merge requires. `test-verifier` is not a planning subject: it judges the integrated branch, so its
+      // review names a commit and that commit must be the head now. Without this it inherited the planning
+      // exemption and a review naming a nonexistent commit was accepted. Caught in review.
+      if (agent === "test-verifier") {
+        const head = integrationHead(resolve(flags.repo ?? process.cwd()), readRun(runDir)).commit;
+        if (review.reviewed_commit !== head) {
+          throw new CliError(`review '${reviewedRef}' approved ${String(review.reviewed_commit).slice(0, 12)} but the integration head is ${String(head).slice(0, 12)}`);
+        }
+      }
     }
     const at = stamp(flags);
     const next = await transition(runDir, {

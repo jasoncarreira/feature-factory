@@ -1078,7 +1078,24 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //   observed the head to prove readiness; it now records it, and publication compares it.
     // - An accepted step could not record a rejection, so a Gate 2 revision could record its success and
     //   never its REJECT. Reopening is legal only with a raised attempt, which is what a revision is.
-    assert.equal(total, 4724, "proving the publication happened lands at 4724 production lines");
+    // 4724 -> 4760, and the tripwire 4750 -> 4775 on the operator's explicit instruction ("raise it to
+    // 4775"), given after being shown the measured overage and what bought it. The 4750 authorization was
+    // given when the count was 4724; a re-review then found three false greens in the production code
+    // added earlier in this same change, and closing them cost 36 lines:
+    //
+    // - A review was matched by subject and verdict but not by ATTEMPT, so accepting attempt 1, recording
+    //   `running --attempts 2` and then accepting again with no `--review-ref` re-consumed attempt 1's
+    //   approval through the reference fallback. Omitting a flag was enough; nothing had to be contrived.
+    // - `test-verifier` inherited the planning-subject exemption from the head binding. A planning subject
+    //   has no commit to name; the verifier judges the integrated branch and does, so a review naming a
+    //   commit that does not exist was accepted.
+    // - Reopening an accepted step was allowed on any raised attempt, which reopened planning work after
+    //   the slices derived from it were seeded, and reopened steps on completed, blocked and partial runs.
+    //   A revision is narrower than a raised attempt.
+    //
+    // Nothing was trimmed to fit. The alternative offered was dropping one of the three, which would have
+    // left a false green in code this PR introduced.
+    assert.equal(total, 4760, "proving the publication happened lands at 4760 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1109,7 +1126,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
-    assert.ok(total <= 4750, `production source is ${total} lines; the tripwire is 4750`);
+    assert.ok(total <= 4775, `production source is ${total} lines; the tripwire is 4775`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

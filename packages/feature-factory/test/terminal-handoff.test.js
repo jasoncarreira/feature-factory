@@ -693,6 +693,10 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   // took -- an outcome stated with no selector anywhere near it -- and nothing subtler.
   const agentsDir = join(pkg, "agents");
   const owned = [
+    // The canonical workflow itself. Its prose is scanned above, but its FENCES were not, which is how a
+    // `DRAFT PR` chain diagram survived in it -- the same miss as README's, in the document the rule is
+    // derived from. Its prose is excluded below to avoid double-reporting what `live` already covers.
+    ["WORKFLOW.md", join(pkg, "WORKFLOW.md")],
     ["README.md", resolve(pkg, "..", "..", "README.md")],
     ["OPERATING.md", resolve(pkg, "..", "..", "OPERATING.md")],
     ["feature-factory/README.md", join(pkg, "README.md")],

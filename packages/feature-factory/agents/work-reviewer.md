@@ -43,6 +43,11 @@ The producer returns a **claim** (its JSON summary / report). The orchestrator's
   extra files there are not a mismatch; what must reconcile is its `tests.exit` against the observed run.
 - **For a build slice or `test-verifier` only:** observed `review_ready` is false (empty diff, unobserved/failed tests, `diff_observed=false`) → **REJECT**.
 - Never approve on the producer's word alone.
+- **Repair evidence substitutes for ordinary evidence where Step 5 permits it.** After a test-only repair,
+  the failed ordinary evidence is deliberately preserved alongside a qualifying repair record, and the
+  repair evidence is what stands. Requiring a green `evidence/test-verifier.json` in that situation rejects
+  the recovery path the workflow defines. Check the repair record and its evidence, not the superseded
+  failure.
 
 **This whole section applies only to subjects that have observed evidence.** A planning subject —
 `spec-writer`, `work-decomposer` — produces an artifact under `.factory/$R/artifacts/`, not a worktree

@@ -9,7 +9,9 @@ directory and returns its path as `workflow`. The driver reads THAT copy, comple
 dispatch, gate, or factory command other than the bounded opening this paragraph names — admission, that
 opening, and the `init` invocation are specified by the host `SKILL.md`, everything after them here. The
 opening is: inspect the two deterministic manifest candidates, and where one exists, qualify it with
-`factory status` and take the staged workflow from the run directory it reports. A fresh run reaches the
+`factory status` and read the staged workflow at `<qualified sandbox_path>/.factory/$R/WORKFLOW.md` --
+status reports `sandbox_path`, not a run directory or a workflow path, so the derivation is stated rather
+than left to be guessed. A fresh run reaches the
 staged copy through `init`; an existing one must never be initialized again, so it reaches the same copy
 through that lookup. Those two candidate reads and that one `status` call are the only state reads
 permitted before this file is in hand. A host whose agents may read outside the

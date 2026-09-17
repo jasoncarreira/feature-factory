@@ -123,7 +123,34 @@ outcome, so `"Read PR_DRAFT for logging. Always publish a draft PR."` passes and
 `"Never assume the result is a draft PR."` fails. It catches the shape every defect in this series took —
 an outcome stated with no selector near it — and nothing subtler.
 
-Production moves 4682 → 4724, and the tripwire 4700 → 4750 on explicit operator instruction.
+### A third pass: three false greens in the second pass's production code
+
+The re-review reproduced all three through the CLI, and none needed a contrived input.
+
+- **A review was matched by subject and verdict but not by attempt.** Accept attempt 1, record
+  `running --attempts 2`, then accept again **omitting `--review-ref`** — the reference fallback
+  re-consumed attempt 1's approval. Omitting a flag was enough.
+- **`test-verifier` inherited the planning-subject exemption.** A planning subject has no commit for its
+  review to name, which is why that check omits the head binding a slice merge requires. The verifier
+  judges the integrated branch and does have one, so a review naming a nonexistent commit was accepted.
+- **Reopening an accepted step was allowed on any raised attempt**, which reopened planning work after the
+  slices derived from it were seeded, and reopened steps on completed, blocked and partial runs. A
+  revision is narrower than a raised attempt.
+
+Also fixed: the pre-init instructions now state the `$R` and `$FEATURE_BRANCH` derivations inline rather
+than pointing at a file that cannot be read yet; the existing-run lookup spells out
+`<sandbox_path>/.factory/$R/WORKFLOW.md`, since `status` reports no run directory; the guard's document
+inventory omitted the canonical workflow's own fences, which is how a `DRAFT PR` diagram survived in the
+document the rule is derived from; and the reviewer prompt now states the repair-evidence substitution,
+so the supported recovery path is not rejected for lacking ordinary evidence.
+
+The gate-head binding was checked against the repair path and showed no regression, including the case
+where repair evidence substitutes for ordinary verifier evidence.
+
+The five refusals are pinned as regressions rather than as a fixture adjusted until it passes — the
+fixture passing is what hid all five.
+
+Production moves 4682 → 4760, and the tripwire 4700 → 4775 across two explicit operator instructions.
 
 ## 0.8.8
 

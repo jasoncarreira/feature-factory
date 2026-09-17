@@ -10,6 +10,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { GATE_NAMES, GATE_STATUSES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
 
+// The steps whose output the plan is derived from. A revision to one of these after seeding would leave
+// the run describing a decomposition its slices were not built from.
+const PLANNING_STEPS = Object.freeze(["spec-writer", "work-decomposer"]);
+
 const TERMINAL_MODES = new Set(["terminalize"]);
 
 // The core hands each contract the observer the caller registered; it does not call it.
@@ -196,10 +200,23 @@ const steps = contract({
       if (step.attempts > prior.attempts + 1) throw new Error(`step '${step.agent}' attempts cannot skip`);
       // An accepted step was frozen in every direction except accepted -> accepted, so a Gate 2 revision
       // could record its success and never its rejection: the reviewer's REJECT on the revised artifact
-      // had no legal transition. Reopening is legal only WITH a new attempt, which is what a revision is;
-      // without one, "already accepted" still holds, so this does not reopen a settled step in place.
-      if (prior.status === "accepted" && step.status !== "accepted" && step.attempts === prior.attempts) {
-        throw new Error(`step '${step.agent}' is already accepted; a revision must raise --attempts`);
+      // had no legal transition. Reopening is a REVISION, which is narrower than "any raised attempt" --
+      // the first version of this allowed a raised attempt alone, and that reopened settled planning work
+      // after the plan was seeded and reopened steps on completed, blocked and partial runs, none of which
+      // any lifecycle asks for. Caught in review, reproduced through the CLI.
+      if (prior.status === "accepted" && step.status !== "accepted") {
+        if (step.attempts === prior.attempts) {
+          throw new Error(`step '${step.agent}' is already accepted; a revision must raise --attempts`);
+        }
+        if (TERMINAL_STATUSES.includes(candidate.status)) {
+          throw new Error(`step '${step.agent}' cannot reopen on a ${candidate.status} run`);
+        }
+        // A planning revision belongs before the plan is acted on. Once slices are seeded, the decomposition
+        // the step produced is what every slice was derived from, so reopening it here changes nothing that
+        // has already been built and leaves the run describing a plan it did not follow.
+        if (PLANNING_STEPS.includes(step.agent) && (candidate.slices ?? []).length > 0) {
+          throw new Error(`step '${step.agent}' cannot reopen after slices are seeded`);
+        }
       }
       if (!STEP_STATUSES.includes(step.status)) throw new Error(`step '${step.agent}' status is invalid`);
     }

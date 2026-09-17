@@ -27,8 +27,9 @@ directory. This adapter therefore runs in a fixed order, and nothing may be reor
    absolute paths and refuse as ambiguous. If neither exists, the run is fresh: call `factory init`,
    which stages the workflow and returns its path as `workflow`. If exactly one exists, the run already
    has a manifest and is **never initialized again**: qualify it with
-   `factory status "$R" --json --repo "<candidate-repository>"` and take the staged workflow from the
-   run directory it reports. Those two candidate reads and that one `status` call are this step, exactly
+   `factory status "$R" --json --repo "<candidate-repository>"` and read the staged workflow at
+   `<the sandbox_path it reports>/.factory/$R/WORKFLOW.md`. Status reports `sandbox_path`; it reports no
+   run directory and no workflow path, so that derivation is the instruction. Those two candidate reads and that one `status` call are this step, exactly
    as the resolver reads are step 2, and they are the only state reads step 4 permits.
 4. **Read that staged file completely**, before any dispatch, gate, further state read, or `factory`
    command other than the `init` or `status` named above.
@@ -118,6 +119,15 @@ Step 3 runs `factory init`, and this is the only document available when it does
 workflow is not readable until init stages it. So the complete invocation is reproduced here, byte for
 byte from the canonical Step 0 block, and a test fails if the two ever differ. Run exactly this,
 including each bracketed flag only when admission supplied its value:
+
+`$R` and `$FEATURE_BRANCH` are bound before this command, and their rules are stated here because the
+workflow that otherwise defines them is not readable yet. When the configured resolver returns a payload,
+`$R` is its canonical `run_id`. When it exits zero with empty output, derive `$R` from the preserved
+request suffix: lowercase it, replace each run of characters outside `[a-z0-9]` with a single `-`, trim
+leading and trailing `-`, and truncate to a value matching
+`^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; refuse rather than invent one if nothing survives.
+`$FEATURE_BRANCH` is the repository's declared override when one exists and otherwise `feature/$R`,
+validated with `git check-ref-format --branch "$FEATURE_BRANCH"`, and its ref must be absent before init.
 
 ```sh
 INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"
