@@ -53,11 +53,34 @@ const envelope = contract({
     created_at: state.created_at,
     updated_at: state.updated_at,
     terminal_result: state.terminal_result ?? null,
+    operator_decision: state.operator_decision ?? null,
     bootstrap_command: state.bootstrap_command,
     bootstrap_exit: state.bootstrap_exit,
   }),
   validateTransition: ({ mode, before, after, current, candidate }) => {
     if (before.status === "needs-human") {
+      // Recording an operator decision is the one write a parked run accepts besides amend-paths, and it
+      // touches nothing but the decision itself: the park stands, its reason stands, and resuming stays an
+      // explicit separate act. Answering the question is not the same as deciding to continue.
+      if (mode === "decide") {
+        if (after.status !== "needs-human") throw new Error("decide must preserve parked status");
+        if (!isDeepStrictEqual(after.terminal_result, before.terminal_result)) {
+          throw new Error("decide must preserve terminal_result");
+        }
+        if (isDeepStrictEqual(after.operator_decision, before.operator_decision)) {
+          throw new Error("decide must record a decision");
+        }
+        if (Date.parse(after.updated_at) <= Date.parse(before.updated_at)) {
+          throw new Error("decide must move updated_at forwards");
+        }
+        for (const key of Object.keys(before).filter((key) => !["updated_at", "operator_decision"].includes(key))) {
+          if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`decide cannot change envelope.${key}`);
+        }
+        for (const key of Object.keys(current).filter((key) => !Object.hasOwn(before, key))) {
+          if (!isDeepStrictEqual(current[key], candidate[key])) throw new Error(`decide cannot change run.${key}`);
+        }
+        return;
+      }
       if (mode === "amend-paths") {
         if (after.status !== "needs-human") throw new Error("amend-paths must preserve parked status");
         if (!isDeepStrictEqual(after.terminal_result, before.terminal_result)) {
@@ -92,6 +115,7 @@ const envelope = contract({
       return;
     }
     if (mode === "amend-paths") throw new Error(`amend-paths requires current status needs-human; found '${before.status}'`);
+    if (mode === "decide") throw new Error(`decide requires current status needs-human; found '${before.status}'`);
     if (["resume-needs-human", "record-bootstrap"].includes(mode)) throw new Error(`${mode} requires current status needs-human; found '${before.status}'`);
     // Identity is immutable for the life of a run. Nothing legitimate renames a
     // run, and allowing it would let a transition retarget another run's record.

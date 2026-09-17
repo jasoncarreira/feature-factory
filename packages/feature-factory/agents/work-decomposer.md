@@ -82,15 +82,14 @@ a re-read rather than a run.
 6. **A slice must be able to make its ratified `test_plan` green using only the paths it owns.** This is
    one invariant with several faces, and it is the only rule in this list whose violation admits *no legal
    move*: `paths` freeze at seeding, a blocked slice's dependents cannot be dispatched, and the slice's own
-   ratified command includes whatever its change affected. No retry count fixes it. Three runs have died
-   here, each arriving at it differently.
+   ratified command includes whatever its change affected. No retry count fixes it.
 
    **The check is mechanical, and it is the same one every time.** Cross-check every slice's `test_plan`
    against every other slice's `paths` before you emit the plan. For each slice ask: when this command
    runs, is everything it must change in order to pass owned by *this* slice? If not, the plan is wrong,
    whatever the topic suggests. Ownership follows the change, not the subject matter.
 
-   Three observed faces of it:
+   Three forms of this ownership problem:
 
    - **Proving an absence a later slice fills.** Two kinds, and only the first is a contradiction:
      - **Invalidated when the later path lands.** The claim holds only while the thing is absent, so the
@@ -110,15 +109,11 @@ a re-read rather than a run.
      once not.
    - **Breaking callers a later slice owns.** If a change invalidates existing call sites, fixtures or
      tests — a signature, a return shape, sync/async nature, a module contract other code imports — those
-     belong to the slice making the change. mimir 1410 lost a run at seven of ten merged slices this way:
-     `evidence-routing` made `observe_evidence` async and SafeGit-only, sixteen orchestrator and reattach
-     tests called the old contract, and only the dependent `orchestrator-publication` slice owned them.
+     belong to the slice making the change, not a dependent slice.
    - **Moving a repo-wide rule whose inventory another slice owns.** A closed-inventory test — every env
      var documented, every tool in an allowlist, every surface in a list, a budget or a limit — fails the
-     moment your change adds a member, and passes again only when the inventory is updated. mimir 1423
-     merged a slice that read `XDG_CONFIG_HOME` while `docs/configuration.md` and
-     `tests/test_config_docs_complete.py` sat in a later slice; the merged slice could not be repaired,
-     because a merged slice cannot be amended.
+     moment your change adds a member, and passes again only when the inventory is updated. The slice
+     adding the member must own the required inventory updates; a merged slice cannot be amended.
 
    **The trigger is invalidation, not change.** A backward-compatible change needs none of this: a
    defaulted optional parameter, or an added field on a returned object, leaves every existing caller,

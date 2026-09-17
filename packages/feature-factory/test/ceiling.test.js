@@ -28,7 +28,7 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
-  "init", "status", "amend-paths", "resume", "lock", "heartbeat", "gate", "step", "terminal",
+  "init", "status", "amend-paths", "resume", "decide", "lock", "heartbeat", "gate", "step", "terminal",
   "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push",
 ];
 
@@ -36,6 +36,9 @@ const RUN_JSON_KEYS = [
   // the inherited fifteen
   "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "pr_draft", "created_at", "updated_at",
   "status", "max_parallel_slices", "max_retries", "gates", "steps", "slices", "validator", "pr_url",
+  // The operator's answer to a parked run: the one channel into a park, since resume carries no message
+  // and every other write is refused there.
+  "operator_decision",
   // 0.8.0: the account a run publishes as, resolved at init from the flag or the environment and
   // never from a checked-in file. Read by every publication guard as the compared expectation.
   "publishing_identity",
@@ -585,7 +588,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 23, "twenty-three: the prior twenty-two plus the recorded publishing identity");
+    assert.equal(RUN_KEYS.length, 24, "twenty-four: the prior twenty-three plus the operator decision recorded against a parked run");
   });
 
   it("registers exactly the declared families", () => {
@@ -1106,7 +1109,24 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //   restriction, on a terminal run included -- which is exactly what a driver recording only the
     //   successful final result produces. Any departure from the settled row is a revision; only exact
     //   same-attempt re-acceptance, which is what a resumed driver re-records, stays free.
-    assert.equal(total, 4774, "proving the publication happened lands at 4774 production lines");
+    // 4774 -> 4858, and the tripwire 4775 -> 4900 on the operator's explicit instruction ("make the ledger
+    // 4900"), given after being shown the measured cost. The largest single jump in this series, and the
+    // only one that is a feature rather than a fix.
+    //
+    // `factory decide` is the operator's answer to a parked run. There was no channel: `resume` carries no
+    // message and every command that could carry one is refused while parked, so the contract's own advice
+    // -- record the decision in the issue -- named the one place a retained run never re-reads. A six-hour
+    // build parked asking whether a ceiling was authoritative, and the only supported reply was to destroy
+    // the sandbox and relaunch, discarding the planning the run had already done.
+    //
+    // The 84 lines are a schema field with its validation, a transition mode that may change nothing but
+    // the decision, a CLI handler that appends and digests, and one status field. The split is the usual
+    // one: recording is enforced because a false green here is a decision silently lost, while READING it
+    // is instruction, since no CLI can make an agent read a file. The digest identifies recorded bytes;
+    // it does not prove that a driver applied them.
+    // 4858 -> 4860: explicit resume refreshes the staged contract before unparking and checks bindings
+    // after that asynchronous copy. The operator-authorized tripwire remains 4900; no code was trimmed.
+    assert.equal(total, 4860, "proving the publication happened lands at 4860 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1137,7 +1157,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
-    assert.ok(total <= 4775, `production source is ${total} lines; the tripwire is 4775`);
+    assert.ok(total <= 4900, `production source is ${total} lines; the tripwire is 4900`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

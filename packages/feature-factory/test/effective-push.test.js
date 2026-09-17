@@ -476,7 +476,11 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "stop before branch handling",
   ], "push refusal effects");
   required(fresh, "stop before branch handling,\nlock claim or steal, dispatch, transition, push, forge command, or further publication.", "push refusal effects");
-  required(gateThree, "Production source: <landed count> / 4500", "Gate 3 source accounting");
+  // Was a pin on `Production source: <landed count> / 4500`. That number was this repository's own ledger
+  // value, copied into a template shipped to every consumer, and it reached a run as though it were the
+  // target project's policy -- a six-hour build parked asking permission to exceed a limit nobody in that
+  // project had set. The contract now states no limit, and the assertion pins that it states none.
+  assert.equal(gateThree.includes("/ 4500"), false, "Gate 3 must not carry a ceiling from this repository");
   ordered(gateThree, [
     "Before every Gate 3 presentation",
     "first validate `.factory/$R/artifacts/post-merge-repairs.md`",
@@ -500,7 +504,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"',
     'gh pr create --base "$PR_BASE" --head "$FEATURE_BRANCH"',
     'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
-    "Production source ceiling: <landed count> / 4500",
+    "This contract sets **no limit on how much code a change may add**",
   ], "Step 6 compare/publication");
   required(publication, "effective boolean `pr_draft` as `PR_DRAFT`", "status policy binding");
   required(publication, "without rereading repository config", "status policy binding");
@@ -559,7 +563,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
       [freshLock, freshNext, freshNoWork, freshPolicy, firstProbe].sort((left, right) => left - right),
       "identity seam fresh ordering must keep the verified owner, immediate guard, no-work rule, and probe together");
 
-    const resumeOrderSeven = seam("resume-order-seven", "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.");
+    const resumeOrderSeven = seam("resume-order-seven", "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner; read the refreshed staged WORKFLOW.md in full as part of this verification.");
     const resumeOrderEight = seam("resume-order-eight-reconciliation", "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.");
     const resumeBoundary = seam("resume-identity-boundary", "When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may");
     const resumePolicy = seam("resume-verified-running-guard", "For a parked resume, run it instead\nimmediately after explicit resume has been verified `running` with unchanged historical result, real\nnext action, and the same fresh owner. No operation may intervene on either side of this guard.");
@@ -655,7 +659,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     ["fresh-no-work-before-success", "Only after\nownership and any required guard succeed may the driver reconcile or consult `status.next`. Only then\ndispatch the planned ticket, story, or design agent or transition state."],
     ["fresh-probe-policy", "For a fresh run with `DECLARED_PUBLISHING_IDENTITY`, immediately after qualified status verifies fresh\nlock ownership by this driver's `SESSION_ID`, run the identity observation below before\nreconciliation, reading `status.next`, dispatch, or any transition."],
     ["fresh-first-probe", "After that preflight succeeds, submit exactly this command as one ordinary host shell step with cwd\nexactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin:\n\n```sh\ngh api --method GET /user --jq .login\n```"],
-    ["resume-order-seven", "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner."],
+    ["resume-order-seven", "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner; read the refreshed staged WORKFLOW.md in full as part of this verification."],
     ["resume-order-eight-reconciliation", "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification."],
     ["resume-identity-boundary", "When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may"],
     ["resume-verified-running-guard", "For a parked resume, run it instead\nimmediately after explicit resume has been verified `running` with unchanged historical result, real\nnext action, and the same fresh owner. No operation may intervene on either side of this guard."],
@@ -676,7 +680,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   assert.throws(() => checkIdentityPolicy(moveUnique(skill, freshNoWorkFragment, freshLockFragment, "before")),
     /identity seam fresh ordering/u, "moving the fresh no-work boundary before verified ownership must fail");
   const resumeBoundaryFragment = "When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may";
-  const resumeOrderSevenFragment = "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.";
+  const resumeOrderSevenFragment = "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner; read the refreshed staged WORKFLOW.md in full as part of this verification.";
   assert.throws(() => checkIdentityPolicy(moveUnique(skill, resumeBoundaryFragment, resumeOrderSevenFragment, "before")),
     /identity seam resume ordering/u, "moving the resume guard boundary outside order 7 to order 8 must fail");
   for (const transition of [

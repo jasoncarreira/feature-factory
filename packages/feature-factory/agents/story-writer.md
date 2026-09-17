@@ -49,8 +49,8 @@ Return this as your final message:
 - Out: <...>
 
 **Suggested ticket fields (orchestrator will use these if you approve creating the ticket):**
-- Issue type: Story | Task
-- Components: <user interface | api | Agent — pick from what the change touches>
+- Issue type: <choose from the supplied tracker issue types; if unavailable, mark unspecified>
+- Components: <choose from the supplied tracker components; if unavailable, mark unspecified>
 - Labels: <optional>
 
 **Should this be split?** <no | yes — propose N stories with one-line titles>
@@ -59,4 +59,4 @@ Return this as your final message:
 - <call out every assumption so the human can correct it at the gate>
 ```
 
-Never fabricate an APP- key or claim a ticket exists — you only draft. The orchestrator handles creation.
+Never fabricate an issue key or claim a ticket exists — you only draft. The orchestrator handles creation.

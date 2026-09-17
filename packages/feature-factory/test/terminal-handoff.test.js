@@ -10,6 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
+import { withRunJsonLock } from "../core/run-lock.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(pkg, "bin", "factory.js");
@@ -286,7 +287,7 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
   return { root, operator, container, sandbox, archive, runId, legacy: false, featureSha, openSha };
 }
 
-test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only then removes the sandbox", () => {
+test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only then removes the sandbox", async () => {
   // mimir 1483, as a negative control: a run that published nothing may not claim `completed`. Built inline
   // rather than through createFixture, because every fixture there is deliberately post-publication -- the
   // legacy path writes a `pr_url` outright -- and the defect only exists before a PR is recorded.
@@ -392,6 +393,12 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.match(parkPolicy, /qualified status\s+reports `park_snapshot` as the published path, or `null` when no snapshot exists/u,
     "the contract must name how an outside observer verifies step 2");
 
+  // Instruction, not automatic publication: a refused resume may already have refreshed the contract.
+  const recoveryRule = "A refreshed workflow or recorded bootstrap failure can make the previous snapshot stale.";
+  const checkRecoveryRule = (source) => assert.ok(source.includes(recoveryRule), "refused resume must route to snapshot recovery");
+  checkRecoveryRule(parkPolicy);
+  assert.throws(() => checkRecoveryRule(parkPolicy.replace(recoveryRule, "")), /snapshot recovery/u);
+
   // And the observable half, live: a park with no snapshot on disk reports null rather than nothing at all.
   // This is what would have caught 0.8.2's miss without waiting for a real run to need the snapshot.
   const obsRoot = realpathSync(mkdtempSync(join(tmpdir(), "factory-terminal-obs-")));
@@ -447,6 +454,36 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   assert.equal(snapshotOf(), null, "an artifact whose mode drifted from the plane is not a faithful copy");
   chmodSync(workflowCopy, liveMode);
   assert.equal(snapshotOf(), published, "restoring the artifact restores the observation");
+  // Refusal AFTER refreshing the staged contract: another state command holds the manifest lock.
+  // Progress is preserved, but the old snapshot is honestly stale until the driver republishes it.
+  writeFileSync(join(livePlane, "WORKFLOW.md"), "# Previous packaged workflow\n");
+  cpSync(livePlane, published, { recursive: true });
+  assert.equal(snapshotOf(), published);
+  factory(obsSandbox, "lock", "obs-run", "claim", "--session", "snapshot-owner");
+  const parkedBytes = readFileSync(join(livePlane, "run.json"));
+  const resumeAt = new Date(Date.parse(JSON.parse(parkedBytes).updated_at) + 1).toISOString();
+  await withRunJsonLock(livePlane, async () => {
+    const refused = spawnSync(process.execPath, [cli, "resume", "obs-run", "--session", "snapshot-owner",
+      "--now", resumeAt, "--repo", obsSandbox, "--json"], { encoding: "utf8" });
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /timed out waiting for run.json lock/u);
+  });
+  assert.deepEqual(readFileSync(join(livePlane, "run.json")), parkedBytes);
+  assert.deepEqual(readFileSync(join(livePlane, "WORKFLOW.md")), workflowBytes);
+  assert.ok(existsSync(published), "a stale snapshot is retained, not deleted");
+  assert.equal(snapshotOf(), null, "the refreshed contract is not silently excluded from snapshot verification");
+  const staging = join(obsOperator, ".factory", ".parked", ".staging-obs-run");
+  const prior = join(obsOperator, ".factory", ".parked", ".prior-obs-run");
+  cpSync(livePlane, staging, { recursive: true });
+  const withoutHeartbeat = (entries) => entries.filter((entry) => entry.path !== "factory.lock");
+  assert.deepEqual(withoutHeartbeat(treeInventory(staging)), withoutHeartbeat(treeInventory(livePlane)));
+  renameSync(published, prior);
+  renameSync(staging, published);
+  rmSync(prior, { recursive: true });
+  assert.equal(snapshotOf(), published, "republishing restores current recovery evidence");
+  factory(obsSandbox, "lock", "obs-run", "release", "--session", "snapshot-owner");
+  assert.equal(snapshotOf(), published);
+
   // The root directory is an entry too. An inventory of descendants only walks INTO the root without ever
   // recording it, so a snapshot whose own directory mode differs from the plane's compared equal -- and the
   // publication contract inventories `.` and every descendant, so that copy fails the verification the

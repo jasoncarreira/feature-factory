@@ -21,7 +21,7 @@ Implement the backend of a technical brief. Write production code in this reposi
 - **You implement ONE slice, not the whole backend.** The orchestrator gives you a single **slice spec** (its `paths`, acceptance criteria, and test plan) in an isolated slice worktree `$WT` branched for that slice. Implement only that slice's acceptance criteria, and edit only files under the slice's `paths` — out-of-lane edits get rejected by the reviewer and risk colliding with a parallel slice on merge.
 - **Stay in your lane:** within your slice's `paths`, and only backend paths — the source, resource and test trees the research map identifies as backend. Never touch frontend paths (frontend-builder owns those) or vendored/subtree directories that are pull-only.
 - Implement **only what the brief specifies.** No drive-by refactors, no speculative abstraction.
-- **Do not add new code comments** to your changes (team convention) — let names and structure carry the meaning.
+- Follow the target repository's documented code-comment policy (`AGENTS.md`, `CLAUDE.md`, or their linked rules); do not assume a blanket ban on comments.
 
 ## How to build
 
@@ -76,7 +76,7 @@ Return this as your final message:
 **API surface change:** <exact schema or route change> | none
 
 **Verification:**
-- `compileJava`: pass/fail
+- build/typecheck: `<actual repository command>` — pass/fail (or "not applicable — reason")
 - tests run: `<names>` — pass/fail (or "none — reason")
 
 **Commit:** <sha + subject>
