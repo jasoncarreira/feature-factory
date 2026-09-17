@@ -121,15 +121,30 @@ describe("OpenCode skill adapter", () => {
     // `implement-abc-123-login` rather than `abc-123`, `café` became `caf` rather than `cafe`, and the
     // branch fallback and both multiple-key refusals were missing. That happens before init, so the wrong
     // run is created before any driver can notice the documents disagree. Byte equality, not paraphrase.
-    const canonicalDerivation = String(canonicalWorkflow).slice(
-      String(canonicalWorkflow).indexOf("If resolution did not already bind `R`"),
-      String(canonicalWorkflow).indexOf("`cannot derive a canonical run id; no session or run created.`")
-        + "`cannot derive a canonical run id; no session or run created.`".length,
-    );
+    // TWO regions, because the algorithm and the definition it depends on are not contiguous in either
+    // document. The first version of this bound only the algorithm, whose range starts after the
+    // ticket-token definition -- so the definition was copied correctly and then left unprotected, free to
+    // drift back into a paraphrase exactly as the algorithm had. "One distinct ticket key" is not a rule
+    // until something says what a ticket key is.
+    const region = (from, to) => {
+      const source = String(canonicalWorkflow);
+      const start = source.indexOf(from);
+      const end = source.indexOf(to);
+      assert.ok(start >= 0 && end > start, `the canonical markers must still bound this region: ${from}`);
+      return source.slice(start, end + to.length);
+    };
+    const ticketToken = region("1. **Ticket?** Collect standalone case-insensitive tokens matching",
+      "Defer branch\n   fallback until `O` is known.");
+    const canonicalDerivation = region("If resolution did not already bind `R`",
+      "`cannot derive a canonical run id; no session or run created.`");
+    assert.ok(ticketToken.includes("[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*"),
+      "the token region must carry the pattern a ticket key is recognised by");
     assert.ok(canonicalDerivation.length > 600 && canonicalDerivation.includes("ambiguous branch ticket keys"),
-      "the canonical derivation markers must still bound the whole algorithm");
-    assert.ok(skill.includes(canonicalDerivation),
-      "SKILL.md must carry the canonical run-id derivation verbatim; a summary of it picked different runs");
+      "the derivation region must span the whole algorithm");
+    for (const [label, text] of [["ticket-token definition", ticketToken], ["run-id derivation", canonicalDerivation]]) {
+      assert.ok(skill.includes(text),
+        `SKILL.md must carry the canonical ${label} verbatim; a summary of this picked different runs`);
+    }
     assert.match(skill, /`--json` is mandatory\./u,
       "the skill must say --json is mandatory, which is the flag whose absence stranded a run");
     assert.match(skill, /before any dispatch, gate, further state read, or `?factory`?\s+command other than the `init` or `status` named above/u);
