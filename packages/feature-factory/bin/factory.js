@@ -1265,14 +1265,16 @@ const HANDLERS = {
       if (!isDeepStrictEqual(state, current)) throw new CliError("factory resume bootstrap refused: run.json bytes changed while bootstrap ran; current state was preserved");
       if (!sameSessionOwner(runDir, boundOwner)) throw new CliError("factory resume bootstrap refused: factory.lock is absent, stale, or no longer names the same owner; current state and owner were preserved");
     };
+    // Enforcement: never unpark a driver that would keep reading an obsolete staged contract.
+    if (success) await writeProtectedFileAtomic(runDir, "WORKFLOW.md", readFileSync(new URL("../WORKFLOW.md", import.meta.url)));
     const next = await transition(runDir, {
       participants: [{ familyId: "envelope", mode: success ? "resume-needs-human" : "record-bootstrap" }],
-      ...(outcome ? { reobservers: new Map([["envelope", assertBinding]]), finalGuard: ({ state }) => {
+      reobservers: new Map([["envelope", assertBinding]]), finalGuard: ({ state }) => {
         if (!readFileSync(join(runDir, "run.json")).equals(boundRunBytes) || !isDeepStrictEqual(state, current)) {
           throw new CliError("factory resume bootstrap refused: run.json bytes changed while bootstrap ran; current state was preserved");
         }
         if (!sameSessionOwner(runDir, boundOwner)) throw new CliError("factory resume bootstrap refused: factory.lock is absent, stale, or no longer names the same owner; current state and owner were preserved");
-      } } : {}),
+      },
       apply: (state) => ({ ...state, ...(success ? { status: "running" } : {}), updated_at: at,
         ...(outcome ? { bootstrap_command: config.bootstrapCommand, bootstrap_exit: outcome.exit } : {}) }),
     });

@@ -3,6 +3,40 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.9.0
+
+A minor bump, not a patch, because `FACTORY_VERSION` is matched exactly: a consumer pinned to a version is
+asserting that it agrees with this contract, and three things here change what that agreement means.
+
+- **`factory decide <run-id> --text TEXT --session ID` answers a parked run.** There was no channel.
+  `resume` carries no message and every command that could carry one is refused while parked, so the
+  contract's own advice — record the decision in the issue — named the one place a retained run never
+  re-reads. mimir's `chainlink-1762` parked after six and a half hours asking whether a ceiling was
+  authoritative, and the only supported reply was to destroy the sandbox and relaunch, discarding planning
+  the run had already done. The text is appended to `artifacts/operator-decisions.md`, bound to the
+  manifest by SHA-256, and reported by `status` as `operator_decision`. Answers append rather than
+  replace, and deciding leaves the run parked: answering the question is not deciding to continue.
+  Recording is enforced; **reading it is instruction**, because no CLI can make an agent read a file. The
+  digest identifies the recorded bytes; it does not prove a driver applied them.
+- **The 4500 production-line ceiling is gone.** That number was this repository's own ledger value, copied
+  into two body templates shipped to every consumer, and it reached a run as though it were the target
+  project's policy. The contract now states that it sets **no limit on how much code a change may add**,
+  and the old pins are replaced by assertions that the ceiling is absent so it cannot return. A project
+  that wants one states it in its own spec.
+- **Explicit resume refreshes the staged contract before unparking**, so a run parked across an upgrade
+  cannot keep driving from the copy it was staged with. Bindings are re-checked after that copy. A resume
+  refused *after* the refresh leaves the previous park snapshot stale; the contract says so and routes the
+  driver to republish it, rather than excluding `WORKFLOW.md` from snapshot verification — the staged
+  contract is exactly what a recovery needs, so excluding it would make the snapshot claim more than it
+  verifies.
+- **A conventions sweep of the shipped prompts.** An `APP-` issue-key format, a blanket
+  no-stray-comments rule stated as universal rather than as the target repository's documented policy,
+  and related wording across the builders, decomposer, reviewer and validator. Same defect as the 4500:
+  one project's house rules shipped as everyone's contract.
+
+Production moves 4774 → 4860; the tripwire 4775 → 4900 on explicit operator instruction after the measured
+cost was shown.
+
 ## 0.8.9
 
 `work-reviewer` could never approve a planning step. One unqualified sentence made it unsatisfiable.

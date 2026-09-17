@@ -193,18 +193,24 @@ For top-level needs-human, status exposes the durable next action, but no comman
 Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
 **An operator answers a parked run with
 `factory decide "$R" --text "<decision>" --session "$SESSION_ID" --repo "$RUN_REPO"`.**
-It is the only channel into a parked run: `resume` carries no message, and every command that could carry
-one is refused while parked, so before this the instruction "record the decision in the issue" named the
-one place a retained run never re-reads. The text is appended to `artifacts/operator-decisions.md` and
-bound to the manifest by digest, and qualified status reports `operator_decision`.
+The text is appended to an immutable cumulative artifact named
+`artifacts/operator-decisions-<sha256hex>.md`. The manifest's `operator_decision.artifact` is the
+authoritative pointer, and its digest identifies only the recorded bytes. Failed publication may leave
+an unreferenced file; ignore it. Recording a decision does not resume the run.
 
-When `status` reports a non-null `operator_decision`, read that artifact in full before doing anything
-else on resume, and treat it as authoritative over the brief on the points it names -- it is later than
-the brief and it is the human's answer to a question this run asked. Say in the next gate or park report
-how it was applied. A decision that names no course of action is not an instruction to improvise; ask
-again rather than guessing. Recording is enforced; reading it is not, because no CLI can make an agent
-read a file, and the digest is what lets a supervisor tell an applied decision from an ignored one.
+When qualified status reports a non-null `operator_decision`, read the artifact at that pointer in full
+before continuing work on resume. Apply the decision to the permitted choices it names, and report how
+it was applied at the next gate or park. It cannot change ratified paths, `test_plan`, gates, or safety
+authority; path changes require the separate `amend-paths` procedure. If it names no clear permitted
+course of action, ask rather than guess. Recording is enforced; reading and applying are instructions.
+The digest identifies recorded bytes, not proof that the decision was applied.
 
+The resume command refreshes the staged `WORKFLOW.md` from the current packaged contract before
+unparking; a copy failure leaves the run parked. After successful resume, read that staged workflow in
+full as part of verifying order 7, before reconciliation, dispatch, or applying decisions. Preserve the
+publishing-identity guard before order 8. For a driver still following an older staged contract, the
+operator may instruct this updated resume sequence, including reading the recorded decision and the
+current no-default-code-ceiling rule. This preserves run state and requires no migration or reset.
 A park that asks a question the decision cannot answer -- one that changes the request itself, so the
 story or brief would have to be regenerated -- is still not fixed by resuming. Resume continues from the existing manifest and
 `status.next`; it does not re-resolve the issue, re-read `ISSUE_PAYLOAD`, or regenerate the story or
@@ -217,8 +223,9 @@ run, and `factory init` refuses while either manifest candidate exists, so a rel
 reselects the parked run instead of replacing it. OPERATING.md carries the command and its cost --
 everything held only in that sandbox is lost, including merged slices whose branches were never pushed,
 so push anything worth keeping first.
-Resume is for external causes -- a timeout, an outage, credentials, an unclean tree -- where the run's own
-artifacts are still correct.
+Resume is for external causes -- a timeout, an outage, credentials, an unclean tree -- or recorded
+operator decisions consistent with the approved scope and ratified plan. Changed requirements follow the
+replacement-run route above.
 State that route in the park reason, because a decision recorded only in a host session or a sandbox
 artifact is lost with that sandbox, and the replacement run asks the same question again.
 
@@ -500,8 +507,8 @@ tracker URL to select a run declares a `resolve` command recognizing those forms
 payload above. Recognition belongs to the declaration for the same reason fetching does: deciding that a
 bare integer is a reference, rather than a feature description, is repository-specific.
 
-This repository declares its own in `.factory.json`, so `205`, `#205`, and the canonical issue URL still
-select run `205` — through that declaration rather than through anything built in.
+For example, a repository may declare a resolver in `.factory.json` that maps `205`, `#205`, and its
+canonical issue URL to run `205`. These forms work only through that declaration, not built-in behavior.
 
 #### Resolver and repository verification boundaries
 
@@ -606,13 +613,21 @@ Resume order 3 — complete the existing effective-push proof.
 Resume order 4 — accept the feature branch only after existing reflog/provenance, branch/worktree binding, seed ancestry, cleanliness/recovery, and operator exact-ref rechecks pass in their current order.
 Resume order 5 — immediately before claiming, rerun the final operator exact-ref-absent guard.
 Resume order 6 — claim with the current host session or perform a justified existing steal, then verify qualified status still shows this fresh owner and the parked result originally observed.
-Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.
+Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner; read the refreshed staged WORKFLOW.md in full as part of this verification.
 Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.
 Resume order 9 — continue solely from the newly qualified status.next.
 
 For configured order 7, the CLI binds the exact raw `run.json` bytes, the validated parked manifest, a forward `updated_at`, and the exact fresh owner before running bootstrap while durable status remains `needs-human`. It reruns the command on every explicit resume. Before transition and again immediately before rename, it requires byte-identical `run.json`, semantic equality with the bound manifest, and the same owner with a nondecreasing heartbeat. Every factory-mediated claim, force-steal, refresh, and release holds `run-json.lock`, so owner writes serialize with the final manifest guard.
 
 A clean zero records the command and exit `0`, advances `updated_at`, and changes status to `running` while preserving progress and the historical terminal result. An ordinary failure with intact bindings records the exact command and integer or `null` result, advances `updated_at`, remains `needs-human`, preserves progress and the historical result, and refuses; a later explicit resume reruns bootstrap. Changed or malformed manifest bytes, or an absent, stale, or different owner, are binding loss rather than ordinary failure: preserve current bytes and ownership, add no bootstrap evidence, and do not unpark.
+
+When the operator supplies a decision, optionally use the qualified decision command above after order 6 verifies the fresh
+owner and unchanged parked result, before order 7's explicit resume. Re-read qualified status and the
+manifest pointer; require the same fresh owner, parked status, original result, and the intended recorded
+bytes and digest. A refusal or mismatch stops recovery. This action does not replace `amend-paths` or
+resume. If staying parked after a decision or amendment, refresh the control-plane snapshot using the
+existing *Parked control-plane snapshot* procedure and report its path or failure; neither command
+archives the updated plane automatically.
 
 When the parked cause is an insufficient ownership declaration for an existing unmerged slice, the
 operator may insert exactly one optional action after order 6 has verified the fresh exact owner and
@@ -639,10 +654,19 @@ When the run reports a nonempty `publishing_identity`, the mandatory guard below
 boundary between completion of resume order 7 and the first operation in resume order 8. Nothing may
 intervene between the verified running/same-owner result and that guard, or between a successful guard
 and reconciliation. A pre-0.8.0 manifest reporting `null` preserves the nine orders without adding an operation.
+The refreshed workflow read belongs to order 7 verification, before this boundary.
 
 For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment and before effective-push proof. Order 3 never absorbs containment, binding, or the post-selection exact-ref guard. During order 4 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 5 and claim or justified steal. Order 6 requires `lock_session === SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --session "$SESSION_ID" --repo "$RUN_REPO"` for order 7 — the same session order 6 just verified as the fresh owner — then require that owner unchanged. Resume refuses without it, and refuses a lock that is absent, stale, or held by anyone else. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 never uses the pre-resume observation or the stop reason.
 
-If resume refuses after claim or the run later reparks, quiesce builders, tools, specialist tasks, and heartbeat loops; release the same owning session; then require qualified status to show an absent lock and null owner before another session begins.
+If resume refuses after claim or the run later reparks, quiesce builders, tools, specialist tasks, and
+heartbeat loops. Qualify the intended retained run again before reporting the stop. If it is still parked
+with the same fresh owning session and the expected historical result, republish its current control
+plane using *Parked control-plane snapshot*, then report the verified snapshot path or the publication
+failure. A refreshed workflow or recorded bootstrap failure can make the previous snapshot stale.
+Do not exclude `WORKFLOW.md` from verification, or claim that a stale snapshot is current. If state or
+ownership cannot be qualified, do not publish a snapshot; report the qualification failure instead.
+Release only the same owning session, and require qualified status to show an absent lock and null owner
+before another session begins; never release a different owner's lock.
 
 Before requesting a fresh run, inspect only the two deterministic manifest candidates described by the
 CLI contract: the legacy candidate under `O/.factory/R` and the sandbox candidate under
@@ -1971,14 +1995,8 @@ redundancy: between the approval and this call the integration head can move, an
 describes a head nobody validated. If `pr` refuses for that reason, the PR you just opened is ahead of
 what was approved — say so at the gate rather than recording it anyway.
 
-This contract sets **no limit on how much code a change may add**, and states none for a driver to
-measure against. A production-line ceiling is a property of a particular repository, decided by the people
-who maintain it; a run learns of one only if the request or the repository states it, and then it is that
-project's number and not a default carried in here. A shipped `4500` -- this document's own former text,
-copied from the ledger of the repository that wrote it -- reached a consumer's run as though it were their
-policy, and a six-hour build parked asking permission to exceed a limit nobody in that project had set.
-Report what a change landed if the request asks for it; do not judge it against a number from here.
-
+This contract sets **no limit on how much code a change may add**. Apply a code ceiling only when the
+request or target repository explicitly sets one; factory supplies no default ceiling.
 When `.factory/$R/artifacts/post-merge-repairs.md` exists, validate it again and include every attempt under
 `## Post-merge test-only repairs` in `BODY_FILE`: introducing merge, attempt, Starting head, trigger and
 post-repair results, files, cause, property outcome, repair commit, and status. Never omit an earlier
@@ -2169,12 +2187,9 @@ Never re-do a side effect the manifest shows already done — ticket creation, p
   ready-for-review is `pr_draft`'s decision, not this rule's.
 - **Scope discipline and no fabrication.** Flag out-of-scope work at the next gate. Never invent paths,
   keys, versions, or test passes — if the evidence is thin, say so and ask.
-- **A repository may lock its own scope, and a lock is not a defect.** A check whose assertion *is* a
-  limit records a decision: a coverage floor, a bundle or performance budget, a maximum file length, a
-  dependency or import allowlist, a public-API or snapshot test, an exact list of permitted names, a
-  cap on how much of something may exist. It need not be a test — a lint rule or a CI threshold locks
-  scope the same way. Treat it as a constraint on the plan: fit inside it, prefer new cases in existing tests
-  over new test entry points, and if the work genuinely needs more, surface that at the gate with the
-  number and the reason. Editing the limit to make the suite green removes the only thing holding the
-  scope, and the failure message tells you the number, so you never need to be told it in advance.
-  Widening one is the engineer's decision, not yours.
+- **A repository may lock its own scope, and a lock is not a defect.** Honor explicit limits such as
+  coverage floors, bundle or performance budgets, file-length caps, and dependency allowlists. If work
+  needs a wider limit, surface the value and reason at the gate; widening it is the engineer's decision.
+  Expected-value ledgers and snapshots may instead record the current result, not a scope limit. Read
+  the repository's policy and the assertion's purpose before classifying a failure. Update such records
+  when the intended change requires it; do not change an explicit limit just to make tests green.

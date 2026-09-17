@@ -8,7 +8,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -689,12 +689,38 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes,
         "every ownership refusal must leave the manifest untouched");
 
+      const stagedWorkflow = join(resumed.runDir, "WORKFLOW.md");
+      const canonicalWorkflow = readFileSync(new URL("../WORKFLOW.md", import.meta.url));
+      const staleWorkflow = "# Workflow from an older package\n";
+      writeFileSync(stagedWorkflow, staleWorkflow);
       const staleTime = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(5)]);
       assert.equal(staleTime.ok, false);
       assert.match(staleTime.stderr, /resume-needs-human must move updated_at forwards/u);
       assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes);
+      assert.equal(readFileSync(stagedWorkflow, "utf8"), staleWorkflow, "invalid timestamps cannot refresh the workflow");
+      // Enforcement: a staging failure must not falsely report an unparked run. Both unsafe
+      // targets must preserve the parked manifest and the exact owner that requested resume.
+      const workflowReferent = join(resumed.operator, "workflow-referent.md");
+      writeFileSync(workflowReferent, "do not overwrite\n");
+      const ownerBytes = readFileSync(join(resumed.runDir, "factory.lock"), "utf8");
+      for (const target of ["symlink", "directory"]) {
+        rmSync(stagedWorkflow, { recursive: true, force: true });
+        if (target === "symlink") symlinkSync(workflowReferent, stagedWorkflow);
+        else mkdirSync(stagedWorkflow);
+        const refused = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
+        assert.equal(refused.ok, false, target);
+        assert.match(refused.stderr, /protected file target has an unsafe type/u, target);
+        assert.equal(readFileSync(join(resumed.runDir, "run.json"), "utf8"), parkedBytes, target);
+        assert.equal(runJson(resumed.runDir).status, "needs-human", target);
+        assert.equal(readFileSync(join(resumed.runDir, "factory.lock"), "utf8"), ownerBytes, target);
+        assert.equal(readFileSync(workflowReferent, "utf8"), "do not overwrite\n", target);
+      }
+      rmSync(stagedWorkflow, { recursive: true, force: true });
+      writeFileSync(stagedWorkflow, staleWorkflow);
       const resume = factory(resumed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(7)]);
       assert.equal(resume.ok, true, resume.stderr);
+      assert.deepEqual(readFileSync(stagedWorkflow), canonicalWorkflow, "resume replaces obsolete staged bytes with this package's workflow");
+      assert.equal(readFileSync(join(resumed.runDir, "factory.lock"), "utf8"), ownerBytes);
       assert.deepEqual(resume.out, {
         run_id: RUN, status: "running", terminal_result: { status: "needs-human", reason },
         next_action: { kind: "gate", subject: "pre_pr" }, next: "gate:pre_pr",
@@ -740,7 +766,12 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(factory(unfixed.repo, ["terminal", RUN, "needs-human", "--reason", reason, "--now", NOW(5)]).ok, true);
       assert.equal(factory(unfixed.repo, ["lock", RUN, "release", "--session", "session-a"]).ok, true);
       assert.equal(factory(unfixed.repo, ["lock", RUN, "claim", "--session", "session-b", "--branch", "feature"]).ok, true);
+      const legacyWorkflow = join(unfixed.runDir, "WORKFLOW.md");
+      rmSync(legacyWorkflow, { force: true });
       assert.equal(factory(unfixed.repo, ["resume", RUN, "--session", "session-b", "--now", NOW(6)]).ok, true);
+      assert.deepEqual(readFileSync(legacyWorkflow), readFileSync(new URL("../WORKFLOW.md", import.meta.url)),
+        "resume creates the missing staged workflow for legacy runs");
+      assert.equal(factory(unfixed.repo, ["status", RUN]).out.lock_session, "session-b");
       const replay = factory(unfixed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(7)]);
       assert.equal(replay.ok, false);
       assert.equal(replay.stderr.trim(), reason);

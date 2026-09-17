@@ -16,6 +16,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { withRunJsonLock } from "../core/run-lock.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -148,7 +150,7 @@ const RESUME_ORDER = [
   "Resume order 4 — accept the feature branch only after existing reflog/provenance, branch/worktree binding, seed ancestry, cleanliness/recovery, and operator exact-ref rechecks pass in their current order.",
   "Resume order 5 — immediately before claiming, rerun the final operator exact-ref-absent guard.",
   "Resume order 6 — claim with the current host session or perform a justified existing steal, then verify qualified status still shows this fresh owner and the parked result originally observed.",
-  "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner.",
+  "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner; read the refreshed staged WORKFLOW.md in full as part of this verification.",
   "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification.",
   "Resume order 9 — continue solely from the newly qualified status.next.",
 ];
@@ -398,41 +400,63 @@ const CLAIMS = [
     // contract's own advice, "record the decision in the issue", named the one place the run cannot look.
     id: "decide-answers-a-parked-run",
     file: "WORKFLOW.md",
-    fragment: "It is the only channel into a parked run: `resume` carries no message, and every command that could carry",
+    fragment: "authoritative pointer, and its digest identifies only the recorded bytes.",
     expect: "allowed",
     matches: /"digest":\s*"sha256:[0-9a-f]{64}"/u,
-    act(repo) {
+    async act(repo) {
       const { repository, runDir } = seeded(repo);
-      assert.equal(factory(repository, ["terminal", RUN, "needs-human", "--reason", "is the ceiling authoritative?", "--now", NOW]).ok, true);
+      assert.equal(factory(repository, ["terminal", RUN, "needs-human", "--reason", "confirm the permitted dependency", "--now", NOW]).ok, true);
       assert.equal(factory(repository, ["lock", RUN, "claim", "--session", "operator"]).ok, true);
-      // Refused without the pieces that make it accountable: who decided, and what they decided.
       for (const [args, pattern] of [
         [["--session", "operator"], /nonblank --text/u],
-        [["--text", "raise it", "--session", "   "], /nonblank --session/u],
+        [["--text", "use the dependency", "--session", "   "], /nonblank --session/u],
         [["--text", "   ", "--session", "operator"], /nonblank --text/u],
       ]) {
         const refused = factory(repository, ["decide", RUN, ...args, "--now", "2026-07-30T12:01:00Z"]);
         assert.equal(refused.ok, false, `expected a refusal from: decide ${args.join(" ")}`);
         assert.match(refused.out, pattern);
       }
-      const result = factory(repository, ["decide", RUN, "--text", "Ceiling raised to 6000 for this run.",
+      const result = factory(repository, ["decide", RUN, "--text", "Use the existing dependency.",
         "--session", "operator", "--now", "2026-07-30T12:01:00Z"]);
       assert.equal(result.ok, true, result.out);
-      const parked = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+      const manifest = join(runDir, "run.json");
+      const before = readFileSync(manifest);
+      const parked = JSON.parse(before);
       assert.equal(parked.status, "needs-human", "deciding answers the question; it does not resume the run");
-      assert.equal(parked.terminal_result.reason, "is the ceiling authoritative?", "the park reason must survive");
-      assert.equal(parked.operator_decision.artifact, "artifacts/operator-decisions.md");
-      const recorded = readFileSync(join(runDir, "artifacts", "operator-decisions.md"), "utf8");
-      assert.match(recorded, /Ceiling raised to 6000 for this run\./u);
-      // Appended, not replaced: a run may be asked more than one question.
-      assert.equal(factory(repository, ["decide", RUN, "--text", "And keep the same ACs.",
-        "--session", "operator", "--now", "2026-07-30T12:02:00Z"]).ok, true);
-      const both = readFileSync(join(runDir, "artifacts", "operator-decisions.md"), "utf8");
-      assert.match(both, /Ceiling raised to 6000[\s\S]*And keep the same ACs\./u, "an answer must not erase the previous one");
-      assert.notEqual(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).operator_decision.digest,
-        parked.operator_decision.digest, "the digest must track the artifact it names");
+      assert.equal(parked.terminal_result.reason, "confirm the permitted dependency");
+      const committed = join(runDir, parked.operator_decision.artifact);
+      const recorded = readFileSync(committed);
+      const digest = (bytes) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      assert.equal(parked.operator_decision.digest, digest(recorded));
+      assert.match(recorded.toString(), /Use the existing dependency\./u);
+      const preserved = () => {
+        assert.deepEqual(readFileSync(manifest), before, "a refused decision must preserve the manifest");
+        assert.deepEqual(readFileSync(committed), recorded, "a refused decision must not append to the committed artifact");
+      };
+      // Negative control for the original failure: the artifact used to change before the timestamp refused.
+      const stale = factory(repository, ["decide", RUN, "--text", "This decision was refused.",
+        "--session", "operator", "--now", "2026-07-30T12:01:00Z"]);
+      assert.equal(stale.ok, false);
+      assert.match(stale.out, /must move updated_at forwards/u);
+      preserved();
+      // Also fail AFTER staging the bytes. Prechecking the timestamp alone cannot protect this boundary.
+      const retry = ["decide", RUN, "--text", "Keep the existing API.", "--session", "operator", "--now", "2026-07-30T12:02:00Z"];
+      await withRunJsonLock(runDir, async () => {
+        const refused = factory(repository, retry);
+        assert.equal(refused.ok, false);
+        assert.match(refused.out, /timed out waiting for run.json lock/u);
+        preserved();
+      });
+      assert.equal(factory(repository, retry).ok, true, "retry may reuse an identical unreferenced artifact");
+      const next = JSON.parse(readFileSync(manifest));
+      const both = readFileSync(join(runDir, next.operator_decision.artifact));
+      assert.match(both.toString(), /Use the existing dependency[\s\S]*Keep the existing API\./u);
+      assert.doesNotMatch(both.toString(), /This decision was refused/u);
+      assert.equal(next.operator_decision.digest, digest(both));
+      assert.notEqual(next.operator_decision.artifact, parked.operator_decision.artifact);
+      assert.deepEqual(readFileSync(committed), recorded, "later decisions never replace previous committed text");
       return result;
-    },
+    }
   },
   {
     id: "parked-owner-may-amend-before-separate-resume",
@@ -1490,7 +1514,7 @@ const CLAIMS = [
       assert.match(absence, /Do not recognize, fetch, or\nresolve a reference/u);
       assert.match(absence, /There is no\nbuilt-in tracker grammar and no built-in fetch command anywhere in this skill/u);
       assert.match(absence, /Recognition belongs to the declaration for the same reason fetching does/u);
-      assert.match(absence, /This repository declares its own in `\.factory\.json`, so `205`, `#205`, and the canonical issue URL still\nselect run `205`/u);
+      assert.match(absence, /For example, a repository may declare a resolver in `\.factory\.json`/u);
       // The first acceptance criterion of #213, asserted over the whole skill rather than one section:
       // the shipped skill names no tracker and fetches from none. A default that reappears anywhere
       // makes that vendor the factory's default again, which is what this change exists to end.
@@ -1773,7 +1797,7 @@ const CLAIMS = [
 
 describe("prose claims about what the CLI permits", () => {
   for (const claim of CLAIMS) {
-    it(`${claim.id}: ${claim.expect}`, () => {
+    it(`${claim.id}: ${claim.expect}`, async () => {
       // The fragment must still be in the prose. Reword the prose and this fails, which is the point:
       // the claim and its proof cannot drift apart quietly.
       const prose = readFileSync(join(pkg, claim.file), "utf8");
@@ -1789,7 +1813,7 @@ describe("prose claims about what the CLI permits", () => {
 
       const repo = project(claim.id);
       try {
-        const result = claim.act(repo);
+        const result = await claim.act(repo);
         assert.equal(result.ok, claim.expect === "allowed",
           `prose says this is ${claim.expect}; the CLI ${result.ok ? "allowed" : "refused"} it:\n${result.out}`);
         assert.match(result.out, claim.matches);

@@ -1122,9 +1122,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // The 84 lines are a schema field with its validation, a transition mode that may change nothing but
     // the decision, a CLI handler that appends and digests, and one status field. The split is the usual
     // one: recording is enforced because a false green here is a decision silently lost, while READING it
-    // is instruction, since no CLI can make an agent read a file. The digest is what lets a supervisor
-    // tell an applied decision from an ignored one, which is the part a test can actually hold.
-    assert.equal(total, 4858, "proving the publication happened lands at 4858 production lines");
+    // is instruction, since no CLI can make an agent read a file. The digest identifies recorded bytes;
+    // it does not prove that a driver applied them.
+    // 4858 -> 4860: explicit resume refreshes the staged contract before unparking and checks bindings
+    // after that asynchronous copy. The operator-authorized tripwire remains 4900; no code was trimmed.
+    assert.equal(total, 4860, "proving the publication happened lands at 4860 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

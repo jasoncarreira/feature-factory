@@ -205,7 +205,7 @@ authority; path changes require the separate `amend-paths` procedure. If it name
 course of action, ask rather than guess. Recording is enforced; reading and applying are instructions.
 The digest identifies recorded bytes, not proof that the decision was applied.
 
-Explicit `factory resume` refreshes the staged `WORKFLOW.md` from the current packaged contract before
+The resume command refreshes the staged `WORKFLOW.md` from the current packaged contract before
 unparking; a copy failure leaves the run parked. After successful resume, read that staged workflow in
 full as part of verifying order 7, before reconciliation, dispatch, or applying decisions. Preserve the
 publishing-identity guard before order 8. For a driver still following an older staged contract, the
@@ -223,8 +223,9 @@ run, and `factory init` refuses while either manifest candidate exists, so a rel
 reselects the parked run instead of replacing it. OPERATING.md carries the command and its cost --
 everything held only in that sandbox is lost, including merged slices whose branches were never pushed,
 so push anything worth keeping first.
-Resume is for external causes -- a timeout, an outage, credentials, an unclean tree -- where the run's own
-artifacts are still correct.
+Resume is for external causes -- a timeout, an outage, credentials, an unclean tree -- or recorded
+operator decisions consistent with the approved scope and ratified plan. Changed requirements follow the
+replacement-run route above.
 State that route in the park reason, because a decision recorded only in a host session or a sandbox
 artifact is lost with that sandbox, and the replacement run asks the same question again.
 
@@ -620,7 +621,7 @@ For configured order 7, the CLI binds the exact raw `run.json` bytes, the valida
 
 A clean zero records the command and exit `0`, advances `updated_at`, and changes status to `running` while preserving progress and the historical terminal result. An ordinary failure with intact bindings records the exact command and integer or `null` result, advances `updated_at`, remains `needs-human`, preserves progress and the historical result, and refuses; a later explicit resume reruns bootstrap. Changed or malformed manifest bytes, or an absent, stale, or different owner, are binding loss rather than ordinary failure: preserve current bytes and ownership, add no bootstrap evidence, and do not unpark.
 
-When the operator supplies a decision, optionally run `factory decide` after order 6 verifies the fresh
+When the operator supplies a decision, optionally use the qualified decision command above after order 6 verifies the fresh
 owner and unchanged parked result, before order 7's explicit resume. Re-read qualified status and the
 manifest pointer; require the same fresh owner, parked status, original result, and the intended recorded
 bytes and digest. A refusal or mismatch stops recovery. This action does not replace `amend-paths` or
@@ -650,13 +651,22 @@ In either case order 7 remains the same explicit resume command; the resume comm
 changes `test_plan`, or reseeds the plan.
 
 When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact
-boundary between completion of resume order 7 and the first operation in resume order 8. The refreshed workflow read belongs to order 7 verification. Nothing else may
+boundary between completion of resume order 7 and the first operation in resume order 8. Nothing may
 intervene between the verified running/same-owner result and that guard, or between a successful guard
 and reconciliation. A pre-0.8.0 manifest reporting `null` preserves the nine orders without adding an operation.
+The refreshed workflow read belongs to order 7 verification, before this boundary.
 
 For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment and before effective-push proof. Order 3 never absorbs containment, binding, or the post-selection exact-ref guard. During order 4 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 5 and claim or justified steal. Order 6 requires `lock_session === SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --session "$SESSION_ID" --repo "$RUN_REPO"` for order 7 — the same session order 6 just verified as the fresh owner — then require that owner unchanged. Resume refuses without it, and refuses a lock that is absent, stale, or held by anyone else. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 never uses the pre-resume observation or the stop reason.
 
-If resume refuses after claim or the run later reparks, quiesce builders, tools, specialist tasks, and heartbeat loops; release the same owning session; then require qualified status to show an absent lock and null owner before another session begins.
+If resume refuses after claim or the run later reparks, quiesce builders, tools, specialist tasks, and
+heartbeat loops. Qualify the intended retained run again before reporting the stop. If it is still parked
+with the same fresh owning session and the expected historical result, republish its current control
+plane using *Parked control-plane snapshot*, then report the verified snapshot path or the publication
+failure. A refreshed workflow or recorded bootstrap failure can make the previous snapshot stale.
+Do not exclude `WORKFLOW.md` from verification, or claim that a stale snapshot is current. If state or
+ownership cannot be qualified, do not publish a snapshot; report the qualification failure instead.
+Release only the same owning session, and require qualified status to show an absent lock and null owner
+before another session begins; never release a different owner's lock.
 
 Before requesting a fresh run, inspect only the two deterministic manifest candidates described by the
 CLI contract: the legacy candidate under `O/.factory/R` and the sandbox candidate under
