@@ -147,6 +147,10 @@ function buildSlice(repo, { extra = null, extraContent = "extra\n", extras = [] 
   return { head: git(repo, "rev-parse", "HEAD"), basePoint };
 }
 
+function integrationHeadOf(repo) {
+  return execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+}
+
 function writeReview(runDir, subject, reviewedCommit, overrides = {}) {
   writeFileSync(join(runDir, "reviews", `${subject}.json`), `${JSON.stringify({
     subject, reviewer: "work-reviewer", verdict: "APPROVE", attempt: 1,
@@ -1718,12 +1722,52 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       assert.equal(factory(p.repo, ["lock", RUN, "claim", "--session", "legacy", "--branch", "feature", "--now", NOW(5)]).ok, true);
       assert.equal(factory(p.repo, ["heartbeat", RUN, "--session", "legacy", "--now", NOW(5)]).ok, true);
       assert.equal(factory(p.repo, ["lock", RUN, "release", "--session", "legacy", "--now", NOW(5)]).ok, true);
+      // A reviewed step now consumes its review: accepting one without an approval is refused, which is
+      // the point of that change. This fixture supplies the approval the workflow always required.
+      // Ordinary mistakes, not adversarial inputs -- there is no adversary here. Each of these recorded an
+      // ACCEPTED step before this change: a driver that skipped the review, a REJECT recorded as acceptance
+      // anyway, the wrong `--review-ref` when several reviews are in flight, a head that moved while the
+      // reviewer worked, and -- the one an auditor reproduced through this CLI -- simply omitting
+      // `--review-ref` on attempt 2, where the fallback quietly re-consumed attempt 1's approval. Written
+      // as refusals rather than as a fixture nudged until it passes, because the fixture passing is what
+      // hid all five.
+      const head = integrationHeadOf(p.repo);
+      const refusal = (args) => {
+        const result = factory(p.repo, ["step", RUN, "test-verifier", "accepted", ...args, "--now", NOW(5)]);
+        assert.equal(result.ok, false, `expected a refusal from: step ... ${args.join(" ")}`);
+        return result.stderr;
+      };
+      assert.match(refusal([]), /cannot be accepted without --review-ref/u,
+        "a reviewed step with no review at all must be refused");
+      const rejecting = writeReview(p.runDir, "test-verifier", head, { verdict: "REJECT", required_fixes: ["fix it"] });
+      assert.match(refusal(["--review-ref", rejecting]), /verdict is REJECT, not an approval/u,
+        "a REJECT with blocking fixes must not accept the step");
+      const wrongSubject = writeReview(p.runDir, "spec-writer", head);
+      assert.match(refusal(["--review-ref", wrongSubject]), /approved 'spec-writer', not 'test-verifier'/u,
+        "another subject's approval must not accept this step");
+      const wrongHead = writeReview(p.runDir, "test-verifier", "f".repeat(40));
+      assert.match(refusal(["--review-ref", wrongHead]), /but the integration head is/u,
+        "test-verifier judges the integrated branch, so a review naming another commit must be refused");
+      // The headline case, pinned as the sequence it actually is. The first version of this passed
+      // `--review-ref` explicitly against a run with no recorded step, so it proved the attempt comparison
+      // and never touched the fallback it was named for. Caught in review. The real shape: accept attempt
+      // 1, reopen at attempt 2, then accept with NO reference flag, where the stored attempt-1 reference
+      // is what gets picked up.
+      const approvalAt1 = writeReview(p.runDir, "test-verifier", head);
+      assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--review-ref", approvalAt1, "--now", NOW(5)]).ok, true);
+      assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "running", "--attempts", "2", "--now", NOW(5)]).ok, true);
+      const fallback = factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--now", NOW(5)]);
+      assert.equal(fallback.ok, false, "the stored attempt-1 approval must not carry attempt 2");
+      assert.match(fallback.stderr, /is for attempt 1, step is at attempt 2/u);
+      // And the same omission succeeds once the approval is actually for this attempt, so the fallback
+      // itself is preserved rather than disabled.
+      writeReview(p.runDir, "test-verifier", head, { attempt: 2 });
       assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--now", NOW(5)]).ok, true);
       // The step half of the projection guard, at the first point a step row exists. An exact object,
       // because the vacuous version this replaces would have accepted the old `test-verifier:accepted(1)`
       // display string, which is the shape this release exists to remove.
       assert.deepEqual(factory(p.repo, ["status", RUN, "--json"]).out.steps,
-        [{ agent: "test-verifier", status: "accepted", attempts: 1 }],
+        [{ agent: "test-verifier", status: "accepted", attempts: 2 }],
         "status must project step rows as structured records, not formatted strings");
       assert.equal(Object.hasOwn(runJson(p.runDir), "pr_base"), false);
       // Gate 3 is the last transition before the skill pushes and opens the PR, so the

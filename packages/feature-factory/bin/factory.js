@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { nextAction, nextActionRecord, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { buildEvidence, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
-import { assertPublicationReady, assertReviewBinding, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
+import { assertPublicationReady, assertReviewBinding, isApproving, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { readRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
 import { reverifyRepair } from "../observe/repair-reverification.js";
 import { archiveReviewAttempt } from "../state/review-archive.js";
@@ -25,6 +25,10 @@ import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SESSION_LOCK_FILE, SessionLockHeldError,
 } from "../state/session-lock.js";
+
+// work-reviewer runs on these and must approve before the step is accepted; the others are not
+// auto-reviewed, so requiring a reference for them would block the workflow's own sequence.
+const REVIEWED_STEPS = Object.freeze(["spec-writer", "work-decomposer", "test-verifier"]);
 
 export const COMMANDS = Object.freeze({
   init: Object.freeze(["--repo", "--branch", "--worktree", "--pr-base", "--issue", "--issue-key", "--publishing-identity", "--mode", "--max-parallel-slices", "--max-retries", "--now", "--json"]),
@@ -976,7 +980,8 @@ const HANDLERS = {
       // intact in `run.json` -- and `at` is what tells a controller whether "approved" happened a minute
       // ago or three hours ago, which is most of what "is this run stuck" means.
       gates: Object.fromEntries(GATE_NAMES.filter((name) => run.gates[name])
-        .map((name) => [name, { status: run.gates[name].status, at: run.gates[name].at ?? null, artifact: run.gates[name].artifact ?? null }])),
+        .map((name) => [name, { status: run.gates[name].status, at: run.gates[name].at ?? null,
+          artifact: run.gates[name].artifact ?? null, reviewed_head: run.gates[name].reviewed_head ?? null }])),
       // Structured, not `${agent}:${status}(${attempts})`. Attempts are the field a controller reads to
       // decide whether an attempt was consumed, and reaching them meant regexing a display string out of
       // a JSON contract. Nothing in the suite asserted the string form, so it was a public shape with no
@@ -1071,6 +1076,12 @@ const HANDLERS = {
             status: decision,
             at: decision === "pending" ? null : at,
             artifact: flags.artifact ?? state.gates[name]?.artifact ?? null,
+            // What this approval judged. The reobserver above already observes the integration head to
+            // prove readiness; recording it is what lets publication tell a fresh approval from a stale
+            // one, which is the whole difference between re-running tests and re-approving.
+            reviewed_head: name === "pre_pr" && decision === "approved"
+              ? integrationHead(repo, state).commit
+              : state.gates[name]?.reviewed_head ?? null,
           },
         },
         ...(name === "brief" ? { plan_digest: briefDigestFor(decision, state, runDir) } : {}),
@@ -1084,6 +1095,38 @@ const HANDLERS = {
     if (!STEP_STATUSES.includes(status)) throw new CliError(`status must be one of ${STEP_STATUSES.join(" | ")}`);
     const runDir = runDirFor(flags, runId);
     assertRunNotParked(runDir, "step");
+    // The reference was stored and never read, so `accepted` was recorded against a missing review file,
+    // a REJECT with blocking fixes, and an approval naming a commit that does not exist -- all three
+    // reproduced through this CLI. That made the enforcement the README claims, and the workflow's
+    // "must APPROVE before you accept that step", instruction rather than fact. A reviewed step now
+    // consumes its review the way a slice does, minus the head binding: a planning subject's output is
+    // an artifact in the control plane, not a commit, so there is no head for the review to name.
+    const priorStep = readRunUnchecked(runDir).run?.steps?.find((step) => step.agent === agent) ?? null;
+    const reviewedRef = flags.reviewRef ?? priorStep?.review_ref ?? null;
+    if (status === "accepted" && REVIEWED_STEPS.includes(agent)) {
+      if (!reviewedRef) throw new CliError(`step '${agent}' cannot be accepted without --review-ref; work-reviewer must approve it first`);
+      const review = readReview(runDir, reviewedRef);
+      if (review.subject !== agent) throw new CliError(`review '${reviewedRef}' approved '${review.subject}', not '${agent}'`);
+      if (!isApproving(review.verdict)) throw new CliError(`review '${reviewedRef}' verdict is ${review.verdict}, not an approval`);
+      // The attempt, or the reference fallback silently re-consumes the previous round's approval: accept
+      // attempt 1, record `running --attempts 2`, then accept again with no `--review-ref` and the stored
+      // attempt-1 review approves attempt 2. Reproduced through the CLI. The fallback stays -- re-passing
+      // an unchanged reference is ordinary -- but it must still be an approval OF THIS attempt.
+      const attempt = flags.attempts === undefined ? priorStep?.attempts ?? 1 : integer(flags.attempts, 1, "--attempts");
+      if (review.attempt !== attempt) {
+        throw new CliError(`review '${reviewedRef}' is for attempt ${review.attempt}, step is at attempt ${attempt}`);
+      }
+      // A planning subject has no commit to bind to, which is why this check omits the head that a slice
+      // merge requires. `test-verifier` is not a planning subject: it judges the integrated branch, so its
+      // review names a commit and that commit must be the head now. Without this it inherited the planning
+      // exemption and a review naming a nonexistent commit was accepted. Caught in review.
+      if (agent === "test-verifier") {
+        const head = integrationHead(resolve(flags.repo ?? process.cwd()), readRun(runDir)).commit;
+        if (review.reviewed_commit !== head) {
+          throw new CliError(`review '${reviewedRef}' approved ${String(review.reviewed_commit).slice(0, 12)} but the integration head is ${String(head).slice(0, 12)}`);
+        }
+      }
+    }
     const at = stamp(flags);
     const next = await transition(runDir, {
       participants: [{ familyId: "steps", mode: "record" }],

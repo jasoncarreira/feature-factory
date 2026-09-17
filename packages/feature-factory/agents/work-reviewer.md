@@ -36,9 +36,27 @@ Do not delegate, and do not open a fresh repo-wide survey. Keep verification sco
 ## Reconcile claim vs. observation (the core rule)
 
 The producer returns a **claim** (its JSON summary / report). The orchestrator's observed evidence is the **truth**. Your first job is to reconcile them:
-- Claim says files changed / tests passed but the observed evidence disagrees → **REJECT** (`claim_mismatch`).
-- Observed `review_ready` is false (empty diff, unobserved/failed tests, `diff_observed=false`) → **REJECT**.
+- Claim says files changed / tests passed but the observed evidence disagrees → **REJECT**
+  (`claim_mismatch`) — reconciled **against the claim's own subject**. For a build slice the observation
+  is that slice's diff, so its file list must match. For `test-verifier` the observation is the whole
+  **integrated** diff, which legitimately contains every merged builder's files as well as the tests, so
+  extra files there are not a mismatch; what must reconcile is its `tests.exit` against the observed run.
+- **For a build slice or `test-verifier` only:** observed `review_ready` is false (empty diff, unobserved/failed tests, `diff_observed=false`) → **REJECT**.
 - Never approve on the producer's word alone.
+- **Repair evidence substitutes for ordinary evidence where Step 5 permits it.** After a test-only repair,
+  the failed ordinary evidence is deliberately preserved alongside a qualifying repair record, and the
+  repair evidence is what stands. Requiring a green `evidence/test-verifier.json` in that situation rejects
+  the recovery path the workflow defines. Check the repair record and its evidence, not the superseded
+  failure.
+
+**This whole section applies only to subjects that have observed evidence.** A planning subject —
+`spec-writer`, `work-decomposer` — produces an artifact under `.factory/$R/artifacts/`, not a worktree
+commit, so it has no diff and no `evidence/<subject>.json`, and the workflow reviews it with a
+`--review-ref` rather than observing it. Its ground truth is the artifact and the cited files, per
+"Review discipline" above. Never reject a planning subject for missing, empty or not-`review_ready`
+evidence: an empty diff is that subject's correct shape, `review_ready` is false for every zero-diff
+observation by construction, and rejecting on it blocks the step permanently rather than asking the
+producer for anything it could supply.
 
 ## Class-wide completeness (the anti-drip-feed rule)
 
@@ -77,10 +95,18 @@ When the subject is a **class-wide** requirement — one that **cannot be establ
   - Backend: the repo's layering, its projection/read path, its API boundary.
   - Frontend: the repo's component conventions, binding forms, state approach and design tokens.
   - Migrations: the repo's filename, author, context, manifest-registration and permission steps.
-  - No edits to vendored or generated trees. No stray code comments.
+  - No **hand**-edits to vendored or generated trees. Regeneration is different and is required: the
+    slice that changes the source owns regenerating what derives from it, so a regenerated client or
+    type set in that slice's lane is expected output, not a finding.
+  - No stray code comments.
   - **Slice discipline:** the diff stays within the slice's `paths` (out-of-lane edits are a finding).
-  - The slice's `acceptance` is actually implemented, and the observed tests cover it.
-- **Test step (`test-verifier`):** each AC maps to a real assertion that would fail if the behavior broke; no test weakened to pass; the observed command is the suite the plan named and was not narrowed to exclude failures, which is a separate finding from weakening a test; observed test run is green (or honestly WRITTEN-NOT-RUN with a reason).
+  - The slice's `acceptance` is actually implemented. This is never waived.
+  - The observed tests cover that acceptance — **unless the slice's ratified `test_plan` is empty**,
+    which the plan decided at Gate 2 and which the workflow and `deriveReviewReady` both honour. A
+    docs-only slice reviewed against tests it was ratified not to have is rejected forever; that
+    exemption is a plan decision, not yours to re-open here. It waives **test execution only**: the
+    acceptance must still be implemented and the diff must still be observed.
+- **Test step (`test-verifier`):** each AC maps to a real assertion that would fail if the behavior broke; no test weakened to pass; the observed command is the suite the plan named and was not narrowed to exclude failures, which is a separate finding from weakening a test; observed test run is green. **There is no WRITTEN-NOT-RUN waiver for this subject:** the stage exists to run the tests, so the evidence must record an observed run that exited zero. Reporting WRITTEN-NOT-RUN honestly is valid; approving on it is not.
 
 ## Security proportionality
 
@@ -88,7 +114,7 @@ The repository's real trust boundaries stay fully blocking: unauthenticated or a
 
 ## Severity
 
-- **BLOCKER** — claim/observation mismatch, `review_ready=false`, an AC unmet or untested, a convention violation a human reviewer would bounce (unguarded prod migration, subtree edit, out-of-lane file), a correctness/security bug.
+- **BLOCKER** — claim/observation mismatch, `review_ready=false` on a subject that has observed evidence, an AC unmet, an AC untested against a non-empty ratified `test_plan`, a convention violation a human reviewer would bounce (unguarded prod migration, subtree edit, out-of-lane file), a correctness/security bug.
 - **MAJOR** — deviates from brief/conventions in a way that will draw review friction; secondary AC untested.
 - **MINOR** — nits; safe to proceed.
 
@@ -126,6 +152,6 @@ Write this structure to the narrative report:
 1. <the specific change the producer must make>
 ```
 
-Cite `path:line` for every finding — an unsourced finding is noise. If it's genuinely clean and the evidence is review-ready, APPROVE without manufacturing problems. If evidence is missing when it should exist (a build slice with no observed diff/tests), that itself is a BLOCKER — do not approve unobserved work.
+Cite `path:line` for every finding — an unsourced finding is noise. If it's genuinely clean and the evidence is review-ready, APPROVE without manufacturing problems. If evidence is missing when it should exist (a build slice with no observed diff/tests), that itself is a BLOCKER — do not approve unobserved work. "When it should exist" excludes a planning subject, which has no observed evidence by design. It does **not** excuse a missing diff for a slice whose ratified `test_plan` is empty: that slice still changes files and is still observed; only its test run is waived.
 
 Your final response may confirm both file writes, but it must not substitute for either file.

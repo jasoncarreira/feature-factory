@@ -3,7 +3,7 @@ name: feature
 description: >
   Software-factory orchestrator. Drives a feature from idea or ticket through a chain of focused
   agents — research, story, design, spec, decompose, parallel build, test, validate — pausing at
-  three approval gates and ending in a draft PR. State is durable (a per-run manifest on disk,
+  three approval gates and ending in a pull request. State is durable (a per-run manifest on disk,
   written only by the `factory` CLI), evidence is observed rather than trusted from agent prose,
   high-risk steps are reviewed, and independent slices build in parallel. The compatibility shorthand
   remains `/feature [--autonomous | --headless] [--base <branch>] [--max-retries <n>] <ticket key | feature idea>`.
@@ -21,9 +21,18 @@ directory. This adapter therefore runs in a fixed order, and nothing may be reor
 2. **Repository resolver intake** — derive `O`, read and validate `$O/.factory.json`, execute a declared
    `resolve`, and bind `R`. This step necessarily reads that file and executes commands before `init`;
    those reads and executions are the step itself and are not covered by the restriction in 4.
-3. **`factory init`**, which stages the canonical workflow and returns its path as `workflow`.
-4. **Read that staged file completely**, before any state read, dispatch, gate, or `factory` command other
-   than `init` itself.
+3. **Reach the staged canonical workflow.** The two deterministic manifest candidates are
+   `$O/.factory/$R/run.json` (legacy) and `$O/.factory-sandboxes/$R/.factory/$R/run.json` (sandbox) —
+   stated here because this step runs before that workflow is readable. If both exist, print both
+   absolute paths and refuse as ambiguous. If neither exists, the run is fresh: call `factory init`,
+   which stages the workflow and returns its path as `workflow`. If exactly one exists, the run already
+   has a manifest and is **never initialized again**: qualify it with
+   `factory status "$R" --json --repo "<candidate-repository>"` and read the staged workflow at
+   `<the sandbox_path it reports>/.factory/$R/WORKFLOW.md`. Status reports `sandbox_path`; it reports no
+   run directory and no workflow path, so that derivation is the instruction. Those two candidate reads and that one `status` call are this step, exactly
+   as the resolver reads are step 2, and they are the only state reads step 4 permits.
+4. **Read that staged file completely**, before any dispatch, gate, further state read, or `factory`
+   command other than the `init` or `status` named above.
 
 Steps 1 and 2 are specified here, in full, because the document that specifies everything else does not
 exist until step 3. Everything after `init` is specified there. Do not read `WORKFLOW.md` next to this file: it lives outside the workspace, `external_directory` is
@@ -111,6 +120,44 @@ workflow is not readable until init stages it. So the complete invocation is rep
 byte from the canonical Step 0 block, and a test fails if the two ever differ. Run exactly this,
 including each bracketed flag only when admission supplied its value:
 
+`$R` and `$FEATURE_BRANCH` are bound before this command. Their rules live here because the workflow that
+otherwise defines them is not readable yet, and the run-id rule is reproduced **verbatim** from that
+workflow rather than summarized — a summary of it selected a different run than the canonical algorithm
+does (`implement ABC-123 login` became `implement-abc-123-login` instead of `abc-123`, `café` became
+`caf` instead of `cafe`, and the branch fallback and the multiple-key refusals were missing), and it did
+so *before* init, which is early enough to create the wrong run. A test binds this copy to the canonical
+text.
+
+When the configured resolver returns a payload, `$R` is its canonical `run_id`. Otherwise the algorithm
+below turns on what counts as a ticket key, so that definition is copied here with it:
+
+1. **Ticket?** Collect standalone case-insensitive tokens matching
+   `[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*`, with each edge bounded by the string edge or a character that is
+   not an ASCII letter or digit. Repeated spellings of the same lowercased key count once. Defer branch
+   fallback until `O` is known.
+
+With that definition:
+
+If resolution did not already bind `R` — because no resolver is declared, or a declared one returned zero
+bytes — derive it exactly as follows:
+
+1. If request text contains one distinct ticket key, lowercase it and use it. If it contains more than
+   one, return `ambiguous ticket keys: <sorted lowercase keys>; no session or run created.` before any
+   tool, state, or CLI action.
+2. With no request key, read the invocation checkout's current symbolic branch and apply the identical
+   token and deduplication rule. If it contains more than one distinct key, return
+   `ambiguous branch ticket keys: <sorted lowercase keys>; no session or run created.` Detached HEAD or
+   no branch key continues without one.
+3. With no key, normalize the trimmed derivation copy to NFKD, remove combining marks, lowercase it,
+   replace each maximal sequence outside `[a-z0-9]` with `-`, and strip leading and trailing dashes.
+4. Require the result to match `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; otherwise return exactly
+   `cannot derive a canonical run id; no session or run created.`
+
+`$FEATURE_BRANCH` is **explicit intake branch intent** when the request carried it, otherwise
+`feature/$R`; a repository instruction may supply an explicit override. Validate it with
+`git check-ref-format --branch "$FEATURE_BRANCH"`, and require its ref absent before init. Do not ask the
+engineer for a branch or worktree.
+
 ```sh
 INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"
 ```
@@ -124,8 +171,11 @@ Never assemble this command from the `factory init --pr-base`, `factory init --m
 `factory init --mode` phrases elsewhere in this file. Those name single flags to forward, not the
 invocation, and assembling from them is what once produced an init without `--json`.
 
-If you stop for any reason after init has succeeded, park the run rather than ending the turn: an
-abandoned `status: running` is indistinguishable from a driver still working.
+If you stop after init has succeeded, do not simply end the turn: an abandoned `status: running` is
+indistinguishable from a driver still working. Park the run **unless the canonical workflow defines that
+stop as something else** — it defines two, and both forbid terminalizing. An interactive `stop` at a gate
+is an unlocked nonterminal stop, and clean verification exhaustion releases the lock and leaves the run
+`running`. Follow the workflow's own sequence for those; park everything else.
 
 ## Repository resolver intake, before any run-id allocation
 
@@ -375,9 +425,11 @@ A `run-orchestrator` must not dispatch itself, `feature-factory`, another `run-o
 arbitrary project-owned agent. It accepts one admitted request, loads and follows this skill, and drives
 exactly one run. It selects or resumes only the deterministic existing sandbox path defined in Step 0
 and never creates a different worktree, clone, isolation directory, replacement run, or orchestration
-layer. It reads durable state only through
-`factory status "$R" --json --repo "$RUN_REPO"`, claims through Step 0, and continues solely from
-`status.next` or `nextAction`. It never hand-writes `run.json`.
+layer. It claims through Step 0 and continues solely from `status.next` or `nextAction`, and it never
+hand-writes `run.json`. It reads durable state through
+`factory status "$R" --json --repo "$RUN_REPO"` wherever status reports the field; where the canonical
+workflow requires a direct manifest read for fields status does not expose, it performs that read as the
+workflow specifies. Never hand-writing state is the rule; never reading it is not.
 
 Persisted mode determines what each driver may do:
 
@@ -385,7 +437,7 @@ Persisted mode determines what each driver may do:
 |---|---|---|---|
 | `interactive` | Persist and present the pending gate, then wait for a real human | Perform the verified park below, release its lock, and end the turn | Route only to the associated same session after an explicit human response |
 | `headless` | Preserve terminal `needs-human` | Terminalize `needs-human`; never masquerade as an interactive parked gate | Refused |
-| `autonomous` | Decide only when the existing preconditions authorize it | Decide under the same rules and continue through draft PR and mandatory Step 7 | Refused |
+| `autonomous` | Decide only when the existing preconditions authorize it | Decide under the same rules and continue through PR publication and mandatory Step 7 | Refused |
 
 An inability to ask a human never promotes interactive or headless to autonomous. When a headless run
 reaches a human gate, terminalize with reason exactly `headless run reached a human gate`:
@@ -394,8 +446,10 @@ reaches a human gate, terminalize with reason exactly `headless run reached a hu
 factory terminal "$R" needs-human --reason "headless run reached a human gate" --repo "$RUN_REPO"
 ```
 
-Verify qualified status durably reports `terminal:needs-human` and that exact terminal reason, retain
-the selected sandbox and repository, and stop.
+Verify qualified status durably reports top-level `status: "needs-human"` with that exact terminal
+reason, retain the selected sandbox and repository, and stop. Do not look for `next: terminal:needs-human`:
+`next` names terminal only for `completed`, `partial` and `blocked`, so a parked run still reports the
+action that would resume it, and waiting for a string the CLI cannot produce hangs the handoff.
 
 The gate artifact map is exact:
 

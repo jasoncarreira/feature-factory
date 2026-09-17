@@ -85,10 +85,15 @@ Then append a machine-readable **claim block** the orchestrator parses (it re-ru
  "tests": {"cmd": "<the test command you ran>", "exit": 0}, "blockers": []}
 ```
 
-Use exactly these field names and exactly this `status` vocabulary. The orchestrator feeds this
-block to `factory observe --claim`, which compares each field against what it observes itself and
-records every disagreement as a review finding. `completed` is the word the evidence uses; any
-other spelling reads as a disagreement about status. `tests.exit` must be the real exit code — a
-claimed zero against an observed failure is the most important disagreement this catches.
+Use exactly these field names and exactly this `status` vocabulary.
+
+**`files_changed` is your report to the reviewer, not a claim the orchestrator reconciles.** Unlike a
+build slice, this stage is observed against the **integrated** worktree from the run's original branch
+point, so the observed diff legitimately contains every merged builder's changes as well as your tests,
+and the workflow's integration observation passes no `--claim`. Listing only your own test files and
+having it compared against that diff would manufacture a `claim_mismatch` on correct work. `completed` is the word the evidence uses; any
+other spelling reads as a disagreement about status. `tests.exit` must be the real exit code: the
+orchestrator re-runs the suite itself, and a claimed zero against an observed failure is the
+disagreement that matters most.
 
 Commit test files separately to the worktree branch (`git -C $WT add <tests> && git -C $WT commit -m "<KEY>: tests for <feature>"`). A FAIL is a valid, useful result — report it honestly; do not weaken a test to make it pass.

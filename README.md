@@ -1,6 +1,6 @@
 # feature-factory
 
-A durable, observed control plane for running a feature from idea to draft PR through a chain of
+A durable, observed control plane for running a feature from idea to pull request through a chain of
 focused agents, with human approval gates.
 
 Three packages:
@@ -37,7 +37,7 @@ rest.*
 INTAKE ─▶ [GATE 1: Story] ─▶ RESEARCH + DESIGN ─▶ SPEC ─▶ DECOMPOSE ─▶ [GATE 2: Brief + Plan]
        ─▶ BUILD  (waves of parallel slices; per-slice OBSERVE ▶ REVIEW ▶ serial MERGE)
        ─▶ INTEGRATE: TEST + VALIDATE (on the merged feature branch)
-       ─▶ [GATE 3: Pre-PR] ─▶ DRAFT PR
+       ─▶ [GATE 3: Pre-PR] ─▶ PR (draft per pr_draft)
 ```
 
 Builds run in parallel; merges are serial, which is what makes the parallelism safe. The
@@ -202,7 +202,7 @@ re-seeded, re-observed, remerged, or re-dispatched.
 Two clean, unchanged unavailable executions end only the current merge/replay CLI invocation and its
 enclosing driver invocation; they do not invoke the irreversible `factory terminal` transition. The
 driver awaits all specialist tasks, stops and awaits heartbeats, releases its owning session, and uses
-qualified status to prove `status: "running"`, `terminal_result: null`, and no remaining ownership before
+qualified status to prove `status: "running"`, an unchanged `terminal_result`, and no remaining ownership before
 reporting `repository-verify-exhausted`. A failed release or unverified ownership reports
 `retained-lock-error` without claiming resumability. A later invocation repeats every normal selection,
 manifest, provenance, branch, worktree, push-target, and operator-ref guard, claims with its actual
@@ -320,7 +320,7 @@ Run state under `S/.factory/<run-id>/run.json` should be gitignored — if it is
 carries manifest churn and every merge trips the privileged-path refusal.
 
 `branch` is the feature branch the run builds and pushes. `pr_base` is the intended moving branch
-that the draft PR targets; it is not a slice `base_ref` SHA. By default, init records the symbolic
+that the pull request targets; it is not a slice `base_ref` SHA. By default, init records the symbolic
 branch checked out in the configured worktree, resolved from `--repo`, even when the process is
 running elsewhere. `--pr-base` is an explicit override and bypasses that observation. Without an
 override, detached HEAD or an unobservable configured worktree fails closed. The recorded value is
@@ -359,11 +359,13 @@ same path. Malformed, absolute, traversing, privileged, duplicate, target-alread
 merged-slice requests refuse atomically. The seeded prefix and `test_plan` remain immutable, no reseed is
 available, and merge still refuses unamended or privileged paths.
 
-The orchestrator creates the external draft PR with the recorded values before recording its URL:
+The orchestrator creates the external PR with the recorded values before recording its URL. Whether it is
+a draft is the repository's `pr_draft` setting, reported by `status`; `--draft` belongs to `pr_draft: true`
+and is omitted for `pr_draft: false`:
 
 ```sh
 factory status <run-id> --json
-gh pr create --draft --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"
+gh pr create [--draft] --base "<pr_base>" --head "<branch>" --title "<title>" --body-file "<body-file>"
 factory pr <run-id> --url <pr-url>
 ```
 
@@ -385,8 +387,9 @@ Enforced, not suggested. Each is a mechanism with a test that fails when the mec
 - Evidence must be observed on a clean worktree that did not move while the tests ran.
 - Whether a slice may ship untested is ratified in its `test_plan` at seeding — there is no flag
   that waives tests at observation time.
-- Publication requires all three gates currently approved, every slice merged, an approving
-  validator verdict bound to the branch's current head, and an observed green test-verifier run.
+- Publication requires all three gates currently approved, every slice merged, an observed green
+  test-verifier run, and — for a multi-slice run — an approving validator verdict bound to the branch's
+  current head. A single-slice run does not require a verdict, though a recorded one still binds.
 - A run has exactly one PR, and recording the same one twice is idempotent.
 
 ## Non-goals
@@ -409,7 +412,7 @@ npm run test:prime
 ```
 
 Run sandboxes are gitignored. Sandbox deletion is allowed only during the verified Step 7 completed
-handoff, after the draft PR is recorded and local-ref fetch, control-plane archive, and archive
+handoff, after the pull request is recorded and local-ref fetch, control-plane archive, and archive
 verification all succeed. Bootstrap failures, collisions, push mismatches, and non-completed outcomes
 retain their sandbox for inspection.
 

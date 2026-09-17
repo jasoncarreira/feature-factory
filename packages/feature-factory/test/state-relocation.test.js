@@ -101,7 +101,10 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "Stop\nscheduling heartbeats and await every heartbeat already in flight",
     "Outcome: repository-verify-exhausted",
     "Outcome: retained-lock-error",
-    "status: \"running\"`, `terminal_result: null`",
+    // Was `terminal_result: null`, which no resumed run can satisfy: `resume-needs-human` preserves the
+    // historical result by design, so requiring null reported every resumed run as a retained-lock error.
+    // The property is that the value did not move, not that it is absent.
+    "a `terminal_result` unchanged from the one this invocation began with",
     "binds `SESSION_ID` to the actual stable host-adapter identity",
     "never require session-ID inequality",
     ".factory/$R/artifacts/post-merge-repairs.md",

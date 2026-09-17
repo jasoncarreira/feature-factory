@@ -3,6 +3,175 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.8.9
+
+`work-reviewer` could never approve a planning step. One unqualified sentence made it unsatisfiable.
+
+- **The rule and the code disagreed.** `deriveReviewReady` returns false for any zero-diff observation —
+  correctly, since "no files changed, tests pass" is the shape of a false green for an implementation
+  slice. But `work-reviewer.md` carried an unqualified *"Observed `review_ready` is false … REJECT"*,
+  while a planning subject (`spec-writer`, `work-decomposer`) produces an artifact under
+  `.factory/$R/artifacts/` and no worktree commit. A zero diff is its **correct** shape, so the step could
+  not pass at any attempt count.
+- **The prompt already knew better in two other places** — it scopes observed evidence to "build/test
+  subjects" at one point and tells the reviewer to judge `spec-writer`/`work-decomposer` from the artifact
+  and cited files at another. Only the reject bullet dropped the qualifier. The reject rule now names the
+  subjects that have evidence, and the section states outright that a planning subject is never rejected
+  for missing, empty or not-`review_ready` evidence.
+- **`deriveReviewReady` is unchanged, deliberately.** Relaxing it so an empty diff could be review-ready
+  would destroy the guard that stops a builder who did nothing from reading as reviewable — the exact
+  false green this codebase spends production lines to prevent.
+- **The guard executes its premise.** Rather than pinning one string against another, the test runs
+  `deriveReviewReady` with an empty `files_changed`, proving the rule is unsatisfiable, and only then
+  requires the prompt to scope it and state the planning case. Controls: restoring the unqualified bullet
+  fails, and keeping the scope while deleting the exemption fails a different assertion.
+
+Observed on mimir's `chainlink-1762`, which parked with `spec-writer:blocked(2)` and attributed the
+contradiction to its own adapter policy. It was ours. `work-reviewer.md` had never been covered by the
+drift guards added in 0.8.4 through 0.8.8, all of which pin `WORKFLOW.md`.
+
+- **The Prime extension no longer depends on the host's resolver root.** Observed: Prime Agent failed to
+  load the extension with `Cannot find module 'feature-factory'` on an install where the dependency was
+  present, and where the same specifier resolved from that file's own path under Node by both `import`
+  and `require`. Bare resolution is still tried first, since it is correct when Node imports the file;
+  when it throws, a walk up from this file's own location finds the dependency beside the package, and a
+  build carrying that fallback was confirmed to start where the same install previously failed.
+  The suspected mechanism — Prime creating jiti with its **own** module URL as the resolution root, so a
+  bare specifier is looked up from Prime's directory — is the best explanation for those observations
+  rather than an established cause: three reproductions of that loader shape resolved successfully here.
+  The fallback stands either way. Which resolver is doing the asking is the host's business; where a
+  package manager put a declared dependency is not.
+- **And when it genuinely is missing, the error says what to do.** Previously it propagated the resolver's
+  bare
+  `Cannot find module 'feature-factory'`, which the host prints under "Failed to load extension" and which
+  names no remedy. It now identifies the file resolution was attempted from, gives the reinstall command,
+  and points at the other possibility — a host loading the extension from somewhere other than its
+  installed path, since resolution is relative to that file. The original resolver error is preserved as
+  `cause`. Reported from a global install where the dependency was in fact present and the same specifier
+  resolved correctly when asked directly from that path, which is exactly the case the old message could
+  not distinguish from a missing package.
+
+### Ten contract contradictions, found by audit rather than by a run
+
+An outside scan for this defect class turned up ten more. All ten were verified against the code before
+being fixed; all ten were real. Two came from the release series that was fixing this class.
+
+1. **Approved test waivers became reviewer blockers.** `WORKFLOW.md` exempts a slice with an empty
+   ratified `test_plan` and `deriveReviewReady` honours it, while the reviewer blocked on "an AC unmet or
+   untested" with no qualifier — so a ratified docs-only slice was rejected forever.
+2. **Required regeneration read as prohibited editing.** The reviewer banned "edits to vendored or
+   generated trees" absolutely; `frontend-builder` correctly requires the source-owning slice to
+   regenerate. Only hand-editing is prohibited.
+3. **`test-verifier`'s claim described a different diff from its observation.** Its prompt said the
+   orchestrator passes its claim to `observe --claim`; the integration observation covers the whole
+   integrated diff and passes no claim, so following the prompt manufactured a `claim_mismatch`.
+4. **The fresh-init sequence was imposed on existing runs.** The OpenCode skill required `init` before any
+   state read; the workflow requires selecting an existing manifest and never initializing it again. This
+   was the 0.8.5 ordering, correct to state and wrong to state unconditionally.
+5. **"Park on any stop" erased intentional nonterminal exits.** Added to both adapters in 0.8.5. An
+   interactive `stop` is an unlocked nonterminal stop the contract says not to terminalize, and clean
+   verification exhaustion forbids terminalizing too.
+6. **Verification exhaustion assumed the run had never parked.** It required `terminal_result: null`,
+   which no resumed run can satisfy, since resume preserves the historical result by design.
+7. **Configuration validation restated an obsolete schema** — "four required properties plus optional
+   `verify_timeout_ms`" against an actual three required and four optional. It now points at the
+   authoritative statement instead of restating a shape that goes stale.
+8. **Headless parking waited for an impossible status.** `terminal:needs-human` cannot occur: `next` names
+   terminal only for `completed`, `partial` and `blocked`, so a parked run still reports a resume action.
+9. **The reviewer granted an integration waiver that does not exist** — WRITTEN-NOT-RUN for
+   `test-verifier`, where the workflow says there is no waiver.
+10. **The root README dropped two qualifiers** — an unconditional `gh pr create --draft`, and a validator
+    verdict required without the single-slice exemption.
+
+**The guard now covers where restatements live.** 0.8.6 derived a rule — prose naming a branch outcome
+must name the selector that chooses it — and scoped it to `WORKFLOW.md`. That scope is why #10 survived it.
+The rule now runs over every shipped prose document, including fenced examples, which is the shape #10
+actually took; each adapter runs the same check over its own skill using its own bundled workflow, so no
+package reaches into another. It also moved from line to paragraph granularity, because a correctly
+qualified sentence routinely wraps the selector onto the line above.
+
+### A second audit pass: four regressions in the first, and five pre-existing defects
+
+The first pass was re-reviewed. It found four problems **in those fixes** and five pre-existing defects
+reproduced through the CLI. All are fixed here.
+
+**In the first pass's fixes.** The empty-`test_plan` waiver was written as an exception to a conjunction,
+so it waived "acceptance is implemented" as well as test coverage, and a closing sentence excused a missing
+observed *diff*. It now waives test execution only. The OpenCode resume exception permitted candidate
+reads the canonical opening still forbade, and pointed at candidate paths defined only in the file not yet
+readable — the opening now allows that bounded lookup and the skill states the paths inline. Exhaustion's
+corrected check kept three stale `terminal_result: null` restatements, including the required report, so
+the check passed while the report lied. And the reviewer still rejected any producer/observation file-list
+disagreement, which for `test-verifier` is the integrated diff and legitimately contains builder files.
+
+**Pre-existing, and reproduced through the CLI.** A reviewed step consumed nothing: `accepted` was
+recorded against a missing review file, a REJECT with blocking fixes, and an approval naming a nonexistent
+commit. A `pre_pr` approval named no commit, so a single-slice run — which skips the validator that
+carries that binding — could approve at A, commit B, re-observe tests at B and publish under the older
+approval; the gate already observed the head to prove readiness and now records it. An accepted step could
+not record a rejection, so a Gate 2 revision could record success but never its REJECT. A NO-GO finding in
+production source had no legal path and is now an explicit park rather than an instruction the contract
+cannot carry out. Autonomous Gate 3 required the validator that single-slice runs must skip. And a
+background driver was told to read durable state only through `status`, while the workflow requires direct
+manifest reads for fields `status` does not expose.
+
+**The guard, again.** Its inventory listed two of eleven specialist prompts, the adapter checks stripped
+fences, and a `DRAFT PR` chain diagram survived in two files. Inventory is now every document this package
+owns, fences included, and each adapter checks its own examples too. Its limits are now stated in the test
+rather than implied: it matches tokens in a block and cannot tell whether a qualifier *governs* an
+outcome, so `"Read PR_DRAFT for logging. Always publish a draft PR."` passes and
+`"Never assume the result is a draft PR."` fails. It catches the shape every defect in this series took —
+an outcome stated with no selector near it — and nothing subtler.
+
+### A third pass: three false greens in the second pass's production code
+
+The re-review reproduced all three through the CLI, and none needed a contrived input.
+
+- **A review was matched by subject and verdict but not by attempt.** Accept attempt 1, record
+  `running --attempts 2`, then accept again **omitting `--review-ref`** — the reference fallback
+  re-consumed attempt 1's approval. Omitting a flag was enough.
+- **`test-verifier` inherited the planning-subject exemption.** A planning subject has no commit for its
+  review to name, which is why that check omits the head binding a slice merge requires. The verifier
+  judges the integrated branch and does have one, so a review naming a nonexistent commit was accepted.
+- **Reopening an accepted step was allowed on any raised attempt**, which reopened planning work after the
+  slices derived from it were seeded, and reopened steps on completed, blocked and partial runs. A
+  revision is narrower than a raised attempt.
+
+Also fixed: the pre-init instructions now state the `$R` and `$FEATURE_BRANCH` derivations inline rather
+than pointing at a file that cannot be read yet; the existing-run lookup spells out
+`<sandbox_path>/.factory/$R/WORKFLOW.md`, since `status` reports no run directory; the guard's document
+inventory omitted the canonical workflow's own fences, which is how a `DRAFT PR` diagram survived in the
+document the rule is derived from; and the reviewer prompt now states the repair-evidence substitution,
+so the supported recovery path is not rejected for lacking ordinary evidence.
+
+The gate-head binding was checked against the repair path and showed no regression, including the case
+where repair evidence substitutes for ordinary verifier evidence.
+
+The five refusals are pinned as regressions rather than as a fixture adjusted until it passes — the
+fixture passing is what hid all five.
+
+### A fourth pass
+
+- **Publication ignored the step rows.** Accept the verifier at attempt 1, approve Gate 3, then record a
+  genuine REJECT at attempt 2 — and the run still published under the older approval. Permitting verifier
+  revisions is what made that reachable, so allowing the revision had to bring the approval rule with it:
+  the verifier's row must be settled as accepted.
+- **Revision scoping ran only on a status change**, so `accepted@1 → accepted@2` skipped every
+  restriction, terminal runs included. That is precisely what a driver recording only the successful final
+  result produces. Any departure from the settled row is a revision now; exact same-attempt re-acceptance,
+  which is what a resumed driver re-records, stays free.
+- **The inlined run-id derivation was a summary, and summaries of it pick different runs.**
+  `implement ABC-123 login` became `implement-abc-123-login` rather than `abc-123`, `café` became `caf`
+  rather than `cafe`, and the branch fallback and both multiple-key refusals were missing — before `init`,
+  which is early enough to create the wrong run. It is now copied verbatim and bound by byte equality,
+  like the init invocation beside it.
+- **The regression named for the fallback did not exercise the fallback.** It supplied `--review-ref`
+  explicitly against a run with no recorded step. It now pins the real sequence — accept attempt 1, reopen
+  at attempt 2, accept with no reference flag — and a companion case proves the fallback still works when
+  the stored approval *is* for the current attempt.
+
+Production moves 4682 → 4774, within the 4775 tripwire, across two explicit operator instructions.
+
 ## 0.8.8
 
 `status --json` projects step and slice rows as structured records. **Breaking for anyone parsing the

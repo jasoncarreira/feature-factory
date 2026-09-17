@@ -106,6 +106,11 @@ const NEEDS_HUMAN_PROSE = [
   ["report", "Report top-level needs-human as parked with its reason and explicit factory resume command.", "report needs-human as final"],
   ["retention", "Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.", "the retained sandbox cannot resume"],
   ["failed-gate", "An autonomous failed gate parks top-level needs-human; fix the durable gate cause before explicit factory resume.", "a failed gate permanently ends the run"],
+  // A NO-GO finding in production source: every slice is merged, a merged slice cannot reopen or
+  // redispatch, seeding is one-time, and the integration fix is test-only -- so the contract used to
+  // instruct an action it cannot carry out. Parking is the honest outcome; the forbidden claim is the
+  // reopen that was being implied.
+  ["nogo-production", "finding in production source has no legal path at this point and must **park top-level needs-human**", "reopen the merged slice"],
   ["gate-restart", "After an autonomous needs-human gate stop, explicitly resume only after the existing pre-lock and ownership checks pass.", "start a replacement run"],
   ["bootstrap-resume-parked", "For configured order 7, the CLI binds the exact raw `run.json` bytes, the validated parked manifest, a forward `updated_at`, and the exact fresh owner before running bootstrap while durable status remains `needs-human`.", "bootstrap changes durable status before execution"],
   ["bootstrap-resume-failure", "An ordinary failure with intact bindings records the exact command and integer or `null` result, advances `updated_at`, remains `needs-human`, preserves progress and the historical result, and refuses; a later explicit resume reruns bootstrap.", "discards the historical result"],

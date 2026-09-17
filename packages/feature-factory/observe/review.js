@@ -281,6 +281,23 @@ export function assertPublicationReady({ runDir, state, runId, repo, observeHead
   if (validator && head !== validator.reviewed_head) {
     refuse(`the validator judged ${String(validator.reviewed_head).slice(0, 12)} but the integration head is ${head.slice(0, 12)}`);
   }
+  // Without a validator nothing else binds the approval to a commit, and a single-slice run skips the
+  // validator by design -- so approving Gate 3 at A, committing B and re-observing tests at B published
+  // under the older approval. Reproduced through the CLI. A gate record written before this field existed
+  // cannot be bound and is left to the contract's instruction rather than refused retroactively.
+  const approvedHead = state.gates?.pre_pr?.reviewed_head ?? null;
+  if (!validator && approvedHead && head !== approvedHead) {
+    refuse(`Gate 3 approved ${String(approvedHead).slice(0, 12)} but the integration head is ${head.slice(0, 12)}; re-approve the gate for the current head`);
+  }
+  // Publication read gates, slices, evidence and the validator, and never the step rows -- so a verifier
+  // revision recorded AFTER Gate 3 was approved did not reach it: accept the verifier at attempt 1,
+  // approve the gate, then record a genuine REJECT at attempt 2, and publication still succeeded under
+  // the older approval. Reproduced through the CLI. Permitting verifier revisions is what made this
+  // reachable, so the approval rule has to follow: the verifier's own row must be settled as accepted.
+  const verifier = (state.steps ?? []).find((step) => step.agent === "test-verifier") ?? null;
+  if (verifier && verifier.status !== "accepted") {
+    refuse(`test-verifier is ${verifier.status} at attempt ${verifier.attempts}; accept its resolved revision before publishing`);
+  }
 
   let repair;
   try {

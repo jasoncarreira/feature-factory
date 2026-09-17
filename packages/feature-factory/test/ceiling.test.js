@@ -1063,7 +1063,50 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // step projection could have reverted to display strings and passed. Both read as coverage and proved
     // nothing; both were caught by running the control rather than by the suite going green. Each now sits
     // at the first fixture where the record it checks actually exists.
-    assert.equal(total, 4682, "proving the publication happened lands at 4682 production lines");
+    // 4682 -> 4724, and the tripwire 4700 -> 4750 on the operator's explicit instruction ("raise it to
+    // 4750"), alongside the instruction to fix the audit's pre-existing findings as well as the ones this
+    // PR introduced -- given knowing three of them are state-machine defects rather than prose. Reproduced through
+    // the CLI by the auditor, each of them:
+    //
+    // - A reviewed step consumed nothing. `accepted` was recorded against a missing review file, a REJECT
+    //   with blocking fixes, and an approval naming a nonexistent commit. The reference was stored and
+    //   never read, which made the README's enforcement claim and the workflow's "must APPROVE before you
+    //   accept that step" instruction rather than fact.
+    // - A `pre_pr` approval named no commit, so on a single-slice run -- which skips the validator that
+    //   carries that binding for multi-slice runs -- approving at A, committing B and re-observing tests
+    //   at B published under the older approval. Fresh evidence is not fresh approval. The gate already
+    //   observed the head to prove readiness; it now records it, and publication compares it.
+    // - An accepted step could not record a rejection, so a Gate 2 revision could record its success and
+    //   never its REJECT. Reopening is legal only with a raised attempt, which is what a revision is.
+    // 4724 -> 4760, and the tripwire 4750 -> 4775 on the operator's explicit instruction ("raise it to
+    // 4775"), given after being shown the measured overage and what bought it. The 4750 authorization was
+    // given when the count was 4724; a re-review then found three false greens in the production code
+    // added earlier in this same change, and closing them cost 36 lines:
+    //
+    // - A review was matched by subject and verdict but not by ATTEMPT, so accepting attempt 1, recording
+    //   `running --attempts 2` and then accepting again with no `--review-ref` re-consumed attempt 1's
+    //   approval through the reference fallback. Omitting a flag was enough; nothing had to be contrived.
+    // - `test-verifier` inherited the planning-subject exemption from the head binding. A planning subject
+    //   has no commit to name; the verifier judges the integrated branch and does, so a review naming a
+    //   commit that does not exist was accepted.
+    // - Reopening an accepted step was allowed on any raised attempt, which reopened planning work after
+    //   the slices derived from it were seeded, and reopened steps on completed, blocked and partial runs.
+    //   A revision is narrower than a raised attempt.
+    //
+    // Nothing was trimmed to fit. The alternative offered was dropping one of the three, which would have
+    // left a false green in code this PR introduced.
+    // 4760 -> 4774, inside the 4775 tripwire already authorized, and nothing was trimmed to reach it.
+    // A fourth review pass found two more in the code added above, both reproduced through the CLI:
+    //
+    // - Publication read gates, slices, evidence and the validator, and never the step rows. So a verifier
+    //   REJECT recorded AFTER Gate 3 was approved did not reach it, and the run published under the older
+    //   approval. Permitting verifier revisions is what made that reachable, so allowing the revision had
+    //   to come with the approval rule that follows from it.
+    // - The revision scoping ran only when the status changed, so accepted@1 -> accepted@2 skipped every
+    //   restriction, on a terminal run included -- which is exactly what a driver recording only the
+    //   successful final result produces. Any departure from the settled row is a revision; only exact
+    //   same-attempt re-acceptance, which is what a resumed driver re-records, stays free.
+    assert.equal(total, 4774, "proving the publication happened lands at 4774 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1094,7 +1137,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
-    assert.ok(total <= 4700, `production source is ${total} lines; the tripwire is 4700`);
+    assert.ok(total <= 4775, `production source is ${total} lines; the tripwire is 4775`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

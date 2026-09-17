@@ -45,7 +45,7 @@ describe("OpenCode skill adapter", () => {
     // version told the driver to read the staged workflow "before any state read" while the intake it also
     // mandates must read `$O/.factory.json` before `init` -- a contradiction a driver resolves by
     // initializing first, which is the original defect. Third review finding.
-    const order = ["1. **Admission**", "2. **Repository resolver intake**", "3. **`factory init`**", "4. **Read that staged file completely**"];
+    const order = ["1. **Admission**", "2. **Repository resolver intake**", "3. **Reach the staged canonical workflow.**", "4. **Read that staged file completely**"];
     let cursor = -1;
     for (const step of order) {
       const at = skill.indexOf(step);
@@ -80,6 +80,29 @@ describe("OpenCode skill adapter", () => {
     // the workspace and `external_directory` is denied for every agent, so a run depending on it fails on a
     // permission refusal. These pin the reordering, one fragment per line so the assertion can match.
     assert.match(skill, /`factory init` stages the canonical workflow at the `workflow` path/u);
+    // The same rule 0.8.6 applied to WORKFLOW.md, applied to this skill. Scoping it to the canonical
+    // contract is why an unconditional `--draft` survived in README.md until an outside audit found it;
+    // a rule that holds for the contract holds wherever the contract is restated. Selectors come from the
+    // WORKFLOW.md this package bundles, so nothing here reaches into another package.
+    const bundled = readFileSync(new URL("../skills/feature/WORKFLOW.md", import.meta.url), "utf8");
+    const selectors = new Set();
+    for (const [, body] of bundled.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)) {
+      for (const [, name] of body.matchAll(/(?:if\s+\[{1,2}\s+|case\s+|elif\s+\[{1,2}\s+)"?\$\{?(\w+)\}?"?/gu)) selectors.add(name);
+    }
+    assert.ok(selectors.has("PR_DRAFT"), "the bundled workflow must still expose PR_DRAFT, or this check is vacuous");
+    const skillProse = skill.replace(/```[a-z]*\n[\s\S]*?```/gu, "");
+    const offending = skillProse.split(/\n\s*\n/u)
+      .filter((para) => /draft PR\b|\bdraft publication\b|PR is a draft\b/iu.test(para) && !/PR_DRAFT|pr_draft/iu.test(para));
+    assert.deepEqual(offending, [],
+      `the skill states a PR_DRAFT outcome as if it were fixed:\n  ${offending.join("\n  ")}`);
+    // Fences too. The first version of this guard stripped them, so appending an unconditional
+    // ```sh\ngh pr create --draft\n``` to the skill passed -- which is exactly the shape the README
+    // defect took. Checked over the whole file, examples included.
+    const inFences = skill.split(/\n\s*\n/u)
+      .filter((block) => /gh pr create --draft|\bDRAFT PR\b/u.test(block) && !/PR_DRAFT|pr_draft/iu.test(block));
+    assert.deepEqual(inFences, [],
+      `the skill shows an unconditional draft outcome in an example:\n  ${inFences.join("\n  ")}`);
+
     // ENFORCEMENT, not instruction: this prevents a false green. A driver runs `factory init` at step 3,
     // before the canonical workflow is readable, so this skill is the only place the invocation can come
     // from -- and it used to describe init only as three isolated flag fragments (`--pr-base`,
@@ -93,9 +116,38 @@ describe("OpenCode skill adapter", () => {
       `the canonical workflow no longer carries a single --json-terminated init block: ${canonicalInit}`);
     assert.ok(skill.includes(canonicalInit),
       "SKILL.md must carry the canonical init invocation verbatim; step 3 runs it before the workflow exists");
+    // The run-id derivation, on the same terms and for a sharper reason: a SUMMARY of it was written here
+    // first and selected different runs than the canonical algorithm -- `implement ABC-123 login` became
+    // `implement-abc-123-login` rather than `abc-123`, `café` became `caf` rather than `cafe`, and the
+    // branch fallback and both multiple-key refusals were missing. That happens before init, so the wrong
+    // run is created before any driver can notice the documents disagree. Byte equality, not paraphrase.
+    // TWO regions, because the algorithm and the definition it depends on are not contiguous in either
+    // document. The first version of this bound only the algorithm, whose range starts after the
+    // ticket-token definition -- so the definition was copied correctly and then left unprotected, free to
+    // drift back into a paraphrase exactly as the algorithm had. "One distinct ticket key" is not a rule
+    // until something says what a ticket key is.
+    const region = (from, to) => {
+      const source = String(canonicalWorkflow);
+      const start = source.indexOf(from);
+      const end = source.indexOf(to);
+      assert.ok(start >= 0 && end > start, `the canonical markers must still bound this region: ${from}`);
+      return source.slice(start, end + to.length);
+    };
+    const ticketToken = region("1. **Ticket?** Collect standalone case-insensitive tokens matching",
+      "Defer branch\n   fallback until `O` is known.");
+    const canonicalDerivation = region("If resolution did not already bind `R`",
+      "`cannot derive a canonical run id; no session or run created.`");
+    assert.ok(ticketToken.includes("[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*"),
+      "the token region must carry the pattern a ticket key is recognised by");
+    assert.ok(canonicalDerivation.length > 600 && canonicalDerivation.includes("ambiguous branch ticket keys"),
+      "the derivation region must span the whole algorithm");
+    for (const [label, text] of [["ticket-token definition", ticketToken], ["run-id derivation", canonicalDerivation]]) {
+      assert.ok(skill.includes(text),
+        `SKILL.md must carry the canonical ${label} verbatim; a summary of this picked different runs`);
+    }
     assert.match(skill, /`--json` is mandatory\./u,
       "the skill must say --json is mandatory, which is the flag whose absence stranded a run");
-    assert.match(skill, /before any state read, dispatch, gate, or `?factory`? command other\s+than `init` itself/u);
+    assert.match(skill, /before any dispatch, gate, further state read, or `?factory`?\s+command other than the `init` or `status` named above/u);
     assert.match(skill, /Do not read `WORKFLOW\.md` next to this file/u);
     assert.match(skill, /feature_background/u);
     assert.match(skill, /FACTORY_SESSION_ID/u);

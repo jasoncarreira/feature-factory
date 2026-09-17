@@ -90,6 +90,29 @@ describe("Prime package contract", () => {
     }
     assert.ok(skill.indexOf("This is the closed pre-context order:") < skill.indexOf("Only after successful admission"));
     assert.equal(workflow, canonicalWorkflow);
+    // The same rule 0.8.6 applied to WORKFLOW.md, applied to this skill. Scoping it to the canonical
+    // contract is why an unconditional `--draft` survived in README.md until an outside audit found it;
+    // a rule that holds for the contract holds wherever the contract is restated. Selectors come from the
+    // WORKFLOW.md this package bundles, so nothing here reaches into another package.
+    const bundled = readFileSync(new URL("../skills/feature/WORKFLOW.md", import.meta.url), "utf8");
+    const selectors = new Set();
+    for (const [, body] of bundled.matchAll(/```[a-z]*\n([\s\S]*?)```/gu)) {
+      for (const [, name] of body.matchAll(/(?:if\s+\[{1,2}\s+|case\s+|elif\s+\[{1,2}\s+)"?\$\{?(\w+)\}?"?/gu)) selectors.add(name);
+    }
+    assert.ok(selectors.has("PR_DRAFT"), "the bundled workflow must still expose PR_DRAFT, or this check is vacuous");
+    const skillProse = skill.replace(/```[a-z]*\n[\s\S]*?```/gu, "");
+    const offending = skillProse.split(/\n\s*\n/u)
+      .filter((para) => /draft PR\b|\bdraft publication\b|PR is a draft\b/iu.test(para) && !/PR_DRAFT|pr_draft/iu.test(para));
+    assert.deepEqual(offending, [],
+      `the skill states a PR_DRAFT outcome as if it were fixed:\n  ${offending.join("\n  ")}`);
+    // Fences too. The first version of this guard stripped them, so appending an unconditional
+    // ```sh\ngh pr create --draft\n``` to the skill passed -- which is exactly the shape the README
+    // defect took. Checked over the whole file, examples included.
+    const inFences = skill.split(/\n\s*\n/u)
+      .filter((block) => /gh pr create --draft|\bDRAFT PR\b/u.test(block) && !/PR_DRAFT|pr_draft/iu.test(block));
+    assert.deepEqual(inFences, [],
+      `the skill shows an unconditional draft outcome in an example:\n  ${inFences.join("\n  ")}`);
+
     // ENFORCEMENT, not instruction: this prevents a false green. Prime does load the canonical workflow
     // before init, so unlike OpenCode it is not bootstrapping blind -- but a skill that describes init
     // only as isolated flag fragments still invites a driver to assemble one, and on OpenCode exactly

@@ -31,7 +31,12 @@ export const MODES = Object.freeze(["interactive", "headless", "autonomous"]);
 
 export const GATE_NAMES = Object.freeze(["story", "brief", "pre_pr"]);
 export const GATE_STATUSES = Object.freeze(["pending", "approved", "changes", "stop"]);
-export const GATE_KEYS = Object.freeze(["status", "at", "artifact"]);
+// `reviewed_head` is the integration head a `pre_pr` approval judged. Without it nothing bound a human
+// approval to a commit, so on a single-slice run -- which skips the validator that carries that binding
+// for multi-slice runs -- approving at A, committing B and re-observing tests at B published under the
+// older approval. Fresh evidence is not fresh approval. Optional, because every other gate has no head
+// to name and a manifest written before this field exists stays valid.
+export const GATE_KEYS = Object.freeze(["status", "at", "artifact", "reviewed_head"]);
 
 export const STEP_STATUSES = Object.freeze(["running", "accepted", "rejected", "blocked"]);
 export const STEP_KEYS = Object.freeze(["agent", "status", "attempts", "review_ref", "evidence_ref"]);
@@ -143,6 +148,7 @@ function gates(errors, value) {
     if (gate === undefined) continue;
     const path = `run.gates.${name}`;
     if (!object(errors, gate, path, GATE_KEYS)) continue;
+    if (gate.reviewed_head !== null && gate.reviewed_head !== undefined) optionalPattern(errors, gate, "reviewed_head", SHA, path);
     enumValue(errors, gate, "status", GATE_STATUSES, path);
     if (gate.at !== null) optionalPattern(errors, gate, "at", ISO, path);
     if (gate.artifact !== undefined && gate.artifact !== null) optionalString(errors, gate, "artifact", path);
