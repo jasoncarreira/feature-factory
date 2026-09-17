@@ -191,8 +191,22 @@ left by an earlier park: neither is evidence for this park. Publishing again is 
 
 For top-level needs-human, status exposes the durable next action, but no command may execute it before explicit factory resume.
 Retain the sandbox for top-level needs-human while parked, then explicitly resume it after the external fix.
-A park that asks a question about the request itself -- a contradiction between criteria, a scope lock,
-or a pinned constraint -- is not fixed by resuming. Resume continues from the existing manifest and
+**An operator answers a parked run with
+`factory decide "$R" --text "<decision>" --session "$SESSION_ID" --repo "$RUN_REPO"`.**
+It is the only channel into a parked run: `resume` carries no message, and every command that could carry
+one is refused while parked, so before this the instruction "record the decision in the issue" named the
+one place a retained run never re-reads. The text is appended to `artifacts/operator-decisions.md` and
+bound to the manifest by digest, and qualified status reports `operator_decision`.
+
+When `status` reports a non-null `operator_decision`, read that artifact in full before doing anything
+else on resume, and treat it as authoritative over the brief on the points it names -- it is later than
+the brief and it is the human's answer to a question this run asked. Say in the next gate or park report
+how it was applied. A decision that names no course of action is not an instruction to improvise; ask
+again rather than guessing. Recording is enforced; reading it is not, because no CLI can make an agent
+read a file, and the digest is what lets a supervisor tell an applied decision from an ignored one.
+
+A park that asks a question the decision cannot answer -- one that changes the request itself, so the
+story or brief would have to be regenerated -- is still not fixed by resuming. Resume continues from the existing manifest and
 `status.next`; it does not re-resolve the issue, re-read `ISSUE_PAYLOAD`, or regenerate the story or
 brief, so an edited issue body cannot reach the artifacts a retained run will keep using. The supported
 route is: record the decision in the issue body, then have the operator remove the retained sandbox
@@ -1763,12 +1777,7 @@ callouts, remaining risks, and a `## Post-merge test-only repairs` section. When
 that section states so. Otherwise it summarizes every journal record in order, including introducing
 merge, attempt, Starting head, trigger result, sorted test paths, cause, property outcome and every
 property loss, repair commit, post-repair result, and final or active status. No attempt, outcome, or
-property loss may be omitted or collapsed into only the latest result. Include the measured landed
-production count using this exact line template:
-
-```text
-Production source: <landed count> / 4500
-```
+property loss may be omitted or collapsed into only the latest result.
 
 Present that current artifact and open the gate with:
 
@@ -1962,11 +1971,13 @@ redundancy: between the approval and this call the integration head can move, an
 describes a head nobody validated. If `pr` refuses for that reason, the PR you just opened is ahead of
 what was approved — say so at the gate rather than recording it anyway.
 
-The PR body includes the same measured landed count using this exact line template:
-
-```text
-Production source ceiling: <landed count> / 4500
-```
+This contract sets **no limit on how much code a change may add**, and states none for a driver to
+measure against. A production-line ceiling is a property of a particular repository, decided by the people
+who maintain it; a run learns of one only if the request or the repository states it, and then it is that
+project's number and not a default carried in here. A shipped `4500` -- this document's own former text,
+copied from the ledger of the repository that wrote it -- reached a consumer's run as though it were their
+policy, and a six-hour build parked asking permission to exceed a limit nobody in that project had set.
+Report what a change landed if the request asks for it; do not judge it against a number from here.
 
 When `.factory/$R/artifacts/post-merge-repairs.md` exists, validate it again and include every attempt under
 `## Post-merge test-only repairs` in `BODY_FILE`: introducing merge, attempt, Starting head, trigger and

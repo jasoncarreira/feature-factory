@@ -98,7 +98,7 @@ When the subject is a **class-wide** requirement — one that **cannot be establ
   - No **hand**-edits to vendored or generated trees. Regeneration is different and is required: the
     slice that changes the source owns regenerating what derives from it, so a regenerated client or
     type set in that slice's lane is expected output, not a finding.
-  - No stray code comments.
+  - Code comments follow the target repository's documented policy; do not invent a blanket ban.
   - **Slice discipline:** the diff stays within the slice's `paths` (out-of-lane edits are a finding).
   - The slice's `acceptance` is actually implemented. This is never waived.
   - The observed tests cover that acceptance — **unless the slice's ratified `test_plan` is empty**,

@@ -575,6 +575,8 @@ runs were finished by hand for causes as small as a wrong number in an issue. `n
 
 ```sh
 factory lock <run-id> claim --session "$SESSION_ID" --branch <branch> --repo <sandbox>
+# After verifying the fresh owner and unchanged parked result, optionally record a decision:
+factory decide <run-id> --text <decision> --session "$SESSION_ID" --repo <sandbox>
 # Only for a verified missing-path cause on an unmerged slice:
 factory amend-paths <run-id> <slice-id> --add <path> [--add <path> ...] --reason <text> --session "$SESSION_ID" --repo <sandbox>
 factory resume <run-id> --session "$SESSION_ID" --repo <sandbox>
@@ -590,6 +592,22 @@ reseeds. Malformed, privileged, duplicate, already-owned, replayed, and merged-s
 without changing the manifest, and merge continues to refuse any unamended or privileged path. The
 original reason stays recorded after the stop is cleared.
 
+`decide` leaves the run parked. Read the immutable cumulative artifact named by
+`operator_decision.artifact` in the manifest, not an unreferenced file left by failed publication.
+Its `artifacts/operator-decisions-<sha256hex>.md` name and digest identify recorded bytes, not proof of
+application. Apply the decision only to named permitted choices and report how; it cannot change
+ratified paths, `test_plan`, gates, or safety authority. Recheck the same fresh owner, parked status,
+original result, and recorded bytes before explicit resume. If staying parked after a decision or
+amendment, refresh the snapshot with the workflow's existing parked-snapshot procedure and report its
+path or failure. Neither command automatically archives the update.
+
+Explicit `factory resume` copies the current packaged `WORKFLOW.md` into the staged contract before
+unparking; a copy failure leaves the run parked. After success, read it in full as part of resume
+verification, before reconciliation, dispatch, or applying decisions. Keep the publishing-identity guard
+between that verification and reconciliation. An operator may instruct a driver using an older staged
+contract to follow this updated sequence, read the decision, and use the current no-default-code-ceiling
+rule. Preserve run state; no migration or reset is needed. This does not upgrade the retained CLI or
+configuration.
 If the retained sandbox declares `bootstrap`, explicit resume runs it before changing parked status. A failed ordinary attempt remains parked and records its exact command plus integer or unavailable result; after fixing the external dependency, repeat the same explicit resume and require clean zero before continuing. Never edit `run.json` or replace the retained sandbox to bypass bootstrap.
 
 **Where the cause lives decides whether resume can help.** External causes and one narrow durable
@@ -600,9 +618,9 @@ file the operator can commit — fix it and resume the retained sandbox. That is
 the reason `needs-human` stopped being terminal.
 
 *Inside the sandbox* — an omitted unmerged-slice ownership path may use the verified amendment above;
-this changes only authorization history, not source or factory code. If its `bin/factory.js`, skill, or
-`.factory.json` predates the needed fix, there is **no** supported recovery. A sandbox executes its own
-copy of all three; it is a clone, not a view, so a fix installed on the host or committed to the operator
+this changes only authorization history, not source or factory code. If its `bin/factory.js` or
+`.factory.json` predates a required executable fix, the workflow refresh above does not repair it. A sandbox executes its own
+copy of these files; it is a clone, not a view, so a fix installed on the host or committed to the operator
 checkout never reaches it. Nor can the run acquire a fresh one: resume binds the retained sandbox, and
 `factory init` refuses outright while that manifest exists (`run '<id>' already exists at '<sandbox
 manifest>'`).

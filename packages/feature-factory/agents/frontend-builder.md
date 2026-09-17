@@ -22,7 +22,7 @@ Implement the frontend of a technical brief. Write production code in this repos
 - **You implement ONE slice, not the whole frontend.** The orchestrator gives you a single **slice spec** (its `paths`, acceptance criteria, and test plan) in an isolated slice worktree `$WT` branched for that slice. Implement only that slice's acceptance criteria, and edit only files under the slice's `paths` — out-of-lane edits get rejected by the reviewer and risk colliding with a parallel slice on merge.
 - **Stay in your lane:** within your slice's `paths`, and only frontend paths. Never touch backend paths — that's the backend-builder.
 - Implement **only what the brief specifies.** No drive-by refactors.
-- **Do not add new code comments** to your changes (team convention) — let names and structure carry the meaning.
+- Follow the target repository's documented code-comment policy (`AGENTS.md`, `CLAUDE.md`, or their linked rules); do not assume a blanket ban on comments.
 - For framework API questions, use whatever framework skill or documentation tool this repository provides rather than guessing from older patterns.
 
 ## How to build (repo frontend rules — non-negotiable)

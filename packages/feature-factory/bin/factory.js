@@ -35,6 +35,7 @@ export const COMMANDS = Object.freeze({
   status: Object.freeze(["--repo", "--json"]),
   "amend-paths": Object.freeze(["--repo", "--add", "--reason", "--session", "--now", "--json"]),
   resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
+  decide: Object.freeze(["--repo", "--text", "--session", "--now", "--json"]),
   // No --force: `lock <id> steal` is the same operation with a name that says what it
   // does, and two spellings of "take someone else's lock" is one too many.
   lock: Object.freeze(["--repo", "--session", "--branch", "--ttl-ms", "--now", "--json"]),
@@ -649,6 +650,47 @@ const HANDLERS = {
     return emit(flags, { run_id: runId, seeded: next.slices.length, slices: next.slices.map((slice) => slice.id) });
   },
 
+  // Enforcement: publish cumulative decision text separately, then atomically select it in run.json.
+  // A refused transition must not change the artifact the driver was told to read. Unreferenced files
+  // from an interrupted publication are harmless; only operator_decision.artifact is authoritative.
+  async decide([runId], flags) {
+    if (!runId) throw new CliError("factory decide requires <run-id>");
+    if (typeof flags.text !== "string" || !flags.text.trim()) throw new CliError("factory decide requires nonblank --text <decision>");
+    if (typeof flags.session !== "string" || !flags.session.trim()) throw new CliError("factory decide requires nonblank --session <id>");
+    const runDir = runDirFor(flags, runId);
+    const current = readRun(runDir);
+    if (current.status !== "needs-human") {
+      throw new CliError(`factory decide requires current status needs-human; found '${current.status}'`);
+    }
+    const owner = assertFreshSessionOwner(runDir, runId, flags.session, "decide");
+    const at = stamp(flags);
+    if (Date.parse(at) <= Date.parse(current.updated_at)) throw new CliError("decide must move updated_at forwards");
+    const prior = current.operator_decision;
+    const existing = prior ? readFileSync(join(runDir, prior.artifact), "utf8") : "";
+    if (prior && planDigest(Buffer.from(existing)) !== prior.digest) throw new CliError("recorded operator decision does not match its digest");
+    const bytes = Buffer.from(`${existing}${existing ? "\n" : ""}## ${at}\n\n${flags.text.trim()}\n`);
+    const digest = planDigest(bytes);
+    const artifact = join("artifacts", `operator-decisions-${digest.slice(7)}.md`);
+    const absolute = join(runDir, artifact);
+    mkdirSync(dirname(absolute), { recursive: true });
+    if (existsSync(absolute)) {
+      if (!lstatSync(absolute).isFile() || !readFileSync(absolute).equals(bytes)) throw new CliError("operator decision artifact differs from the intended bytes");
+    } else {
+      await writeProtectedFileAtomic(dirname(absolute), basename(absolute), bytes, { createOnly: true });
+    }
+    const next = await transition(runDir, {
+      participants: [{ familyId: "envelope", mode: "decide" }],
+      apply: (state) => {
+        if (!isDeepStrictEqual(state, current)) throw new CliError("run changed while recording the operator decision; retry from current state");
+        return { ...state, updated_at: at, operator_decision: { at, digest, artifact } };
+      },
+      finalGuard: () => {
+        if (!sameSessionOwner(runDir, owner)) throw new CliError("operator decision session ownership changed; current decision was preserved");
+      },
+    });
+    return emit(flags, { run_id: runId, status: next.status, operator_decision: next.operator_decision });
+  },
+
   async ["amend-paths"](positional, flags) {
     if (positional.length !== 2) throw new CliError("factory amend-paths requires exactly <run-id> <slice-id>");
     const [runId, sliceId] = positional;
@@ -1001,6 +1043,8 @@ const HANDLERS = {
       // Both, deliberately. `next_action` is the machine answer; `next` is its rendering, derived from the
       // same record by one formatter so they cannot drift, and kept because the driver contract, the
       // sidebar and a lot of prose name `next: gate:story`.
+      // Identifies the committed decision bytes, not whether the driver applied them.
+      operator_decision: run.operator_decision ?? null,
       next_action: nextActionRecord(run),
       next: nextAction(run),
     });
@@ -1609,6 +1653,7 @@ function usage() {
   factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
   factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID [--now ISO]
+  factory decide <run-id> --text TEXT --session ID [--now ISO]
   factory resume <run-id> --session ID [--now ISO]
   factory reverify-repair <run-id> <repair-record-id> [--repo PATH] [--now ISO] [--json]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]

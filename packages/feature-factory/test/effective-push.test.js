@@ -476,7 +476,11 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "stop before branch handling",
   ], "push refusal effects");
   required(fresh, "stop before branch handling,\nlock claim or steal, dispatch, transition, push, forge command, or further publication.", "push refusal effects");
-  required(gateThree, "Production source: <landed count> / 4500", "Gate 3 source accounting");
+  // Was a pin on `Production source: <landed count> / 4500`. That number was this repository's own ledger
+  // value, copied into a template shipped to every consumer, and it reached a run as though it were the
+  // target project's policy -- a six-hour build parked asking permission to exceed a limit nobody in that
+  // project had set. The contract now states no limit, and the assertion pins that it states none.
+  assert.equal(gateThree.includes("/ 4500"), false, "Gate 3 must not carry a ceiling from this repository");
   ordered(gateThree, [
     "Before every Gate 3 presentation",
     "first validate `.factory/$R/artifacts/post-merge-repairs.md`",
@@ -500,7 +504,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"',
     'gh pr create --base "$PR_BASE" --head "$FEATURE_BRANCH"',
     'factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"',
-    "Production source ceiling: <landed count> / 4500",
+    "This contract sets **no limit on how much code a change may add**",
   ], "Step 6 compare/publication");
   required(publication, "effective boolean `pr_draft` as `PR_DRAFT`", "status policy binding");
   required(publication, "without rereading repository config", "status policy binding");

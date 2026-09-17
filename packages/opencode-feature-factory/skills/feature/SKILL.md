@@ -360,8 +360,8 @@ tracker URL to select a run declares a `resolve` command recognizing those forms
 payload above. Recognition belongs to the declaration for the same reason fetching does: deciding that a
 bare integer is a reference, rather than a feature description, is repository-specific.
 
-This repository declares its own in `.factory.json`, so `205`, `#205`, and the canonical issue URL still
-select run `205` — through that declaration rather than through anything built in.
+For example, a repository may declare a resolver in `.factory.json` that maps `205`, `#205`, and its
+canonical issue URL to run `205`. These forms work only through that declaration, not built-in behavior.
 
 ## Operating modes
 
