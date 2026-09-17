@@ -1095,7 +1095,18 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     //
     // Nothing was trimmed to fit. The alternative offered was dropping one of the three, which would have
     // left a false green in code this PR introduced.
-    assert.equal(total, 4760, "proving the publication happened lands at 4760 production lines");
+    // 4760 -> 4774, inside the 4775 tripwire already authorized, and nothing was trimmed to reach it.
+    // A fourth review pass found two more in the code added above, both reproduced through the CLI:
+    //
+    // - Publication read gates, slices, evidence and the validator, and never the step rows. So a verifier
+    //   REJECT recorded AFTER Gate 3 was approved did not reach it, and the run published under the older
+    //   approval. Permitting verifier revisions is what made that reachable, so allowing the revision had
+    //   to come with the approval rule that follows from it.
+    // - The revision scoping ran only when the status changed, so accepted@1 -> accepted@2 skipped every
+    //   restriction, on a terminal run included -- which is exactly what a driver recording only the
+    //   successful final result produces. Any departure from the settled row is a revision; only exact
+    //   same-attempt re-acceptance, which is what a resumed driver re-records, stays free.
+    assert.equal(total, 4774, "proving the publication happened lands at 4774 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

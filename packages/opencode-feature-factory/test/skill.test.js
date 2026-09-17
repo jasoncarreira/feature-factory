@@ -116,6 +116,20 @@ describe("OpenCode skill adapter", () => {
       `the canonical workflow no longer carries a single --json-terminated init block: ${canonicalInit}`);
     assert.ok(skill.includes(canonicalInit),
       "SKILL.md must carry the canonical init invocation verbatim; step 3 runs it before the workflow exists");
+    // The run-id derivation, on the same terms and for a sharper reason: a SUMMARY of it was written here
+    // first and selected different runs than the canonical algorithm -- `implement ABC-123 login` became
+    // `implement-abc-123-login` rather than `abc-123`, `café` became `caf` rather than `cafe`, and the
+    // branch fallback and both multiple-key refusals were missing. That happens before init, so the wrong
+    // run is created before any driver can notice the documents disagree. Byte equality, not paraphrase.
+    const canonicalDerivation = String(canonicalWorkflow).slice(
+      String(canonicalWorkflow).indexOf("If resolution did not already bind `R`"),
+      String(canonicalWorkflow).indexOf("`cannot derive a canonical run id; no session or run created.`")
+        + "`cannot derive a canonical run id; no session or run created.`".length,
+    );
+    assert.ok(canonicalDerivation.length > 600 && canonicalDerivation.includes("ambiguous branch ticket keys"),
+      "the canonical derivation markers must still bound the whole algorithm");
+    assert.ok(skill.includes(canonicalDerivation),
+      "SKILL.md must carry the canonical run-id derivation verbatim; a summary of it picked different runs");
     assert.match(skill, /`--json` is mandatory\./u,
       "the skill must say --json is mandatory, which is the flag whose absence stranded a run");
     assert.match(skill, /before any dispatch, gate, further state read, or `?factory`?\s+command other than the `init` or `status` named above/u);

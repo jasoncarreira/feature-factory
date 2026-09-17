@@ -150,7 +150,27 @@ where repair evidence substitutes for ordinary verifier evidence.
 The five refusals are pinned as regressions rather than as a fixture adjusted until it passes — the
 fixture passing is what hid all five.
 
-Production moves 4682 → 4760, and the tripwire 4700 → 4775 across two explicit operator instructions.
+### A fourth pass
+
+- **Publication ignored the step rows.** Accept the verifier at attempt 1, approve Gate 3, then record a
+  genuine REJECT at attempt 2 — and the run still published under the older approval. Permitting verifier
+  revisions is what made that reachable, so allowing the revision had to bring the approval rule with it:
+  the verifier's row must be settled as accepted.
+- **Revision scoping ran only on a status change**, so `accepted@1 → accepted@2` skipped every
+  restriction, terminal runs included. That is precisely what a driver recording only the successful final
+  result produces. Any departure from the settled row is a revision now; exact same-attempt re-acceptance,
+  which is what a resumed driver re-records, stays free.
+- **The inlined run-id derivation was a summary, and summaries of it pick different runs.**
+  `implement ABC-123 login` became `implement-abc-123-login` rather than `abc-123`, `café` became `caf`
+  rather than `cafe`, and the branch fallback and both multiple-key refusals were missing — before `init`,
+  which is early enough to create the wrong run. It is now copied verbatim and bound by byte equality,
+  like the init invocation beside it.
+- **The regression named for the fallback did not exercise the fallback.** It supplied `--review-ref`
+  explicitly against a run with no recorded step. It now pins the real sequence — accept attempt 1, reopen
+  at attempt 2, accept with no reference flag — and a companion case proves the fallback still works when
+  the stored approval *is* for the current attempt.
+
+Production moves 4682 → 4774, within the 4775 tripwire, across two explicit operator instructions.
 
 ## 0.8.8
 

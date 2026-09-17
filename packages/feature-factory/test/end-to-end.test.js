@@ -1748,17 +1748,26 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       const wrongHead = writeReview(p.runDir, "test-verifier", "f".repeat(40));
       assert.match(refusal(["--review-ref", wrongHead]), /but the integration head is/u,
         "test-verifier judges the integrated branch, so a review naming another commit must be refused");
-      const staleAttempt = writeReview(p.runDir, "test-verifier", head, { attempt: 1 });
-      assert.match(refusal(["--review-ref", staleAttempt, "--attempts", "2"]),
-        /is for attempt 1, step is at attempt 2/u,
-        "omitting --review-ref on a later attempt must not re-consume the previous approval");
-      const verifierReview = writeReview(p.runDir, "test-verifier", head);
-      assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--review-ref", verifierReview, "--now", NOW(5)]).ok, true);
+      // The headline case, pinned as the sequence it actually is. The first version of this passed
+      // `--review-ref` explicitly against a run with no recorded step, so it proved the attempt comparison
+      // and never touched the fallback it was named for. Caught in review. The real shape: accept attempt
+      // 1, reopen at attempt 2, then accept with NO reference flag, where the stored attempt-1 reference
+      // is what gets picked up.
+      const approvalAt1 = writeReview(p.runDir, "test-verifier", head);
+      assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--review-ref", approvalAt1, "--now", NOW(5)]).ok, true);
+      assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "running", "--attempts", "2", "--now", NOW(5)]).ok, true);
+      const fallback = factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--now", NOW(5)]);
+      assert.equal(fallback.ok, false, "the stored attempt-1 approval must not carry attempt 2");
+      assert.match(fallback.stderr, /is for attempt 1, step is at attempt 2/u);
+      // And the same omission succeeds once the approval is actually for this attempt, so the fallback
+      // itself is preserved rather than disabled.
+      writeReview(p.runDir, "test-verifier", head, { attempt: 2 });
+      assert.equal(factory(p.repo, ["step", RUN, "test-verifier", "accepted", "--now", NOW(5)]).ok, true);
       // The step half of the projection guard, at the first point a step row exists. An exact object,
       // because the vacuous version this replaces would have accepted the old `test-verifier:accepted(1)`
       // display string, which is the shape this release exists to remove.
       assert.deepEqual(factory(p.repo, ["status", RUN, "--json"]).out.steps,
-        [{ agent: "test-verifier", status: "accepted", attempts: 1 }],
+        [{ agent: "test-verifier", status: "accepted", attempts: 2 }],
         "status must project step rows as structured records, not formatted strings");
       assert.equal(Object.hasOwn(runJson(p.runDir), "pr_base"), false);
       // Gate 3 is the last transition before the skill pushes and opens the PR, so the

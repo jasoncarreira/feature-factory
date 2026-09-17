@@ -204,8 +204,13 @@ const steps = contract({
       // the first version of this allowed a raised attempt alone, and that reopened settled planning work
       // after the plan was seeded and reopened steps on completed, blocked and partial runs, none of which
       // any lifecycle asks for. Caught in review, reproduced through the CLI.
-      if (prior.status === "accepted" && step.status !== "accepted") {
-        if (step.attempts === prior.attempts) {
+      // Any departure from the settled row is a revision -- including accepted -> accepted at a higher
+      // attempt, which is what a driver recording only the successful final result produces. Scoping this
+      // to a status change let that path skip every restriction below, on a terminal run included. Exact
+      // same-attempt re-acceptance stays legal, because that is what a resumed driver re-records.
+      const revises = prior.status === "accepted" && (step.status !== "accepted" || step.attempts > prior.attempts);
+      if (revises) {
+        if (step.status !== "accepted" && step.attempts === prior.attempts) {
           throw new Error(`step '${step.agent}' is already accepted; a revision must raise --attempts`);
         }
         if (TERMINAL_STATUSES.includes(candidate.status)) {

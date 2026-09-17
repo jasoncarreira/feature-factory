@@ -120,12 +120,31 @@ workflow is not readable until init stages it. So the complete invocation is rep
 byte from the canonical Step 0 block, and a test fails if the two ever differ. Run exactly this,
 including each bracketed flag only when admission supplied its value:
 
-`$R` and `$FEATURE_BRANCH` are bound before this command, and their rules are stated here because the
-workflow that otherwise defines them is not readable yet. When the configured resolver returns a payload,
-`$R` is its canonical `run_id`. When it exits zero with empty output, derive `$R` from the preserved
-request suffix: lowercase it, replace each run of characters outside `[a-z0-9]` with a single `-`, trim
-leading and trailing `-`, and truncate to a value matching
-`^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; refuse rather than invent one if nothing survives.
+`$R` and `$FEATURE_BRANCH` are bound before this command. Their rules live here because the workflow that
+otherwise defines them is not readable yet, and the run-id rule is reproduced **verbatim** from that
+workflow rather than summarized — a summary of it selected a different run than the canonical algorithm
+does (`implement ABC-123 login` became `implement-abc-123-login` instead of `abc-123`, `café` became
+`caf` instead of `cafe`, and the branch fallback and the multiple-key refusals were missing), and it did
+so *before* init, which is early enough to create the wrong run. A test binds this copy to the canonical
+text.
+
+When the configured resolver returns a payload, `$R` is its canonical `run_id`. Otherwise:
+
+If resolution did not already bind `R` — because no resolver is declared, or a declared one returned zero
+bytes — derive it exactly as follows:
+
+1. If request text contains one distinct ticket key, lowercase it and use it. If it contains more than
+   one, return `ambiguous ticket keys: <sorted lowercase keys>; no session or run created.` before any
+   tool, state, or CLI action.
+2. With no request key, read the invocation checkout's current symbolic branch and apply the identical
+   token and deduplication rule. If it contains more than one distinct key, return
+   `ambiguous branch ticket keys: <sorted lowercase keys>; no session or run created.` Detached HEAD or
+   no branch key continues without one.
+3. With no key, normalize the trimmed derivation copy to NFKD, remove combining marks, lowercase it,
+   replace each maximal sequence outside `[a-z0-9]` with `-`, and strip leading and trailing dashes.
+4. Require the result to match `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; otherwise return exactly
+   `cannot derive a canonical run id; no session or run created.`
+
 `$FEATURE_BRANCH` is the repository's declared override when one exists and otherwise `feature/$R`,
 validated with `git check-ref-format --branch "$FEATURE_BRANCH"`, and its ref must be absent before init.
 

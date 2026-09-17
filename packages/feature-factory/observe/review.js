@@ -289,6 +289,15 @@ export function assertPublicationReady({ runDir, state, runId, repo, observeHead
   if (!validator && approvedHead && head !== approvedHead) {
     refuse(`Gate 3 approved ${String(approvedHead).slice(0, 12)} but the integration head is ${head.slice(0, 12)}; re-approve the gate for the current head`);
   }
+  // Publication read gates, slices, evidence and the validator, and never the step rows -- so a verifier
+  // revision recorded AFTER Gate 3 was approved did not reach it: accept the verifier at attempt 1,
+  // approve the gate, then record a genuine REJECT at attempt 2, and publication still succeeded under
+  // the older approval. Reproduced through the CLI. Permitting verifier revisions is what made this
+  // reachable, so the approval rule has to follow: the verifier's own row must be settled as accepted.
+  const verifier = (state.steps ?? []).find((step) => step.agent === "test-verifier") ?? null;
+  if (verifier && verifier.status !== "accepted") {
+    refuse(`test-verifier is ${verifier.status} at attempt ${verifier.attempts}; resolve it and re-approve Gate 3 before publishing`);
+  }
 
   let repair;
   try {
