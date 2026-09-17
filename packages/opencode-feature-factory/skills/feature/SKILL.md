@@ -128,7 +128,15 @@ does (`implement ABC-123 login` became `implement-abc-123-login` instead of `abc
 so *before* init, which is early enough to create the wrong run. A test binds this copy to the canonical
 text.
 
-When the configured resolver returns a payload, `$R` is its canonical `run_id`. Otherwise:
+When the configured resolver returns a payload, `$R` is its canonical `run_id`. Otherwise the algorithm
+below turns on what counts as a ticket key, so that definition is copied here with it:
+
+1. **Ticket?** Collect standalone case-insensitive tokens matching
+   `[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*`, with each edge bounded by the string edge or a character that is
+   not an ASCII letter or digit. Repeated spellings of the same lowercased key count once. Defer branch
+   fallback until `O` is known.
+
+With that definition:
 
 If resolution did not already bind `R` — because no resolver is declared, or a declared one returned zero
 bytes — derive it exactly as follows:
@@ -145,8 +153,10 @@ bytes — derive it exactly as follows:
 4. Require the result to match `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`; otherwise return exactly
    `cannot derive a canonical run id; no session or run created.`
 
-`$FEATURE_BRANCH` is the repository's declared override when one exists and otherwise `feature/$R`,
-validated with `git check-ref-format --branch "$FEATURE_BRANCH"`, and its ref must be absent before init.
+`$FEATURE_BRANCH` is **explicit intake branch intent** when the request carried it, otherwise
+`feature/$R`; a repository instruction may supply an explicit override. Validate it with
+`git check-ref-format --branch "$FEATURE_BRANCH"`, and require its ref absent before init. Do not ask the
+engineer for a branch or worktree.
 
 ```sh
 INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"

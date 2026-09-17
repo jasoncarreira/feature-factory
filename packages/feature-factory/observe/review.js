@@ -296,7 +296,7 @@ export function assertPublicationReady({ runDir, state, runId, repo, observeHead
   // reachable, so the approval rule has to follow: the verifier's own row must be settled as accepted.
   const verifier = (state.steps ?? []).find((step) => step.agent === "test-verifier") ?? null;
   if (verifier && verifier.status !== "accepted") {
-    refuse(`test-verifier is ${verifier.status} at attempt ${verifier.attempts}; resolve it and re-approve Gate 3 before publishing`);
+    refuse(`test-verifier is ${verifier.status} at attempt ${verifier.attempts}; accept its resolved revision before publishing`);
   }
 
   let repair;
