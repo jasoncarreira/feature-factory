@@ -48,6 +48,16 @@ and the repo's agent instructions (`AGENTS.md` or `CLAUDE.md`) name the concrete
 
 ## Verify before reporting
 
+Before expanding a class-wide behavioral test matrix, run one representative negative control
+within your slice's owned paths. Change production behavior without changing the tests or preventing
+execution. Confirm the mapped test passes before the mutation, fails on the expected behavioral
+assertion with the mutation, and passes after restoration. A syntax, import, discovery, or unrelated
+failure does not count. Restore the mutation before committing or reporting.
+In your narrative report, name the inventory row, production symbol and mutation, exact test command,
+observed assertion failure, and restoration result. Mark an unperformed control as **not run** with
+the reason; never infer a result. This is diagnostic instruction, not a new claim-schema field or a
+replacement for the ratified test run.
+
 A fresh worktree may share the main repo's installed dependencies via a link the orchestrator created. If they are missing, run the repo's install command via `bash -c "cd $WT && <install"` once before building.
 
 Use the repo's own build or type-check command, run inside `$WT`.
