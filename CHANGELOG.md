@@ -3,6 +3,34 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.9.1
+
+A patch: shipped prompt text only. No command, field or contract shape changed, but `FACTORY_VERSION` is
+matched exactly, so a consumer picks this up deliberately rather than silently.
+
+- **A class-wide behavioral test matrix starts with one proven negative control.** mimir's
+  `chainlink-1762` exhausted five build attempts on one defect that reappeared under a different name each
+  round: the tests established that 117 call sites were *enumerated* — AST references, test names — where
+  the acceptance criterion required each one to *behave*. The reviewer was right five times, and nothing in
+  the contract told the builder what would settle it. Builders now mutate production behavior within their
+  owned paths without changing the tests or preventing execution, confirm the mapped test passes before,
+  **fails on the expected behavioral assertion** with the mutation, and passes after restoration, then
+  restore before committing. A syntax, import, discovery or unrelated failure does not count — that
+  qualifier is the mechanism, since an inventory test really can fail under a mutation that renames the
+  symbol it searches for, and a control accepting any failure certifies the defect it exists to expose.
+  The report names the row, symbol, mutation, exact command, observed assertion failure and restoration;
+  an unperformed control is marked **not run** with its reason rather than inferred.
+- **The reviewer reads that report as diagnostic information, not evidence.** Naming a symbol, a test and
+  an assertion makes a claim checkable, not verified, and one control validates the approach rather than
+  the other 116 members. It cuts both ways and the prompt says both: a missing attestation alone is not a
+  blocker, inadequate behavioral coverage is, and an attestation alone is not grounds to approve. Shared
+  parameterized tests are explicitly valid — 117 rows needing behavioral proof is not 117 test cases.
+- **Instruction, not enforcement.** A CLI cannot confirm a mutation was performed and restored without
+  performing it again, so a schema field here would record an unverified claim while looking like a gate.
+  The prompt says so inline, so the next reader does not add the field.
+
+Ledger unchanged at 4860; no production line changed.
+
 ## 0.9.0
 
 A minor bump, not a patch, because `FACTORY_VERSION` is matched exactly: a consumer pinned to a version is
