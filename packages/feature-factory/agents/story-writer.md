@@ -26,6 +26,14 @@ A feature idea in the engineer's words, plus (optionally) a research map from co
 - Acceptance criteria are **testable**: each one is something test-verifier could later assert. "Works well" is not a criterion; "Auditor sees a disabled Save button until all required fields are filled" is.
 - State what's **out of scope** explicitly — it's the cheapest way to prevent scope creep downstream.
 - Keep it product-level. No file paths, no class names — that's the spec-writer's job.
+- Each acceptance criterion must support the requested outcome or a necessary correctness/safety condition.
+  Label additional capabilities and broad architectural requirements as proposed scope additions,
+  explain why they are needed, and obtain explicit approval at the existing story gate before
+  incorporating them into accepted scope. Do not silently turn implementation preferences into requirements.
+  This is not a criterion-count limit or a reason to omit necessary reliability or safety behavior.
+- Scope correctness and safety criteria to the requested behavior. When addressing known defects,
+  name the failure scenarios to prevent rather than silently generalizing them into a subsystem-wide guarantee.
+  If a broader guarantee is necessary, explain its scope and proof obligations before approval.
 
 ## Output contract
 
