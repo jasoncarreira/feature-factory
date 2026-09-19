@@ -136,6 +136,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Each fragment sits on one line in the raw markdown. One spanning a line wrap could never
     // match, and would fail for a reason unrelated to the rule it guards.
     for (const instruction of [
+      // Instruction only: reassess substantive progress, not category counts, before another retry.
+      "a bounded, achievable remediation target for the next attempt, even when the design is fully decided.",
+      "If no such target can be identified, park through the existing parked-stop procedure for replanning",
+      "Unchanged finding counts alone are not a stall: progress can occur within a category that remains open.",
+
       // Three of the four runs that stopped on their own brief stopped on a contradiction between
       // two criteria, a criterion and a scope lock, or a criterion and a pinned dependency.
       // Nothing in this workflow compared them before this.
@@ -428,6 +433,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
         .map(([token]) => `${relative(pkg, path)} :: ${token}`));
     assert.deepEqual(agentPolicyOffenders, [], "shipped agent prose contains a prohibited vendor or operational tool identifier");
     const requiredAgentFragments = [
+      { name: "story-writer", label: "known defects stay bounded", fragment: "name the failure scenarios to prevent rather than silently generalizing them into a subsystem-wide guarantee." },
+      { name: "story-writer", label: "broader guarantees need explicit proof scope", fragment: "If a broader guarantee is necessary, explain its scope and proof obligations before approval." },
+      // Instruction only: keep scope tied to the request without reopening approved requirements.
+      { name: "story-writer", label: "scope tied to requested outcome", fragment: "Each acceptance criterion must support the requested outcome or a necessary correctness/safety condition." },
+      { name: "story-writer", label: "scope additions need approval", fragment: "explain why they are needed, and obtain explicit approval at the existing story gate before" },
+      { name: "work-reviewer", label: "unapproved expansion is rejected", fragment: "reject unapproved scope expansion rather than silently accepting it as an implementation requirement." },
+      { name: "work-reviewer", label: "approved scope is not reopened", fragment: "Check the supplied request and approval record; do not reopen explicitly approved scope merely because" },
+
       // Class-wide classification is what makes the finite-inventory requirement and the reviewer's
       // acceptance bar apply, so the trigger has to be the property of the claim rather than four
       // keywords. mimir #1423 spent four runs and zero slices on a criterion that quantified over an
@@ -498,6 +511,17 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     }
     const decomposer = byName.get("work-decomposer") ?? "";
     const reviewer = byName.get("work-reviewer") ?? "";
+    // Instruction placement: keep the scope verdict in doc-step review, not survey discipline.
+    const scopeVerdict = "reject unapproved scope expansion rather than silently accepting it as an implementation requirement.";
+    // Both bullet markers must be found before they can bound a slice. An absent end marker makes
+    // indexOf return -1, and slice(start, -1) reads to end-of-file -- which would quietly relax the
+    // check below to "appears anywhere after Doc steps" and keep passing on a botched move.
+    const docStart = reviewer.indexOf("- **Doc steps");
+    const docEnd = reviewer.indexOf("- **Build slices");
+    assert.ok(docStart >= 0 && docEnd > docStart, "doc-step review must be bounded by both subject bullets");
+    const docReview = reviewer.slice(docStart, docEnd);
+    assert.ok(docReview.includes(scopeVerdict), "scope verdict belongs in doc-step review");
+    assert.equal(reviewer.split(scopeVerdict).length - 1, 1, "scope verdict must not be duplicated");
     // Rules 6 and 7 were merged into one invariant: a slice must be able to make its ratified
     // `test_plan` green from its own `paths`. This assertion previously pinned rule 6's headline
     // ("No slice may depend on the absence of what another slice owns"), which is now one of three

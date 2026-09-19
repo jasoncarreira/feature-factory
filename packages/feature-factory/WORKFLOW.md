@@ -1393,9 +1393,14 @@ Per slice:
      $ factory slice "$R" "$SLICE_ID" review --evidence-ref "evidence/$SLICE_ID.json" \
        --review-ref "reviews/$SLICE_ID.json" --repo "$RUN_REPO"
      ```
-   - On REJECT, before spending an attempt, identify the design-level root cause. If the fix would
+   - On REJECT, before spending an attempt, identify the cause of the remaining failures. If the fix would
      violate an approved story or brief constraint, or repeated findings trace to the same unresolved
      design choice, stop and escalate the smallest decision needed rather than burning attempts.
+     When repeated reviews leave substantial acceptance gaps, review prior verified progress and identify
+     a bounded, achievable remediation target for the next attempt, even when the design is fully decided.
+     If no such target can be identified, park through the existing parked-stop procedure for replanning
+     or operator clarification; preserve the work and do not silently change approved acceptance criteria.
+     Unchanged finding counts alone are not a stall: progress can occur within a category that remains open.
      Otherwise route the fixes back to that builder and re-observe. After `max_retries`, mark the slice
      `blocked` and stop dispatching its dependents.
 5. **Merge (you, serially)** — on APPROVE, merge the slice branch into the feature branch one at a

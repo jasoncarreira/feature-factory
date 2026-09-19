@@ -3,6 +3,56 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.9.2
+
+A patch: shipped prompt and contract text only. No command, field or contract shape changed, but
+`FACTORY_VERSION` is matched exactly, so a consumer picks this up deliberately.
+
+Every change here comes from one run. mimir's `chainlink-1762` spent three runs and twenty-one build
+attempts on a typed-ledger and accounting subsystem; the feature actually requested — detect a stuck
+run, prompt a turn, remediate or escalate — was three of its eleven acceptance criteria and was never
+once the thing that blocked. The factory behaved correctly throughout: the reviewer was right five
+times running, the builder reported `blocked` honestly every round, and the decomposer's single-slice
+justification was sound. Nothing produced a false green. What was missing was any instruction that
+would have stopped it earlier.
+
+- **Escalation no longer requires an unresolved design choice.** The driver was told to escalate when
+  repeated findings trace to the same open design question — but every review of that slice ended
+  `feasibility: "No unresolved design-level blocker."`, which was true and which disarmed the only
+  exit. The rule now also asks, when repeated reviews leave substantial acceptance gaps, whether the
+  next attempt has a **bounded, achievable remediation target**, and routes a dead end through the
+  existing parked-stop procedure for replanning rather than spending the rest of the budget. Work is
+  preserved and approved acceptance criteria are not quietly changed.
+- **An unchanged finding count is explicitly not a stall.** The contract says so in as many words,
+  because it is the tempting wrong rule: across attempts 3–6 that slice held at eight blocking
+  findings while the reviewer credited real progress inside every category and narrowed each one to
+  its exact remaining defects. A finding code names a category, not a unit of work, and a count-based
+  trigger would fire on a run that is genuinely advancing.
+- **`story-writer` keeps criteria tied to what was asked.** Additional capabilities and broad
+  architectural requirements must be labelled as proposed scope additions with a reason, for decision
+  at the story gate, rather than becoming requirements silently. Separately: when addressing known
+  defects, name the failure scenarios to prevent instead of generalizing them into a subsystem-wide
+  guarantee, and if a broader guarantee really is needed, state its scope and proof obligations before
+  approval. That second rule is aimed at the most expensive line in that story — "avoid the reference
+  implementation's three failures" — which reads as a cheap safety condition and converts into proving
+  an absence across a whole subsystem.
+- **`work-reviewer` rejects unapproved scope expansion**, in the doc-step review where its sibling
+  spec and plan verdicts already live. It must not reopen explicitly approved scope merely because a
+  smaller feature was possible, impose a criterion-count limit, or reject necessary reliability
+  behavior — the failure mode of a scope rule is a reviewer that relitigates approved work forever.
+
+All four are instruction, not enforcement: a stall wastes attempts, it does not let a run claim
+success it did not earn.
+
+The placement of the reviewer verdict is pinned by a test rather than left to an eye, and that test's
+own boundary is now guarded: it bounds the doc-step section between two subject bullets, and an absent
+end marker makes `indexOf` return `-1` while `slice(start, -1)` reads to end-of-file — which would
+have relaxed the check to "appears anywhere after Doc steps" and kept passing on a botched move.
+Control: renaming the Build slices bullet fails on the new bound assertion by its own message, and
+restoring returns it to green.
+
+Ledger unchanged at 4860; no production line changed.
+
 ## 0.9.1
 
 A patch: shipped prompt text only. No command, field or contract shape changed, but `FACTORY_VERSION` is
