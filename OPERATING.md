@@ -644,6 +644,44 @@ on the host and could not reach the run.
 
 `completed`, `partial` and `blocked` remain final; only `needs-human` re-enters.
 
+### A production defect found after every slice has merged
+
+Integrated acceptance runs after the last slice merges, and it can find a defect whose fix touches
+production source. The factory will not fix that itself: post-merge repair is test-only, and a merged
+slice is never dispatched again. Both rules protect one guarantee — every production line reached the
+branch through a reviewed slice — and repairing production on the integration branch would break it. So
+the run parks `needs-human` with the defect named, and hands you the decision rather than taking it.
+
+**Take ownership before you touch anything.** Confirm the sandbox still exists — a snapshot under
+`$O/.factory/.parked/<R>` is evidence for recovery, not a resumable run — then claim a fresh lock, verify
+you hold it, and re-read qualified status to confirm the run is still parked with the same terminal
+result. Only then edit. A parked run is claimable by anyone until someone claims it, so editing first
+leaves a window in which another driver claims and resumes the run while your fix is half-written, and
+the lock protects nothing it was there to protect. Nobody is attacking you; two operators and a
+still-running driver are enough.
+
+Fix it on the run's recorded feature branch, inside that sandbox. Not on the slice branch: that slice is
+`merged`, its merge proof was taken against its reviewed commit, and it will never be dispatched again,
+so a commit there is a divergent branch nothing picks up. Add the regression coverage in the same commit.
+Gate 3 re-observes the integrated suite, so a fix without a test that would have caught the defect runs
+green and proves only that the suite still passes.
+
+Then verify you still hold the lock and that the parked result is unchanged, and resume. Gate 3
+re-observes at the new head. If Gate 3 was already approved before your commit moved that head, approve
+it again: publication compares the recorded `reviewed_head` and refuses an approval naming the commit
+before your fix.
+
+What you accept by doing this is that your commit did not go through a slice review. That is the entire
+content of the handoff — the factory declines to ship production it cannot show was reviewed, stops, and
+you are the reviewer it stopped for. Say so in the commit message, so the next reader knows which line
+arrived that way and why.
+
+chainlink-1304 is the worked example. One slice, merged clean at zero findings on its third attempt, and
+then integrated acceptance found an equality test accepting booleans where an identity check was meant,
+plus a recovery path that could swallow read failures without a durable notice. Both in production
+source, both real, and the second review was the only thing that caught them. That is the argument for
+fixing and resuming rather than for reviewing less.
+
 ## 5. Failure modes to expect
 
 **A subagent reading outside the repository hangs forever — unless the read is denied in advance.** No error,
