@@ -652,17 +652,24 @@ slice is never dispatched again. Both rules protect one guarantee — every prod
 branch through a reviewed slice — and repairing production on the integration branch would break it. So
 the run parks `needs-human` with the defect named, and hands you the decision rather than taking it.
 
-Fix it on the run's recorded feature branch, inside the retained sandbox. Not on the slice branch: that
-slice is `merged`, its merge proof was taken against its reviewed commit, and it will never be dispatched
-again, so a commit there is a divergent branch nothing picks up. Add the regression coverage in the same
-commit. Gate 3 re-observes the integrated suite, so a fix without a test that would have caught the defect
-runs green and proves only that the suite still passes.
+**Take ownership before you touch anything.** Confirm the sandbox still exists — a snapshot under
+`$O/.factory/.parked/<R>` is evidence for recovery, not a resumable run — then claim a fresh lock, verify
+you hold it, and re-read qualified status to confirm the run is still parked with the same terminal
+result. Only then edit. A parked run is claimable by anyone until someone claims it, so editing first
+leaves a window in which another driver claims and resumes the run while your fix is half-written, and
+the lock protects nothing it was there to protect. Nobody is attacking you; two operators and a
+still-running driver are enough.
 
-Then confirm the sandbox still exists — a snapshot under `$O/.factory/.parked/<R>` is evidence for
-recovery, not a resumable run — claim a fresh lock and verify it, and resume. Gate 3 re-observes at the
-new head. If Gate 3 was already approved before your commit moved that head, approve it again:
-publication compares the recorded `reviewed_head` and refuses an approval naming the commit before your
-fix.
+Fix it on the run's recorded feature branch, inside that sandbox. Not on the slice branch: that slice is
+`merged`, its merge proof was taken against its reviewed commit, and it will never be dispatched again,
+so a commit there is a divergent branch nothing picks up. Add the regression coverage in the same commit.
+Gate 3 re-observes the integrated suite, so a fix without a test that would have caught the defect runs
+green and proves only that the suite still passes.
+
+Then verify you still hold the lock and that the parked result is unchanged, and resume. Gate 3
+re-observes at the new head. If Gate 3 was already approved before your commit moved that head, approve
+it again: publication compares the recorded `reviewed_head` and refuses an approval naming the commit
+before your fix.
 
 What you accept by doing this is that your commit did not go through a slice review. That is the entire
 content of the handoff — the factory declines to ship production it cannot show was reviewed, stops, and
