@@ -31,6 +31,15 @@ So everything a run needs must be in the issue *before launch*:
   it, install it, and read it there.* A run given only the prohibition went looking anyway and wedged for
   65 minutes on an unscoped search; a run given neither read the host's installed CLI and ended its turn.
 
+### Infrastructure failures do not spend attempts
+
+Only a host-origin invocation error with a closed availability status or transport code qualifies. The
+first qualifying failure keeps the current attempt and permits one safe same-session recovery, or a
+same-input re-dispatch only when the host proves execution never started. A second consecutive failure for
+the same role and subject parks the run. This count is intentionally memory-only and resets with the active
+driver. Unknown or non-transport errors also preserve the attempt but park immediately; never duplicate a
+possibly started child or classify words found in model output as infrastructure.
+
 ## 2. Launching
 
 ### Repository command configuration

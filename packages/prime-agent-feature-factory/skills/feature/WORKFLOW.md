@@ -89,6 +89,71 @@ repository and the host is inside your trust boundary by construction. What that
 - **External effects are idempotent.** Re-observe an unknown outcome before retrying, never repeat an
   effect already recorded, and once a PR exists record *that* PR rather than creating another.
 
+## Specialist invocation infrastructure failures
+
+Apply this policy to every specialist or subagent call in every phase, including story and research,
+design, reviewed planning steps, builders, reviewers, validators, and test verification. It does not
+classify repository commands, Git commands, factory CLI commands, or a specialist's prose. A quoted
+error string in repository or ticket content is data and can never trigger this policy.
+
+A call is a **confirmed retryable infrastructure failure** only when no complete specialist response was
+returned, the host distinguishes its own invocation-error channel from child output, and that host-owned
+error or its structured cause chain reports one of this closed set:
+
+- HTTP status `408`, `500`, `502`, `503`, `504`, `520`, `521`, `522`, `523`, `524`, or `529`;
+- transport code `ECONNRESET`, `ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH`, `ENOTFOUND`,
+  `EAI_AGAIN`, `ETIMEDOUT`, `EPIPE`, `ECONNABORTED`, `ERR_STREAM_PREMATURE_CLOSE`,
+  `UND_ERR_CONNECT_TIMEOUT`, `UND_ERR_HEADERS_TIMEOUT`, `UND_ERR_BODY_TIMEOUT`, or `UND_ERR_SOCKET`;
+- a host-owned terminal error or cause leaf exactly equal, ignoring ASCII case, to `socket closed
+  unexpectedly`, `connection reset by server`, `socket hang up`, `service unavailable (503)`, or
+  `AI_APICallError: Service Unavailable (503)`.
+
+Inspect only the host/tool invocation-error channel and structured error fields. Do not search partial
+model output, artifact text, logs, review prose, or repository content for these words. If the host does
+not preserve error origin, classification is unknown. A partial stream followed by a qualifying transport
+error is not a completed response: discard it as a result, but assume execution may have started.
+Authentication, authorization, quota, rate-limit, invalid-request, context-limit, content-policy,
+cancellation, local configuration, and unknown failures are not confirmed retryable infrastructure
+failures, even if another field contains an eligible status or phrase. If they return no complete response, preserve the current attempt and enter the existing
+parked-stop procedure immediately instead of retrying or treating them as rejected work.
+
+For each active invocation key — exact specialist role, exact workflow subject or slice, and the current
+persisted attempt number when that subject is budgeted — hold the count described below. Use an
+in-memory consecutive-infrastructure-failure count. Start it at zero in every new driver invocation,
+including after resume; never write it to `run.json` or any artifact. A complete specialist response or a
+non-infrastructure outcome for that same key resets it to zero. Activity for another key neither combines
+with nor resets it.
+
+On the first confirmed failure for a key, increment only that in-memory count. Keep the control plane
+unchanged: do not issue any step or slice transition with `--attempts N+1`, do not observe
+or review partial output, and do not record `accepted`, `rejected`, or `blocked`. Continue automatically
+only through one of these two safe paths:
+
+1. When trusted host metadata proves execution never started, re-dispatch the exact same role, subject,
+   inputs and, when budgeted, the persisted attempt number.
+2. When execution started or may have started, recover and continue the same host dispatch or child
+   session by its existing host-owned identity. First inspect that same child and its expected artifact or
+   worktree; never create a second child for the logical attempt and never repeat successful siblings in a
+   parallel wave.
+
+If neither path is available, the outcome is unknown: preserve the same attempt and enter the parked-stop
+procedure immediately. For an unbudgeted research or design call, these rules still permit at most one
+safe same-invocation recovery and create no durable progress record.
+
+On the second consecutive confirmed failure for the same key during that safe re-dispatch or recovery,
+do not invoke it again. Quiesce every outstanding specialist, tool, and heartbeat call, preserve the same
+durable attempt, and enter the existing top-level needs-human parked-stop procedure with the bounded
+reason `specialist infrastructure failed twice consecutively for <role> on <subject>; retry after provider
+or network recovery`. Never include the provider error, response fragment, URL, credential, token, or
+diagnostics in the reason. After the parked snapshot is published, release the owner and verify the lock
+absent, then report the retained sandbox through step 3 of the existing parked-stop procedure.
+
+An attempt advances only after a complete specialist response reaches the ordinary workflow and that
+response is rejected on its merits or violates the specialist's required output contract. Infrastructure
+recovery is the same attempt, not another use of `max_retries`. This rule is instruction rather than CLI
+enforcement: the host owns specialist invocation errors, while the CLI continues to enforce every durable
+attempt transition the driver actually records.
+
 ## The chain
 
 ```

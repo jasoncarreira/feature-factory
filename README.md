@@ -31,6 +31,15 @@ prose cannot enforce. The dividing line is deliberate:
 Everything else is instructions. The rule is: *enforce what can produce a false green, instruct the
 rest.*
 
+## Infrastructure failures and attempts
+
+A confirmed host-origin HTTP availability or transport failure does not spend a specialist attempt. The
+active driver retries once at the same persisted attempt only when the host proves execution never started
+or can recover the same child/session. It never classifies child text, blindly duplicates a possibly
+started builder, or repeats successful siblings. A second consecutive failure for the same role and
+subject parks the run for a human. The per-subject failure count is memory-only and resets with the driver;
+unknown, auth, quota, rate-limit, configuration, and other non-transport failures park without a retry.
+
 ## The chain
 
 ```

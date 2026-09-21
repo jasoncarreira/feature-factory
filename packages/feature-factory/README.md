@@ -20,6 +20,14 @@ host binding and copies this workflow beside that skill at build/pack time. Inst
 `opencode-feature-factory` or `prime-agent-feature-factory` for a supported host, or build an adapter
 that loads the complete workflow and drives all durable state changes through the CLI.
 
+## Infrastructure failures and attempts
+
+A confirmed host-origin HTTP availability or transport failure does not spend a specialist attempt. The
+active driver retries once at the same persisted attempt only when the host proves execution never started
+or can recover the same child/session. It never classifies child text or blindly duplicates possibly
+started work. A second consecutive failure for the same role and subject parks the run. The counter is
+memory-only and resets with the driver; unknown or non-transport failures park without a retry.
+
 ## Repository command configuration
 
 A repository operator may provide optional `$O/.factory.json`, where `O` is the physically
