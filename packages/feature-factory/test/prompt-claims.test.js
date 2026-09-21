@@ -1524,6 +1524,24 @@ const CLAIMS = [
       assert.match(boundaries, /For `resolve`, use the ordinary shell result directly[\s\S]*no stderr redirection or suppression rule,[\s\S]*timeout,\nretry, or fallback after any configured resolver result or failure/u);
       assert.match(boundaries, /`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the\s+guards below\. Configured `publish`, when present, replaces only the driver's `gh pr create` in Step 6;\s+the factory-owned exact push and post-push identity guard remain unchanged\./u);
       assert.match(boundaries, /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted[\s\S]*at most two executions in that merge invocation[\s\S]*timeout and retry never apply to resolver, slice, or Gate 3 commands/u);
+      // The selection contract is only coherent if execution reads the RESOLVED selection. Review caught
+      // the first attempt keying execution on the file while precedence lived in a separate paragraph, so
+      // an environment-only override would have fallen through to the default. Pin the branch outcomes and
+      // refuse the phrasing that reintroduces the split -- a fragment naming the variable cannot tell the
+      // two apart, which is why the earlier pins passed against contradictory text.
+      const selection = prose.slice(prose.indexOf("**Resolve one publishing selection"), prose.indexOf("Both Step 6 identity guards are skipped"));
+      assert.ok(selection.length > 400, "the publishing-selection region looks truncated");
+      for (const branch of [
+        "inherited `FACTORY_PUBLISHING_COMMAND` holding at least one non-whitespace\ncharacter selects that string",
+        "set empty or to whitespace selects the default, even\nwhen `$O/.factory.json` declares `publish`",
+        "an unset variable selects the configured `publish` when the\nfile declares one; and with neither, the default",
+        "an environment-only override selects a command in a repository that declares none",
+        "a\ndeclared `publish` is never executed while that variable holds a different value",
+      ]) assert.ok(selection.includes(branch), `the publishing selection does not state the branch: ${branch}`);
+      assert.match(selection, /\*\*When the resolution selects a command rather than the default, run that exact selected string/u,
+        "execution must read the resolved selection, not either source");
+      assert.doesNotMatch(prose, /When `\.factory\.json` declares `publish`, run that exact string/u,
+        "execution conditioned on the file ignores an environment-only override");
       assert.ok(boundaries.includes("| `publish` | Optional. Exact configured string as one shell step in `RUN_REPO` cwd, no stdin or positional arguments, and inherited environment plus exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE` | Exit status is authoritative; the last nonempty stdout line must be an absolute HTTPS URL and becomes `PR_URL` | Zero plus that URL is recordable; any other result is indeterminate and parks before `factory pr` | Invoked in Step 6 in place of only `gh pr create`, after the factory-owned exact push and post-push identity guard. Inherited `FACTORY_PUBLISHING_COMMAND` overrides it, and overrides it with the default when set empty. `factory pr` is unchanged and still records the URL. |"));
       assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; read the value `status` reports for the run, recorded at init from `--publishing-identity` or the inherited `FACTORY_PUBLISHING_IDENTITY` | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; only a manifest written before 0.8.0 can report `null` and skip them. |"));
       assert.match(prose, /fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or\s+declared[\s\S]*second identity observation always runs after that\s+push is known successful and immediately before the selected pull-request operation/u);

@@ -511,7 +511,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   for (const fragment of [
     "The fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or",
     "The second identity observation always runs after that",
-    "run that exact string instead of only `gh pr create` above",
+    "run that exact selected string instead\nof only `gh pr create` above",
     "Add exactly five values to",
     "do not run `factory pr`, and do not fall back to `gh pr create`",
     "Before any retry, re-observe whether the pull request exists",

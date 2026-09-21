@@ -2003,19 +2003,26 @@ declared. It is the only push in this procedure. The second identity observation
 push is known successful and immediately before the selected pull-request operation, with no intervening
 operation.
 
-Resolve the command before running anything: inherited `FACTORY_PUBLISHING_COMMAND` overrides the
-configured `publish`, because how a run publishes is a property of the environment as much as of the
-repository -- the same reason there is no `publishing_identity` key in that file, and one repository is
-published from both a maintainer's checkout and an automated host. A set value with at least one
-non-whitespace character is the command, whatever the file declares. A set value that is empty or only
-whitespace selects the default `gh pr create` below, so a host with nothing to delegate to can decline a
-repository's declaration instead of being unable to publish at all. Unset leaves the configured `publish`,
-or the default when the file declares none. The override applies with or without `$O/.factory.json`; it
-removes no guard, because the Step 6 identity guards are already skipped when that file is absent. Report
-which source supplied the command, since the two are indistinguishable afterwards and an operator
-debugging a publication needs to know which one ran.
+**Resolve one publishing selection before running anything, and execute that selection rather than
+either source.** In order: inherited `FACTORY_PUBLISHING_COMMAND` holding at least one non-whitespace
+character selects that string; the same variable set empty or to whitespace selects the default, even
+when `$O/.factory.json` declares `publish`; an unset variable selects the configured `publish` when the
+file declares one; and with neither, the default. The resolution runs whether or not `$O/.factory.json`
+exists, so an environment-only override selects a command in a repository that declares none, and a
+declared `publish` is never executed while that variable holds a different value. Nothing downstream
+reads either source again.
 
-**When `.factory.json` declares `publish`, run that exact string instead of only `gh pr create` above**,
+The environment overrides the file because how a run publishes is a property of the environment as much
+as of the repository -- the same reason there is no `publishing_identity` key in that file, and one
+repository is published from both a maintainer's checkout and an automated host. Empty selecting the
+default is what keeps a repository from declaring its way into a run that cannot publish at all from a
+host with nothing to delegate to, and it makes empty and absent behave alike rather than needing two
+rules. The override removes no guard: the Step 6 identity guards are already skipped when that file is
+absent. Report which source the selection came from, since the two are indistinguishable afterwards and
+an operator debugging a publication needs to know which one ran.
+
+**When the resolution selects a command rather than the default, run that exact selected string instead
+of only `gh pr create` above**,
 as one shell command in `RUN_REPO` cwd with no stdin or positional arguments. Add exactly five values to
 the inherited environment: exact `PR_BASE`, exact `FEATURE_BRANCH`, `PR_DRAFT` as `true` or `false`, exact
 decorated `TITLE` as `PR_TITLE`, and an absolute `PR_BODY_FILE` naming the exact decorated body bytes.

@@ -138,17 +138,21 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // match, and would fail for a reason unrelated to the rule it guards.
     for (const instruction of [
       // Instruction only: which command publishes is an environment property, like the identity beside it.
-      // The empty-selects-default rule is the load-bearing half -- without it a repository can declare its
-      // way into a run that cannot publish from a host with nothing to delegate to.
-      "Resolve the command before running anything: inherited `FACTORY_PUBLISHING_COMMAND` overrides the",
-      "whitespace selects the default `gh pr create` below, so a host with nothing to delegate to can decline a",
-      "or the default when the file declares none. The override applies with or without `$O/.factory.json`; it",
+      // Each selection branch is pinned separately, because review caught the first attempt stating
+      // precedence in one paragraph while the execution paragraph still keyed on the file -- a literal
+      // adapter would have ignored an environment-only override. The branches are the contract; a single
+      // fragment naming the variable would have passed against the contradictory text.
+      "**Resolve one publishing selection before running anything, and execute that selection rather than",
+      "character selects that string; the same variable set empty or to whitespace selects the default, even",
+      "file declares one; and with neither, the default. The resolution runs whether or not `$O/.factory.json`",
+      "exists, so an environment-only override selects a command in a repository that declares none, and a",
+      "declared `publish` is never executed while that variable holds a different value. Nothing downstream",
+      "**When the resolution selects a command rather than the default, run that exact selected string instead",
 
       // Enforcement is in repository-config.js; these pin the contract it implements, because a `publish`
       // that is optional in code and still documented as required is the same defect one layer over.
       "`publish` was required and invoked nowhere until this release, so every",
       "The fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or",
-      "**When `.factory.json` declares `publish`, run that exact string instead of only `gh pr create` above**",
       "as one shell command in `RUN_REPO` cwd with no stdin or positional arguments. Add exactly five values to",
       "do not run `factory pr`, and do not fall back to `gh pr create`. Follow the",
       "later-driver procedure. Before any retry, re-observe whether the pull request exists and record an",
