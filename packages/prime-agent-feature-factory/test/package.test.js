@@ -32,7 +32,7 @@ describe("Prime package contract", () => {
     assert.match(skill, /\[WORKFLOW\.md\]\(WORKFLOW\.md\)/u);
     assert.match(skill, /Do not assume the skill loader inlined it/u);
     assert.match(skill, /feature_factory_context/u);
-    assert.match(skill, /handle = await rlm\(prompt\)/u);
+    assert.match(skill, /handle = await rlm\.spawn\(prompt, name=NAME, \*\*PROFILE\)/u);
     assert.match(skill, /receiver_role="parent"/u);
     assert.match(skill, /never hand-write `run\.json`/u);
     assert.match(skill, /reject an exact case-sensitive first\s+`--background`/u);
