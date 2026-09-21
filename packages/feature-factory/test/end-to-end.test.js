@@ -8,7 +8,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -330,6 +330,100 @@ describe("end to end — a merge is refused through the real CLI", () => {
         "an archive must be a faithful copy of the record it preserves");
       assert.equal(runJson(p.runDir).slices[0].status, "merged");
       assert.equal(existsSync(join(p.runDir, "evidence", "test-verifier.json")), false);
+
+      // A restore may preserve a merged claim only when the pushed repository still proves the complete
+      // base/review/evidence/merge chain. Exercise that through the real command before this fixture is removed.
+      assert.equal(factory(p.repo, ["terminal", RUN, "needs-human", "--reason", "lost sandbox", "--now", NOW(5)]).ok, true);
+      const remoteFeatureRef = "refs/remotes/origin/feature";
+      const restoreRemote = join(p.operator, ".factory", "restore-remote.git");
+      mkdirSync(restoreRemote, { recursive: true });
+      git(restoreRemote, "init", "--bare", "--quiet");
+      git(p.repo, "push", "--quiet", restoreRemote, "feature:refs/heads/feature");
+      git(p.operator, "remote", "set-url", "origin", restoreRemote);
+      git(p.operator, "fetch", "--quiet", "origin", `refs/heads/feature:${remoteFeatureRef}`);
+      const snapshot = join(p.operator, ".factory", ".parked", RUN);
+      mkdirSync(dirname(snapshot), { recursive: true });
+      const preservedSlice = runJson(p.runDir).slices[0];
+      const preservedReview = readFileSync(join(p.runDir, preservedSlice.review_ref));
+      const preservedEvidence = readFileSync(join(p.runDir, preservedSlice.evidence_ref));
+      cpSync(p.runDir, snapshot, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+      rmSync(p.repo, { recursive: true });
+      const restored = factory(p.operator, ["restore", RUN, "--from", remoteFeatureRef, "--now", NOW(6)]);
+      assert.equal(restored.ok, true, restored.stderr);
+      assert.equal(restored.out.feature_commit, mergeCommit);
+      assert.deepEqual(restored.out.reset_slices, []);
+      const restoredRun = runJson(restored.out.run_dir);
+      assert.deepEqual(restoredRun.slices[0], { ...preservedSlice, worktree: null });
+      assert.deepEqual(readFileSync(join(restored.out.run_dir, preservedSlice.review_ref)), preservedReview);
+      assert.deepEqual(readFileSync(join(restored.out.run_dir, preservedSlice.evidence_ref)), preservedEvidence);
+
+      // Negative control: a merged row whose approval commit is no longer in Git must not survive merely
+      // because its merge commit still is. Remove the successful generation so binding validation is reached.
+      rmSync(restored.out.sandbox_path, { recursive: true });
+      const snapshotReview = join(snapshot, "reviews", "be-thing.json");
+      const realReview = join(snapshot, "reviews", "be-thing.real.json");
+      renameSync(snapshotReview, realReview);
+      symlinkSync("be-thing.real.json", snapshotReview);
+      const linkedRecord = factory(p.operator, ["restore", RUN, "--from", remoteFeatureRef, "--now", NOW(7)]);
+      assert.equal(linkedRecord.ok, false);
+      assert.match(linkedRecord.stderr, /review .* must be a contained regular file/u);
+      rmSync(restored.out.sandbox_path, { recursive: true });
+      rmSync(snapshotReview);
+      renameSync(realReview, snapshotReview);
+      const snapshotEvidence = join(snapshot, "evidence", "be-thing.json");
+      const unboundReview = JSON.parse(readFileSync(snapshotReview, "utf8"));
+      const unprovedEvidence = JSON.parse(readFileSync(snapshotEvidence, "utf8"));
+      const actualFiles = [...unprovedEvidence.files_changed];
+      unboundReview.reviewed_commit = "0".repeat(40);
+      unprovedEvidence.commit = "0".repeat(40);
+      writeFileSync(snapshotReview, `${JSON.stringify(unboundReview, null, 2)}\n`);
+      writeFileSync(snapshotEvidence, `${JSON.stringify(unprovedEvidence, null, 2)}\n`);
+      const refusedRestore = factory(p.operator, ["restore", RUN, "--from", remoteFeatureRef, "--now", NOW(7)]);
+      assert.equal(refusedRestore.ok, false);
+      assert.match(refusedRestore.stderr, /reviewed_commit .* does not resolve in the restored repository/u);
+      assert.equal(existsSync(join(restored.out.sandbox_path, ".factory", RUN, "run.json")), false,
+        "a binding refusal retains diagnostics without publishing a live manifest");
+      rmSync(restored.out.sandbox_path, { recursive: true });
+      unboundReview.reviewed_commit = p.sliceHead;
+      writeFileSync(snapshotReview, `${JSON.stringify(unboundReview, null, 2)}\n`);
+      unprovedEvidence.commit = p.sliceHead;
+      writeFileSync(snapshotEvidence, `${JSON.stringify(unprovedEvidence, null, 2)}\n`);
+      const snapshotRunPath = join(snapshot, "run.json"), unprovedRun = JSON.parse(readFileSync(snapshotRunPath, "utf8"));
+      const provedMerge = unprovedRun.slices[0].merge_commit;
+      unprovedRun.slices[0].merge_commit = p.basePoint;
+      writeFileSync(snapshotRunPath, `${JSON.stringify(unprovedRun, null, 2)}\n`);
+      const unprovedRestore = factory(p.operator, ["restore", RUN, "--from", remoteFeatureRef, "--now", NOW(8)]);
+      assert.equal(unprovedRestore.ok, false);
+      assert.match(unprovedRestore.stderr, /merge proof failed after restore/u,
+        "a resolvable ancestor is not enough when it is not the commit whose contribution was reviewed");
+      assert.equal(existsSync(join(restored.out.sandbox_path, ".factory", RUN, "run.json")), false);
+      rmSync(restored.out.sandbox_path, { recursive: true });
+      unprovedRun.slices[0].merge_commit = provedMerge;
+      writeFileSync(snapshotRunPath, `${JSON.stringify(unprovedRun, null, 2)}\n`);
+      unboundReview.reviewed_commit = p.sliceHead;
+      unprovedEvidence.commit = p.sliceHead;
+      unprovedEvidence.tests.cmd = "true";
+      writeFileSync(snapshotReview, `${JSON.stringify(unboundReview, null, 2)}\n`);
+      writeFileSync(snapshotEvidence, `${JSON.stringify(unprovedEvidence, null, 2)}\n`);
+      const unratifiedTest = factory(p.operator, ["restore", RUN, "--from", remoteFeatureRef, "--now", NOW(9)]);
+      assert.equal(unratifiedTest.ok, false);
+      assert.match(unratifiedTest.stderr, /evidence does not satisfy its ratified test_plan/u);
+      rmSync(restored.out.sandbox_path, { recursive: true });
+      unprovedEvidence.tests.cmd = PASSING_TEST_COMMAND;
+      unprovedEvidence.files_changed = ["fabricated-path.txt"];
+      writeFileSync(snapshotEvidence, `${JSON.stringify(unprovedEvidence, null, 2)}\n`);
+      const falsePaths = factory(p.operator, ["restore", RUN, "--from", remoteFeatureRef, "--now", NOW(10)]);
+      assert.equal(falsePaths.ok, false);
+      assert.match(falsePaths.stderr, /restored diff violates its evidence or ratified path ownership/u);
+      rmSync(restored.out.sandbox_path, { recursive: true });
+      unprovedEvidence.files_changed = actualFiles;
+      writeFileSync(snapshotEvidence, `${JSON.stringify(unprovedEvidence, null, 2)}\n`);
+      const unownedRun = JSON.parse(readFileSync(snapshotRunPath, "utf8"));
+      unownedRun.slices[0].paths = ["not-the-changed-path.txt"];
+      writeFileSync(snapshotRunPath, `${JSON.stringify(unownedRun, null, 2)}\n`);
+      const unownedRestore = factory(p.operator, ["restore", RUN, "--from", remoteFeatureRef, "--now", NOW(11)]);
+      assert.equal(unownedRestore.ok, false);
+      assert.match(unownedRestore.stderr, /Brief-ratified plan and amendments/u);
     } finally { cleanupProject(p); }
 
     const green = upToReview("clean-config", undefined, {

@@ -3,6 +3,36 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.0
+
+A minor release: parked control-plane snapshots can now reconstruct a lost sandbox without claiming that
+unpublished branch-local work survived.
+
+- **`factory restore` consumes the previously write-only snapshot.** Run it from the canonical operator
+  repository with a full remote-tracking feature ref. It reserves the exact derived sandbox, clones the
+  repository, restores the recorded feature branch, and publishes `run.json` only after the copy and every
+  final binding check succeed.
+- **Preserved work is proved, not trusted.** Merged slices retain their status only when their base,
+  evidence, review, merge proof, and ancestry all resolve against the restored feature head. Stale
+  HEAD-bound validator state is invalidated. Gate 3 and test-verifier state are always invalidated, and canonical verifier records are omitted, because
+  publication evidence names the prior physical generation. Restored slice authority is rebound to the
+  Brief-approved plan digest and recorded path amendments. Other nonmerged slices reset to
+  `pending`, preserving the ratified plan and attempt counts while reporting the loss.
+- **A restore is a new physical generation of the same logical run.** It stays parked and lockless, never
+  runs repository-configured bootstrap or resumes automatically, omits the snapshot's root `factory.lock`, and
+  leaves the source snapshot unchanged. `status.restore` records the source inventory digest, exact feature commit, reset
+  slices, and invalidations. `status.park_snapshot` becomes `null` because the transformed generation is
+  intentionally not byte-identical to its source.
+- **The recovery path fails closed.** Canonical source and destination directories, tracked ignore policy,
+  exact effective-push-endpoint remote-ref identity, source/ref stability, contained-symlink preservation,
+  escaping-link refusal, inventory equality, Git containment,
+  and create-only manifest publication are checked around every effect that could otherwise produce a
+  partially restored live run.
+
+The production ledger lands at 5200 lines against the issue-authorized 5200 tripwire. Tests extend existing
+call sites: one restores a proved merge and its negative control; another restores a lost active slice,
+proves root-lock exclusion and source immutability, and then completes the ordinary claim/resume handoff.
+
 ## 0.9.2
 
 A patch: shipped prompt and contract text only. No command, field or contract shape changed, but

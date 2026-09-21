@@ -156,6 +156,13 @@ describe("atomic writer", () => {
         }), /protected file target has an unsafe type/u);
         assert.equal(readFileSync(join(clean, "elsewhere.json"), "utf8"), "{}\n");
         assert.deepEqual(hidden(clean), [], "the temp file must be cleaned up after a refused commit");
+        const outside = root("outside-parent");
+        try {
+          symlinkSync(outside, join(clean, "nested"));
+          await assert.rejects(() => writeProtectedJsonAtomic(clean, "nested/run.json", { version: 1 }),
+            /protected file parent has an unsafe symlink/u);
+          assert.deepEqual(readdirSync(outside), [], "an intermediate symlink receives no protected write");
+        } finally { rmSync(outside, { recursive: true, force: true }); }
       } finally { rmSync(clean, { recursive: true, force: true }); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -199,6 +206,19 @@ describe("atomic writer", () => {
         assert.deepEqual(JSON.parse(readFileSync(join(race, "run.json"), "utf8")), { writer: "winner" });
         assert.deepEqual(hidden(race), []);
       } finally { rmSync(race, { recursive: true, force: true }); }
+
+      const swapped = root("temp-swap");
+      try {
+        await assert.rejects(() => writeProtectedJsonAtomic(swapped, "run.json", { writer: "expected" }, {
+          createOnly: true,
+          hooks: { beforeCommit: () => {
+            const temp = join(swapped, hidden(swapped)[0]);
+            rmSync(temp); writeFileSync(temp, '{"writer":"attacker"}\n');
+          } },
+        }), /protected temporary file changed before commit/u);
+        assert.equal(readdirSync(swapped).includes("run.json"), false, "replacement temp bytes never become live");
+        assert.deepEqual(hidden(swapped), []);
+      } finally { rmSync(swapped, { recursive: true, force: true }); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 

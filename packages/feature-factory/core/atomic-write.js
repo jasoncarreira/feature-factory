@@ -4,7 +4,7 @@
 // writes into a working tree, so a local process swapping run.json for a symlink inside that window
 // is a real failure mode and an up-front-only check is a TOCTOU hole. Create-only writes preflight
 // absence and publish by link. beforeCommit is the last race seam, used by CAS and create-only tests.
-import { link as fsLink, lstat, open, rename as fsRename, unlink } from "node:fs/promises";
+import { link as fsLink, lstat, open, realpath, rename as fsRename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join, resolve, sep } from "node:path";
 
@@ -26,30 +26,33 @@ export async function writeProtectedFileAtomic(rootDir, relativePath, data, opti
   const rename = options.fsOps?.rename ?? fsRename;
   const link = options.fsOps?.link ?? fsLink;
   const beforeCommit = options.hooks?.beforeCommit;
-  const bytes = Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8");
+  const bytes = Buffer.isBuffer(data) ? Buffer.from(data) : Buffer.from(String(data), "utf8");
 
+  await assertSafeParent(rootDir, parentDir);
   await assertSafeTarget(targetPath, createOnly);
 
   const tempPath = join(parentDir, `.${randomUUID()}.tmp`);
-  let handle = null;
-  let published = false;
+  let handle = null, published = false, targetLinked = false;
   try {
-    // "wx" is O_CREAT|O_EXCL|O_WRONLY: if the name exists, fail rather than adopt
-    // a file somebody else created.
-    handle = await open(tempPath, "wx", 0o600);
+    // Exclusive creation refuses adoption. Keep the inode open through commit so a replaced temp name
+    // cannot publish bytes other than the ones this writer fsynced.
+    handle = await open(tempPath, "wx+", 0o600);
     await handle.writeFile(bytes);
     await handle.sync();
-    await handle.close();
-    handle = null;
 
     if (createOnly) {
       await assertSafeTarget(targetPath, true);
       if (typeof beforeCommit === "function") await beforeCommit();
+      await assertSafeParent(rootDir, parentDir);
       try { await link(tempPath, targetPath); } catch (error) {
         if (error?.code === "EEXIST") throw new ProtectedWriteError("protected create target already exists", error);
         throw error;
       }
+      targetLinked = true;
+      await assertPublishedInode(handle, targetPath, bytes);
       published = true;
+      await handle.close();
+      handle = null;
       try { await unlink(tempPath); } catch (cleanupError) {
         try { await unlink(tempPath); } catch (retryError) {
           if (retryError?.code !== "ENOENT") {
@@ -60,13 +63,21 @@ export async function writeProtectedFileAtomic(rootDir, relativePath, data, opti
       }
     } else {
       if (typeof beforeCommit === "function") await beforeCommit();
+      await assertSafeParent(rootDir, parentDir);
       await assertSafeTarget(targetPath, false);
       await rename(tempPath, targetPath);
+      targetLinked = true;
+      await assertPublishedInode(handle, targetPath, bytes);
       published = true;
+      await handle.close();
+      handle = null;
     }
   } catch (error) {
     if (handle) {
       try { await handle.close(); } catch { /* the original error is the one that matters */ }
+    }
+    if (targetLinked && !published) {
+      try { await unlink(targetPath); } catch { /* the original integrity failure is primary */ }
     }
     if (!published) {
       try {
@@ -84,6 +95,19 @@ export async function writeProtectedFileAtomic(rootDir, relativePath, data, opti
 
   await syncDirectory(parentDir);
   return { path: targetPath };
+}
+
+async function assertPublishedInode(handle, targetPath, bytes) {
+  const [held, named] = await Promise.all([handle.stat(), lstat(targetPath)]);
+  const observed = Buffer.alloc(bytes.length + 1), read = await handle.read(observed, 0, observed.length, 0);
+  if (!named.isFile() || held.dev !== named.dev || held.ino !== named.ino || read.bytesRead !== bytes.length
+    || !observed.subarray(0, bytes.length).equals(bytes)) throw new ProtectedWriteError("protected temporary file changed before commit");
+}
+
+async function assertSafeParent(rootDir, parentDir) {
+  const root = resolve(rootDir), rel = resolve(parentDir).slice(root.length + 1);
+  let observed; try { observed = await realpath(parentDir); } catch (error) { throw new ProtectedWriteError("protected file parent could not be inspected", error); }
+  if (observed !== resolve(await realpath(root), rel)) throw new ProtectedWriteError("protected file parent has an unsafe symlink");
 }
 
 function resolveProtectedPath(rootDir, relativePath) {

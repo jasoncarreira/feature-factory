@@ -140,10 +140,14 @@ removed the sandbox destroyed the manifest and every accepted gate with it. `.pa
 id, so a snapshot never occupies the completed archive at `$O/.factory/<R>` and never blocks
 re-initialising the same run id. It is published by a staged, verified swap, so a failed later park cannot degrade the last good
 snapshot. A failed snapshot is reported and never prevents the park. `blocked`
-and `partial` are not snapshotted, and a snapshot is evidence for recovery rather than a resumable run.
+and `partial` are not snapshotted. A retained sandbox resumes directly; when that sandbox is lost,
+`factory restore <R> --repo <O> --from refs/remotes/<remote>/<feature-branch>` rebuilds a parked,
+lockless sandbox from the snapshot and the exact feature ref still advertised by the operator effective push endpoint. It reports every active slice reset
+to `pending` rather than claiming branch-local work survived.
 
-Qualified status reports `park_snapshot` for a parked run: the published path, or `null` when no snapshot
-exists. That is how an outside observer verifies the snapshot happened rather than assuming it.
+Qualified status reports `park_snapshot` for an unchanged live park: the published path, or `null` when no
+matching snapshot exists. A restored generation deliberately reports `null` because its manifest and path
+bindings changed; `status.restore` carries its source digest, feature commit, resets, and invalidations.
 Malformed config, malformed payload, a non-zero exit, or unavailable exit status refuses before any
 run effect and never falls back. Resolver diagnostics name `resolve`, the status classification, and the admitted reference bounded to 200
 characters; neither

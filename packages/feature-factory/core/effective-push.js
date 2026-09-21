@@ -20,10 +20,10 @@ function execute(run, args) {
   });
 }
 
-function capture(run, repository) {
+export function capturePushTarget(repository, remote = "origin", run = spawnSync) {
   let result;
   try {
-    result = execute(run, ["-C", repository, "remote", "get-url", "--push", "origin"]);
+    result = execute(run, ["-C", repository, "remote", "get-url", "--push", remote]);
   } catch {
     return null;
   }
@@ -62,7 +62,7 @@ export function enforceEffectivePushTarget(positionals, { spawnSync: run = spawn
   const [operation, operatorRepository, sandboxRepository] = positionals;
   if (operation !== "bootstrap" && operation !== "check") throw failure(OPERATION_ERROR);
 
-  let operatorTarget = capture(run, operatorRepository);
+  let operatorTarget = capturePushTarget(operatorRepository, "origin", run);
   if (operatorTarget === null) {
     throw failure(`factory sandbox: operator effective push target unavailable; sandbox retained at ${sandboxRepository}`);
   }
@@ -73,12 +73,12 @@ export function enforceEffectivePushTarget(positionals, { spawnSync: run = spawn
     if (!configure(run, sandboxRepository, operatorTarget.toString("utf8"))) {
       throw failure(`factory sandbox: sandbox effective push target unavailable at ${sandboxRepository}`);
     }
-    operatorTarget = capture(run, operatorRepository);
+    operatorTarget = capturePushTarget(operatorRepository, "origin", run);
     if (operatorTarget === null) {
       throw failure(`factory sandbox: operator effective push target unavailable; sandbox retained at ${sandboxRepository}`);
     }
   }
-  const sandboxTarget = capture(run, sandboxRepository);
+  const sandboxTarget = capturePushTarget(sandboxRepository, "origin", run);
   if (sandboxTarget === null) {
     throw failure(`factory sandbox: sandbox effective push target unavailable at ${sandboxRepository}`);
   }
