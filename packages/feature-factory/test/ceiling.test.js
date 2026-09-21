@@ -136,6 +136,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Each fragment sits on one line in the raw markdown. One spanning a line wrap could never
     // match, and would fail for a reason unrelated to the rule it guards.
     for (const instruction of [
+      // Instruction only: the single-slice validator skip removes a duplicate verdict, not the second
+      // reading. mimir's chainlink-1304 merged one slice clean and the test-verifier review then found
+      // two real production defects in it, so a wording that calls the re-read valueless invites cutting
+      // the only pass that catches them.
+      "**Skipping it does not mean the integrated diff goes unread**, and nothing here should be read as",
+      "defects in it, both real and both confirmed. What the skip removes is a duplicate *verdict* on a",
+      "production defect parks the run for an operator instead of returning to a builder. Review it as the",
+
       // Instruction only: reassess substantive progress, not category counts, before another retry.
       "a bounded, achievable remediation target for the next attempt, even when the design is fully decided.",
       "If no such target can be identified, park through the existing parked-stop procedure for replanning",
@@ -476,6 +484,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // Instruction pins: distinguish behavioral proof from inventories without adding a CLI gate.
       ...["backend-builder", "frontend-builder", "work-reviewer"].map((name) => (
         { name, label: "control-failure exclusions remain explicit", fragment: "syntax, import, discovery, or unrelated" })),
+      // Instruction only: no later round exists to carry a withheld finding into.
+      { name: "work-reviewer", label: "final integrated reading is exhaustive", fragment: "make its findings exhaustive in one pass: a production defect recorded here parks the run" },
       { name: "work-reviewer", label: "behavioral boundary mapping", fragment: "invokes the relevant production boundary and asserts its required effect or exclusion." },
       { name: "work-reviewer", label: "enumeration is not behavioral proof", fragment: "AST references and test names prove enumeration, not behavior." },
       { name: "work-reviewer", label: "attestation is self-report", fragment: "Treat the builder's negative-control report as self-reported diagnostic information," },
