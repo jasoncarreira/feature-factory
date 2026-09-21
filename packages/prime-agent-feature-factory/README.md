@@ -36,32 +36,60 @@ inline another package's resource. The CLI remains the only writer of `run.json`
 
 ## Specialist model and thinking level
 
-Every agent file in `feature-factory` declares `model`, `role`, and `effort` in its frontmatter, and the
-OpenCode adapter treats the three differently: `role` selects a configured profile, `effort` becomes the
-default `variant`, and the declared `model` is **ignored** — an OpenCode agent's model comes from profile
-configuration, because `sonnet` is a tier rather than a model id. **This adapter consumes none of the
-three.** On Prime, all eleven specialists run with the parent session's model and thinking level.
+Every agent file in `feature-factory` declares `model`, `role`, and `effort` in its frontmatter. This
+adapter uses `role` and `effort`, and ignores the declared `model` for the same reason the OpenCode
+adapter does: `sonnet` and `opus` are tiers, while Prime requires an exact `provider/id` selector and
+fails a spawn given anything else.
 
-That follows from Prime's spawn contract rather than being an oversight. `rlm.run` accepts exactly two
-options — `name` and `model` — and unknown keyword arguments fail the spawn instead of being ignored, so
-an `effort` or `thinking` argument would stop the child starting rather than go unused. A child inherits
-the parent model when `model` is omitted, and inherits the global `defaultThinkingLevel` either way.
+`effort` becomes the child's `thinking` level directly — every declared value (`low`, `medium`, `high`,
+`xhigh`) is one of Prime's `THINKING_LEVELS`, so nothing is mapped or approximated. A value outside that
+set is dropped rather than passed, because an unknown level fails the spawn instead of being ignored, and
+inheriting the parent's level is the safer miss.
 
-`model` is deliberately not passed even though Prime supports it. Selection is fail-closed: an unavailable
-model fails admission rather than falling back to another one. Under a subscription OAuth login
-(PrimeIntellect-ai/prime-agent#740) `rlm.find_models()` returns nothing and an explicit `model=` fails
-admission for every model except the parent's, so passing a selector there would stop specialists spawning
-at all — worse than running them all on one tier. Pre-validating a selector does not avoid this either:
-`find_models()` returns an alphabetical head slice that reads as the full reachable set (#799), so it
-rejects models that are in fact reachable.
+A model resolves through the same four levels as the OpenCode plugin, most specific first, so an operator
+configuring both hosts learns one vocabulary:
 
-**The parent session is therefore the only lever.** `work-decomposer` and `work-reviewer` declare `opus`
-and decide whether a plan is satisfiable and whether a build is accepted; on Prime they inherit whatever
-the run was launched with. Choose the parent model and `defaultThinkingLevel` with that in mind.
+```
+profiles[<agent>]  →  profiles[<role>]  →  profiles.default  →  profile
+```
 
-Upstream requests that would change this: per-child thinking level (#703), a persistent
-`subagents.defaultModel` policy (#921), and virtual model selectors (#1138). If they land, what this
-adapter needs is mostly configuration rather than code.
+Configure them in `.prime/agent/feature-factory.json`, project-local first and then
+`~/.prime/agent/feature-factory.json` for every project:
+
+```jsonc
+{ "profiles": {
+    "planning": { "model": "openai/gpt-5.6-sol", "thinking": "xhigh" },
+    "builder":  { "model": "openai/gpt-5.6-sol" },
+    "story-reader": { "model": "openai/gpt-5.6-luna", "thinking": "minimal" }
+} }
+```
+
+The project file wins outright over the home file; they are not merged, so a project that sets only
+`builder` does not inherit the home file's other roles. A malformed or non-object file is skipped rather
+than raised, because a typo in an optional profile must not stop the extension registering and take
+`/feature` down with it.
+
+That file is the configuration surface because Prime registers an extension **by path** and calls its
+default export with `pi` alone — there is no per-extension options object in `settings.json` or in the
+package manifest, so anything reachable only by calling the export directly is not configuration.
+
+Roles come from each agent's own frontmatter — `planning`, `story`, `research`, `design`, `builder`,
+`test`, `reviewer` — so a new agent inherits its role without needing an entry.
+
+**`model` has no default here, deliberately.** Prime's own `subagentDefaultModel` setting already means
+"one model for every child", and it applies exactly when a spawn omits `model=`. Pinning a selector is
+fail-closed at both layers: an unavailable, unauthenticated or expired selection fails the spawn rather
+than falling back to another model. That is the behaviour you want — a run should not quietly proceed on
+a model nobody chose — but it means a wrong selector stops the chain rather than degrading it. Configure
+one only after `rlm.find_models()` confirms it from the credentials the run will use.
+
+### What this adapter cannot enforce
+
+On OpenCode, each agent's declared `tools` becomes a permission map, and that is what keeps a reviewer
+from editing the code it judges. **Prime children inherit the parent's tools and skills**, and
+`rlm.spawn` takes no tool or skill argument, so that separation is instruction here rather than
+enforcement: the composed prompt states the allowed files and tools, and nothing stops a child ignoring
+it. Recursion depth is enforced by the host — the default permits children but not grandchildren.
 
 ## Development
 

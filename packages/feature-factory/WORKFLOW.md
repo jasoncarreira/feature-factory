@@ -1764,16 +1764,27 @@ HEAD, a branch name, or an unpersisted variable.
    is not a slice and has no slice `test_plan`, so it continues to supply its integration command. There
    is no waiver: the stage exists to run the tests, so the evidence must record an observed run that
    exited zero, against the integration head as it stands. Then `work-reviewer` confirms each criterion
-   maps to a real assertion.
+   maps to a real assertion, judging the whole integrated diff rather than any one slice's.
+   On a single-slice run this is the last review before publication, and its production findings have no
+   in-band repair: post-merge repair is test-only and a merged slice is never dispatched again, so a
+   production defect parks the run for an operator instead of returning to a builder. Review it as the
+   final reading it is.
    This Gate 3 observation is always fresh and independent in the ordinary path. It uses the existing
    argv-tokenized `--test-cmd` path and overwrites canonical evidence at the current head. The sole
    substitution is a qualifying explicit repair re-verification pass at current HEAD under Gate 3's
    complete inventory rules below; failed ordinary evidence remains preserved rather than overwritten.
 2. `implementation-validator` — the holistic pass across the whole diff, complementing per-slice
    reviews. **Skip it when the run has exactly one slice**: its subject is the interaction *between*
-   slices, and with one there is none, so it re-reads the diff the slice reviewer just approved —
-   a serialized pass on the critical path for no new information. Gate 3 does not require a verdict
-   for a single-slice run. Run it for every multi-slice run; the gate refuses without it.
+   slices, and with one there is none, so it has no question of its own to answer. Gate 3 does not
+   require a verdict for a single-slice run. Run it for every multi-slice run; the gate refuses
+   without it.
+
+   **Skipping it does not mean the integrated diff goes unread**, and nothing here should be read as
+   saying a second reading is worthless. Step 1's `work-reviewer` pass over `test-verifier` judges that
+   diff whole, and on a single-slice run it is the only review after the slice's own: mimir's
+   chainlink-1304 merged its one slice clean at zero findings, and that pass then found two production
+   defects in it, both real and both confirmed. What the skip removes is a duplicate *verdict* on a
+   subject that does not exist, not the reading.
 
    When you do run it, it returns GO / GO-WITH-NITS / NO-GO **and writes `reviews/implementation-validator.json`
    naming the commit it judged**, exactly like any other reviewer. Then:
