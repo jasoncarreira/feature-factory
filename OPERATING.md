@@ -555,10 +555,30 @@ removed the sandbox destroyed the manifest and every accepted gate with it. `.pa
 id, so a snapshot never occupies the completed archive at `$O/.factory/<R>` and never blocks
 re-initialising the same run id. It is published by a staged, verified swap, so a failed later park cannot degrade the last good
 snapshot. A failed snapshot is reported and never prevents the park. `blocked`
-and `partial` are not snapshotted, and a snapshot is evidence for recovery rather than a resumable run.
+and `partial` are not snapshotted. A retained sandbox resumes directly; when that sandbox is lost,
+`factory restore <R> --repo <O> --from refs/remotes/<remote>/<feature-branch>` rebuilds a parked,
+lockless sandbox from the snapshot and the exact feature ref still advertised by the operator effective push endpoint. It reports every active slice reset
+to `pending` rather than claiming branch-local work survived.
 
-Qualified status reports `park_snapshot` for a parked run: the published path, or `null` when no snapshot
-exists. That is how an outside observer verifies the snapshot happened rather than assuming it.
+Qualified status reports `park_snapshot` for an unchanged live park: the published path, or `null` when no
+matching snapshot exists. A restored generation deliberately reports `null` because its manifest and path
+bindings changed; `status.restore` carries its source digest, feature commit, resets, and invalidations.
+
+**A lost parked sandbox** — canonical snapshot present, derived sandbox absent:
+
+```sh
+factory restore <run-id> --repo "$O" \
+  --from "refs/remotes/<remote>/<recorded-feature-branch>" --json
+```
+
+Fetch the feature branch from the operator effective push endpoint into that exact remote-tracking ref
+first. Restore refuses an arbitrary commit or local-only branch, a destination collision, a moved
+source/ref, an unresolved preserved merged-slice or head-bound SHA, or an unproved merge. It copies
+contained symlinks without following them, refuses escaping links, and omits the plane-root `factory.lock`
+plus prior-generation canonical verifier records. It resets unmerged physical bindings to `pending`,
+invalidates Gate 3 and verifier state, and publishes `run.json` last. It never runs repository-configured
+bootstrap or resumes. Review `reset_slices` and `invalidated`, then use the new `sandbox_path` for the
+ordinary claim and resume sequence below. Keep the source snapshot unchanged.
 
 **A crashed run** — `running`, nothing alive:
 

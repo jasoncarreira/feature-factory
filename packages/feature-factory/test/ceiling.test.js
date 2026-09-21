@@ -28,7 +28,7 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
-  "init", "status", "amend-paths", "resume", "decide", "lock", "heartbeat", "gate", "step", "terminal",
+  "init", "status", "amend-paths", "resume", "restore", "decide", "lock", "heartbeat", "gate", "step", "terminal",
   "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push",
 ];
 
@@ -113,6 +113,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
+    assert.deepEqual(COMMANDS.restore, ["--repo", "--from", "--now", "--json"]);
     assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS["reverify-repair"], ["--repo", "--now", "--json"]);
     assert.deepEqual(COMMANDS["effective-push"], []);
@@ -1178,7 +1179,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // it does not prove that a driver applied them.
     // 4858 -> 4860: explicit resume refreshes the staged contract before unparking and checks bindings
     // after that asynchronous copy. The operator-authorized tripwire remains 4900; no code was trimmed.
-    assert.equal(total, 4860, "proving the publication happened lands at 4860 production lines");
+    // 4860 -> 5182 for issue #343: restore qualifies an immutable parked snapshot and exact pushed ref,
+    // proves every preserved merge binding, reports downgraded work, omits stale ownership, records durable
+    // provenance, and publishes the transformed manifest last. The issue authorizes the 5200 tripwire.
+    assert.equal(total, 5182, "snapshot restore lands at 5182 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1209,7 +1213,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // trimming to fit 4500. The margin is 29 lines, which at the observed median landing of 12 is two more changes
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
-    assert.ok(total <= 4900, `production source is ${total} lines; the tripwire is 4900`);
+    // Issue #343 authorizes 4900 -> 5200 for snapshot restore, including source/destination binding,
+    // Git provenance, explicit loss reporting, and atomic publication. The issue body records the approval.
+    assert.ok(total <= 5200, `production source is ${total} lines; the tripwire is 5200`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

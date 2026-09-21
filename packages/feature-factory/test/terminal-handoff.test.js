@@ -3,14 +3,15 @@ import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+  readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 import { withRunJsonLock } from "../core/run-lock.js";
+import { dispatchRestore } from "../bin/restore.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(pkg, "bin", "factory.js");
@@ -358,7 +359,7 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     "`.staging-$R` and `.prior-$R` cannot be run ids",
     "It never touches `S`",
     "does not prevent or undo the park",
-    "Do not\npublish one for `blocked` or `partial`",
+    "Do not publish snapshots for",
   ]) {
     assert.ok(parkSection.includes(fragment), `the parked-snapshot contract must state: ${fragment}`);
   }
@@ -398,6 +399,23 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   const checkRecoveryRule = (source) => assert.ok(source.includes(recoveryRule), "refused resume must route to snapshot recovery");
   checkRecoveryRule(parkPolicy);
   assert.throws(() => checkRecoveryRule(parkPolicy.replace(recoveryRule, "")), /snapshot recovery/u);
+  const restoreRules = [
+    "A snapshot is a restore input, not a live run",
+    '`factory restore "$R" --repo "$O" --fr' + 'om "$RESTORE_REF" --json`',
+    "remains parked and lockless, aligns and rechecks the operator's effective push target",
+    "proves every preserved merged-slice Git and evidence binding",
+    "omits prior-generation\ncanonical verifier records",
+    "reports `reset_slices` and `invalidated`",
+    "`park_snapshot` becomes `null`",
+    "Never substitute a local branch, a bare commit, a",
+    "inspect `status.restore`, and start the same ownership sequence below.",
+  ];
+  const checkRestoreRules = (source) => {
+    for (const fragment of restoreRules) if (!source.includes(fragment)) throw new Error(`restore-contract: ${fragment}`);
+  };
+  checkRestoreRules(parkPolicy);
+  for (const fragment of restoreRules) assert.throws(() => checkRestoreRules(parkPolicy.replace(fragment, "")),
+    /restore-contract/u, `restore contract fragment must be load-bearing: ${fragment}`);
 
   // And the observable half, live: a park with no snapshot on disk reports null rather than nothing at all.
   // This is what would have caught 0.8.2's miss without waiting for a real run to need the snapshot.
@@ -543,6 +561,248 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   rmSync(join(obsOperator, ".factory", ".parked"), { recursive: true, force: true });
   symlinkSync(elsewhere, join(obsOperator, ".factory", ".parked"));
   assert.equal(snapshotOf(), null, "a symlinked parent component is not a published snapshot path");
+
+
+  // Issue #343: a canonical park snapshot is a recovery input, not merely readable evidence. Restore
+  // creates a new sandbox generation from an exact remote-tracking feature ref. It never imports the
+  // old owner, never resumes, and reports work whose branch-local state could not survive the loss.
+  const restoreRoot = realpathSync(mkdtempSync(join(tmpdir(), "factory-restore-")));
+  const restoreOperator = join(restoreRoot, "operator");
+  mkdirSync(restoreOperator);
+  git(restoreOperator, "init", "--quiet", "--initial-branch=main");
+  git(restoreOperator, "config", "user.name", "Factory Test");
+  git(restoreOperator, "config", "user.email", "factory@example.test");
+  writeFileSync(join(restoreOperator, ".gitignore"), ".factory/\n/.factory-sandboxes/\n");
+  writeFileSync(join(restoreOperator, "base.txt"), "base\n");
+  mkdirSync(join(restoreOperator, "workspace"));
+  writeFileSync(join(restoreOperator, "workspace", "base.txt"), "nested integration worktree\n");
+  git(restoreOperator, "add", ".gitignore", "base.txt", "workspace/base.txt");
+  git(restoreOperator, "commit", "--quiet", "-m", "base");
+  const restoreRemote = join(restoreRoot, "remote.git");
+  mkdirSync(restoreRemote);
+  git(restoreRemote, "init", "--bare", "--quiet");
+  git(restoreOperator, "remote", "add", "origin", restoreRemote);
+  const restoreRun = "restore-parked";
+  const restoreFixture = initFresh(restoreOperator, [restoreRun, "--pr-base", "main", "--worktree", "workspace",
+    "--mode", "autonomous", "--now", "2026-09-21T16:00:00Z"]);
+  const lostSandbox = restoreFixture.repository;
+  writeFileSync(join(lostSandbox, "survived.txt"), "pushed work\n");
+  git(lostSandbox, "add", "survived.txt");
+  git(lostSandbox, "commit", "--quiet", "-m", "pushed work");
+  const restoredHead = git(lostSandbox, "rev-parse", "HEAD");
+  const remoteFeatureRef = `refs/remotes/origin/feature/${restoreRun}`;
+  git(lostSandbox, "push", "--quiet", restoreRemote, `HEAD:refs/heads/feature/${restoreRun}`);
+  git(restoreOperator, "fetch", "--quiet", "origin", `refs/heads/feature/${restoreRun}:${remoteFeatureRef}`);
+  const lostRunPath = join(restoreFixture.runDir, "run.json");
+  const lostRun = JSON.parse(readFileSync(lostRunPath, "utf8"));
+  lostRun.slices = [
+    { id: "merged-code", stack: "backend", depends_on: [], status: "pending", worktree: null, branch: null,
+      attempts: 1, paths: ["survived.txt"], test_plan: [], base_ref: null, evidence_ref: null, review_ref: null, merge_commit: null },
+    { id: "lost-review", stack: "backend", depends_on: [], status: "review", worktree: join(lostSandbox, ".factory", "worktrees", restoreRun, "lost-review"),
+      branch: `factory/${restoreRun}/lost-review`, attempts: 2, paths: ["lost.txt"], test_plan: [], base_ref: restoredHead,
+      evidence_ref: null, review_ref: null, merge_commit: null },
+  ];
+  const staleHead = git(restoreOperator, "rev-parse", "main");
+  lostRun.gates.pre_pr = { status: "approved", at: "2026-09-21T16:00:30.000Z", artifact: null, reviewed_head: staleHead };
+  lostRun.validator = { verdict: "GO", report: "artifacts/validation-report.md", reviewed_head: staleHead, loops: 1 };
+  lostRun.steps = [{ agent: "test-verifier", status: "accepted", attempts: 1,
+    review_ref: "reviews/test-verifier.json", evidence_ref: "evidence/test-verifier.json" }];
+  const lostPlan = Buffer.from(`${JSON.stringify({ slices: lostRun.slices.map(({ id, stack, depends_on, paths, test_plan }) => ({ id, stack, depends_on, paths, test_plan })) }, null, 2)}\n`);
+  writeFileSync(join(restoreFixture.runDir, "plan", "slices.json"), lostPlan);
+  lostRun.plan_digest = `sha256:${createHash("sha256").update(lostPlan).digest("hex")}`;
+  writeFileSync(join(restoreFixture.runDir, "reviews", "test-verifier.json"), `${JSON.stringify({ reviewed_commit: staleHead })}\n`);
+  writeFileSync(join(restoreFixture.runDir, "evidence", "test-verifier.json"), `${JSON.stringify({ commit: staleHead })}\n`);
+  writeFileSync(lostRunPath, `${JSON.stringify(lostRun, null, 2)}\n`);
+  factory(lostSandbox, "terminal", restoreRun, "needs-human", "--reason", "host recovery required", "--now", "2026-09-21T16:01:00Z");
+  writeFileSync(join(restoreFixture.runDir, "factory.lock"), "stale owner must not return\n");
+  mkdirSync(join(restoreFixture.runDir, "nested"));
+  writeFileSync(join(restoreFixture.runDir, "nested", "factory.lock"), "durable nested state\n");
+  symlinkSync("nested/factory.lock", join(restoreFixture.runDir, "lock-link"));
+  const restoreSnapshot = join(restoreOperator, ".factory", ".parked", restoreRun);
+  mkdirSync(dirname(restoreSnapshot), { recursive: true });
+  cpSync(restoreFixture.runDir, restoreSnapshot, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+  assert.equal(factory(lostSandbox, "status", restoreRun).park_snapshot, restoreSnapshot);
+  const sourceBeforeRestore = treeInventory(restoreSnapshot);
+  const sourceWorkflowBytes = readFileSync(join(restoreSnapshot, "WORKFLOW.md"));
+  const sourceRunBytes = readFileSync(join(restoreSnapshot, "run.json"));
+  rmSync(lostSandbox, { recursive: true });
+  const bareCommit = spawnSync(process.execPath, [cli, "restore", restoreRun, "--repo", restoreOperator,
+    "--from", restoredHead, "--now", "2026-09-21T16:02:00Z", "--json"], { encoding: "utf8" });
+  assert.equal(bareCommit.status, 1);
+  assert.match(bareCommit.stderr, /--from must name exact branch/u);
+  assert.equal(existsSync(lostSandbox), false);
+  git(restoreOperator, "update-ref", "-d", remoteFeatureRef);
+  const missingRef = spawnSync(process.execPath, [cli, "restore", restoreRun, "--repo", restoreOperator,
+    "--from", remoteFeatureRef, "--now", "2026-09-21T16:02:00Z", "--json"], { encoding: "utf8" });
+  assert.equal(missingRef.status, 1);
+  assert.match(missingRef.stderr, /restore feature ref .* is absent or unobservable/u);
+  assert.equal(existsSync(lostSandbox), false, "a ref refusal happens before reserving the destination");
+  git(restoreOperator, "fetch", "--quiet", "origin", `refs/heads/feature/${restoreRun}:${remoteFeatureRef}`);
+  git(restoreRemote, "update-ref", `refs/heads/feature/${restoreRun}`, staleHead);
+  const staleRemote = spawnSync(process.execPath, [cli, "restore", restoreRun, "--repo", restoreOperator,
+    "--from", remoteFeatureRef, "--now", "2026-09-21T16:02:00Z", "--json"], { encoding: "utf8" });
+  assert.equal(staleRemote.status, 1);
+  assert.match(staleRemote.stderr, /does not match branch .* as advertised by remote/u);
+  assert.equal(existsSync(lostSandbox), false, "a stale remote-tracking ref refuses before destination reservation");
+  git(restoreRemote, "update-ref", `refs/heads/feature/${restoreRun}`, restoredHead);
+  const escapingLink = join(restoreSnapshot, "artifacts", "escaping-link"), bounce = join(restoreRoot, "snapshot-bounce");
+  symlinkSync(restoreSnapshot, bounce);
+  symlinkSync(relative(dirname(escapingLink), join(bounce, "nested", "factory.lock")), escapingLink);
+  const escapingRestore = spawnSync(process.execPath, [cli, "restore", restoreRun, "--repo", restoreOperator,
+    "--from", remoteFeatureRef, "--now", "2026-09-21T16:02:00Z", "--json"], { encoding: "utf8" });
+  assert.equal(escapingRestore.status, 1);
+  assert.match(escapingRestore.stderr, /park snapshot symlink .* escapes the control plane/u);
+  assert.equal(existsSync(join(lostSandbox, ".factory", restoreRun, "run.json")), false);
+  rmSync(lostSandbox, { recursive: true });
+  unlinkSync(escapingLink);
+  unlinkSync(bounce);
+  await assert.rejects(() => dispatchRestore([restoreRun], {
+    repo: restoreOperator, from: remoteFeatureRef, now: "2026-09-21T16:02:00Z",
+  }, { beforeManifest: ({ runDir }) => writeFileSync(join(runDir, "artifacts", "raced.txt"), "intervening write\n") }),
+  (error) => error?.cause?.message === "restored control plane changed before manifest publication; run.json was not published");
+  assert.equal(existsSync(join(lostSandbox, ".factory", restoreRun, "run.json")), false,
+    "an intervening writer is caught at the manifest commit boundary");
+  rmSync(lostSandbox, { recursive: true });
+  const competingRun = join(restoreOperator, ".factory", restoreRun);
+  await assert.rejects(() => dispatchRestore([restoreRun], {
+    repo: restoreOperator, from: remoteFeatureRef, now: "2026-09-21T16:02:00Z",
+  }, { beforeManifest: () => { mkdirSync(competingRun); writeFileSync(join(competingRun, "run.json"), "{}\n"); } }),
+  (error) => error?.cause?.message.includes("live run manifest appeared"));
+  assert.equal(existsSync(join(lostSandbox, ".factory", restoreRun, "run.json")), false,
+    "a competing live manifest prevents publication of a second generation");
+  rmSync(lostSandbox, { recursive: true });
+  rmSync(competingRun, { recursive: true });
+  await assert.rejects(() => dispatchRestore([restoreRun], {
+    repo: restoreOperator, from: remoteFeatureRef, now: "2026-09-21T16:02:00Z",
+  }, { beforeManifest: () => writeFileSync(join(restoreSnapshot, "WORKFLOW.md"), Buffer.concat([sourceWorkflowBytes, Buffer.from("changed\n")])) }),
+  (error) => error?.cause?.message === "park snapshot changed while restore was running; run.json was not published");
+  assert.equal(existsSync(join(lostSandbox, ".factory", restoreRun, "run.json")), false);
+  rmSync(lostSandbox, { recursive: true });
+  writeFileSync(join(restoreSnapshot, "WORKFLOW.md"), sourceWorkflowBytes);
+  await assert.rejects(() => dispatchRestore([restoreRun], {
+    repo: restoreOperator, from: remoteFeatureRef, now: "2026-09-21T16:02:00Z",
+  }, { beforeManifest: () => git(restoreRemote, "update-ref", `refs/heads/feature/${restoreRun}`, staleHead) }),
+  (error) => error?.cause?.message.includes("does not match branch"));
+  git(restoreRemote, "update-ref", `refs/heads/feature/${restoreRun}`, restoredHead);
+  rmSync(lostSandbox, { recursive: true });
+  await assert.rejects(() => dispatchRestore([restoreRun], {
+    repo: restoreOperator, from: remoteFeatureRef, now: "2026-09-21T16:02:00Z",
+  }, { beforeManifest: ({ sandbox }) => git(sandbox, "remote", "set-url", "--push", "origin", sandbox) }),
+  (error) => error?.cause?.message.includes("does not match operator target"));
+  rmSync(lostSandbox, { recursive: true });
+  await assert.rejects(() => dispatchRestore([restoreRun], {
+    repo: restoreOperator, from: remoteFeatureRef, now: "2026-09-21T16:02:00Z",
+  }, { beforeManifest: ({ sandbox }) => writeFileSync(join(sandbox, "base.txt"), "dirty\n") }),
+  (error) => error?.cause?.message === "restored feature worktree changed while restore was running");
+  rmSync(lostSandbox, { recursive: true });
+  const noVerifierRow = JSON.parse(sourceRunBytes);
+  noVerifierRow.steps = [];
+  writeFileSync(join(restoreSnapshot, "run.json"), `${JSON.stringify(noVerifierRow, null, 2)}\n`);
+  const evidenceOnly = factory(restoreOperator, "restore", restoreRun, "--from", remoteFeatureRef, "--now", "2026-09-21T16:02:00Z");
+  assert.ok(evidenceOnly.invalidated.includes("step:test-verifier"), "orphan canonical verifier evidence is invalidated");
+  assert.equal(existsSync(join(evidenceOnly.run_dir, "evidence", "test-verifier.json")), false);
+  rmSync(lostSandbox, { recursive: true });
+  writeFileSync(join(restoreSnapshot, "run.json"), sourceRunBytes);
+  const restored = factory(restoreOperator, "restore", restoreRun, "--from", remoteFeatureRef, "--now", "2026-09-21T16:02:00Z");
+  assert.equal(restored.feature_commit, restoredHead);
+  assert.equal(git(restored.sandbox_path, "remote", "get-url", "--push", "origin"),
+    git(restoreOperator, "remote", "get-url", "--push", "origin"), "restore qualifies the effective push target before publication");
+  assert.deepEqual(restored.reset_slices, ["lost-review"]);
+  assert.deepEqual(restored.invalidated, ["gate:pre_pr", "validator", "step:test-verifier"]);
+  assert.equal(existsSync(join(restored.run_dir, "evidence", "test-verifier.json")), false, "prior-generation verifier evidence is excluded");
+  assert.equal(existsSync(join(restored.run_dir, "reviews", "test-verifier.json")), false, "its verifier review is excluded with it");
+  assert.equal(existsSync(join(restored.run_dir, "factory.lock")), false, "the dead owner is not restored");
+  assert.equal(readFileSync(join(restored.run_dir, "nested", "factory.lock"), "utf8"), "durable nested state\n");
+  assert.equal(readlinkSync(join(restored.run_dir, "lock-link")), "nested/factory.lock", "a contained symlink stays a symlink");
+  assert.deepEqual(treeInventory(restoreSnapshot), sourceBeforeRestore, "restore never mutates its source snapshot");
+  const restoredRun = JSON.parse(readFileSync(join(restored.run_dir, "run.json"), "utf8"));
+  assert.equal(restoredRun.status, "needs-human");
+  assert.equal(restoredRun.worktree, "workspace", "a supported nested integration worktree remains bound");
+  assert.equal(restoredRun.terminal_result.reason, "host recovery required");
+  assert.deepEqual(restoredRun.slices[1], { ...lostRun.slices[1], status: "pending", worktree: null, branch: null,
+    base_ref: null, evidence_ref: null, review_ref: null, merge_commit: null });
+  const restoredStatus = factory(restored.sandbox_path, "status", restoreRun);
+  assert.equal(restoredStatus.park_snapshot, null, "the transformed generation does not claim byte identity with its source");
+  const sourceInventoryText = sourceBeforeRestore.map((entry) => {
+    const type = { directory: "d", regular: "f", symlink: "l" }[entry.type];
+    const payload = entry.type === "regular" ? ` ${entry.sha256}` : entry.type === "symlink" ? ` ${entry.target}` : "";
+    return `${entry.path} ${type} ${entry.mode.toString(8)}${payload}`;
+  }).sort();
+  assert.deepEqual(restoredStatus.restore, {
+    version: 1, run_id: restoreRun, restored_at: "2026-09-21T16:02:00.000Z",
+    source_snapshot: restoreSnapshot,
+    source_inventory: `sha256:${createHash("sha256").update(JSON.stringify(sourceInventoryText)).digest("hex")}`,
+    feature_ref: remoteFeatureRef, feature_commit: restoredHead, reset_slices: ["lost-review"],
+    invalidated: ["gate:pre_pr", "validator", "step:test-verifier"], previous_restore: null,
+  });
+  assert.deepEqual(JSON.parse(readFileSync(restored.restore_record, "utf8")), restoredStatus.restore,
+    "status reports the exact durable restore record");
+  const reorderedRecord = Object.fromEntries(Object.entries(restoredStatus.restore).reverse());
+  writeFileSync(restored.restore_record, `${JSON.stringify(reorderedRecord, null, 2)}\n`);
+  assert.equal(factory(restored.sandbox_path, "status", restoreRun).restore.feature_commit, restoredHead,
+    "restore record validation treats JSON key order as non-semantic");
+  writeFileSync(restored.restore_record, `${JSON.stringify({ ...reorderedRecord, invalidated: ["unknown"] }, null, 2)}\n`);
+  const malformedRestore = spawnSync(process.execPath, [cli, "status", restoreRun, "--repo", restored.sandbox_path, "--json"], { encoding: "utf8" });
+  assert.equal(malformedRestore.status, 1);
+  assert.match(malformedRestore.stderr, /restore record .* is malformed/u);
+  writeFileSync(restored.restore_record, `${JSON.stringify({ ...reorderedRecord, previous_restore: {} }, null, 2)}\n`);
+  const malformedChain = spawnSync(process.execPath, [cli, "status", restoreRun, "--repo", restored.sandbox_path, "--json"], { encoding: "utf8" });
+  assert.equal(malformedChain.status, 1);
+  assert.match(malformedChain.stderr, /restore record .* is malformed/u);
+  writeFileSync(restored.restore_record, `${JSON.stringify(reorderedRecord, null, 2)}\n`);
+  assert.equal(restoredStatus.gates.pre_pr.status, "pending");
+  assert.equal(restoredStatus.validator, null);
+  assert.deepEqual(restoredStatus.steps.find((step) => step.agent === "test-verifier"),
+    { agent: "test-verifier", status: "running", attempts: 1 });
+  assert.equal(restoredStatus.lock, "absent");
+  factory(restored.sandbox_path, "lock", restoreRun, "claim", "--session", "restore-owner");
+  factory(restored.sandbox_path, "resume", restoreRun, "--session", "restore-owner", "--now", "2026-09-21T16:03:00Z");
+  assert.equal(factory(restored.sandbox_path, "status", restoreRun).status, "running");
+  const destinationBeforeCollision = treeInventory(restored.sandbox_path);
+  const collision = spawnSync(process.execPath, [cli, "restore", restoreRun, "--repo", restoreOperator,
+    "--from", remoteFeatureRef, "--now", "2026-09-21T16:04:00Z", "--json"], { encoding: "utf8" });
+  assert.equal(collision.status, 1);
+  assert.match(collision.stderr, /restore sandbox destination .* already exists/u);
+  assert.deepEqual(treeInventory(restored.sandbox_path), destinationBeforeCollision,
+    "a collision refusal does not change the existing generation");
+  rmSync(restored.sandbox_path, { recursive: true });
+  const reboundRun = JSON.parse(readFileSync(join(restoreSnapshot, "run.json"), "utf8"));
+  reboundRun.steps = [{ agent: "spec-writer", status: "accepted", attempts: 1,
+    review_ref: "reviews/spec-writer.json", evidence_ref: null }];
+  reboundRun.validator = { verdict: "GO", report: "artifacts/validation.md", reviewed_head: restoredHead, loops: 0 };
+  const planningReview = { subject: "spec-writer", reviewer: "work-reviewer", verdict: "APPROVE", attempt: 1,
+    reviewed_commit: "0".repeat(40), findings: [], required_fixes: [], checked_against: ["story"] };
+  const validatorReview = { ...planningReview, subject: "implementation-validator", verdict: "GO", reviewed_commit: restoredHead };
+  writeFileSync(join(restoreSnapshot, "run.json"), `${JSON.stringify(reboundRun, null, 2)}\n`);
+  writeFileSync(join(restoreSnapshot, "reviews", "spec-writer.json"), `${JSON.stringify(planningReview, null, 2)}\n`);
+  writeFileSync(join(restoreSnapshot, "reviews", "implementation-validator.json"), `${JSON.stringify(validatorReview, null, 2)}\n`);
+  const rebound = factory(restoreOperator, "restore", restoreRun, "--from", remoteFeatureRef, "--now", "2026-09-21T16:05:00Z");
+  const reboundStatus = factory(rebound.sandbox_path, "status", restoreRun);
+  assert.equal(reboundStatus.steps[0].status, "accepted", "planning review survives without a code-SHA ancestry rule");
+  assert.equal(reboundStatus.validator.reviewed_head, restoredHead, "validator survives only with its exact review binding");
+  rmSync(rebound.sandbox_path, { recursive: true });
+  planningReview.subject = "other-subject";
+  writeFileSync(join(restoreSnapshot, "reviews", "spec-writer.json"), `${JSON.stringify(planningReview, null, 2)}\n`);
+  const unapprovedStep = spawnSync(process.execPath, [cli, "restore", restoreRun, "--repo", restoreOperator,
+    "--from", remoteFeatureRef, "--now", "2026-09-21T16:06:00Z", "--json"], { encoding: "utf8" });
+  assert.equal(unapprovedStep.status, 1);
+  assert.match(unapprovedStep.stderr, /step 'spec-writer' review does not approve its restored attempt/u);
+  assert.equal(existsSync(join(restored.sandbox_path, ".factory", restoreRun, "run.json")), false);
+  rmSync(restored.sandbox_path, { recursive: true });
+  planningReview.subject = "spec-writer";
+  writeFileSync(join(restoreSnapshot, "reviews", "spec-writer.json"), `${JSON.stringify(planningReview, null, 2)}\n`);
+  git(restoreOperator, "switch", "--quiet", "--detach", restoredHead);
+  writeFileSync(join(restoreOperator, ".gitignore"), `.factory-sandboxes/\n.factory/\n!.factory/\n.factory/*\n!.factory/${restoreRun}/\n.factory/${restoreRun}/*\n!.factory/${restoreRun}/run.json\n`);
+  git(restoreOperator, "add", ".gitignore");
+  git(restoreOperator, "commit", "--quiet", "-m", "unignore restored manifest");
+  const unignoredHead = git(restoreOperator, "rev-parse", "HEAD");
+  git(restoreOperator, "push", "--quiet", "--force", "origin", `HEAD:refs/heads/feature/${restoreRun}`);
+  git(restoreOperator, "switch", "--quiet", "main");
+  const unignoredManifest = spawnSync(process.execPath, [cli, "restore", restoreRun, "--repo", restoreOperator,
+    "--from", remoteFeatureRef, "--now", "2026-09-21T16:07:00Z", "--json"], { encoding: "utf8" });
+  assert.equal(unignoredManifest.status, 1);
+  assert.match(unignoredManifest.stderr, /requires '.factory\/restore-parked\/run.json' to be ignored/u);
+  assert.ok(unignoredHead, "the refusal is against a real advertised descendant commit");
 
   const skill = readFileSync(join(pkg, "WORKFLOW.md"), "utf8");
   const start = skill.indexOf("## Step 7 — Summary and completed sandbox handoff");

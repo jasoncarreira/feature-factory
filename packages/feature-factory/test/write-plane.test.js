@@ -3,7 +3,8 @@
 // untested claim in crash-safety code is worse than no claim.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { open as fsOpen } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProtectedWriteError, writeProtectedJsonAtomic } from "../core/atomic-write.js";
@@ -156,6 +157,13 @@ describe("atomic writer", () => {
         }), /protected file target has an unsafe type/u);
         assert.equal(readFileSync(join(clean, "elsewhere.json"), "utf8"), "{}\n");
         assert.deepEqual(hidden(clean), [], "the temp file must be cleaned up after a refused commit");
+        const outside = root("outside-parent");
+        try {
+          symlinkSync(outside, join(clean, "nested"));
+          await assert.rejects(() => writeProtectedJsonAtomic(clean, "nested/run.json", { version: 1 }),
+            /protected file parent has an unsafe symlink/u);
+          assert.deepEqual(readdirSync(outside), [], "an intermediate symlink receives no protected write");
+        } finally { rmSync(outside, { recursive: true, force: true }); }
       } finally { rmSync(clean, { recursive: true, force: true }); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -199,6 +207,53 @@ describe("atomic writer", () => {
         assert.deepEqual(JSON.parse(readFileSync(join(race, "run.json"), "utf8")), { writer: "winner" });
         assert.deepEqual(hidden(race), []);
       } finally { rmSync(race, { recursive: true, force: true }); }
+
+      const direct = root("direct-create");
+      try {
+        let protectedUntilVerified = false;
+        await writeProtectedJsonAtomic(direct, "run.json", { writer: "expected" }, {
+          createOnly: true,
+          fsOps: { open: async (...args) => {
+            const handle = await fsOpen(...args);
+            return new Proxy(handle, { get(target, property) {
+              if (property === "chmod") return async (mode) => {
+                assert.equal(statSync(join(direct, "run.json")).mode & 0o777, 0, "unverified target stays unreadable");
+                protectedUntilVerified = true;
+                return target.chmod(mode);
+              };
+              const value = Reflect.get(target, property, target);
+              return typeof value === "function" ? value.bind(target) : value;
+            } });
+          } },
+          hooks: { beforeCommit: () => {
+            assert.equal(existsSync(join(direct, "run.json")), false, "the target is absent at the commit boundary");
+            assert.deepEqual(hidden(direct), [], "create-only publication exposes no replaceable temp pathname");
+          } },
+        });
+        assert.equal(protectedUntilVerified, true);
+        assert.deepEqual(JSON.parse(readFileSync(join(direct, "run.json"), "utf8")), { writer: "expected" });
+        assert.equal(statSync(join(direct, "run.json")).mode & 0o777, 0o600);
+      } finally { rmSync(direct, { recursive: true, force: true }); }
+
+      const failedCreate = root("failed-direct-create");
+      try {
+        await assert.rejects(() => writeProtectedJsonAtomic(failedCreate, "run.json", { writer: "expected" }, {
+          createOnly: true,
+          fsOps: { open: async (...args) => {
+            const handle = await fsOpen(...args);
+            return new Proxy(handle, { get(target, property) {
+              if (property === "writeFile") return async () => { throw new Error("injected write failure"); };
+              const value = Reflect.get(target, property, target);
+              return typeof value === "function" ? value.bind(target) : value;
+            } });
+          } },
+        }), /protected file commit failed/u);
+        assert.equal(statSync(join(failedCreate, "run.json")).mode & 0o777, 0,
+          "a failed create leaves an unreadable reservation rather than unlinking an uncertain pathname");
+        await assert.rejects(() => writeProtectedJsonAtomic(failedCreate, "run.json", { writer: "retry" }, { createOnly: true }),
+          /protected create target already exists/u);
+        assert.deepEqual(hidden(failedCreate), []);
+      } finally { rmSync(failedCreate, { recursive: true, force: true }); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
