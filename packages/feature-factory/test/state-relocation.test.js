@@ -118,13 +118,15 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const nonSelectedRepositoryShapes = new Set([
     'factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"',
     'factory status "$R" --json --repo "<candidate-repository>"',
+    'factory restore "$R" --repo "$O" --fr' + 'om "$RESTORE_REF" --json',
   ]);
   for (const command of commands.filter((entry) => entry.includes('"$R"'))) {
     if (nonSelectedRepositoryShapes.has(command)) continue;
     assert.match(command, /^factory [a-z-]+\s/u, `factory invocation is not command-first: ${command}`);
     assert.match(command, /--repo "\$RUN_REPO"$/u, `factory invocation lacks trailing selected RUN_REPO: ${command}`);
   }
-  assert.deepEqual(commands.filter((entry) => /--repo "\$O"/u.test(entry)), [[...nonSelectedRepositoryShapes][0]]);
+  assert.deepEqual(commands.filter((entry) => /--repo "\$O"/u.test(entry)),
+    [...nonSelectedRepositoryShapes].filter((entry) => entry.includes('--repo "$O"')));
   assert.ok(commands.includes([...nonSelectedRepositoryShapes][1]));
   for (const stem of ["factory status <run-id> --json", "factory gate <run-id> pre_pr pending"]) {
     assert.ok(commands.includes(stem), `missing compatibility command stem: ${stem}`);
@@ -143,11 +145,11 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   assert.match(resuming, /preserved compatibility\nclaim reads “run `factory status <run-id> --json` and resume; never restart\.” It names a non-runnable\ncommand stem\. Execute only `factory status "\$R" --json --repo "\$RUN_REPO"`/u);
   const modeAdmission = skill.slice(skill.indexOf("## Mode admission"), skill.indexOf("## Operating modes"));
   // This assertion used to require the opposite, and the text it required was wrong twice: it named
-  // `--repo "$RUN_REPO"` for the one command that takes `--repo "$O"` -- `RUN_REPO` is bound FROM init's
-  // response, so it cannot exist when init runs -- and it claimed the invocation ends with the repository
-  // flag when the canonical block ends with `--json`. Every other `"$R"` invocation does end with
-  // `--repo "$RUN_REPO"`, which is why the over-generalization looked right; init is the allowlisted
-  // exception a few lines above. Pin the exception here so prose and block cannot drift apart again.
+  // `--repo "$RUN_REPO"` for commands that take `--repo "$O"`: `RUN_REPO` is bound from init or restore's
+  // response, so it cannot exist when either creates the sandbox -- and it claimed the invocation ends with
+  // the repository flag when the canonical block ends with `--json`. Every other `"$R"` invocation does end
+  // with `--repo "$RUN_REPO"`, which is why the over-generalization looked right; init and restore are the allowlisted
+  // exceptions a few lines above. Pin the exception here so prose and block cannot drift apart again.
   assert.match(modeAdmission, /compatibility phrases name init command stems, not runnable invocations/u);
   assert.match(modeAdmission, /the fully qualified command block in Step 0[^]*--repo "\$O"[^]*ends with `--json`/u,
     "the admission section must send a driver to the Step 0 block and name init's real repository flag and tail");

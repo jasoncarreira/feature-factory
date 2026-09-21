@@ -21,6 +21,7 @@ import { writeProtectedFileAtomic, writeProtectedJsonAtomic } from "../core/atom
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
 import { resolveSpawnExecutable } from "../core/executable.js";
 import { dispatchInitPublication } from "./init-publication.js";
+import { dispatchRestore, readRestoreRecord } from "./restore.js";
 import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, repositoryRelativePath, validateRun } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SESSION_LOCK_FILE, SessionLockHeldError,
@@ -35,6 +36,7 @@ export const COMMANDS = Object.freeze({
   status: Object.freeze(["--repo", "--json"]),
   "amend-paths": Object.freeze(["--repo", "--add", "--reason", "--session", "--now", "--json"]),
   resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
+  restore: Object.freeze(["--repo", "--from", "--now", "--json"]),
   decide: Object.freeze(["--repo", "--text", "--session", "--now", "--json"]),
   // No --force: `lock <id> steal` is the same operation with a name that says what it
   // does, and two spellings of "take someone else's lock" is one too many.
@@ -331,6 +333,7 @@ function bootstrapOutcome(worktree, config, phase) {
   return { exit, refusal };
 }
 
+
 function branchPoint(run) {
   const base = run.slices.find((slice) => Array.isArray(slice.depends_on) && slice.depends_on.length === 0)?.base_ref;
   if (!/^[0-9a-f]{40}$/u.test(base ?? "")) throw new CliError("first seeded root slice has no immutable 40-character base_ref");
@@ -350,6 +353,7 @@ async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, 
   await writeProtectedJsonAtomic(runDir, evidenceRef(subject), evidence);
   return { evidence, ancestry };
 }
+
 
 function canonicalRepositoryVerifyEvidence(evidence, { runId, run, integration, verifyCommand }) {
   const baseRef = branchPoint(run);
@@ -497,6 +501,8 @@ async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit }) {
 }
 
 const HANDLERS = {
+  restore: dispatchRestore,
+
   async ["reverify-repair"](positional, flags) {
     if (positional.length !== 2) throw new CliError("factory reverify-repair requires exactly <run-id> <repair-record-id>");
     const [runId, recordId] = positional;
@@ -1015,6 +1021,7 @@ const HANDLERS = {
       max_retries: run.max_retries,
       publishing_identity: run.publishing_identity ?? null,
       park_snapshot: run.status === "needs-human" ? observedParkSnapshot(resolve(flags.repo ?? process.cwd()), runId, runDir) : null,
+      restore: readRestoreRecord(runDir, run),
       pr_draft: run.pr_draft ?? true,
       lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,
@@ -1657,6 +1664,7 @@ function usage() {
   factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID [--now ISO]
   factory decide <run-id> --text TEXT --session ID [--now ISO]
   factory resume <run-id> --session ID [--now ISO]
+  factory restore <run-id> --repo OPERATOR --from refs/remotes/REMOTE/BRANCH [--now ISO]
   factory reverify-repair <run-id> <repair-record-id> [--repo PATH] [--now ISO] [--json]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID

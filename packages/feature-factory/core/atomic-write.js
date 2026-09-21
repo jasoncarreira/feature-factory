@@ -1,10 +1,11 @@
-// Exclusive same-directory temp, then fsync of the file and of the directory. The directory fsync is
+// Ordinary writes use an exclusive same-directory temp; every write fsyncs its file and directory. Directory fsync is
 // what makes a completed publication survive power loss, and attack 9 (crash-recovery replay) rests
 // on it. Ordinary writes recheck the target immediately before the rename, not only up front: this
 // writes into a working tree, so a local process swapping run.json for a symlink inside that window
 // is a real failure mode and an up-front-only check is a TOCTOU hole. Create-only writes preflight
-// absence and publish by link. beforeCommit is the last race seam, used by CAS and create-only tests.
-import { link as fsLink, lstat, open, rename as fsRename, unlink } from "node:fs/promises";
+// absence, then write through the protected target's held mode-000 inode; only verified, fsynced bytes
+// become readable. beforeCommit is the last race seam used by CAS and create-only tests.
+import { lstat, open, realpath, rename as fsRename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join, resolve, sep } from "node:path";
 
@@ -20,70 +21,81 @@ export function writeProtectedJsonAtomic(rootDir, relativePath, value, options =
 }
 
 export async function writeProtectedFileAtomic(rootDir, relativePath, data, options = {}) {
-  const targetPath = resolveProtectedPath(rootDir, relativePath);
-  const parentDir = resolve(targetPath, "..");
-  const createOnly = options.createOnly === true;
-  const rename = options.fsOps?.rename ?? fsRename;
-  const link = options.fsOps?.link ?? fsLink;
-  const beforeCommit = options.hooks?.beforeCommit;
-  const bytes = Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8");
-
+  const targetPath = resolveProtectedPath(rootDir, relativePath), parentDir = resolve(targetPath, "..");
+  const createOnly = options.createOnly === true, beforeCommit = options.hooks?.beforeCommit;
+  const openFile = options.fsOps?.open ?? open;
+  const bytes = Buffer.isBuffer(data) ? Buffer.from(data) : Buffer.from(String(data), "utf8");
+  await assertSafeParent(rootDir, parentDir);
   await assertSafeTarget(targetPath, createOnly);
+  if (createOnly) return writeProtectedCreate(rootDir, parentDir, targetPath, bytes, beforeCommit, openFile);
 
-  const tempPath = join(parentDir, `.${randomUUID()}.tmp`);
-  let handle = null;
-  let published = false;
+  const tempPath = join(parentDir, `.${randomUUID()}.tmp`), rename = options.fsOps?.rename ?? fsRename;
+  let handle = null, published = false, targetLinked = false;
   try {
-    // "wx" is O_CREAT|O_EXCL|O_WRONLY: if the name exists, fail rather than adopt
-    // a file somebody else created.
-    handle = await open(tempPath, "wx", 0o600);
+    handle = await openFile(tempPath, "wx+", 0o600);
     await handle.writeFile(bytes);
     await handle.sync();
+    if (typeof beforeCommit === "function") await beforeCommit();
+    await assertSafeParent(rootDir, parentDir);
+    await assertSafeTarget(targetPath, false);
+    await assertPublishedInode(handle, tempPath, bytes);
+    await rename(tempPath, targetPath);
+    targetLinked = true;
+    await assertPublishedInode(handle, targetPath, bytes);
     await handle.close();
     handle = null;
-
-    if (createOnly) {
-      await assertSafeTarget(targetPath, true);
-      if (typeof beforeCommit === "function") await beforeCommit();
-      try { await link(tempPath, targetPath); } catch (error) {
-        if (error?.code === "EEXIST") throw new ProtectedWriteError("protected create target already exists", error);
-        throw error;
-      }
-      published = true;
-      try { await unlink(tempPath); } catch (cleanupError) {
-        try { await unlink(tempPath); } catch (retryError) {
-          if (retryError?.code !== "ENOENT") {
-            throw new ProtectedWriteError("protected create published target but temporary cleanup is indeterminate", retryError);
-          }
-        }
-        throw new ProtectedWriteError("protected create published target but initial temporary cleanup failed", cleanupError);
-      }
-    } else {
-      if (typeof beforeCommit === "function") await beforeCommit();
-      await assertSafeTarget(targetPath, false);
-      await rename(tempPath, targetPath);
-      published = true;
-    }
+    published = true;
   } catch (error) {
-    if (handle) {
-      try { await handle.close(); } catch { /* the original error is the one that matters */ }
+    if (handle) try { await handle.close(); } catch { /* the original error is primary */ }
+    if (targetLinked && !published) try { await unlink(targetPath); } catch { /* integrity failure is primary */ }
+    if (!published) try { await unlink(tempPath); } catch (cleanupError) {
+      if (cleanupError?.code !== "ENOENT") throw new ProtectedWriteError("protected temporary file cleanup is indeterminate", cleanupError);
     }
-    if (!published) {
-      try {
-        await unlink(tempPath);
-      } catch (cleanupError) {
-        if (cleanupError?.code !== "ENOENT") {
-          throw new ProtectedWriteError("protected temporary file cleanup is indeterminate", cleanupError);
-        }
-      }
-    }
-    throw error instanceof ProtectedWriteError
-      ? error
-      : new ProtectedWriteError("protected file commit failed", error);
+    throw error instanceof ProtectedWriteError ? error : new ProtectedWriteError("protected file commit failed", error);
   }
-
   await syncDirectory(parentDir);
   return { path: targetPath };
+}
+
+async function writeProtectedCreate(rootDir, parentDir, targetPath, bytes, beforeCommit, openFile) {
+  let handle = null;
+  try {
+    if (typeof beforeCommit === "function") await beforeCommit();
+    await assertSafeParent(rootDir, parentDir);
+    await assertSafeTarget(targetPath, true);
+    try { handle = await openFile(targetPath, "wx+", 0o000); } catch (error) {
+      if (error?.code === "EEXIST") throw new ProtectedWriteError("protected create target already exists", error);
+      throw error;
+    }
+    await handle.writeFile(bytes);
+    await handle.sync();
+    await assertPublishedInode(handle, targetPath, bytes);
+    await handle.chmod(0o600);
+    await handle.sync();
+    await assertPublishedInode(handle, targetPath, bytes);
+    await handle.close();
+    handle = null;
+  } catch (error) {
+    if (handle) try { await handle.close(); } catch { /* the original error is primary */ }
+    // Never unlink by pathname after claiming it: a competitor could have replaced that name.
+    // A failed direct create remains mode 000 and blocks reuse instead of exposing uncertain state.
+    throw error instanceof ProtectedWriteError ? error : new ProtectedWriteError("protected file commit failed", error);
+  }
+  await syncDirectory(parentDir);
+  return { path: targetPath };
+}
+
+async function assertPublishedInode(handle, targetPath, bytes) {
+  const [held, named] = await Promise.all([handle.stat(), lstat(targetPath)]);
+  const observed = Buffer.alloc(bytes.length + 1), read = await handle.read(observed, 0, observed.length, 0);
+  if (!named.isFile() || held.dev !== named.dev || held.ino !== named.ino || read.bytesRead !== bytes.length
+    || !observed.subarray(0, bytes.length).equals(bytes)) throw new ProtectedWriteError("protected publication inode or bytes changed before commit");
+}
+
+async function assertSafeParent(rootDir, parentDir) {
+  const root = resolve(rootDir), rel = resolve(parentDir).slice(root.length + 1);
+  let observed; try { observed = await realpath(parentDir); } catch (error) { throw new ProtectedWriteError("protected file parent could not be inspected", error); }
+  if (observed !== resolve(await realpath(root), rel)) throw new ProtectedWriteError("protected file parent has an unsafe symlink");
 }
 
 function resolveProtectedPath(rootDir, relativePath) {

@@ -113,10 +113,14 @@ removed the sandbox destroyed the manifest and every accepted gate with it. `.pa
 id, so a snapshot never occupies the completed archive at `$O/.factory/<R>` and never blocks
 re-initialising the same run id. It is published by a staged, verified swap, so a failed later park cannot degrade the last good
 snapshot. A failed snapshot is reported and never prevents the park. `blocked`
-and `partial` are not snapshotted, and a snapshot is evidence for recovery rather than a resumable run.
+and `partial` are not snapshotted. A retained sandbox resumes directly; when that sandbox is lost,
+`factory restore <R> --repo <O> --from refs/remotes/<remote>/<feature-branch>` rebuilds a parked,
+lockless sandbox from the snapshot and the exact pushed feature ref. It reports every active slice reset
+to `pending` rather than claiming branch-local work survived.
 
-Qualified status reports `park_snapshot` for a parked run: the published path, or `null` when no snapshot
-exists. That is how an outside observer verifies the snapshot happened rather than assuming it.
+Qualified status reports `park_snapshot` for an unchanged live park: the published path, or `null` when no
+matching snapshot exists. A restored generation deliberately reports `null` because its manifest and path
+bindings changed; `status.restore` carries its source digest, feature commit, resets, and invalidations.
 Malformed config, malformed payload, a non-zero exit, or unavailable exit status refuses before any
 run effect and never falls back:
 
@@ -189,6 +193,30 @@ the prior value; verified release followed by a new verified claim establishes f
 Gate 3 always runs a separate fresh integrated `test-verifier` observation at the current head. It
 overwrites canonical evidence through the existing command mode and never shares, substitutes, or
 optimizes from post-merge evidence, even when the head is unchanged.
+
+## Restoring a lost parked sandbox
+
+Run restore from the canonical operator repository, not from a replacement checkout:
+
+```sh
+factory restore <run-id> --repo <operator-repository> \
+  --from refs/remotes/<remote>/<recorded-feature-branch> --json
+```
+
+The source must be the canonical `$O/.factory/.parked/<run-id>` snapshot. The feature ref must be a full
+remote-tracking ref whose branch suffix exactly matches the manifest and whose commit is still advertised
+by that remote's push endpoint, exactly equal to the operator effective push endpoint. Restore validates
+that snapshot, refuses symlinks that escape its control plane, clones the exact derived sandbox, aligns and
+rechecks the operator's effective push target, and proves every preserved merged-slice Git and evidence
+binding against the pushed head. It omits the old root session lock and publishes the transformed manifest
+last. The run stays parked and no repository-configured bootstrap runs. Nonmerged slices with physical
+branch or worktree state reset to `pending`, and the command reports them. Stale HEAD-bound validator
+approval is invalidated. Gate 3 and test-verifier approval are always invalidated because canonical
+publication evidence names the prior physical generation; canonical verifier records are omitted from the
+copy. The staged slice projection must still match the Brief-bound plan digest and recorded amendments.
+The durable `status.restore` record identifies the source inventory and restored commit. Because the new
+generation has different paths and provenance, `status.park_snapshot` is `null` after a successful restore.
+Claim the new lock and use the ordinary resume sequence only after reviewing those losses.
 
 ## Resuming a parked run
 

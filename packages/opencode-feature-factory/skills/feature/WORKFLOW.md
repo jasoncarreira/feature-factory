@@ -304,9 +304,16 @@ Three properties make this safe to do at a park rather than only at completion:
    failed would leave `status: running` with nothing alive, which every health signal misreads — a worse
    outcome than a missing snapshot.
 
-A snapshot is evidence for recovery, not a resumable run: resume operates on the sandbox manifest. Do not
-publish one for `blocked` or `partial`, which are not resumable, and never treat a snapshot as authority
-over the live plane.
+A snapshot is a restore input, not a live run: resume still operates only on a sandbox manifest. While `S`
+exists, never restore over it or treat the snapshot as authority over the live plane. If `S` is lost, fetch
+the feature branch still advertised by the operator effective push endpoint into a full remote-tracking ref whose suffix is the recorded branch, then run
+`factory restore "$R" --repo "$O" --from "$RESTORE_REF" --json`. Restore creates only the exact derived
+sandbox, remains parked and lockless, aligns and rechecks the operator's effective push target, omits the
+old plane-root lock, proves every preserved merged-slice Git and evidence binding, resets unrecoverable nonmerged slices to `pending`, and reports `reset_slices` and `invalidated`. It omits prior-generation
+canonical verifier records and always invalidates Gate 3 and test-verifier state. It records its source inventory and restored commit at `status.restore`; `park_snapshot` becomes `null` because the new
+generation is intentionally not byte-identical to its source. Review those losses, bind `RUN_REPO` to the
+returned sandbox, and only then enter the ordinary claim-and-resume order. Do not publish snapshots for
+`blocked` or `partial`, which are not resumable.
 
 At every interactive gate, `changes: <feedback>` records `changes`, follows
 `changes-at-gate:<name>`, revises only the affected stage, and re-presents it pending. `stop` requires
@@ -2184,6 +2191,12 @@ accepted NO-GO findings, recorded overrides, retained or residual sandboxes, or 
 `dead_lock`.
 
 ## Resuming
+
+If the intended sandbox is absent but qualified operator inspection finds the canonical parked snapshot,
+restore it first using the exact procedure above. Restore is not resume: it leaves the new generation
+parked with no owner and may reset or invalidate state. Never substitute a local branch, a bare commit, a
+new run, or a hand-copied manifest for the full remote-tracking ref and CLI command. After restore, use its
+returned sandbox as `RUN_REPO`, inspect `status.restore`, and start the same ownership sequence below.
 
 On invocation, if the run directory exists and you hold or steal the lock, the preserved compatibility
 claim reads “run `factory status <run-id> --json` and resume; never restart.” It names a non-runnable
