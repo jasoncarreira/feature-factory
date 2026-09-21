@@ -53,7 +53,8 @@ configuring both hosts learns one vocabulary:
 profiles[<agent>]  →  profiles[<role>]  →  profiles.default  →  profile
 ```
 
-Configure them as extension options:
+Configure them in `.prime/agent/feature-factory.json`, project-local first and then
+`~/.prime/agent/feature-factory.json` for every project:
 
 ```jsonc
 { "profiles": {
@@ -62,6 +63,15 @@ Configure them as extension options:
     "story-reader": { "model": "openai/gpt-5.6-luna", "thinking": "minimal" }
 } }
 ```
+
+The project file wins outright over the home file; they are not merged, so a project that sets only
+`builder` does not inherit the home file's other roles. A malformed or non-object file is skipped rather
+than raised, because a typo in an optional profile must not stop the extension registering and take
+`/feature` down with it.
+
+That file is the configuration surface because Prime registers an extension **by path** and calls its
+default export with `pi` alone — there is no per-extension options object in `settings.json` or in the
+package manifest, so anything reachable only by calling the export directly is not configuration.
 
 Roles come from each agent's own frontmatter — `planning`, `story`, `research`, `design`, `builder`,
 `test`, `reviewer` — so a new agent inherits its role without needing an entry.

@@ -4,7 +4,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import featureFactoryExtension, { dispatchProfiles, factoryResources, primeSessionId, profileFor } from "../extensions/index.js";
+import featureFactoryExtension, { PROFILE_CONFIG_PATH, dispatchProfiles, factoryResources, primeSessionId, profileFor, readProfileConfig } from "../extensions/index.js";
 
 // `resolveFromOwnPath` walks up from the extension's OWN location, so exercising it means putting a copy
 // of the extension in a real install layout and importing it from there -- injecting a stub proves the
@@ -170,13 +170,12 @@ describe("Prime extension", () => {
     const dispatch = dispatchProfiles(AGENTS);
     // The whole set, so a new agent that forgets `effort` or `role` fails here rather than silently
     // spawning at the parent's level.
-    assert.deepEqual(dispatch["spec-writer"], { role: "planning", thinking: "xhigh" });
-    assert.deepEqual(dispatch["backend-builder"], { role: "builder", thinking: "medium" });
-    assert.deepEqual(dispatch["story-reader"], { role: "story", thinking: "low" });
+    assert.deepEqual(dispatch["spec-writer"], { thinking: "xhigh" });
+    assert.deepEqual(dispatch["backend-builder"], { thinking: "medium" });
+    assert.deepEqual(dispatch["story-reader"], { thinking: "low" });
     assert.equal(Object.keys(dispatch).length, 11);
     for (const [name, entry] of Object.entries(dispatch)) {
       assert.ok(entry.thinking, `${name} declares no usable effort`);
-      assert.ok(entry.role, `${name} declares no role`);
       assert.equal(entry.model, undefined, `${name} pinned a model with no operator profile`);
     }
   });
@@ -206,8 +205,7 @@ describe("Prime extension", () => {
     const good = dispatchProfiles(AGENTS, { profiles: { planning: { thinking: "max" } } });
     const bad = dispatchProfiles(AGENTS, { profiles: { planning: { thinking: "ludicrous" } } });
     assert.equal(good["spec-writer"].thinking, "max");
-    assert.equal(bad["spec-writer"].thinking, undefined);
-    assert.equal(bad["spec-writer"].role, "planning");
+    assert.deepEqual(bad["spec-writer"], {});
   });
 
   it("carries the dispatch map on feature_factory_context so the driver never reparses frontmatter", async () => {
@@ -231,5 +229,57 @@ describe("Prime extension", () => {
     // shadowing it with nothing.
     assert.deepEqual(profileFor("work-reviewer", "reviewer", { profiles: { "work-reviewer": {} }, profile: { model: "p/bare" } }), { model: "p/bare" });
     assert.deepEqual(profileFor("work-reviewer", "reviewer", { profiles: { "work-reviewer": "nope" }, profile: { model: "p/bare" } }), { model: "p/bare" });
+  });
+
+  // Prime fails a spawn on an unknown keyword instead of ignoring it, and the skill spreads the whole
+  // dispatch entry into the call. So the end-to-end property is not "role is absent" but "every entry
+  // spreads cleanly into a spawn that accepts exactly what Prime accepts" -- a diagnostic key added here
+  // later breaks the first dispatch of every run, and this is what notices.
+  it("produces entries that spread into a spawn accepting only name, model and thinking", () => {
+    const ACCEPTED = new Set(["name", "model", "thinking"]);
+    const spawn = (prompt, kwargs) => {
+      if (typeof prompt !== "string") throw new TypeError("prompt must be str");
+      if (!kwargs.name) throw new TypeError("name is required");
+      for (const key of Object.keys(kwargs)) {
+        if (!ACCEPTED.has(key)) throw new TypeError(`rlm.spawn got an unexpected keyword argument '${key}'`);
+      }
+      return { name: kwargs.name };
+    };
+    const dispatch = dispatchProfiles(AGENTS, { profiles: { reviewer: { model: "p/strong", thinking: "max" } } });
+    for (const [name, profile] of Object.entries(dispatch)) {
+      assert.doesNotThrow(() => spawn("do the thing", { name, ...profile }), `${name} cannot be spawned`);
+    }
+    // Control: the strict fake is what makes the loop meaningful, so prove it rejects the shape this
+    // test exists to prevent rather than passing everything.
+    assert.throws(() => spawn("x", { name: "a", role: "planning" }), /unexpected keyword argument 'role'/u);
+  });
+
+  // Prime registers an extension by path and calls the default export with `pi` alone, so an options
+  // argument is unreachable from a normal install. These exercise the file the extension actually reads.
+  it("reads profiles from the project file, then the home file, and prefers the project", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "prime-cfg-")));
+    const write = (base, body) => {
+      mkdirSync(join(base, dirname(PROFILE_CONFIG_PATH)), { recursive: true });
+      writeFileSync(join(base, PROFILE_CONFIG_PATH), body);
+    };
+    const project = join(root, "project");
+    const home = join(root, "home");
+    write(home, JSON.stringify({ profiles: { default: { model: "home/model" } } }));
+    assert.deepEqual(readProfileConfig(project, home), { profiles: { default: { model: "home/model" } } });
+    write(project, JSON.stringify({ profiles: { default: { model: "project/model" } } }));
+    assert.deepEqual(readProfileConfig(project, home), { profiles: { default: { model: "project/model" } } });
+    assert.deepEqual(readProfileConfig(join(root, "none"), join(root, "none")), {});
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("registers with no profiles rather than throwing when the config file is malformed", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "prime-cfg-bad-")));
+    mkdirSync(join(root, dirname(PROFILE_CONFIG_PATH)), { recursive: true });
+    writeFileSync(join(root, PROFILE_CONFIG_PATH), "{ not json");
+    // A typo in an optional profile must not take /feature down with it.
+    assert.deepEqual(readProfileConfig(root, join(root, "none")), {});
+    writeFileSync(join(root, PROFILE_CONFIG_PATH), JSON.stringify(["array", "is", "not", "config"]));
+    assert.deepEqual(readProfileConfig(root, join(root, "none")), {});
+    rmSync(root, { recursive: true, force: true });
   });
 });

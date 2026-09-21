@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, parse } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -103,7 +104,11 @@ export function dispatchProfiles(agentsDir, options = {}, read = readAgentFiles)
   for (const { name, role, effort } of read(agentsDir)) {
     const chosen = profileFor(name, role, options);
     const thinking = chosen.thinking ?? effort;
-    out[name] = { role };
+    // Only what `rlm.spawn` accepts. The driver spreads this entry straight into the call, and Prime
+    // fails a spawn on an unknown keyword rather than ignoring it -- so `role`, which resolution needs
+    // and the spawn does not, stays out of the value entirely instead of relying on the caller to strip
+    // it. Adding a diagnostic key here would break the first dispatch of every run.
+    out[name] = {};
     if (THINKING_LEVELS.includes(thinking)) out[name].thinking = thinking;
     if (chosen.model) out[name].model = chosen.model;
   }
@@ -130,11 +135,39 @@ export function primeSessionId(sessionFile, fallback = randomUUID()) {
   return `prime-agent:${sessionFile ? basename(sessionFile) : fallback}`;
 }
 
+// Prime registers an extension by path and calls the default export with `pi` alone -- there is no
+// per-extension options object in `settings.json` or the package manifest. A configuration surface that
+// only a direct call can reach is not configuration, so profiles are read from a file instead, project
+// first and then global, with an explicit `options` argument still winning for tests and `-e` use.
+export const PROFILE_CONFIG_PATH = join(".prime", "agent", "feature-factory.json");
+
+export function readProfileConfig(cwd = process.cwd(), home = homedir(), read = readFileSync) {
+  for (const base of [cwd, home]) {
+    let bytes;
+    try {
+      bytes = read(join(base, PROFILE_CONFIG_PATH), "utf8");
+    } catch {
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(bytes);
+    } catch {
+      // A malformed file is reported and skipped rather than throwing: a typo in an optional profile
+      // must not stop the extension registering, which would take /feature down with it.
+      continue;
+    }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  }
+  return {};
+}
+
 export default function featureFactoryExtension(pi, options = {}) {
   const resources = factoryResources(options.resolveFeatureFactory);
   // Resolved once at registration: the agent set and the operator's profiles are both fixed for the
   // life of the extension, and reading eleven files per dispatch would buy nothing.
-  const dispatch = dispatchProfiles(resources.agents, options);
+  const configured = options.profiles || options.profile ? options : readProfileConfig();
+  const dispatch = dispatchProfiles(resources.agents, configured);
   const sessionIds = new WeakMap();
 
   function sessionIdFor(sessionManager) {
