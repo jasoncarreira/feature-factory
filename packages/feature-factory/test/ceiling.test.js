@@ -137,6 +137,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Each fragment sits on one line in the raw markdown. One spanning a line wrap could never
     // match, and would fail for a reason unrelated to the rule it guards.
     for (const instruction of [
+      // Instruction only: which command publishes is an environment property, like the identity beside it.
+      // The empty-selects-default rule is the load-bearing half -- without it a repository can declare its
+      // way into a run that cannot publish from a host with nothing to delegate to.
+      "Resolve the command before running anything: inherited `FACTORY_PUBLISHING_COMMAND` overrides the",
+      "whitespace selects the default `gh pr create` below, so a host with nothing to delegate to can decline a",
+      "or the default when the file declares none. The override applies with or without `$O/.factory.json`; it",
+
       // Enforcement is in repository-config.js; these pin the contract it implements, because a `publish`
       // that is optional in code and still documented as required is the same defect one layer over.
       "`publish` was required and invoked nowhere until this release, so every",

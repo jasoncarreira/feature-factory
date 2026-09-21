@@ -314,7 +314,10 @@ configuration. Both modes use shell-free Git subprocesses, write no output on su
 sandbox on a fixed redacted failure. Captured targets and child diagnostics are never returned, logged,
 persisted in factory state, printed, or attached as an error cause. The command is independent of
 `publishing_identity` and adds no run state or flag. Configured `publish` replaces only PR creation after
-the factory-owned exact push and post-push identity guard.
+the factory-owned exact push and post-push identity guard. Inherited `FACTORY_PUBLISHING_COMMAND`
+overrides that entry for the environment the run happens to be in, and selects the default `gh pr create`
+when it is set empty, so a repository declaring how it publishes cannot leave a host with nothing to
+delegate to unable to publish at all.
 
 ## Why the code exists at all
 
