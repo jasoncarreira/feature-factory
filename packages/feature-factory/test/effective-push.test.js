@@ -508,6 +508,52 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   ], "Step 6 compare/publication");
   required(publication, "effective boolean `pr_draft` as `PR_DRAFT`", "status policy binding");
   required(publication, "without rereading repository config", "status policy binding");
+  for (const fragment of [
+    "The fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or",
+    "The second identity observation always runs after that",
+    "run that exact string instead of only `gh pr create` above",
+    "Add exactly five values to",
+    "do not run `factory pr`, and do not fall back to `gh pr create`",
+    "Before any retry, re-observe whether the pull request exists",
+  ]) {
+    required(publication, fragment, "configured publish boundary");
+    assert.throws(() => required(publication.replace(fragment, ""), fragment, "configured publish boundary"),
+      /configured publish boundary contract is missing/u);
+  }
+
+  const configuredPublishRoot = mkdtempSync(join(tmpdir(), "factory-configured-publish-"));
+  try {
+    const runRepository = join(configuredPublishRoot, "run-repository");
+    const bodyFile = join(configuredPublishRoot, "body.md");
+    const traceFile = join(configuredPublishRoot, "trace");
+    const publishScript = join(configuredPublishRoot, "publish.sh");
+    mkdirSync(runRepository);
+    writeFileSync(bodyFile, "decorated body\n");
+    writeFileSync(publishScript, [
+      "#!/bin/sh",
+      "printf '%s\n' \"$PWD\" \"$PR_BASE\" \"$FEATURE_BRANCH\" \"$PR_DRAFT\" \"$PR_TITLE\" \"$PR_BODY_FILE\" > \"$TRACE_FILE\"",
+      "printf 'informational output\nhttps://example.test/pull/348\n'",
+    ].join("\n"));
+    chmodSync(publishScript, 0o700);
+    writeFileSync(join(runRepository, ".factory.json"), JSON.stringify({
+      resolve: "true", verify: "true", publish: shellQuote(publishScript),
+    }));
+    const configuredPublishCommand = JSON.parse(readFileSync(join(runRepository, ".factory.json"), "utf8")).publish;
+    for (const draft of ["true", "false"]) {
+      const result = command(absoluteShell, ["-c", configuredPublishCommand], {
+        cwd: runRepository,
+        env: {
+          TRACE_FILE: traceFile, PR_BASE: "main", FEATURE_BRANCH: "feature/pr-348", PR_DRAFT: draft,
+          PR_TITLE: "341 : publish", PR_BODY_FILE: bodyFile,
+        },
+      });
+      assert.equal(result.status, 0);
+      assert.deepEqual(readFileSync(traceFile, "utf8").trimEnd().split("\n"),
+        [realpathSync(runRepository), "main", "feature/pr-348", draft, "341 : publish", bodyFile]);
+      assert.equal(result.stdout.trimEnd().split("\n").filter(Boolean).at(-1), "https://example.test/pull/348");
+    }
+  } finally { rmSync(configuredPublishRoot, { recursive: true, force: true }); }
+
   // Step 6 carried its own copy of the generic non-disclosure claim, and it survived the first
   // narrowing because only the Step 0 sentence was rewritten. Pinned in the Step 6 slice, not the
   // fresh-request slice, so the assertion fails for drift here rather than passing on a match
@@ -728,7 +774,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     "Do not put the raw or rendered reason inside double quotes",
     "byte-for-byte equal to `PRE_QUOTING_REASON`, not the encoded token",
     "report only `Outcome: retained-lock-error`",
-    "There is no\nseparate identity guard before `factory pr`",
+    "There is no separate identity guard before `factory pr`",
   ]) assert.throws(() => checkIdentityPolicy(skill.replace(marker, "")), undefined, marker);
 
   const root = mkdtempSync(join(tmpdir(), "factory-effective-push-"));

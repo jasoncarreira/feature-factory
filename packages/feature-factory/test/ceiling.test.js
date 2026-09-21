@@ -140,10 +140,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // Enforcement is in repository-config.js; these pin the contract it implements, because a `publish`
       // that is optional in code and still documented as required is the same defect one layer over.
       "`publish` was required and invoked nowhere until this release, so every",
-      "**When `.factory.json` declares `publish`, run that command instead of the `git push` and `gh pr create`",
-      "the last nonempty line of its stdout. Everything around it is unchanged: the second identity observation",
-      "nothing that can be recorded, so follow the common quiesce, park, durable-reason, owning release,",
-      "publishes has said the default is wrong for it, and retrying the default would publish under exactly",
+      "The fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or",
+      "**When `.factory.json` declares `publish`, run that exact string instead of only `gh pr create` above**",
+      "as one shell command in `RUN_REPO` cwd with no stdin or positional arguments. Add exactly five values to",
+      "do not run `factory pr`, and do not fall back to `gh pr create`. Follow the",
+      "later-driver procedure. Before any retry, re-observe whether the pull request exists and record an",
 
       // Instruction only: the single-slice validator skip removes a duplicate verdict, not the second
       // reading. mimir's chainlink-1304 merged one slice clean and the test-verifier review then found

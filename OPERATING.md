@@ -50,9 +50,9 @@ resolved Git top level of the invocation checkout:
 }
 ```
 
-The root object has three required properties and four optional properties: `pr_draft`,
-`verify_timeout_ms`, `bootstrap`, and `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and a present `bootstrap` are
-non-empty command strings. There is no `publishing_identity` key, and a file carrying one is malformed
+The root object has two required properties, `resolve` and `verify`, and five optional properties:
+`publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and `bootstrap_timeout_ms`. Required commands and
+any present `publish` or `bootstrap` are non-empty strings. There is no `publishing_identity` key, and a file carrying one is malformed
 because the optional set is closed. A present `pr_draft` must be a JSON boolean and omission means `true`.
 Both timeouts must be positive safe integers. `bootstrap_timeout_ms`
 requires `bootstrap`. Each omitted timeout independently defaults to `900000` milliseconds and neither
@@ -69,11 +69,11 @@ value stops the run instead of publishing under whatever credential the host hap
 it from `gh`, the token, stored authentication, or Git configuration: an expectation read from the
 credential being checked would always match.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; then invalid `publish`.
 
-The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
+The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, `.factory.json entry 'verify_timeout_ms' must be a positive integer`, and `.factory.json entry 'publish' must be a non-empty string`.
 
-`resolve`, `bootstrap`, and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` remains unconsumed and is not invoked.
+`resolve`, `bootstrap`, and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` is optional and replaces only PR creation after the factory-owned exact push and post-push identity guard.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
 After mode admission, `resolve` runs as one ordinary shell step with its
 configured string submitted unchanged, exact cwd `O`, the inherited environment plus `FACTORY_INPUT`,
@@ -125,7 +125,7 @@ The entries have these execution contracts:
 | --- | --- | --- | --- |
 | `bootstrap` | The exact string runs unchanged with `shell: true`, cwd exactly the selected sandbox, inherited environment and stdin, and child stdout and stderr both routed to CLI stderr. Each attempt gets the independent configured timeout or `900000` millisecond default. | Clean numeric zero succeeds. Tracked-state observation failure outranks named dirty worktree/index paths, which outrank unavailable or nonzero exit. | CLI-owned once during fresh init after clone, containment, and PR-base observation but before manifest publication, and again on every explicit resume while parked. No retry. |
 | `verify` | The unchanged string runs as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio; no structured stdin or factory payload. Each attempt gets the full configured timeout. Stdout and stderr are visible, informational, and unparsed rather than captured or persisted. | Numeric child exit status is authoritative. Zero succeeds; non-zero means repository verification failed; no numeric status is unavailable. | Invoked after each newly recorded merge with at most two executions per merge or replay invocation. Direct committed test-only repair observation remains one execution. |
-| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory payload. Exit status is authoritative and stdout is informational and unparsed. | Zero reports success; non-zero reports failure. | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by `factory effective-push`. |
+| `publish` | Optional exact string run as one shell step in `RUN_REPO`, with no stdin or positional arguments and inherited environment plus exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE`. The last nonempty stdout line must be an absolute HTTPS URL. | Zero plus that URL is recordable; every other result is indeterminate and parks without fallback or `factory pr`. | Replaces only `gh pr create`, after the factory-owned exact push and post-push identity guard. |
 | `publishing_identity` | No runtime input; read the value `status` reports for the run | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three guards; only a manifest written before 0.8.0 can report `null` and skip them. |
 
 Bootstrap cleanliness checks tracked worktree and index paths only, so untracked dependency installation is allowed. Clean zero publishes paired top-level `bootstrap_command` and `bootstrap_exit` evidence; the command is exact and the result is a non-negative integer or `null`. Ordinary transitions preserve the pair, while status response shape stays unchanged.
@@ -134,13 +134,13 @@ A failed, timed-out, dirty, or unobservable fresh init emits no JSON stdout, ret
 
 When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.
 
-Bootstrap never runs during resolver intake, merge verification or replay, direct repository verification, slice observation, Gate 3, effective push, configured publication, push, or PR creation. Existing resolver, verify, configured-publish, effective-push, push, PR, and Gate 3 behavior is unchanged.
+Bootstrap never runs during resolver intake, merge verification or replay, direct repository verification, slice observation, Gate 3, effective push, configured publication, push, or PR creation. Bootstrap does not mediate configured publication, effective-push, push, PR, or Gate 3 behavior.
 
 Publishing identity is checked immediately after verified post-lock ownership, or immediately after an
 explicit resume is verified running with the same fresh owner and before reconciliation or other work;
-immediately before `git push`, after effective push-target equality; and immediately before
-`gh pr create`, after the push is known successful. No operation may intervene across any guard
-boundary. There is no separate guard before `factory pr`. `publishing_identity` is a recorded run field reported by `status`, resolved by `init` from a flag or the environment. The independent `factory effective-push` command adds no state or flag. Existing push, `gh pr create`, `factory pr`, Gate 3, merge, and approval semantics remain unchanged.
+immediately before `git push`, after effective push-target equality; and immediately before the selected
+PR-creation command, after the factory-owned exact push is known successful. No operation may intervene
+across any guard boundary. There is no separate guard before `factory pr`. `publishing_identity` is a recorded run field reported by `status`, resolved by `init` from a flag or the environment. The independent `factory effective-push` command adds no state or flag. Existing push, `factory pr`, Gate 3, merge, and approval semantics remain unchanged.
 
 Before each guard, inherited `GH_TOKEN` must exist and contain at least one character. Missing or empty
 parks identity as unobservable without invoking `gh`, the network, stored authentication, credential
