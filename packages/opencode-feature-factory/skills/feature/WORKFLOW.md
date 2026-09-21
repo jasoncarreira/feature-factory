@@ -376,10 +376,11 @@ The optional repository-owned file is `$O/.factory.json`:
 }
 ```
 
-The root must be a JSON object with the three required own properties `resolve`, `verify`, and `publish`,
-plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
+The root must be a JSON object with the two required own properties `resolve` and `verify`,
+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
 `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
-command must be non-empty. There is no `publishing_identity` key: the account a run publishes as is a
+command must be non-empty. `publish` was required and invoked nowhere until this release, so every
+consumer wrote a command that could not run; it is optional now, and consumed when present. There is no `publishing_identity` key: the account a run publishes as is a
 property of the environment it runs in, not of the repository, and a tracked file cannot hold two values
 for one repository published from both a maintainer's checkout and an automated host. A file carrying that
 key is malformed, because the optional set above is closed. `pr_draft` must be a JSON boolean
@@ -538,7 +539,8 @@ change platform placement, background-tool, title-association, host-session, or 
 `story-reader` remains lookup-free and capability-free beyond its existing generic read tools.
 
 `resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the
-guards below. Configured `publish` remains unconsumed and is not invoked.
+guards below. Configured `publish`, when present, replaces the driver's own `git push` and `gh pr create`
+in Step 6 and is described there; when absent, Step 6 is unchanged.
 
 Configured `bootstrap` is consumed only by CLI-owned fresh init and explicit resume; the workflow consumer validates it but never executes it itself.
 
@@ -548,7 +550,7 @@ Effective push-target capture and comparison are active through the package-owne
 |---|---|---|---|---|
 | `bootstrap` | Exact configured string as one shell command with `shell: true`, inherited environment and stdin, cwd exactly the selected sandbox, and child stdout and stderr both routed to CLI stderr. Each execution receives its own `bootstrap_timeout_ms`, independently `900000` when omitted. | Numeric exit status or unavailable `null`; output is visible on CLI stderr and never parsed | Clean zero succeeds; dirty or unobservable tracked state outranks unavailable or nonzero exit | Invoked by the CLI once during configured fresh init and again on every explicit configured resume; never invoked by resolver, merge verification or replay, direct repository verification, slice or Gate 3 observation, effective push, or publication. |
 | `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status means unavailable | Invoked after each newly recorded merge through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
-| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |
+| `publish` | Optional. Ordinary shell step in `RUN_REPO` cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative, and the last nonempty stdout line is read as the published pull request URL | Zero **and** a URL on that line means published; non-zero, or zero with no URL there, is a failure and publishes nothing | Invoked in Step 6 in place of the driver's `git push` and `gh pr create` when configured. `factory pr` is unchanged and still records the URL; the publishing-identity guards and <code>factory effective-push</code> run exactly as they do without it. |
 | `publishing_identity` | No runtime input; read the value `status` reports for the run, recorded at init from `--publishing-identity` or the inherited `FACTORY_PUBLISHING_IDENTITY` | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; only a manifest written before 0.8.0 can report `null` and skip them. |
 
 When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.
@@ -1988,6 +1990,19 @@ gh api --method GET /user --jq .login
 )
 factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"
 ```
+
+**When `.factory.json` declares `publish`, run that command instead of the `git push` and `gh pr create`
+above**, as one shell command in `RUN_REPO` cwd with the inherited environment, and read `PR_URL` from
+the last nonempty line of its stdout. Everything around it is unchanged: the second identity observation
+still runs immediately before it with no intervening operation, <code>factory effective-push</code> still proves
+target equality, `PR_DRAFT` still selects draft or ready-for-review publication and the command is
+responsible for honouring it, and `factory pr` still records the URL. Exit zero **with** a URL on that
+line is the only success: a non-zero exit, or a zero exit whose last line is not a URL, published
+nothing that can be recorded, so follow the common quiesce, park, durable-reason, owning release,
+unlock-verification, retention, reporting, and later-driver procedure rather than recording a
+pull request. Do not fall back to `git push` and `gh pr create` -- a repository that declared how it
+publishes has said the default is wrong for it, and retrying the default would publish under exactly
+the mechanism it replaced.
 
 The second observation runs only after that push is known successful and immediately before unchanged
 `gh pr create`, with no intervening operation. Both Step 6 guards are skipped when `.factory.json` is

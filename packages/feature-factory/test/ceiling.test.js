@@ -136,6 +136,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Each fragment sits on one line in the raw markdown. One spanning a line wrap could never
     // match, and would fail for a reason unrelated to the rule it guards.
     for (const instruction of [
+      // Enforcement is in repository-config.js; these pin the contract it implements, because a `publish`
+      // that is optional in code and still documented as required is the same defect one layer over.
+      "`publish` was required and invoked nowhere until this release, so every",
+      "**When `.factory.json` declares `publish`, run that command instead of the `git push` and `gh pr create`",
+      "the last nonempty line of its stdout. Everything around it is unchanged: the second identity observation",
+      "nothing that can be recorded, so follow the common quiesce, park, durable-reason, owning release,",
+      "publishes has said the default is wrong for it, and retrying the default would publish under exactly",
+
       // Instruction only: the single-slice validator skip removes a duplicate verdict, not the second
       // reading. mimir's chainlink-1304 merged one slice clean and the test-verifier review then found
       // two real production defects in it, so a wording that calls the re-read valueless invites cutting
@@ -1178,7 +1186,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // it does not prove that a driver applied them.
     // 4858 -> 4860: explicit resume refreshes the staged contract before unparking and checks bindings
     // after that asynchronous copy. The operator-authorized tripwire remains 4900; no code was trimmed.
-    assert.equal(total, 4860, "proving the publication happened lands at 4860 production lines");
+    // 4860 -> 4870: `.factory.json` `publish` stops being a required key nobody runs. Optional does not
+    // mean unchecked, so the cost is the validation that an empty or non-string command is refused --
+    // the same refusal it already had as a required key, kept rather than dropped with the requirement.
+    // The parsed result deliberately does not carry the command: the driver reads `.factory.json` for
+    // `publish` exactly as it does for `resolve`, so returning it would be surface with no consumer,
+    // which is what this key already was one layer up. Inside the standing 4900 tripwire; nothing
+    // padded or trimmed to reach it.
+    assert.equal(total, 4870, "proving the publication happened lands at 4870 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

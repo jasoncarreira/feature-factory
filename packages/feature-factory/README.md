@@ -220,7 +220,7 @@ own the same path. Duplicate, target-already-owned, malformed, privileged, repla
 requests refuse atomically. Resume never amends or reseeds. A merge continues to refuse every unamended
 or privileged changed path.
 
-`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` remains unconsumed and is not invoked.
+`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` is optional; when present it replaces the driver's own `git push` and `gh pr create` in Step 6, and its last nonempty stdout line is read as the published pull request URL.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
 The recorded `publishing_identity` is read from `status` exactly as reported, without trimming,
 normalization, case-folding, or reserialization. `init` refuses when neither the flag nor the environment

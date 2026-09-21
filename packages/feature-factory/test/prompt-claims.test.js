@@ -174,7 +174,7 @@ const BOOTSTRAP_POLICY_CONTRACTS = [
   ...BOOTSTRAP_POLICY_FRAGMENTS.map((fragment, index) => [
     `fragment-${index}`, fragment, (text) => text.includes(fragment),
   ]),
-  ["schema-optionals", "plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and", (text) => /root must be a JSON object with the three required own properties `resolve`, `verify`, and `publish`,\s+plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and\s+`bootstrap_timeout_ms`/u.test(text)],
+  ["schema-optionals", "plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and", (text) => /root must be a JSON object with the two required own properties `resolve` and `verify`,\s+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and\s+`bootstrap_timeout_ms`/u.test(text)],
   // 0.8.0 removed `publishing_identity` from the file. The optional set is closed, so a file still carrying
   // it is malformed -- pinned here because a reader who only saw the key disappear might assume it is ignored.
   ["schema-no-identity-key", "key is malformed, because the optional set above is closed", (text) => /A file carrying that\s+key is malformed, because the optional set above is closed/u.test(text)],
@@ -1455,7 +1455,7 @@ const CLAIMS = [
         assert.match(text, /`factory init` resolves\s+it in code -- `--publishing-identity <account>` when passed, otherwise the inherited\s+`FACTORY_PUBLISHING_IDENTITY`/u);
         assert.match(text, /Do not tighten the existing non-whitespace validation to the observed-login grammar/u);
         assert.match(text, /It says nothing\s+about the publishing identity, which comes from `init` rather than from this file, so a repository with no\s+config file still carries a recorded identity and still runs every publishing-identity guard/u);
-        assert.match(text, /`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the\s+guards below\. Configured `publish` remains unconsumed and is not invoked\./u);
+        assert.match(text, /`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the\s+guards below\. Configured `publish`, when present, replaces the driver's own `git push` and `gh pr create`\s+in Step 6 and is described there; when absent, Step 6 is unchanged\./u);
         assert.match(text, /Effective push-target capture and comparison are active through the package-owned <code>factory effective-push<\/code> command; they are not deferred to configured `publish`\./u);
         assert.match(text, /`publishing_identity` \| No runtime input; read the value `status` reports for the run, recorded at init[\s\S]*Active at the three mandatory guards below; only a manifest written before 0\.8\.0 can report `null` and skip them/u);
         assert.doesNotMatch(text, /remains deferred to #224|push-target migration is deferred|`publish` and `publishing_identity` remain deferred|consumption is deferred to #216/u);
@@ -1473,7 +1473,7 @@ const CLAIMS = [
         "The publishing identity is not read from this file and not resolved by the driver.",
         "Do not tighten the existing non-whitespace validation",
         "It says nothing",
-        "Configured `publish` remains unconsumed and is not invoked.",
+        "Configured `publish`, when present, replaces the driver's own `git push` and `gh pr create`",
         "Effective push-target capture and comparison are active through the package-owned <code>factory effective-push</code> command",
         "Active at the three mandatory guards below",
       ]) assert.throws(() => checkPublishingIdentityConfig(prose.replace(marker, "")));
@@ -1522,9 +1522,9 @@ const CLAIMS = [
       assert.doesNotMatch(prose, /https:\/\/github\.com\/<owner>\/<repo>\/issues/u);
       assert.match(boundaries, /Add no resolver\ncache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
       assert.match(boundaries, /For `resolve`, use the ordinary shell result directly[\s\S]*no stderr redirection or suppression rule,[\s\S]*timeout,\nretry, or fallback after any configured resolver result or failure/u);
-      assert.match(boundaries, /`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the\s+guards below\. Configured `publish` remains unconsumed and is not invoked\./u);
+      assert.match(boundaries, /`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the\s+guards below\. Configured `publish`, when present, replaces the driver's own `git push` and `gh pr create`\s+in Step 6 and is described there; when absent, Step 6 is unchanged\./u);
       assert.match(boundaries, /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted[\s\S]*at most two executions in that merge invocation[\s\S]*timeout and retry never apply to resolver, slice, or Gate 3 commands/u);
-      assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |"));
+      assert.ok(boundaries.includes("| `publish` | Optional. Ordinary shell step in `RUN_REPO` cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative, and the last nonempty stdout line is read as the published pull request URL | Zero **and** a URL on that line means published; non-zero, or zero with no URL there, is a failure and publishes nothing | Invoked in Step 6 in place of the driver's `git push` and `gh pr create` when configured. `factory pr` is unchanged and still records the URL; the publishing-identity guards and <code>factory effective-push</code> run exactly as they do without it. |"));
       assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; read the value `status` reports for the run, recorded at init from `--publishing-identity` or the inherited `FACTORY_PUBLISHING_IDENTITY` | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; only a manifest written before 0.8.0 can report `null` and skip them. |"));
       const packageReadme = readFileSync(join(pkg, "README.md"), "utf8");
       assert.match(packageReadme, /factory effective-push <bootstrap\|check> <operator-repository> <sandbox-repository>/u);
@@ -1534,7 +1534,7 @@ const CLAIMS = [
       assert.match(packageReadme, /Legacy\s+manifests without the key remain keyless and behave as `true`\. Status alone adds effective\s+`pr_draft: boolean` in JSON and `pr_draft: true\|false` in plain output\./u);
       assert.match(packageReadme, /explicit `false` creates a ready-for-review\s+PR without `--draft`\. Publication does not reread the live config\./u);
       assert.doesNotMatch(packageReadme, /pr_draft[^\n]*(?:override|promotion)|(?:override|promotion)[^\n]*pr_draft/iu);
-      assert.match(packageReadme, /Configured `publish` remains unconsumed and is not invoked\./u);
+      assert.match(packageReadme, /Configured `publish` is optional; when present it replaces the driver's own `git push` and `gh pr create` in Step 6/u);
       assert.match(packageReadme, /`publishing_identity` is a recorded run field reported by `status`, resolved by `init` from a flag or the environment\. The independent `factory effective-push` command adds no state or flag\./u);
       assert.doesNotMatch(packageReadme, /#224|push-target migration is deferred|only `publish` remains deferred/u);
       assert.match(prose, /Every host adapter and run driver uses the following same\nconfigured-or-absent policy/u);

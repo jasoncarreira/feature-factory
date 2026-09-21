@@ -229,10 +229,11 @@ The optional repository-owned file is `$O/.factory.json`:
 }
 ```
 
-The root must be a JSON object with the three required own properties `resolve`, `verify`, and `publish`,
-plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
+The root must be a JSON object with the two required own properties `resolve` and `verify`,
+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
 `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
-command must be non-empty. There is no `publishing_identity` key: the account a run publishes as is a
+command must be non-empty. `publish` was required and invoked nowhere until this release, so every
+consumer wrote a command that could not run; it is optional now, and consumed when present. There is no `publishing_identity` key: the account a run publishes as is a
 property of the environment it runs in, not of the repository, and a tracked file cannot hold two values
 for one repository published from both a maintainer's checkout and an automated host. A file carrying that
 key is malformed, because the optional set above is closed. `pr_draft` must be a JSON boolean
