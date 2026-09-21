@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join, parse } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -57,12 +57,84 @@ function resourcesFor(root) {
   return { agents: join(root, "agents"), cli: join(root, "bin", "factory.js") };
 }
 
+// Prime's valid child reasoning levels, copied from the host's THINKING_LEVELS. An unknown value fails
+// `rlm.spawn` rather than being ignored, so an agent whose `effort` drifted outside this set must be
+// dropped here instead of reaching the spawn: every agent declares one of low/medium/high/xhigh today,
+// and all four are valid, but the frontmatter is prose and nothing else checks it.
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+// Frontmatter is prose, and only three keys matter here. A full YAML parser would be a dependency this
+// package does not have and does not need for `key: value` at the top of a known file.
+function frontmatter(text) {
+  const out = {};
+  const lines = text.split("\n");
+  if (lines[0]?.trim() !== "---") return out;
+  for (const line of lines.slice(1)) {
+    if (line.trim() === "---") break;
+    const match = /^([a-z_]+):[ \t]*(\S.*?)[ \t]*$/.exec(line);
+    if (match) out[match[1]] = match[2];
+  }
+  return out;
+}
+
+function usable(profile) {
+  if (!profile || typeof profile !== "object") return null;
+  return profile.model || profile.thinking ? profile : null;
+}
+
+// The same four levels the OpenCode plugin resolves, most specific first, because an operator
+// configuring both hosts should not have to learn two vocabularies:
+//
+//   profiles[<agent>] -> profiles[<role>] -> profiles.default -> profile
+//
+// `role` comes from the agent's own frontmatter rather than a table here, so a new agent inherits its
+// role without an entry. The declared `model` is NOT a source: "sonnet" and "opus" are tiers, while
+// Prime requires an exact `provider/id` selector and fails the spawn on anything else.
+export function profileFor(name, role, { profiles = {}, profile } = {}) {
+  return usable(profiles[name]) ?? usable(role ? profiles[role] : null) ?? usable(profiles.default) ?? usable(profile) ?? {};
+}
+
+// What each specialist is spawned with. `thinking` defaults to the agent's declared `effort` because the
+// agent knows how hard its own job is; a profile overrides it. `model` has no default: Prime's own
+// `subagentDefaultModel` setting already covers "one model for every child", and an unavailable explicit
+// selector fails the spawn closed, so this adapter pins one only where an operator asked for it.
+export function dispatchProfiles(agentsDir, options = {}, read = readAgentFiles) {
+  const out = {};
+  for (const { name, role, effort } of read(agentsDir)) {
+    const chosen = profileFor(name, role, options);
+    const thinking = chosen.thinking ?? effort;
+    out[name] = { role };
+    if (THINKING_LEVELS.includes(thinking)) out[name].thinking = thinking;
+    if (chosen.model) out[name].model = chosen.model;
+  }
+  return out;
+}
+
+function readAgentFiles(agentsDir) {
+  let entries;
+  try {
+    entries = readdirSync(agentsDir);
+  } catch {
+    return [];
+  }
+  const agents = [];
+  for (const entry of entries.sort()) {
+    if (!entry.endsWith(".md")) continue;
+    const meta = frontmatter(readFileSync(join(agentsDir, entry), "utf8"));
+    agents.push({ name: meta.name ?? entry.slice(0, -3), role: meta.role, effort: meta.effort });
+  }
+  return agents;
+}
+
 export function primeSessionId(sessionFile, fallback = randomUUID()) {
   return `prime-agent:${sessionFile ? basename(sessionFile) : fallback}`;
 }
 
 export default function featureFactoryExtension(pi, options = {}) {
   const resources = factoryResources(options.resolveFeatureFactory);
+  // Resolved once at registration: the agent set and the operator's profiles are both fixed for the
+  // life of the extension, and reading eleven files per dispatch would buy nothing.
+  const dispatch = dispatchProfiles(resources.agents, options);
   const sessionIds = new WeakMap();
 
   function sessionIdFor(sessionManager) {
@@ -76,13 +148,14 @@ export default function featureFactoryExtension(pi, options = {}) {
   pi.registerTool({
     name: "feature_factory_context",
     label: "Feature Factory Context",
-    description: "Return the stable Prime session lock identity and installed specialist-agent directory.",
+    description: "Return the stable Prime session lock identity, the installed specialist-agent directory, and each specialist's spawn profile.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const sessionId = sessionIdFor(ctx.sessionManager);
+      const payload = { sessionId, agents: resources.agents, cli: resources.cli, dispatch };
       return {
-        content: [{ type: "text", text: JSON.stringify({ sessionId, agents: resources.agents, cli: resources.cli }) }],
-        details: { sessionId, agents: resources.agents, cli: resources.cli },
+        content: [{ type: "text", text: JSON.stringify(payload) }],
+        details: payload,
       };
     },
   });
