@@ -43,12 +43,6 @@ function inventoryEntries(root, skipped = new Set()) {
 }
 const inventory = (root, skipped = new Set()) => JSON.stringify(inventoryEntries(root, skipped));
 
-function manifestCommitInventory(root) {
-  const temporary = readdirSync(root).filter((name) => /^\.[0-9a-f]{8}-[0-9a-f-]{27}\.tmp$/u.test(name));
-  if (temporary.length !== 1 || !lstatSync(join(root, temporary[0])).isFile()) throw new RestoreError("restore manifest commit has an unexpected temporary-file inventory");
-  return inventory(root, new Set(temporary));
-}
-
 function copySnapshot(source, target) {
   const copy = (relative, from, to) => {
     if (SKIPPED_ENTRIES.has(relative)) return;
@@ -274,7 +268,7 @@ export async function dispatchRestore(positional, flags, operations = {}) {
   if (operations.beforeManifest) await operations.beforeManifest({ runDir, sandbox });
   const finalGuard = () => {
     if (!readFileSync(join(qualified.source, "run.json")).equals(qualified.bytes) || inventory(qualified.source) !== qualified.inventory) throw new RestoreError("park snapshot changed while restore was running; run.json was not published");
-    if (manifestCommitInventory(runDir) !== preparedInventory) throw new RestoreError("restored control plane changed before manifest publication; run.json was not published");
+    if (inventory(runDir) !== preparedInventory) throw new RestoreError("restored control plane changed before manifest publication; run.json was not published");
     if (entryState(legacyManifest)) throw new RestoreError(`live run manifest appeared at '${legacyManifest}' while restore was running`);
     assertRestoreBinding({ operatorRoot, sandbox, runId, branch: qualified.run.branch, worktree, featureRef: flags.from, head, source: qualified.source });
   };

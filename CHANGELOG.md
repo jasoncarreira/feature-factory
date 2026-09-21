@@ -25,11 +25,11 @@ unpublished branch-local work survived.
   intentionally not byte-identical to its source.
 - **The recovery path fails closed.** Canonical source and destination directories, tracked ignore policy,
   exact effective-push-endpoint remote-ref identity, source/ref stability, contained-symlink preservation,
-  escaping-link refusal, inventory equality, Git containment,
-  and create-only manifest publication are checked around every effect that could otherwise produce a
+  escaping-link refusal, inventory equality, Git containment, and create-only manifest publication through
+  a held, unreadable target inode are checked around every effect that could otherwise produce a
   partially restored live run.
 
-The production ledger lands at 5200 lines against the issue-authorized 5200 tripwire. Tests extend existing
+The production ledger lands at 5182 lines against the issue-authorized 5200 tripwire. Tests extend existing
 call sites: one restores a proved merge and its negative control; another restores a lost active slice,
 proves root-lock exclusion and source immutability, and then completes the ordinary claim/resume handoff.
 

@@ -1169,10 +1169,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // it does not prove that a driver applied them.
     // 4858 -> 4860: explicit resume refreshes the staged contract before unparking and checks bindings
     // after that asynchronous copy. The operator-authorized tripwire remains 4900; no code was trimmed.
-    // 4860 -> 5200 for issue #343: restore qualifies an immutable parked snapshot and exact pushed ref,
+    // 4860 -> 5182 for issue #343: restore qualifies an immutable parked snapshot and exact pushed ref,
     // proves every preserved merge binding, reports downgraded work, omits stale ownership, records durable
     // provenance, and publishes the transformed manifest last. The issue authorizes the 5200 tripwire.
-    assert.equal(total, 5200, "snapshot restore lands at 5200 production lines");
+    assert.equal(total, 5182, "snapshot restore lands at 5182 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
