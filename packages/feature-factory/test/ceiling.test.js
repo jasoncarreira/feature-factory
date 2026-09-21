@@ -137,6 +137,26 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Each fragment sits on one line in the raw markdown. One spanning a line wrap could never
     // match, and would fail for a reason unrelated to the rule it guards.
     for (const instruction of [
+      // Instruction only: which command publishes is an environment property, like the identity beside it.
+      // Each selection branch is pinned separately, because review caught the first attempt stating
+      // precedence in one paragraph while the execution paragraph still keyed on the file -- a literal
+      // adapter would have ignored an environment-only override. The branches are the contract; a single
+      // fragment naming the variable would have passed against the contradictory text.
+      "**Resolve one publishing selection before running anything, and execute that selection rather than",
+      "character selects that string; the same variable set empty or to whitespace selects the default, even",
+      "file declares one; and with neither, the default. The resolution runs whether or not `$O/.factory.json`",
+      "exists, so an environment-only override selects a command in a repository that declares none, and a",
+      "declared `publish` is never executed while that variable holds a different value. Nothing downstream",
+      "**When the resolution selects a command rather than the default, run that exact selected string instead",
+
+      // Enforcement is in repository-config.js; these pin the contract it implements, because a `publish`
+      // that is optional in code and still documented as required is the same defect one layer over.
+      "`publish` was required and invoked nowhere until this release, so every",
+      "The fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or",
+      "as one shell command in `RUN_REPO` cwd with no stdin or positional arguments. Add exactly five values to",
+      "do not run `factory pr`, and do not fall back to `gh pr create`. Follow the",
+      "later-driver procedure. Before any retry, re-observe whether the pull request exists and record an",
+
       // Instruction only: the single-slice validator skip removes a duplicate verdict, not the second
       // reading. mimir's chainlink-1304 merged one slice clean and the test-verifier review then found
       // two real production defects in it, so a wording that calls the re-read valueless invites cutting
@@ -1182,7 +1202,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // 4860 -> 5182 for issue #343: restore qualifies an immutable parked snapshot and exact pushed ref,
     // proves every preserved merge binding, reports downgraded work, omits stale ownership, records durable
     // provenance, and publishes the transformed manifest last. The issue authorizes the 5200 tripwire.
-    assert.equal(total, 5182, "snapshot restore lands at 5182 production lines");
+    // 5182 -> 5192: `.factory.json` `publish` stops being a required key nobody runs. Optional does not
+    // mean unchecked, so an empty or non-string command remains a loud refusal.
+    assert.equal(total, 5192, "optional publish configuration lands at 5192 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

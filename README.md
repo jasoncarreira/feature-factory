@@ -108,9 +108,9 @@ resolved Git top level:
 }
 ```
 
-The root has three required properties and four optional properties: `pr_draft`, `verify_timeout_ms`,
-`bootstrap`, and `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and a present `bootstrap` are non-empty command
-strings. There is no `publishing_identity` key, and a file carrying one is malformed because the
+The root has two required properties, `resolve` and `verify`, and five optional properties: `publish`,
+`pr_draft`, `verify_timeout_ms`, `bootstrap`, and `bootstrap_timeout_ms`. Required commands and any present
+`publish` or `bootstrap` are non-empty strings. There is no `publishing_identity` key, and a file carrying one is malformed because the
 optional set is closed. A present `pr_draft` must be a JSON boolean and omission means `true`.
 Both timeouts are positive safe integers. `bootstrap_timeout_ms` requires `bootstrap`.
 Each omitted timeout independently defaults to `900000`; neither shares the other's budget. The file is
@@ -127,7 +127,7 @@ value stops the run instead of publishing under whatever credential the host hap
 it from `gh`, the token, stored authentication, or Git configuration: an expectation read from the
 credential being checked would always match.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; then invalid `publish`.
 
 The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
 
@@ -176,7 +176,7 @@ A failed, timed-out, dirty, or unobservable fresh init emits no JSON stdout, ret
 
 When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.
 
-Bootstrap never runs during resolver intake, merge verification or replay, direct repository verification, slice observation, Gate 3, effective push, configured publication, push, or PR creation. Existing resolver, verify, configured-publish, effective-push, push, PR, and Gate 3 behavior is unchanged.
+Bootstrap never runs during resolver intake, merge verification or replay, direct repository verification, slice observation, Gate 3, effective push, configured publication, push, or PR creation. Bootstrap does not mediate configured publication, effective-push, push, PR, or Gate 3 behavior.
 
 After a slice merge is successfully and atomically recorded, `verify` starts in the exact recorded
 integration worktree. The configured string is submitted unchanged as one ordinary shell command with
@@ -226,7 +226,7 @@ Gate 3 always performs its own fresh integrated `test-verifier` observation at t
 the existing command mode. It overwrites the canonical evidence independently and never shares,
 substitutes, or optimizes from post-merge evidence, even when the head has not moved.
 
-`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` remains unconsumed and is not invoked.
+`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` is optional and replaces only PR creation after the factory-owned exact push and post-push identity guard. It receives exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE` environment values. Only exit zero with an absolute HTTPS URL on the last nonempty stdout line is recordable; every other result parks without fallback.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
 The recorded `publishing_identity` is read from `status` exactly as reported, without trimming,
 normalization, case-folding, or reserialization. `init` refuses when neither the flag nor the environment
@@ -236,8 +236,8 @@ can report `null`. `publishing_identity` is a recorded run field reported by `st
 With a recorded identity, every mode checks it at exactly three boundaries: immediately
 after verified post-lock ownership, or immediately after an explicit resume is verified running with
 the same fresh owner and before reconciliation or other work; immediately before `git push`, after
-effective push-target equality; and immediately before `gh pr create`, after the push is known
-successful. No operation intervenes across a guard boundary. Only a manifest written before 0.8.0, which can
+effective push-target equality; and immediately before the selected PR-creation command, after the
+factory-owned exact push is known successful. No operation intervenes across a guard boundary. Only a manifest written before 0.8.0, which can
 report `null`, skips all three guards; an absent config does not affect them.
 
 Before each guard, inherited `GH_TOKEN` must exist and contain at least one character. Missing or empty
@@ -274,7 +274,7 @@ session.
 
 Publishing-identity verification is enforcement because it prevents false-green or wrong-account
 publication. Credential provisioning and helper setup are instruction only. Existing push,
-`gh pr create`, `factory pr`, Gate 3, merge, and approval semantics remain unchanged. See
+`factory pr`, Gate 3, merge, and approval semantics remain unchanged. See
 [OPERATING.md](OPERATING.md) for the shared inherited-token helper recipe; it does not acquire, store,
 install, or repair credentials.
 

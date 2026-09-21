@@ -157,7 +157,7 @@ const RESUME_ORDER = [
 ];
 
 const BOOTSTRAP_POLICY_FRAGMENTS = [
-  "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.",
+  "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; then invalid `publish`.",
   "Configured `bootstrap` is consumed only by CLI-owned fresh init and explicit resume; the workflow consumer validates it but never executes it itself.",
   "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.",
   "Bootstrap cleanliness examines tracked worktree and index paths only; untracked dependency output is ignored.",
@@ -175,7 +175,7 @@ const BOOTSTRAP_POLICY_CONTRACTS = [
   ...BOOTSTRAP_POLICY_FRAGMENTS.map((fragment, index) => [
     `fragment-${index}`, fragment, (text) => text.includes(fragment),
   ]),
-  ["schema-optionals", "plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and", (text) => /root must be a JSON object with the three required own properties `resolve`, `verify`, and `publish`,\s+plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and\s+`bootstrap_timeout_ms`/u.test(text)],
+  ["schema-optionals", "plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and", (text) => /root must be a JSON object with the two required own properties `resolve` and `verify`,\s+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and\s+`bootstrap_timeout_ms`/u.test(text)],
   // 0.8.0 removed `publishing_identity` from the file. The optional set is closed, so a file still carrying
   // it is malformed -- pinned here because a reader who only saw the key disappear might assume it is ignored.
   ["schema-no-identity-key", "key is malformed, because the optional set above is closed", (text) => /A file carrying that\s+key is malformed, because the optional set above is closed/u.test(text)],
@@ -1435,7 +1435,7 @@ const CLAIMS = [
   {
     id: "legacy-step-six-requires-human-base-without-inference-or-backfill",
     file: "WORKFLOW.md",
-    fragment: "For a legacy manifest where `pr_base` is absent or null, stop and\nrequire a human/operator to choose or confirm the exact target, then pass that value through\n`gh pr create --base`. Never infer it from HEAD, the feature branch, repository or forge defaults, and\nnever backfill the legacy manifest.",
+    fragment: "For a legacy manifest where\n`pr_base` is absent or null, stop and require a human/operator to choose or confirm the exact target,\nthen pass that value through `gh pr create --base` or the configured command's exact `PR_BASE`. Never\ninfer it from HEAD, the feature branch, repository or forge defaults, and\nnever backfill the legacy manifest.",
     expect: "allowed",
     matches: /"pr_base": null/u,
     act(repo) {
@@ -1479,7 +1479,7 @@ const CLAIMS = [
         assert.match(text, /`factory init` resolves\s+it in code -- `--publishing-identity <account>` when passed, otherwise the inherited\s+`FACTORY_PUBLISHING_IDENTITY`/u);
         assert.match(text, /Do not tighten the existing non-whitespace validation to the observed-login grammar/u);
         assert.match(text, /It says nothing\s+about the publishing identity, which comes from `init` rather than from this file, so a repository with no\s+config file still carries a recorded identity and still runs every publishing-identity guard/u);
-        assert.match(text, /`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the\s+guards below\. Configured `publish` remains unconsumed and is not invoked\./u);
+        assert.match(text, /`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the\s+guards below\. Configured `publish`, when present, replaces only the driver's `gh pr create` in Step 6;\s+the factory-owned exact push and post-push identity guard remain unchanged\./u);
         assert.match(text, /Effective push-target capture and comparison are active through the package-owned <code>factory effective-push<\/code> command; they are not deferred to configured `publish`\./u);
         assert.match(text, /`publishing_identity` \| No runtime input; read the value `status` reports for the run, recorded at init[\s\S]*Active at the three mandatory guards below; only a manifest written before 0\.8\.0 can report `null` and skip them/u);
         assert.doesNotMatch(text, /remains deferred to #224|push-target migration is deferred|`publish` and `publishing_identity` remain deferred|consumption is deferred to #216/u);
@@ -1497,7 +1497,7 @@ const CLAIMS = [
         "The publishing identity is not read from this file and not resolved by the driver.",
         "Do not tighten the existing non-whitespace validation",
         "It says nothing",
-        "Configured `publish` remains unconsumed and is not invoked.",
+        "Configured `publish`, when present, replaces only the driver's `gh pr create`",
         "Effective push-target capture and comparison are active through the package-owned <code>factory effective-push</code> command",
         "Active at the three mandatory guards below",
       ]) assert.throws(() => checkPublishingIdentityConfig(prose.replace(marker, "")));
@@ -1546,10 +1546,31 @@ const CLAIMS = [
       assert.doesNotMatch(prose, /https:\/\/github\.com\/<owner>\/<repo>\/issues/u);
       assert.match(boundaries, /Add no resolver\ncache, payload handoff, manifest or session\nfield, generated asset, or `run\.json` key/u);
       assert.match(boundaries, /For `resolve`, use the ordinary shell result directly[\s\S]*no stderr redirection or suppression rule,[\s\S]*timeout,\nretry, or fallback after any configured resolver result or failure/u);
-      assert.match(boundaries, /`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the\s+guards below\. Configured `publish` remains unconsumed and is not invoked\./u);
+      assert.match(boundaries, /`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the\s+guards below\. Configured `publish`, when present, replaces only the driver's `gh pr create` in Step 6;\s+the factory-owned exact push and post-push identity guard remain unchanged\./u);
       assert.match(boundaries, /`verify` \| Ordinary shell step in the exact integration-worktree cwd with inherited environment[\s\S]*Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted[\s\S]*at most two executions in that merge invocation[\s\S]*timeout and retry never apply to resolver, slice, or Gate 3 commands/u);
-      assert.ok(boundaries.includes("| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |"));
+      // The selection contract is only coherent if execution reads the RESOLVED selection. Review caught
+      // the first attempt keying execution on the file while precedence lived in a separate paragraph, so
+      // an environment-only override would have fallen through to the default. Pin the branch outcomes and
+      // refuse the phrasing that reintroduces the split -- a fragment naming the variable cannot tell the
+      // two apart, which is why the earlier pins passed against contradictory text.
+      const selection = prose.slice(prose.indexOf("**Resolve one publishing selection"), prose.indexOf("Both Step 6 identity guards are skipped"));
+      assert.ok(selection.length > 400, "the publishing-selection region looks truncated");
+      for (const branch of [
+        "inherited `FACTORY_PUBLISHING_COMMAND` holding at least one non-whitespace\ncharacter selects that string",
+        "set empty or to whitespace selects the default, even\nwhen `$O/.factory.json` declares `publish`",
+        "an unset variable selects the configured `publish` when the\nfile declares one; and with neither, the default",
+        "an environment-only override selects a command in a repository that declares none",
+        "a\ndeclared `publish` is never executed while that variable holds a different value",
+      ]) assert.ok(selection.includes(branch), `the publishing selection does not state the branch: ${branch}`);
+      assert.match(selection, /\*\*When the resolution selects a command rather than the default, run that exact selected string/u,
+        "execution must read the resolved selection, not either source");
+      assert.doesNotMatch(prose, /When `\.factory\.json` declares `publish`, run that exact string/u,
+        "execution conditioned on the file ignores an environment-only override");
+      assert.ok(boundaries.includes("| `publish` | Optional. Exact configured string as one shell step in `RUN_REPO` cwd, no stdin or positional arguments, and inherited environment plus exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE` | Exit status is authoritative; the last nonempty stdout line must be an absolute HTTPS URL and becomes `PR_URL` | Zero plus that URL is recordable; any other result is indeterminate and parks before `factory pr` | Invoked in Step 6 in place of only `gh pr create`, after the factory-owned exact push and post-push identity guard. Inherited `FACTORY_PUBLISHING_COMMAND` overrides it, and overrides it with the default when set empty. `factory pr` is unchanged and still records the URL. |"));
       assert.ok(boundaries.includes("| `publishing_identity` | No runtime input; read the value `status` reports for the run, recorded at init from `--publishing-identity` or the inherited `FACTORY_PUBLISHING_IDENTITY` | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; only a manifest written before 0.8.0 can report `null` and skip them. |"));
+      assert.match(prose, /fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or\s+declared[\s\S]*second identity observation always runs after that\s+push is known successful and immediately before the selected pull-request operation/u);
+      assert.match(prose, /Add exactly five values to\s+the inherited environment: exact `PR_BASE`, exact `FEATURE_BRANCH`, `PR_DRAFT` as `true` or `false`, exact\s+decorated `TITLE` as `PR_TITLE`, and an absolute `PR_BODY_FILE`/u);
+      assert.match(prose, /non-zero exit, or a zero\s+exit whose last line is not a URL, is indeterminate[\s\S]*do not run `factory pr`, and do not fall back to `gh pr create`[\s\S]*Before any retry, re-observe/u);
       const packageReadme = readFileSync(join(pkg, "README.md"), "utf8");
       assert.match(packageReadme, /factory effective-push <bootstrap\|check> <operator-repository> <sandbox-repository>/u);
       assert.match(packageReadme, /The command accepts exactly those three positional arguments and no options\.[\s\S]*`bootstrap` captures the\s+operator's effective push target, configures the sandbox push URL from it, then freshly captures both\s+repositories and compares them exactly\.[\s\S]*`check` freshly captures both targets and compares without\s+configuration/u);
@@ -1558,7 +1579,7 @@ const CLAIMS = [
       assert.match(packageReadme, /Legacy\s+manifests without the key remain keyless and behave as `true`\. Status alone adds effective\s+`pr_draft: boolean` in JSON and `pr_draft: true\|false` in plain output\./u);
       assert.match(packageReadme, /explicit `false` creates a ready-for-review\s+PR without `--draft`\. Publication does not reread the live config\./u);
       assert.doesNotMatch(packageReadme, /pr_draft[^\n]*(?:override|promotion)|(?:override|promotion)[^\n]*pr_draft/iu);
-      assert.match(packageReadme, /Configured `publish` remains unconsumed and is not invoked\./u);
+      assert.match(packageReadme, /Configured `publish` is optional; when present it replaces only `gh pr create` in Step 6[\s\S]*factory-owned exact push and post-push identity guard/u);
       assert.match(packageReadme, /`publishing_identity` is a recorded run field reported by `status`, resolved by `init` from a flag or the environment\. The independent `factory effective-push` command adds no state or flag\./u);
       assert.doesNotMatch(packageReadme, /#224|push-target migration is deferred|only `publish` remains deferred/u);
       assert.match(prose, /Every host adapter and run driver uses the following same\nconfigured-or-absent policy/u);

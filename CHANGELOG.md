@@ -28,8 +28,11 @@ unpublished branch-local work survived.
   escaping-link refusal, inventory equality, Git containment, and create-only manifest publication through
   a held, unreadable target inode are checked around every effect that could otherwise produce a
   partially restored live run.
+- **Configured publication is optional and real.** A declared `publish` command replaces only PR creation,
+  after the factory-owned exact push and post-push identity guard. It receives explicit base, head, mode,
+  title, and body inputs. Indeterminate results park without a default fallback or duplicate-PR claim.
 
-The production ledger lands at 5182 lines against the issue-authorized 5200 tripwire. Tests extend existing
+The production ledger lands at 5192 lines against the issue-authorized 5200 tripwire. Tests extend existing
 call sites: one restores a proved merge and its negative control; another restores a lost active slice,
 proves root-lock exclusion and source immutability, and then completes the ordinary claim/resume handoff.
 

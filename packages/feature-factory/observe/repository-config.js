@@ -16,8 +16,12 @@ export function parseRepositoryConfig(bytes) {
   // resolved by `init` from a flag or the environment and recorded in `run.json`. The allowed set below is
   // closed, so a file still carrying the key is malformed rather than silently ignored -- which is what
   // makes the removal visible to whoever has to edit it.
-  const requiredKeys = ["publish", "resolve", "verify"];
-  const allowedKeys = [...requiredKeys, "pr_draft", "verify_timeout_ms", "bootstrap", "bootstrap_timeout_ms"];
+  // `publish` was required from #308 and invoked nowhere, so every consumer wrote a command that could
+  // not run -- and a reader who saw it reasonably concluded the factory owned publication, which it does
+  // not. It is optional now and consumed when present, so the key means what it says either way.
+  const requiredKeys = ["resolve", "verify"];
+  const optionalCommandKeys = ["publish"];
+  const allowedKeys = [...requiredKeys, ...optionalCommandKeys, "pr_draft", "verify_timeout_ms", "bootstrap", "bootstrap_timeout_ms"];
   if (!config || typeof config !== "object" || Array.isArray(config)
     || Object.keys(config).some((keyName) => !allowedKeys.includes(keyName))) {
     throw new RepositoryConfigError("invalid .factory.json");
@@ -42,6 +46,12 @@ export function parseRepositoryConfig(bytes) {
   }
   if (requiredKeys.some((keyName) => typeof config[keyName] !== "string" || !config[keyName].trim())) {
     throw new RepositoryConfigError("invalid .factory.json");
+  }
+  // Optional does not mean unchecked: an empty or non-string `publish` is a declared command that cannot
+  // run, which is the state this key was already in and the one worth refusing loudly.
+  if (optionalCommandKeys.some((keyName) => Object.hasOwn(config, keyName)
+    && (typeof config[keyName] !== "string" || !config[keyName].trim()))) {
+    throw new RepositoryConfigError("invalid .factory.json: entry 'publish' must be a non-empty string");
   }
   const parsed = { command: config.verify, timeoutMs: config.verify_timeout_ms ?? DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS,
     prDraft: config.pr_draft ?? true };
