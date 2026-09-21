@@ -383,10 +383,11 @@ The optional repository-owned file is `$O/.factory.json`:
 }
 ```
 
-The root must be a JSON object with the three required own properties `resolve`, `verify`, and `publish`,
-plus only the optional own properties `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
+The root must be a JSON object with the two required own properties `resolve` and `verify`,
+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
 `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
-command must be non-empty. There is no `publishing_identity` key: the account a run publishes as is a
+command must be non-empty. `publish` was required and invoked nowhere until this release, so every
+consumer wrote a command that could not run; it is optional now, and consumed when present. There is no `publishing_identity` key: the account a run publishes as is a
 property of the environment it runs in, not of the repository, and a tracked file cannot hold two values
 for one repository published from both a maintainer's checkout and an automated host. A file carrying that
 key is malformed, because the optional set above is closed. `pr_draft` must be a JSON boolean
@@ -395,7 +396,7 @@ safe integers when present, and `bootstrap_timeout_ms` is valid only with a decl
 `verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;
 neither timeout shares or consumes the other's budget.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; then invalid `publish`.
 
 Do not use the obsolete summary “Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.” because it omits the earlier `pr_draft` check.
 
@@ -523,7 +524,7 @@ Do not create, write, merge, archive, or package `.factory.json`. It remains ope
 committed, so every clone and sandbox carries it, and refused by the privileged-path policy, so a run
 cannot widen its own configuration. It lived under the gitignored `.factory/` run directory until that proved unusable —
 `.factory/` is gitignored, so the file could not be committed and never reached a sandbox clone, which
-made the `verify` and unconsumed `publish` entries impossible and left this repository unable to resolve
+made the `verify` and `publish` entries unavailable and left this repository unable to resolve
 a reference from a fresh checkout. For configured resolver execution, add no helper module,
 command runner, parser service, plugin bridge, transport, protocol, or CLI command. Add no resolver
 cache, payload handoff, manifest or session
@@ -541,11 +542,12 @@ separate capture policy, output channel, buffering, truncation, redaction, outpu
 retry, or fallback after any configured resolver result or failure. The verify timeout and bounded retry
 below apply only to repository `verify` shell attempts; the bootstrap timeout applies only to CLI-owned
 init and explicit resume. Neither applies to `resolve`, slice observation, or Gate 3 commands. Do not
-change platform placement, background-tool, title-association, host-session, or publication behavior.
+change platform placement, background-tool, title-association, or host-session behavior. Publication changes only through the optional Step 6 command below.
 `story-reader` remains lookup-free and capability-free beyond its existing generic read tools.
 
 `resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the
-guards below. Configured `publish` remains unconsumed and is not invoked.
+guards below. Configured `publish`, when present, replaces only the driver's `gh pr create` in Step 6;
+the factory-owned exact push and post-push identity guard remain unchanged.
 
 Configured `bootstrap` is consumed only by CLI-owned fresh init and explicit resume; the workflow consumer validates it but never executes it itself.
 
@@ -555,7 +557,7 @@ Effective push-target capture and comparison are active through the package-owne
 |---|---|---|---|---|
 | `bootstrap` | Exact configured string as one shell command with `shell: true`, inherited environment and stdin, cwd exactly the selected sandbox, and child stdout and stderr both routed to CLI stderr. Each execution receives its own `bootstrap_timeout_ms`, independently `900000` when omitted. | Numeric exit status or unavailable `null`; output is visible on CLI stderr and never parsed | Clean zero succeeds; dirty or unobservable tracked state outranks unavailable or nonzero exit | Invoked by the CLI once during configured fresh init and again on every explicit configured resume; never invoked by resolver, merge verification or replay, direct repository verification, slice or Gate 3 observation, effective push, or publication. |
 | `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status means unavailable | Invoked after each newly recorded merge through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
-| `publish` | Future ordinary shell step in repository-root cwd with inherited environment; no structured stdin or factory-specific payload is defined | Exit status is authoritative; stdout is informational and unparsed | Zero means the command reported success; non-zero means it reported failure | Not invoked. Existing `git push`, `gh pr create`, and `factory pr` behavior remains unchanged; effective push-target equality is enforced separately by <code>factory effective-push</code>. |
+| `publish` | Optional. Exact configured string as one shell step in `RUN_REPO` cwd, no stdin or positional arguments, and inherited environment plus exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE` | Exit status is authoritative; the last nonempty stdout line must be an absolute HTTPS URL and becomes `PR_URL` | Zero plus that URL is recordable; any other result is indeterminate and parks before `factory pr` | Invoked in Step 6 in place of only `gh pr create`, after the factory-owned exact push and post-push identity guard. Inherited `FACTORY_PUBLISHING_COMMAND` overrides it, and overrides it with the default when set empty. `factory pr` is unchanged and still records the URL. |
 | `publishing_identity` | No runtime input; read the value `status` reports for the run, recorded at init from `--publishing-identity` or the inherited `FACTORY_PUBLISHING_IDENTITY` | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; only a manifest written before 0.8.0 can report `null` and skip them. |
 
 When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.
@@ -1996,17 +1998,54 @@ gh api --method GET /user --jq .login
 factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"
 ```
 
-The second observation runs only after that push is known successful and immediately before unchanged
-`gh pr create`, with no intervening operation. Both Step 6 guards are skipped when `.factory.json` is
-absent. A mismatch or unobservable result follows the common quiesce, park, durable-reason, owning
-release, unlock-verification, retention, reporting, and later-driver procedure above. There is no
-separate identity guard before `factory pr`; preserve that command and every existing publication mode,
-status, and gate exactly.
+The fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or
+declared. It is the only push in this procedure. The second identity observation always runs after that
+push is known successful and immediately before the selected pull-request operation, with no intervening
+operation.
 
-The `gh` call is the orchestrator's external effect; the package makes no forge call and `factory pr`
-does not verify the forge's base. For a legacy manifest where `pr_base` is absent or null, stop and
-require a human/operator to choose or confirm the exact target, then pass that value through
-`gh pr create --base`. Never infer it from HEAD, the feature branch, repository or forge defaults, and
+**Resolve one publishing selection before running anything, and execute that selection rather than
+either source.** In order: inherited `FACTORY_PUBLISHING_COMMAND` holding at least one non-whitespace
+character selects that string; the same variable set empty or to whitespace selects the default, even
+when `$O/.factory.json` declares `publish`; an unset variable selects the configured `publish` when the
+file declares one; and with neither, the default. The resolution runs whether or not `$O/.factory.json`
+exists, so an environment-only override selects a command in a repository that declares none, and a
+declared `publish` is never executed while that variable holds a different value. Nothing downstream
+reads either source again.
+
+The environment overrides the file because how a run publishes is a property of the environment as much
+as of the repository -- the same reason there is no `publishing_identity` key in that file, and one
+repository is published from both a maintainer's checkout and an automated host. Empty selecting the
+default is what keeps a repository from declaring its way into a run that cannot publish at all from a
+host with nothing to delegate to, and it makes empty and absent behave alike rather than needing two
+rules. The override removes no guard: the Step 6 identity guards are already skipped when that file is
+absent. Report which source the selection came from, since the two are indistinguishable afterwards and
+an operator debugging a publication needs to know which one ran.
+
+**When the resolution selects a command rather than the default, run that exact selected string instead
+of only `gh pr create` above**,
+as one shell command in `RUN_REPO` cwd with no stdin or positional arguments. Add exactly five values to
+the inherited environment: exact `PR_BASE`, exact `FEATURE_BRANCH`, `PR_DRAFT` as `true` or `false`, exact
+decorated `TITLE` as `PR_TITLE`, and an absolute `PR_BODY_FILE` naming the exact decorated body bytes.
+Read the last nonempty stdout line as `PR_URL` and require it to be an absolute HTTPS URL. The configured
+command owns PR creation, but these inputs preserve the recorded base, head, mode, title, and body intent;
+do not claim the factory verified that the command honored them. `factory pr` still records the returned
+URL. Exit zero **with** that absolute HTTPS URL is the only recordable result. A non-zero exit, or a zero
+exit whose last line is not a URL, is indeterminate: do not claim that no external effect occurred,
+do not run `factory pr`, and do not fall back to `gh pr create`. Follow the
+common quiesce, park, durable-reason, owning release, unlock-verification, retention, reporting, and
+later-driver procedure. Before any retry, re-observe whether the pull request exists and record an
+existing one rather than creating another.
+
+Both Step 6 identity guards are skipped when `.factory.json` is absent. A mismatch or unobservable result
+follows the common quiesce, park, durable-reason, owning release, unlock-verification, retention,
+reporting, and later-driver procedure above. There is no separate identity guard before `factory pr`;
+preserve that command and every existing publication mode, status, and gate exactly.
+
+The default `gh` call or configured `publish` command is the orchestrator's external effect; the package
+makes no forge call and `factory pr` does not verify the forge's base. For a legacy manifest where
+`pr_base` is absent or null, stop and require a human/operator to choose or confirm the exact target,
+then pass that value through `gh pr create --base` or the configured command's exact `PR_BASE`. Never
+infer it from HEAD, the feature branch, repository or forge defaults, and
 never backfill the legacy manifest.
 
 `pr_url` is immutable once recorded — a run has one PR, and overwriting the URL would hide a second

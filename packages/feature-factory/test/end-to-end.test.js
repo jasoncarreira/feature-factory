@@ -19,6 +19,7 @@ import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
 // convenience of its own coverage.
 import { GATE_KEYS, VALIDATOR_KEYS } from "../state/schema.js";
 import { assertPublicationReady, REVIEW_KEYS } from "../observe/review.js";
+import { parseRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
 import { resolveSpawnExecutable } from "../core/executable.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
@@ -247,6 +248,18 @@ describe("end to end — a merge is refused through the real CLI", () => {
   }
 
   it("records a clean serial merge", () => {
+    for (const config of [
+      { resolve: "true", verify: "true" },
+      { resolve: "true", verify: "true", publish: "true" },
+    ]) assert.doesNotThrow(() => parseRepositoryConfig(JSON.stringify(config)));
+    for (const publish of ["", "   ", null, 7, {}, []]) {
+      assert.throws(() => parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", publish })),
+        (error) => error instanceof RepositoryConfigError
+          && error.message === "invalid .factory.json: entry 'publish' must be a non-empty string");
+    }
+    assert.throws(() => parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", unknown: true })),
+      (error) => error instanceof RepositoryConfigError && error.message === "invalid .factory.json");
+
     const agentDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "agents");
     for (const { file, reviewDestination, narrativeContents } of [
       {
