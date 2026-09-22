@@ -3,6 +3,38 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.1
+
+A patch release that makes the slice retry budget real instead of caller-optional (#352), and gives a
+supervisor a way to publish the park evidence it could not produce (#353).
+
+- A complete slice merit rejection now advances exactly `review@N -> running@(N+1)` before builder
+  redispatch. Infrastructure recovery and resume remain on N, approval proceeds only to merge, and a
+  rejection at `max_retries` blocks without inventing another attempt.
+- The CLI enforces the transition against the matching live `REJECT` review, clears stale attempt-bound
+  evidence and review refs, refuses wrong-attempt observation before evidence publication, and rejects
+  every row above the configured bound.
+- A retry preserves the slice's exact immutable `base_ref`. Integration HEAD may move when a same-wave
+  sibling merges; that does not rewrite the historical branch point or narrow the owned and reviewed diff.
+  Restore also preserves terminal blocked slices instead of reopening them at their exhausted attempt.
+
+- **`factory snapshot <run-id> --repo <operator>` publishes a parked control-plane snapshot.** `factory
+  terminal` requires no lock so a supervisor can park a run it is not driving, and `restore` consumes a
+  snapshot to rebuild a lost sandbox — but producing one was specified only as driver prose, so an
+  out-of-band park was incomplete by construction: step 1 of the three-step park and nothing else, which
+  the contract names as the state the sequence exists to prevent. mimir's budget park is that case,
+  cancelling the driver and then terminalizing, so its parked runs report `park_snapshot: null` and stay
+  recoverable only while their sandbox survives.
+- **Publication is verified before it commits, and refuses what `restore` cannot read.** The command
+  stages, compares source and destination inventories excluding only the plane-root `factory.lock`, then
+  commits by rename with rollback. It refuses a run that is not parked, so a live plane cannot be recorded
+  as a moment no resume can return to, and it requires `run.json` to be a regular non-symlink file
+  resolving to itself — the same rule the restore side applies, so producer and consumer agree on what a
+  valid snapshot is rather than each deciding separately. The prose specification is unchanged and remains
+  the definition; a driver may run the command instead of copying by hand, and a supervisor must.
+
+All three packages and both exact adapter pins move together to 0.10.1.
+
 ## 0.10.0
 
 A minor release: parked control-plane snapshots can now reconstruct a lost sandbox without claiming that

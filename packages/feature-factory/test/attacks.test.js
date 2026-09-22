@@ -637,5 +637,45 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       }), /path_amendments cannot change in record/u);
       assert.equal(bytes(ordinary.runDir), before);
     } finally { rmSync(ordinary.root, { recursive: true, force: true }); }
+
+
+    const activeSlice = (status, attempts = 1) => ({
+      ...slice(), status, attempts, worktree: ".", branch: "be", base_ref: SHA_A,
+      review_ref: status === "review" ? "reviews/be.json" : null,
+    });
+    for (const [label, prior, nextStatus, nextAttempts, pattern] of [
+      ["running advance", activeSlice("running"), "running", 2, /only from review to running/u],
+      ["review without advance", activeSlice("review"), "running", 1, /retry must advance to attempt 2/u],
+      ["review-state advance", activeSlice("review"), "review", 2, /only from review to running/u],
+      ["blocked reopen", activeSlice("blocked"), "running", 1, /already blocked/u],
+      ["review to pending", activeSlice("review"), "pending", 1, /cannot return to pending/u],
+      ["review blocks before max", activeSlice("review"), "blocked", 1, /cannot block before max_retries \(3\)/u],
+      ["merged above max", activeSlice("review", 3), "merged", 4, /cannot exceed run\.max_retries \(3\)/u],
+      ["blocked above max", activeSlice("review", 3), "blocked", 4, /cannot exceed run\.max_retries \(3\)/u],
+    ]) {
+      const f = fixture(`slice-attempt-${label.replaceAll(" ", "-")}`, { slices: [prior] });
+      try {
+        const before = bytes(f.runDir);
+        await assert.rejects(() => transition(f.runDir, {
+          participants: [{ familyId: "slices", mode: "record" }],
+          apply: (state) => ({ ...state, updated_at: LATER, slices: [{
+            ...state.slices[0], status: nextStatus, attempts: nextAttempts,
+            merge_commit: nextStatus === "merged" ? "c".repeat(40) : null,
+          }] }),
+        }), pattern, label);
+        assert.equal(bytes(f.runDir), before, label);
+      } finally { rmSync(f.root, { recursive: true, force: true }); }
+    }
+
+    const retry = fixture("slice-attempt-retry-ok", { slices: [activeSlice("review")] });
+    try {
+      const next = await transition(retry.runDir, {
+        participants: [{ familyId: "slices", mode: "record" }],
+        apply: (state) => ({ ...state, updated_at: LATER, slices: [{
+          ...state.slices[0], status: "running", attempts: 2, evidence_ref: null, review_ref: null,
+        }] }),
+      });
+      assert.deepEqual({ status: next.slices[0].status, attempts: next.slices[0].attempts }, { status: "running", attempts: 2 });
+    } finally { rmSync(retry.root, { recursive: true, force: true }); }
   });
 });

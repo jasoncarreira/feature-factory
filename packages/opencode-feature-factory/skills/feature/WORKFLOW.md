@@ -209,9 +209,11 @@ sequence with `UNKNOWN_OUTCOME_REASON`. Never repeat successful siblings.
 A budgeted attempt advances only after a complete specialist response reaches the ordinary workflow and
 that response is rejected on its merits or violates the specialist's required output contract. A complete
 unbudgeted result returns to its ordinary workflow without creating an attempt. Infrastructure recovery is
-the same attempt, not another use of `max_retries`. This rule is instruction rather than CLI enforcement:
-the host owns specialist invocation errors, while the CLI continues to enforce every durable attempt
-transition the driver actually records.
+the same attempt, not another use of `max_retries`. For a slice, an output-contract violation may advance
+only when canonical evidence and its matching REJECT review were recorded; if the malformed output prevents
+either record, park top-level `needs-human` through the common procedure instead of fabricating authority for
+N+1. This rule is instruction rather than CLI enforcement: the host owns specialist invocation errors, while
+the CLI continues to enforce every durable attempt transition the driver actually records.
 
 ## The chain
 
@@ -1437,6 +1439,7 @@ Step 0. Require `run_id === R`, select exactly one `slices` row with `id === SLI
 
 ```text
 RECORDED_SLICE = parsedRun.slices row whose id equals SLICE_ID
+MAX_RETRIES = parsedRun.max_retries
 SLICE_WORKTREE = RECORDED_SLICE.worktree
 SLICE_BRANCH = RECORDED_SLICE.branch
 SLICE_BASE_REF = RECORDED_SLICE.base_ref
@@ -1450,13 +1453,14 @@ for it. A driver that assumes "this is the first try" observes as attempt 1 whil
 merge then refuses that evidence — `evidence '…' is for attempt 1, slice is at attempt 2` — after the build
 and the review have already been spent. It names the report and the `--attempt` argument below.
 
-Require the row status to be `running` or `review`, every bound value to be non-null, `SLICE_ATTEMPT` to be
-a positive integer, `SLICE_BASE_REF` to
-be a 40-character commit SHA, `SLICE_BRANCH` to equal `factory/R/<slice-id>`, and the physical
-`SLICE_WORKTREE` to equal `SLICE_ROOT/<slice-id>`. Require `git -C "$RUN_REPO" worktree list
---porcelain` to associate that physical path with that exact branch. A pending slice requires both path
-and ref to remain absent; an unrecorded existing path or ref is a collision. Refuse every mismatch
-instead of repairing, deleting, or reassociating it. A merged slice is never dispatched again.
+Require every bound value to be non-null, `MAX_RETRIES` and `SLICE_ATTEMPT` to be positive integers,
+`SLICE_BASE_REF` to be a 40-character commit SHA, `SLICE_BRANCH` to equal `factory/R/<slice-id>`, and the
+physical `SLICE_WORKTREE` to equal `SLICE_ROOT/<slice-id>`. Require `git -C "$RUN_REPO" worktree list
+--porcelain` to associate that physical path with that exact branch. Before dispatch or observation require
+status `running`. A `review` row is a completed decision checkpoint: on resume consume its recorded review
+through step 4, never re-observe it. A pending slice requires both path and ref to remain absent; an
+unrecorded existing path or ref is a collision. Refuse every mismatch instead of repairing, deleting, or
+reassociating it. A merged slice is never dispatched again.
 
 For a non-empty `SLICE_TEST_PLAN`, select one complete entry and bind `SLICE_TEST_COMMAND` by copying
 that persisted string verbatim. Never shorten, append to, normalize, or source it from the mutable
@@ -1533,8 +1537,8 @@ Per slice:
 4. **Review** — `work-reviewer` with subject `<slice-id>`, the observed evidence, the slice spec, and
    the brief. Record both refs — the merge requires each:
      ```sh
-     $ factory slice "$R" "$SLICE_ID" review --evidence-ref "evidence/$SLICE_ID.json" \
-       --review-ref "reviews/$SLICE_ID.json" --repo "$RUN_REPO"
+     $ factory slice "$R" "$SLICE_ID" review --attempts "$SLICE_ATTEMPT" \
+       --evidence-ref "evidence/$SLICE_ID.json" --review-ref "reviews/$SLICE_ID.json" --repo "$RUN_REPO"
      ```
    - On REJECT, before spending an attempt, identify the cause of the remaining failures. If the fix would
      violate an approved story or brief constraint, or repeated findings trace to the same unresolved
@@ -1544,8 +1548,23 @@ Per slice:
      If no such target can be identified, park through the existing parked-stop procedure for replanning
      or operator clarification; preserve the work and do not silently change approved acceptance criteria.
      Unchanged finding counts alone are not a stall: progress can occur within a category that remains open.
-     Otherwise route the fixes back to that builder and re-observe. After `max_retries`, mark the slice
-     `blocked` and stop dispatching its dependents.
+     Only a complete merit REJECT spends an attempt; infrastructure recovery and resume preserve
+     `SLICE_ATTEMPT` under the common rules above. Reload `RUN_MANIFEST`, require the recorded review to name
+     this slice and `SLICE_ATTEMPT` with exact verdict `REJECT`, and require the row still to be `review`.
+     If `SLICE_ATTEMPT >= MAX_RETRIES`, record the terminal slice state and stop dispatching its
+     dependents without creating another attempt:
+     ```sh
+     $ factory slice "$R" "$SLICE_ID" blocked --attempts "$SLICE_ATTEMPT" --repo "$RUN_REPO"
+     ```
+     Otherwise bind `NEXT_SLICE_ATTEMPT = SLICE_ATTEMPT + 1` and, before redispatch, record:
+     ```sh
+     $ factory slice "$R" "$SLICE_ID" running --attempts "$NEXT_SLICE_ATTEMPT" --repo "$RUN_REPO"
+     ```
+     This retry-opening command takes no worktree, branch, evidence, or review flag. Reload the row and
+     require status `running`, attempt `NEXT_SLICE_ATTEMPT`, unchanged worktree, branch, and exact
+     `SLICE_BASE_REF`, and null evidence and review refs. The base is the immutable original branch point,
+     not merely any ancestor and not the integration head after sibling merges. Then set `SLICE_ATTEMPT` to
+     the recorded new value, route the bounded fixes back to that builder, and re-observe.
 5. **Merge (you, serially)** — on APPROVE, merge the slice branch into the feature branch one at a
    time. Builds are concurrent; merges are single-writer, which is what makes the parallelism safe.
    ```sh

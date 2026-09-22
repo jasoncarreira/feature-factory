@@ -116,6 +116,7 @@ const NEEDS_HUMAN_PROSE = [
   ["gate-restart", "After an autonomous needs-human gate stop, explicitly resume only after the existing pre-lock and ownership checks pass.", "start a replacement run"],
   ["bootstrap-resume-parked", "For configured order 7, the CLI binds the exact raw `run.json` bytes, the validated parked manifest, a forward `updated_at`, and the exact fresh owner before running bootstrap while durable status remains `needs-human`.", "bootstrap changes durable status before execution"],
   ["bootstrap-resume-failure", "An ordinary failure with intact bindings records the exact command and integer or `null` result, advances `updated_at`, remains `needs-human`, preserves progress and the historical result, and refuses; a later explicit resume reruns bootstrap.", "discards the historical result"],
+  ["malformed-slice-output", "either record, park top-level `needs-human` through the common procedure instead of fabricating authority for", "continue at N+1"],
   ["identity-park", "factory terminal \"$R\" needs-human --reason <REASON_TOKEN> --repo \"$RUN_REPO\"", "completed"],
   ["identity-report", "Only after all of those steps succeed report the parked run, `RUN_REPO`, `Status: needs-human`, the exact", "final"],
   ["malformed-evidence", "Malformed verification evidence parks top-level needs-human; fix the evidence source and explicitly resume without editing evidence or run.json.", "malformed evidence makes the run final"],
@@ -209,8 +210,9 @@ const INFRASTRUCTURE_POLICY_CONTRACTS = [
   ["unknown-route", "If neither path is available, preserve the persisted attempt when one exists", (text) => /create none for unbudgeted\s+work, and take the common infrastructure-park sequence with `UNKNOWN_OUTCOME_REASON`/u.test(text)],
   ["second-route", "On the second consecutive confirmed failure for the same key", (text) => /do not invoke it again\. Take the common infrastructure-park sequence with `SECOND_FAILURE_REASON`/u.test(text)],
   ["later-driver-guard", "The failure count remains invocation-local", (text) => /Explicit\s+resume, `status\.next`, provider recovery, the reset count, and an operator assertion alone establish\s+neither fact[\s\S]*If neither safe path is available, do not dispatch; re-enter the common infrastructure-park\s+sequence with `UNKNOWN_OUTCOME_REASON`/u.test(text)],
-  ["budgeted-merit-only", "A budgeted attempt advances only after a complete specialist response", (text) => /complete\s+unbudgeted result returns to its ordinary workflow without creating an attempt[\s\S]*Infrastructure recovery is\s+the same attempt, not another use of `max_retries`/u.test(text)],
-  ["instruction-boundary", "This rule is instruction rather than CLI enforcement", (text) => /host owns specialist invocation errors, while the CLI continues to enforce every durable attempt\s+transition/u.test(text)],
+  ["budgeted-merit-only", "A budgeted attempt advances only after a complete specialist response", (text) => /complete\s+unbudgeted result returns to its ordinary workflow without creating an attempt[\s\S]*Infrastructure recovery is\s+the same attempt, not another use of `max_retries`[\s\S]*For a slice, an output-contract violation may advance[\s\S]*canonical evidence and its matching REJECT review were recorded[\s\S]*park top-level `needs-human`/u.test(text)],
+  ["instruction-boundary", "This rule is instruction rather than CLI enforcement", (text) => /host owns specialist invocation errors, while\s+the CLI continues to enforce every durable attempt\s+transition/u.test(text)],
+  ["slice-max-block", "If `SLICE_ATTEMPT >= MAX_RETRIES`", (text) => /without creating another attempt[\s\S]*blocked --attempts "\$SLICE_ATTEMPT"/u.test(text)],
 ];
 
 function checkNeedsHumanProse(prose) {
@@ -603,24 +605,15 @@ const CLAIMS = [
     },
   },
   {
-    // The report path carries the attempt, so the attempt has to come from durable state. Ambient "this is
-    // the first try" is not merely untidy: the merge compares evidence.attempt to the persisted row and
-    // refuses the mismatch, so a driver that guesses spends a build and a review before finding out.
-    id: "the-attempt-comes-from-the-persisted-slice-row",
+    // A rejected merit pass is the sole authority for N+1. The persisted number then owns the report,
+    // observation, and next review; a guessed prior attempt must refuse before replacing evidence.
+    id: "a-rejected-slice-advances-before-redispatch",
     file: "WORKFLOW.md",
-    fragment: "SLICE_ATTEMPT = RECORDED_SLICE.attempts",
+    fragment: "NEXT_SLICE_ATTEMPT = SLICE_ATTEMPT + 1",
     expect: "allowed",
     matches: /review_ready: true/u,
     act(repo) {
       const { repository, runDir, base } = activateSlice(repo);
-      // A retry, recorded the way the CLI records one. From here the row says 2 and nothing else may.
-      const retried = factory(repository, ["slice", RUN, "s1", "running", "--attempts", "2",
-        "--worktree", ".", "--branch", "slice", "--now", NOW]);
-      assert.equal(retried.ok, true, retried.out);
-      const persisted = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"))
-        .slices.find((entry) => entry.id === "s1").attempts;
-      assert.equal(persisted, 2);
-
       const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).trim();
       const report = { status: "completed", slice: "s1", files_changed: ["src/work.ts"], commit, tests: { cmd: PASSING_TEST_COMMAND, exit: 0 }, blockers: [] };
       const forAttempt = (attempt) => {
@@ -629,23 +622,34 @@ const CLAIMS = [
         return reference;
       };
 
-      // Ambient state: the driver assumes attempt 1 and names its report accordingly. `observe` accepts it,
-      // which is exactly why the workflow has to bind the attempt -- the cost lands later, at the merge.
+      const first = factory(repository, ["observe", RUN, "s1", "--worktree", ".", "--base", base,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--claim", forAttempt(1), "--now", NOW]);
+      assert.equal(first.ok, true, first.out);
+      writeFileSync(join(runDir, "reviews", "s1.json"), JSON.stringify({
+        subject: "s1", reviewer: "work-reviewer", verdict: "REJECT", attempt: 1,
+        reviewed_commit: commit, findings: ["retry"], required_fixes: ["retry"], checked_against: ["brief"],
+      }));
+      const rejected = factory(repository, ["slice", RUN, "s1", "review", "--attempts", "1",
+        "--evidence-ref", "evidence/s1.json", "--review-ref", "reviews/s1.json", "--now", NOW]);
+      assert.equal(rejected.ok, true, rejected.out);
+
+      const retried = factory(repository, ["slice", RUN, "s1", "running", "--attempts", "2", "--now", NOW]);
+      assert.equal(retried.ok, true, retried.out);
+      const row = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).slices.find((entry) => entry.id === "s1");
+      assert.equal(row.attempts, 2);
+      assert.equal(row.base_ref, base);
+      assert.equal(row.evidence_ref, null);
+      assert.equal(row.review_ref, null);
+
+      const priorEvidence = readFileSync(join(runDir, "evidence", "s1.json"), "utf8");
       const ambient = factory(repository, ["observe", RUN, "s1", "--worktree", ".", "--base", base,
         "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--claim", forAttempt(1), "--now", NOW]);
-      assert.equal(ambient.ok, true, ambient.out);
-      assert.equal(JSON.parse(readFileSync(join(runDir, "evidence", "s1.json"), "utf8")).attempt, 1);
-      // Bound as the workflow binds it, so the merge reaches the attempt comparison rather than refusing
-      // earlier for a missing evidence_ref.
-      assert.equal(factory(repository, ["slice", RUN, "s1", "review",
-        "--evidence-ref", "evidence/s1.json", "--now", NOW]).ok, true);
-      const merged = factory(repository, ["slice", RUN, "s1", "merged", "--merge-commit", commit, "--now", NOW]);
-      assert.equal(merged.ok, false, "evidence from a guessed attempt must not reach a merge");
-      assert.match(merged.out, /is for attempt 1, slice is at attempt 2/u);
+      assert.equal(ambient.ok, false, "a stale attempt must refuse before replacing canonical evidence");
+      assert.match(ambient.out, /does not match slice 's1' attempt 2/u);
+      assert.equal(readFileSync(join(runDir, "evidence", "s1.json"), "utf8"), priorEvidence);
 
-      // The persisted attempt, and its own report path. This is the documented spelling.
       const result = factory(repository, ["observe", RUN, "s1", "--worktree", ".", "--base", base,
-        "--attempt", String(persisted), "--test-cmd", PASSING_TEST_COMMAND, "--claim", forAttempt(persisted), "--now", NOW]);
+        "--attempt", "2", "--test-cmd", PASSING_TEST_COMMAND, "--claim", forAttempt(2), "--now", NOW]);
       assert.equal(result.ok, true, result.out);
       const evidence = JSON.parse(readFileSync(join(runDir, "evidence", "s1.json"), "utf8"));
       assert.equal(evidence.attempt, 2);
@@ -1182,21 +1186,24 @@ const CLAIMS = [
     },
   },
   {
-    id: "base-ref-immutable-after-activation",
+    id: "base-ref-remains-immutable-on-running-replay",
     file: "WORKFLOW.md",
-    fragment: "`base_ref` is fixed when the slice is activated and cannot be changed afterwards",
-    expect: "refused",
-    matches: /base_ref is immutable once recorded/u,
+    fragment: "The base is the immutable original branch point,",
+    expect: "allowed",
+    matches: /base_ref: [0-9a-f]{40}/u,
     act(repo) {
-      const { repository, base } = activateSlice(repo);
+      const { repository, runDir, base } = activateSlice(repo);
       assert.match(String(base), /^[0-9a-f]{40}$/u, "activation must report the base it recorded");
-      // Move the branch, then re-activate. The CLI observes the *new* head, so if base_ref were
-      // writable twice this would silently re-point the slice's diff baseline.
+      // Moving integration is normal after a sibling merge. A same-attempt replay and a merit retry both
+      // preserve the historical branch point rather than sampling this newer head.
       execFileSync("git", ["checkout", "-q", "work"], { cwd: repository });
       writeFileSync(join(repository, "src", "later.ts"), "later\n");
       execFileSync("git", ["add", "-A"], { cwd: repository });
       execFileSync("git", ["commit", "-q", "-m", "later"], { cwd: repository });
-      return factory(repository, ["slice", RUN, "s1", "running", "--worktree", ".", "--branch", "slice", "--now", NOW]);
+      const result = factory(repository, ["slice", RUN, "s1", "running", "--worktree", ".", "--branch", "slice", "--now", NOW]);
+      assert.equal(result.ok, true, result.out);
+      assert.equal(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).slices[0].base_ref, base);
+      return result;
     },
   },
   {

@@ -754,9 +754,15 @@ const HANDLERS = {
     let observedBase = null;
     if (status === "running") {
       const current = readRun(runDir);
-      const head = integrationHead(repo, current);
-      if (!head.commit) throw new CliError(`could not observe the head of '${current.branch}' to bind the slice base`);
-      observedBase = head.commit;
+      const existing = current.slices.find((slice) => slice.id === sliceId);
+      if (!existing) throw new CliError(`unknown slice '${sliceId}'`);
+      // The base is the historical branch point. Integration HEAD may move after sibling merges,
+      // so only a fresh activation observes it; retries preserve the exact recorded value.
+      if (existing.status === "pending") {
+        const head = integrationHead(repo, current);
+        if (!head.commit) throw new CliError(`could not observe the head of '${current.branch}' to bind the slice base`);
+        observedBase = head.commit;
+      }
     }
     if (status === "merged" && !flags.mergeCommit) throw new CliError("recording a merge requires --merge-commit");
 
@@ -878,21 +884,41 @@ const HANDLERS = {
       });
     }
 
+    let retryReviewRef = null;
     const next = await transition(runDir, {
       participants: [{ familyId: "slices", mode: status === "merged" ? "merge" : "record" }],
       reobservers,
       apply: (state) => {
         const existing = state.slices.find((slice) => slice.id === sliceId);
         if (!existing) throw new Error(`unknown slice '${sliceId}'`);
+        const attempts = flags.attempts === undefined ? existing.attempts : integer(flags.attempts, 1, "--attempts");
+        const advances = attempts === existing.attempts + 1;
+        const closesRejectedReview = existing.status === "review" && (advances || status === "blocked");
+        // Enforcement: only a bound merit REJECT may spend N+1 or terminalize an exhausted review.
+        if (advances && (existing.status !== "review" || status !== "running")) throw new CliError(`slice '${sliceId}' attempts may advance only from review to running`);
+        if (existing.status === "review" && status === "blocked" && existing.attempts < state.max_retries) throw new CliError(`slice '${sliceId}' cannot block before max_retries (${state.max_retries})`);
+        if (advances && (flags.worktree !== undefined || flags.branch !== undefined || flags.evidenceRef !== undefined || flags.reviewRef !== undefined)) throw new CliError("a slice retry reuses its recorded worktree, branch, and base; omit worktree, branch, evidence, and review flags");
+        if (closesRejectedReview) {
+          if (!existing.review_ref) throw new CliError(`slice '${sliceId}' retry requires its recorded review`);
+          const review = readReview(runDir, existing.review_ref);
+          if (review.subject !== sliceId || review.attempt !== existing.attempts || review.verdict !== "REJECT") throw new CliError(`slice '${sliceId}' attempt ${existing.attempts} does not have a matching REJECT review`);
+          if (!existing.evidence_ref) throw new CliError(`slice '${sliceId}' retry requires its recorded evidence`);
+          const evidence = readEvidence(runDir, existing.evidence_ref, { runId });
+          const worktree = resolveWorktree(repo, existing.worktree ?? "");
+          if (!worktree) throw new CliError(`slice '${sliceId}' recorded worktree is unavailable`);
+          const observedHead = observeWorktree(worktree, existing.base_ref, { ref: existing.branch }).commit;
+          if (evidence.subject !== sliceId || evidence.attempt !== existing.attempts || evidence.base_ref !== existing.base_ref || review.reviewed_commit !== evidence.commit || observedHead !== evidence.commit) throw new CliError(`slice '${sliceId}' REJECT does not bind its recorded evidence and branch head`);
+          if (advances) retryReviewRef = existing.review_ref;
+        }
         const row = {
           ...existing,
           status,
-          attempts: flags.attempts === undefined ? existing.attempts : integer(flags.attempts, 1, "--attempts"),
-          worktree: flags.worktree ?? existing.worktree,
-          branch: flags.branch ?? existing.branch,
-          base_ref: observedBase ?? existing.base_ref,
-          evidence_ref: flags.evidenceRef ?? existing.evidence_ref,
-          review_ref: flags.reviewRef ?? existing.review_ref,
+          attempts,
+          worktree: advances ? existing.worktree : flags.worktree ?? existing.worktree,
+          branch: advances ? existing.branch : flags.branch ?? existing.branch,
+          base_ref: advances ? existing.base_ref : observedBase ?? existing.base_ref,
+          evidence_ref: advances ? null : flags.evidenceRef ?? existing.evidence_ref,
+          review_ref: advances ? null : flags.reviewRef ?? existing.review_ref,
           merge_commit: flags.mergeCommit ?? existing.merge_commit,
         };
         return { ...state, updated_at: at, slices: state.slices.map((slice) => (slice.id === sliceId ? row : slice)) };
@@ -905,7 +931,7 @@ const HANDLERS = {
     // expose it — so the documented path could not be followed at all.
     if (status === "merged") await verifyRecordedMerge({ repo, runDir, runId, mergeCommit: row.merge_commit });
     // Slice attempts are budgeted the same way, so their rejected verdicts vanish the same way.
-    const sliceReviewArchive = await archiveReviewAttempt(runDir, row.review_ref);
+    const sliceReviewArchive = await archiveReviewAttempt(runDir, retryReviewRef ?? row.review_ref);
     return emit(flags, { ...mergedPayload(runId, sliceId, row), review_archive: sliceReviewArchive });
   },
 
@@ -963,7 +989,14 @@ const HANDLERS = {
     //
     // A subject with no slice row - test-verifier, an agent step - has no ratified
     // waiver and so has none: its tests must be observed.
-    const slice = run.slices.find((entry) => entry.id === subject);
+    const slice = flags.repositoryVerify ? null : run.slices.find((entry) => entry.id === subject);
+    const attempt = flags.attempt === undefined ? 1 : integer(flags.attempt, 1, "--attempt");
+    if (slice && slice.status !== "running") throw new CliError(`slice '${subject}' must be running before observation; found '${slice.status}'`);
+    if (slice && attempt !== slice.attempts) {
+      // Enforcement: writing canonical evidence for another attempt lets a stale review cycle
+      // bypass the retry transition and its max_retries bound.
+      throw new CliError(`--attempt ${attempt} does not match slice '${subject}' attempt ${slice.attempts}`);
+    }
     if (slice && flags.testCmd !== undefined
       && !slice.test_plan.some((entry) => entry === flags.testCmd)) {
       throw new CliError(
@@ -977,7 +1010,7 @@ const HANDLERS = {
 
     const { evidence, ancestry } = await writeObservedEvidence({
       runDir, runId, subject,
-      attempt: flags.attempt === undefined ? 1 : integer(flags.attempt, 1, "--attempt"),
+      attempt,
       branch: flags.repositoryVerify ? run.branch : flags.branch ?? null,
       baseRef: flags.base, worktree, status: flags.status ?? "completed",
       blockedReason: flags.blockedReason ?? null, claim,

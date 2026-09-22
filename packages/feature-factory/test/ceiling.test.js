@@ -359,11 +359,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       { command: "lock", when: /\bsteal\b/u, flag: "--session", why: "claiming a stolen lock needs a session id" },
       { command: "slice", when: /\breview\b/u, flag: "--review-ref", why: "the merge refuses a slice with no review_ref" },
       { command: "slice", when: /\breview\b/u, flag: "--evidence-ref", why: "the merge refuses a slice with no evidence_ref" },
-      { command: "slice", when: /\brunning\b/u, flag: "--branch", why: "the merge refuses a slice with no recorded branch" },
-      { command: "slice", when: /\brunning\b/u, flag: "--worktree", why: "an unset worktree falls back to the repository root instead of the isolated slice tree" },
+      // A retry must reuse rather than resupply these identities; the CLI refuses the flags on N+1.
+      { command: "slice", when: /\brunning\b/u, unless: /NEXT_SLICE_ATTEMPT/u, flag: "--branch", why: "the merge refuses a fresh slice with no recorded branch" },
+      { command: "slice", when: /\brunning\b/u, unless: /NEXT_SLICE_ATTEMPT/u, flag: "--worktree", why: "a fresh slice must record its isolated worktree" },
     ];
-    for (const { command, when, flag, why } of required) {
-      const relevant = invocations.filter((entry) => entry.command === command && !entry.elided && when.test(entry.snippet));
+    for (const { command, when, unless, flag, why } of required) {
+      const relevant = invocations.filter((entry) => entry.command === command && !entry.elided
+        && when.test(entry.snippet) && !unless?.test(entry.snippet));
       assert.ok(relevant.length > 0, `no documented '${command}' invocation matching ${when}`);
       for (const entry of relevant) {
         assert.ok(entry.flags.includes(flag), `${entry.snippet}\n  must pass ${flag}: ${why}`);
@@ -1219,12 +1221,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // provenance, and publishes the transformed manifest last. The issue authorizes the 5200 tripwire.
     // 5182 -> 5192: `.factory.json` `publish` stops being a required key nobody runs. Optional does not
     // mean unchecked, so an empty or non-string command remains a loud refusal.
-    // 5192 -> 5302 for issue #353: publishing a parked snapshot was specified only as driver prose, so a
-    // supervisor that parks a run it is not driving -- which `factory terminal` deliberately permits --
+    // 5192 -> 5237 for issue #352: a merit REJECT is the only slice event that spends N+1, retries retain
+    // their original base across sibling merges, and wrong-attempt evidence refuses before publication.
+    // 5237 -> 5354 for issue #353: publishing a parked snapshot was specified only as driver prose, so
+    // a supervisor that parks a run it is not driving -- which `factory terminal` deliberately permits --
     // could complete step 1 of the three-step park and nothing else. The cost is the five-phase swap:
     // preflight, stage, verify by inventory equality, the two-rename commit with rollback, and cleanup
-    // that reports a residual rather than failing a completed publication. The issue authorizes 5350.
-    assert.equal(total, 5302, "publishing a parked snapshot lands at 5302 production lines");
+    // that reports a residual rather than failing a completed publication.
+    assert.equal(total, 5354, "publishing a parked snapshot lands at 5354 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1256,10 +1260,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
     // Issue #343 authorizes 4900 -> 5200 for snapshot restore, including source/destination binding,
-    // Git provenance, explicit loss reporting, and atomic publication. The issue body records the approval.
-    // Issue #353 authorizes 5200 -> 5350 for the snapshot publisher. The issue body records the approval,
-    // written before the work; 5350 is a cap, not a target, and nothing was padded or trimmed to reach it.
-    assert.ok(total <= 5350, `production source is ${total} lines; the tripwire is 5350`);
+    // Git provenance, explicit loss reporting, and atomic publication. Issue #352 authorized 5200 -> 5240
+    // for bounded slice merit retries; issue #353 authorizes 5350 for the snapshot publisher, and the
+    // merged tree carries both. #353's figure was re-authorized to 5400 once #352 merged first: 5350 was
+    // estimated from a 5192 base, and the combined tree measures 5354, which neither issue anticipated.
+    // Raised on explicit operator instruction recorded in the issue; nothing was trimmed to fit.
+    assert.ok(total <= 5400, `production source is ${total} lines; the tripwire is 5400`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
