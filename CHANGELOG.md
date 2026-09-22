@@ -5,8 +5,8 @@ version across the workspace, with each adapter pinning the exact factory versio
 
 ## 0.10.1
 
-A patch release that makes the slice retry budget real instead of caller-optional (#352), and gives a
-supervisor a way to publish the park evidence it could not produce (#353).
+A patch release that makes the slice retry budget real instead of caller-optional, gives a supervisor a
+way to publish park evidence, and adds an audited operator extension for an exhausted slice (#352, #353, #357).
 
 - A complete slice merit rejection now advances exactly `review@N -> running@(N+1)` before builder
   redispatch. Infrastructure recovery and resume remain on N, approval proceeds only to merge, and a
@@ -18,7 +18,6 @@ supervisor a way to publish the park evidence it could not produce (#353).
 - A retry preserves the slice's exact immutable `base_ref`. Integration HEAD may move when a same-wave
   sibling merges; that does not rewrite the historical branch point or narrow the owned and reviewed diff.
   Restore also preserves terminal blocked slices instead of reopening them at their exhausted attempt.
-
 - **`factory snapshot <run-id> --repo <operator>` publishes a parked control-plane snapshot.** `factory
   terminal` requires no lock so a supervisor can park a run it is not driving, and `restore` consumes a
   snapshot to rebuild a lost sandbox — but producing one was specified only as driver prose, so an
@@ -27,12 +26,18 @@ supervisor a way to publish the park evidence it could not produce (#353).
   cancelling the driver and then terminalizing, so its parked runs report `park_snapshot: null` and stay
   recoverable only while their sandbox survives.
 - **Publication is verified before it commits, and refuses what `restore` cannot read.** The command
-  stages, compares source and destination inventories excluding only the plane-root `factory.lock`, then
+  stages, compares source and destination inventories excluding only the plane-root `factory.lock` and transition lock, then
   commits by rename with rollback. It refuses a run that is not parked, so a live plane cannot be recorded
   as a moment no resume can return to, and it requires `run.json` to be a regular non-symlink file
   resolving to itself — the same rule the restore side applies, so producer and consumer agree on what a
   valid snapshot is rather than each deciding separately. The prose specification is unchanged and remains
   the definition; a driver may run the command instead of copying by hand, and a supervisor must.
+- `factory grant-retry` can add exactly one attempt to a parked exhausted slice or raise the run-wide
+  default for pending work while reopening only its named slice. It requires the exact owner, complete
+  snapshot, clean live branch, bound REJECT and evidence, and immutable attempt archives; the run stays parked.
+- Retry grants append immutable provenance, refuse a run-wide raise around another blocked slice or exhausted
+  repair journal, and move the pre-grant snapshot away. Publish the changed plane before separate resume;
+  restored blocked slices whose physical references were cleared remain ineligible.
 
 All three packages and both exact adapter pins move together to 0.10.1.
 

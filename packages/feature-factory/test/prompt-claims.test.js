@@ -131,6 +131,7 @@ const NEEDS_HUMAN_PROSE = [
   ["repair-committed-transition", "`committed → verified|failed|exhausted|needs-human`", "factory resume resolves the repair-record"],
   ["repair-guard", "Only the explicit `factory reverify-repair \"$R\" \"$REPAIR_RECORD_ID\" --repo \"$RUN_REPO\"` may derive effective `verified` from this repair-record needs-human; the physical row stays frozen, and resume and reconciliation never execute or clear it.", "resume and reconciliation may clear it"],
   ["path-amendment", "park `needs-human` with that diagnosis; only the verified owner may use the optional", "resume silently widens ownership"],
+  ["retry-exhaustion-park", "enters the common parked-stop procedure as top-level `needs-human`; retry exhaustion never terminalizes the", "retry exhaustion is never resumable"],
   ["generic-stop", "Use terminal needs-human only to park a running envelope; use explicit factory resume after the cause is fixed.", "terminal needs-human is a final outcome"],
   ["generic-retention", "A top-level needs-human sandbox stays retained while parked and continues only after explicit factory resume.", "retained needs-human cannot continue"],
   ["gate-three-repair", "A Gate 3 repair-record needs-human remains blocked until the complete inventory proves its canonical first passing re-verification; Gate 3 never executes or clears re-verification.", "Gate 3 executes re-verification"],
@@ -142,7 +143,7 @@ const NEEDS_HUMAN_PROSE = [
   // is only caught if the run stops, and "and continue" on this line would invert the rule while
   // leaving every word of the requirement in place.
   ["satisfiability-park", "not work to attempt: park with `needs-human`, name both sides, and", "and continue"],
-  ["bounded-loop", "A bounded loop parks top-level needs-human; explicit resume may repark it if the external cause remains unfixed.", "bounded-loop needs-human cannot resume"],
+  ["bounded-loop", "On slice exhaustion mark it `blocked` and park top-level needs-human; do not terminalize", "bounded-loop needs-human cannot resume"],
   ["specialist-infrastructure", "**Every infrastructure-triggered needs-human park follows one sequence.**", "report before unlock"],
 ];
 
@@ -213,7 +214,7 @@ const INFRASTRUCTURE_POLICY_CONTRACTS = [
   ["later-driver-guard", "The failure count remains invocation-local", (text) => /Explicit\s+resume, `status\.next`, provider recovery, the reset count, and an operator assertion alone establish\s+neither fact[\s\S]*If neither safe path is available, do not dispatch; re-enter the common infrastructure-park\s+sequence with `UNKNOWN_OUTCOME_REASON`/u.test(text)],
   ["budgeted-merit-only", "A budgeted attempt advances only after a complete specialist response", (text) => /complete\s+unbudgeted result returns to its ordinary workflow without creating an attempt[\s\S]*Infrastructure recovery is\s+the same attempt, not another use of `max_retries`[\s\S]*For a slice, an output-contract violation may advance[\s\S]*canonical evidence and its matching REJECT review were recorded[\s\S]*park top-level `needs-human`/u.test(text)],
   ["instruction-boundary", "This rule is instruction rather than CLI enforcement", (text) => /host owns specialist invocation errors, while\s+the CLI continues to enforce every durable attempt\s+transition/u.test(text)],
-  ["slice-max-block", "If `SLICE_ATTEMPT >= MAX_RETRIES`", (text) => /without creating another attempt[\s\S]*blocked --attempts "\$SLICE_ATTEMPT"/u.test(text)],
+  ["slice-max-block", "If `SLICE_ATTEMPT >= SLICE_RETRY_LIMIT`", (text) => /without creating another attempt[\s\S]*blocked --attempts "\$SLICE_ATTEMPT"/u.test(text)],
 ];
 
 function checkNeedsHumanProse(prose) {
@@ -1642,6 +1643,26 @@ const CLAIMS = [
         "Apart from the safe matching-unavailable replay above, a configured command may run again\nonly after a committed test-only repair changes HEAD",
         "include every attempt under\n`## Post-merge test-only repairs`",
       ]) assert.ok(prose.includes(postMergeClaim), `post-merge policy is missing: ${postMergeClaim}`);
+      const retryExtensionClaims = [
+        'factory grant-retry "$R" "$SLICE_ID" --scope slice --reason "$EXTENSION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"',
+        'factory grant-retry "$R" "$SLICE_ID" --scope all --reason "$EXTENSION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"',
+        "`slice` raises only that slice's additive allowance. `all` raises the run-wide default, including every",
+        "pending later wave, but still reopens only `SLICE_ID`; it refuses while another slice is blocked or an",
+        "an archive gets a preparation-only refusal: publish the changed plane and invoke the grant again.",
+        "The grant atomically moves the old canonical snapshot away so restore cannot recover pre-grant authority.",
+        'Do not dispatch or resume yet. Republish the updated live plane, then require qualified status',
+        "the staged workflow before its final snapshot check.",
+        "start the replacement slice branch at that exact historical",
+        "terminalize `partial`. The parked snapshot and retained lock are what make a later audited grant",
+      ];
+      const checkRetryExtensionPolicy = (source) => {
+        for (const fragment of retryExtensionClaims) if (!source.includes(fragment)) throw new Error(`retry-extension-policy: ${fragment}`);
+      };
+      checkRetryExtensionPolicy(prose);
+      for (const fragment of retryExtensionClaims) {
+        assert.throws(() => checkRetryExtensionPolicy(prose.replace(fragment, "")), /retry-extension-policy/u,
+          `retry extension fragment must be load-bearing: ${fragment}`);
+      }
       const bootstrapCommand = "node -e \"const f=require('fs');f.mkdirSync('.factory',{recursive:true});f.writeFileSync('.factory/prompt-bootstrap','ran')\"";
       writeFileSync(join(repo, ".factory.json"), `${JSON.stringify({
         resolve: "true", verify: "true", publish: "true",
@@ -1788,7 +1809,7 @@ const CLAIMS = [
     // that silently fell back to the default fails the match instead of passing on a coincidence.
     id: "status-reports-retry-budget",
     file: "WORKFLOW.md",
-    fragment: "Qualified status reports the run's `max_retries`, so the budget a run is actually bounded by is\n  observable rather than assumed",
+    fragment: "Qualified status reports the run's `max_retries` and each slice's effective `retry_limit`",
     expect: "allowed",
     matches: /"max_retries": 7/u,
     act(repo) {

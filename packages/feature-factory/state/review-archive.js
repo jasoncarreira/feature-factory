@@ -11,10 +11,11 @@
 // Instruction, not enforcement: losing a verdict cannot produce a false green, so a failed
 // archive must never fail the step that earned it. The caller reports where the copy landed,
 // or that it did not, rather than throwing.
-import { readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
-import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
-import { ProtectedWriteError } from "../core/atomic-write.js";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import { writeProtectedFileAtomic, writeProtectedJsonAtomic } from "../core/atomic-write.js";
 
 // The attempt comes from the record, not from `--attempts`. The record is what is being
 // preserved, and a snapshot filed under a number the record does not itself claim would
@@ -36,25 +37,38 @@ export function attemptArchiveRef(ref, attempt) {
 // step that earned the verdict, which is the contract stated at the top of this file.
 const ARCHIVE_REF = /\.attempt-\d+\.json$/u;
 
+export function qualifyAttemptArchive(runDir, ref, description = "attempt record") {
+  if (typeof ref !== "string" || !ref.trim() || ARCHIVE_REF.test(ref)) throw new Error(`${description} ref is not a live attempt record`);
+  const root = realpathSync(runDir), source = join(runDir, ref), canonicalSource = resolve(root, ref), sourceStat = lstatSync(source);
+  if (!canonicalSource.startsWith(`${root}${sep}`) || !sourceStat.isFile() || sourceStat.isSymbolicLink()
+    || realpathSync(source) !== canonicalSource) throw new Error(`${description} must be a contained regular non-symlink file`);
+  const bytes = readFileSync(source), record = JSON.parse(bytes.toString("utf8"));
+  if (!Number.isSafeInteger(record?.attempt) || record.attempt < 1) throw new Error(`${description} does not name a positive attempt`);
+  const archive = attemptArchiveRef(ref, record.attempt), target = join(runDir, archive);
+  if (existsSync(target)) {
+    const stat = lstatSync(target);
+    if (!stat.isFile() || stat.isSymbolicLink() || realpathSync(target) !== resolve(root, archive)) throw new Error(`${description} archive '${archive}' has an unsafe type`);
+    const archiveBytes = readFileSync(target);
+    if (!archiveBytes.equals(bytes) || !isDeepStrictEqual(JSON.parse(archiveBytes.toString("utf8")), record)) throw new Error(`${description} archive '${archive}' conflicts with the live record`);
+  }
+  return { archive, record, bytes, digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`, exists: existsSync(target) };
+}
+
+export async function publishAttemptArchive(runDir, qualified) {
+  if (!qualified.exists) await writeProtectedFileAtomic(runDir, qualified.archive, qualified.bytes, { createOnly: true });
+  const archived = JSON.parse(readFileSync(join(runDir, qualified.archive), "utf8"));
+  if (!isDeepStrictEqual(archived, qualified.record)) throw new Error(`attempt archive '${qualified.archive}' does not match its qualified record`);
+  return qualified.archive;
+}
+
 export async function archiveReviewAttempt(runDir, ref) {
-  if (typeof ref !== "string" || !ref.trim()) return null;
-  if (ARCHIVE_REF.test(ref)) return null;
-  let record;
+  if (typeof ref !== "string" || !ref.trim() || ARCHIVE_REF.test(ref)) return null;
   try {
-    record = JSON.parse(readFileSync(join(runDir, ref), "utf8"));
-  } catch {
-    return null;
-  }
-  const attempt = record?.attempt;
-  if (!Number.isSafeInteger(attempt) || attempt < 1) return null;
-  const archive = attemptArchiveRef(ref, attempt);
-  try {
-    // createOnly: an archive that can be overwritten is not an archive. A second record for
-    // the same attempt loses to the first, which is the one the verdict was recorded against.
+    const source = join(runDir, ref), stat = lstatSync(source), record = JSON.parse(readFileSync(source, "utf8"));
+    if (!stat.isFile() || stat.isSymbolicLink() || !Number.isSafeInteger(record?.attempt) || record.attempt < 1) return null;
+    const archive = attemptArchiveRef(ref, record.attempt), target = join(runDir, archive);
+    if (existsSync(target)) return lstatSync(target).isFile() && !lstatSync(target).isSymbolicLink() ? archive : null;
     await writeProtectedJsonAtomic(runDir, archive, record, { createOnly: true });
-  } catch (error) {
-    const exists = error instanceof ProtectedWriteError && /already exists/u.test(error.message);
-    if (!exists) return null;
-  }
-  return archive;
+    return archive;
+  } catch { return null; }
 }

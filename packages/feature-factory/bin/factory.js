@@ -4,7 +4,7 @@
 // The orchestrator calls this CLI instead of writing control-plane state directly.
 // Flags are declared per command; unknown options fail rather than becoming missing fields.
 // Schema validation surrounds every state write.
-import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync, renameSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
@@ -12,18 +12,20 @@ import { isDeepStrictEqual } from "node:util";
 import { readFileSync } from "node:fs";
 import { nextAction, nextActionRecord, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
+import { RUN_JSON_LOCK_DIR } from "../core/run-lock.js";
 import { buildEvidence, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, isApproving, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { readRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
 import { reverifyRepair } from "../observe/repair-reverification.js";
-import { archiveReviewAttempt } from "../state/review-archive.js";
+import { readRepairState } from "../observe/repair-record.js";
+import { archiveReviewAttempt, publishAttemptArchive, qualifyAttemptArchive } from "../state/review-archive.js";
 import { writeProtectedFileAtomic, writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
 import { resolveSpawnExecutable } from "../core/executable.js";
 import { dispatchInitPublication } from "./init-publication.js";
-import { dispatchRestore, readRestoreRecord } from "./restore.js";
+import { assertRetryExtensionBindings, dispatchRestore, readRestoreRecord } from "./restore.js";
 import { dispatchSnapshot } from "./snapshot.js";
-import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, repositoryRelativePath, validateRun } from "../state/schema.js";
+import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, RETRY_EXTENSION_SCOPES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, effectiveRetryLimit, repositoryRelativePath, validateRun } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SESSION_LOCK_FILE, SessionLockHeldError,
 } from "../state/session-lock.js";
@@ -37,6 +39,7 @@ export const COMMANDS = Object.freeze({
   status: Object.freeze(["--repo", "--json"]),
   "amend-paths": Object.freeze(["--repo", "--add", "--reason", "--session", "--now", "--json"]),
   resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
+  "grant-retry": Object.freeze(["--repo", "--scope", "--reason", "--session", "--now", "--json"]),
   restore: Object.freeze(["--repo", "--from", "--now", "--json"]),
   snapshot: Object.freeze(["--repo", "--json"]),
   decide: Object.freeze(["--repo", "--text", "--session", "--now", "--json"]),
@@ -181,18 +184,18 @@ function briefDigestFor(decision, state, runDir) {
 // conclusion was wrong. Both caught in review.
 // Every path component is checked with `lstat` and never followed, since `lstat` on the final entry alone
 // still follows intermediate symlinks.
-function planeInventory(root) {
+function planeInventory(root, skipped = new Set()) {
   const entries = [];
   const record = (rel, full) => {
-    // The session lock is liveness, not run state, and it is the one entry in the plane designed to change
-    // on a timer. Comparing it made every snapshot invalid within one heartbeat: a live park published a
+    // The session lock is liveness, not run state. Exact additional root entries are supplied only while a
+    // protected transition owns its coordination lock and atomic temp. Comparing factory.lock made every snapshot invalid within one heartbeat: a live park published a
     // complete, byte-correct plane and `status` reported `park_snapshot: null` eleven seconds later,
     // because the copy held `heartbeat_at` 23:28:25 and the plane had moved to 23:28:36. The whole point
     // of the field was to answer "did the driver publish it", and it answered "no" for a snapshot that was
     // there -- the same disagree-with-your-own-description defect the 0.8.3 work existed to remove,
     // reintroduced by the check built to remove it. Every existing test publishes and reads back with no
     // heartbeat in between, which is why three review rounds and a real park all missed it.
-    if (rel === SESSION_LOCK_FILE) return;
+    if (rel === SESSION_LOCK_FILE || skipped.has(rel)) return;
     const stat = lstatSync(full);
     const mode = (stat.mode & 0o7777).toString(8);
     if (stat.isSymbolicLink()) entries.push(`${rel} l ${mode} ${readlinkSync(full)}`);
@@ -206,20 +209,42 @@ function planeInventory(root) {
   return entries.sort().join("\n");
 }
 
-function observedParkSnapshot(repo, runId, runDir) {
-  const container = dirname(repo);
-  if (basename(container) !== ".factory-sandboxes" || basename(repo) !== runId) return null;
-  const operatorRoot = dirname(container);
-  const candidate = join(operatorRoot, CONTROL_PLANE, ".parked", runId);
+function observedParkSnapshot(repo, runId, runDir, liveSkipped = new Set()) {
+  const container = dirname(repo), sandbox = basename(container) === ".factory-sandboxes" && basename(repo) === runId;
+  const operatorRoot = sandbox ? dirname(container) : repo, candidate = join(operatorRoot, CONTROL_PLANE, ".parked", runId);
   try {
-    for (const component of [join(operatorRoot, CONTROL_PLANE), join(operatorRoot, CONTROL_PLANE, ".parked"), candidate]) {
-      if (!lstatSync(component).isDirectory()) return null;
-    }
-    if (planeInventory(candidate) !== planeInventory(runDir)) return null;
+    const live = [join(operatorRoot, CONTROL_PLANE, runId), join(operatorRoot, ".factory-sandboxes", runId, CONTROL_PLANE, runId)]
+      .filter((plane) => existsSync(join(plane, "run.json")));
+    if (live.length !== 1 || realpathSync(live[0]) !== realpathSync(runDir)) return null;
+    assertRetryExtensionBindings(runDir, readRun(runDir));
+    assertRetryExtensionBindings(candidate, readRun(candidate));
+    for (const component of [join(operatorRoot, CONTROL_PLANE), join(operatorRoot, CONTROL_PLANE, ".parked"), candidate]) if (!lstatSync(component).isDirectory()) return null;
+    if (planeInventory(candidate) !== planeInventory(runDir, liveSkipped)) return null;
     return readFileSync(join(candidate, "run.json")).equals(readFileSync(join(runDir, "run.json"))) ? candidate : null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
+}
+
+function qualifyRetryGrant(repo, runDir, runId, state, sliceId, { requireSnapshot = true } = {}) {
+  const slice = state.slices.find((entry) => entry.id === sliceId);
+  if (!slice) throw new CliError(`unknown slice '${sliceId}'`);
+  const limit = effectiveRetryLimit(state, slice);
+  if (slice.status !== "blocked" || slice.attempts !== limit) throw new CliError(`grant-retry requires slice '${sliceId}' blocked at effective retry limit ${limit}`);
+  if (!slice.review_ref || !slice.evidence_ref) throw new CliError(`grant-retry requires slice '${sliceId}' recorded review and evidence`);
+  const review = readReview(runDir, slice.review_ref), evidence = readEvidence(runDir, slice.evidence_ref, { runId });
+  if (review.subject !== sliceId || review.attempt !== slice.attempts || review.verdict !== "REJECT") throw new CliError(`slice '${sliceId}' attempt ${slice.attempts} does not have a matching REJECT review`);
+  if (evidence.subject !== sliceId || evidence.attempt !== slice.attempts || evidence.base_ref !== slice.base_ref || review.reviewed_commit !== evidence.commit) throw new CliError(`slice '${sliceId}' REJECT does not bind its recorded evidence and base`);
+  const worktree = resolveWorktree(repo, slice.worktree ?? "");
+  if (!worktree) throw new CliError(`slice '${sliceId}' recorded worktree is unavailable`);
+  const branch = git(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (!branch.ok || branch.stdout.trim() !== slice.branch) throw new CliError(`slice '${sliceId}' worktree is not on recorded branch '${slice.branch}'`);
+  const cleanliness = observeCleanliness(worktree);
+  if (!cleanliness.clean) throw new CliError(`slice '${sliceId}' ${cleanliness.reason}`);
+  const observed = observeWorktree(worktree, slice.base_ref, { ref: slice.branch });
+  if (!observed.diff_observed || observed.commit !== evidence.commit) throw new CliError(`slice '${sliceId}' REJECT does not bind the live branch head`);
+  const snapshot = requireSnapshot ? observedParkSnapshot(repo, runId, runDir) : null;
+  if (requireSnapshot && !snapshot) throw new CliError(`grant-retry requires a complete current park snapshot for run '${runId}'`);
+  return { slice, limit, review, evidence, worktree, snapshot,
+    snapshotDigest: snapshot ? planDigest(Buffer.from(planeInventory(snapshot))) : null };
 }
 
 function runDirFor(flags, runId) {
@@ -504,7 +529,7 @@ async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit }) {
 
 const HANDLERS = {
   restore: dispatchRestore,
-  snapshot: (positional, flags) => emit(flags, dispatchSnapshot(positional, flags)),
+  snapshot: async (positional, flags) => emit(flags, await dispatchSnapshot(positional, flags)),
 
   async ["reverify-repair"](positional, flags) {
     if (positional.length !== 2) throw new CliError("factory reverify-repair requires exactly <run-id> <repair-record-id>");
@@ -633,6 +658,7 @@ const HANDLERS = {
             worktree: null,
             branch: null,
             attempts: 1,
+            extra_attempts: 0,
             // The ratification point: the gate approved these paths and this test plan,
             // so they are the set every later merge is judged against and the decision
             // about whether this slice may ship without an observed test run.
@@ -735,6 +761,82 @@ const HANDLERS = {
       terminal_result: next.terminal_result, amendment: row.path_amendments.at(-1) });
   },
 
+  async ["grant-retry"](positional, flags) {
+    if (positional.length !== 2) throw new CliError("factory grant-retry requires exactly <run-id> <slice-id>");
+    const [runId, sliceId] = positional;
+    if (!RETRY_EXTENSION_SCOPES.includes(flags.scope)) throw new CliError(`factory grant-retry requires --scope ${RETRY_EXTENSION_SCOPES.join("|")}`);
+    if (typeof flags.reason !== "string" || !flags.reason.trim()) throw new CliError("factory grant-retry requires nonblank --reason <text>");
+    if (typeof flags.session !== "string" || !flags.session.trim()) throw new CliError("factory grant-retry requires nonblank --session <id>");
+    const runDir = runDirFor(flags, runId), repo = resolve(flags.repo ?? process.cwd());
+    const boundBytes = readFileSync(join(runDir, "run.json")), current = validateRun(JSON.parse(boundBytes.toString("utf8")));
+    if (current.status !== "needs-human") throw new CliError(`factory grant-retry requires current status needs-human; found '${current.status}'`);
+    const owner = assertFreshSessionOwner(runDir, runId, flags.session, "grant-retry"), at = stamp(flags);
+    if (Date.parse(at) <= Date.parse(current.updated_at)) throw new CliError("grant-retry must move updated_at forwards");
+    const qualified = qualifyRetryGrant(repo, runDir, runId, current, sliceId);
+    if (flags.scope === "all") {
+      const otherBlocked = current.slices.filter((slice) => slice.id !== sliceId && slice.status === "blocked");
+      if (otherBlocked.length) throw new CliError(`grant-retry --scope all refuses while other slices are blocked: ${otherBlocked.map((slice) => slice.id).join(", ")}`);
+      const repairs = readRepairState({ runDir, state: current, runId, repo });
+      if (repairs.records.some((record) => record.status === "exhausted")) throw new CliError("grant-retry --scope all refuses an exhausted post-merge repair bound to the current run-wide limit");
+    }
+    const reviewArchive = qualifyAttemptArchive(runDir, qualified.slice.review_ref, `slice '${sliceId}' review`);
+    const evidenceArchive = qualifyAttemptArchive(runDir, qualified.slice.evidence_ref, `slice '${sliceId}' evidence`);
+    if (!reviewArchive.exists || !evidenceArchive.exists) {
+      if (!reviewArchive.exists) await publishAttemptArchive(runDir, reviewArchive);
+      if (!evidenceArchive.exists) await publishAttemptArchive(runDir, evidenceArchive);
+      throw new CliError(`grant-retry prepared missing immutable attempt archives for slice '${sliceId}'; publish a fresh snapshot and retry; no retry was granted`);
+    }
+    if (!isDeepStrictEqual(reviewArchive.record, qualified.review) || !isDeepStrictEqual(evidenceArchive.record, qualified.evidence)) throw new CliError(`slice '${sliceId}' attempt archives do not bind the qualified review and evidence`);
+    const priorSnapshot = join(dirname(qualified.snapshot), `.prior-${runId}`);
+    if (existsSync(priorSnapshot)) throw new CliError(`grant-retry requires snapshot residual '${priorSnapshot}' to be cleared by factory snapshot`);
+    const recheck = () => {
+      if (!readFileSync(join(runDir, "run.json")).equals(boundBytes)) throw new CliError("grant-retry refused because run.json changed after qualification");
+      if (!sameSessionOwner(runDir, owner)) throw new CliError("grant-retry refused because session ownership changed after qualification");
+      if (planDigest(Buffer.from(planeInventory(qualified.snapshot))) !== qualified.snapshotDigest) throw new CliError("grant-retry refused because the qualified park snapshot changed");
+      const observed = qualifyRetryGrant(repo, runDir, runId, current, sliceId, { requireSnapshot: false });
+      if (!isDeepStrictEqual(observed.review, qualified.review) || !isDeepStrictEqual(observed.evidence, qualified.evidence)) throw new CliError("grant-retry refused because the qualified review or evidence changed");
+      const observedReviewArchive = qualifyAttemptArchive(runDir, qualified.slice.review_ref, `slice '${sliceId}' review`);
+      const observedEvidenceArchive = qualifyAttemptArchive(runDir, qualified.slice.evidence_ref, `slice '${sliceId}' evidence`);
+      if (!observedReviewArchive.exists || observedReviewArchive.archive !== reviewArchive.archive
+        || !observedEvidenceArchive.exists || observedEvidenceArchive.archive !== evidenceArchive.archive) {
+        throw new CliError(`slice '${sliceId}' qualified attempt archives changed before grant-retry commit`);
+      }
+      if (flags.scope === "all") {
+        const repairs = readRepairState({ runDir, state: current, runId, repo });
+        if (repairs.records.some((record) => record.status === "exhausted")) {
+          throw new CliError("grant-retry --scope all refuses an exhausted post-merge repair bound to the current run-wide limit");
+        }
+      }
+    };
+    const mode = flags.scope === "all" ? "grant-retry-all" : "grant-retry-slice";
+    const next = await transition(runDir, {
+      participants: [{ familyId: "envelope", mode }, { familyId: "slices", mode }],
+      reobservers: new Map([["envelope", async () => recheck()]]),
+      finalGuard: () => { recheck(); renameSync(qualified.snapshot, priorSnapshot); },
+      apply: (state) => {
+        if (!isDeepStrictEqual(state, current)) throw new CliError("grant-retry refused because run state changed after qualification");
+        const existing = state.slices.find((slice) => slice.id === sliceId), previousLimit = effectiveRetryLimit(state, existing);
+        const row = { ...existing, status: "running", attempts: existing.attempts + 1,
+          ...(flags.scope === "slice" ? { extra_attempts: (existing.extra_attempts ?? 0) + 1 } : {}),
+          evidence_ref: null, review_ref: null };
+        const maxRetries = state.max_retries + (flags.scope === "all" ? 1 : 0), newLimit = maxRetries + (row.extra_attempts ?? 0);
+        const audit = { scope: flags.scope, slice_id: sliceId, base_ref: existing.base_ref, attempt: row.attempts, previous_limit: previousLimit,
+          new_limit: newLimit, previous_max_retries: state.max_retries, max_retries: maxRetries,
+          session: flags.session, reason: flags.reason.trim(), at, snapshot_digest: qualified.snapshotDigest,
+          review_ref: reviewArchive.archive, review_sha256: reviewArchive.digest,
+          evidence_ref: evidenceArchive.archive, evidence_sha256: evidenceArchive.digest };
+        return { ...state, updated_at: at, max_retries: maxRetries,
+          retry_extensions: [...(state.retry_extensions ?? []), audit],
+          slices: state.slices.map((slice) => slice.id === sliceId ? row : slice) };
+      },
+    });
+    const row = next.slices.find((slice) => slice.id === sliceId), audit = next.retry_extensions.at(-1);
+    return emit(flags, { run_id: runId, slice: sliceId, scope: flags.scope, status: next.status,
+      attempts: row.attempts, retry_limit: effectiveRetryLimit(next, row), max_retries: next.max_retries,
+      review_archive: audit.review_ref, evidence_archive: audit.evidence_ref, park_snapshot: null,
+      next_action: "republish park snapshot, then resume explicitly" });
+  },
+
   async slice([runId, sliceId, status], flags) {
     if (!SLICE_STATUSES.includes(status)) throw new CliError(`status must be one of ${SLICE_STATUSES.join(" | ")}`);
     const runDir = runDirFor(flags, runId);
@@ -761,7 +863,7 @@ const HANDLERS = {
       if (existing.status === "pending") {
         const head = integrationHead(repo, current);
         if (!head.commit) throw new CliError(`could not observe the head of '${current.branch}' to bind the slice base`);
-        observedBase = head.commit;
+        observedBase = existing.base_ref ?? head.commit;
       }
     }
     if (status === "merged" && !flags.mergeCommit) throw new CliError("recording a merge requires --merge-commit");
@@ -885,6 +987,7 @@ const HANDLERS = {
     }
 
     let retryReviewRef = null;
+    let retryEvidenceRef = null;
     const next = await transition(runDir, {
       participants: [{ familyId: "slices", mode: status === "merged" ? "merge" : "record" }],
       reobservers,
@@ -898,7 +1001,8 @@ const HANDLERS = {
         // Enforcement: only a bound merit REJECT may spend N+1 or terminalize an exhausted review.
         if (advances && (existing.status !== "review" || status !== "running")) throw new CliError(`slice '${sliceId}' attempts may advance only from review to running`);
         if (blocks && existing.status !== "review") throw new CliError(`slice '${sliceId}' may block only from review`);
-        if (blocks && existing.attempts < state.max_retries) throw new CliError(`slice '${sliceId}' cannot block before max_retries (${state.max_retries})`);
+        const retryLimit = effectiveRetryLimit(state, existing);
+        if (blocks && existing.attempts < retryLimit) throw new CliError(`slice '${sliceId}' cannot block before effective retry limit (${retryLimit})`);
         if (advances && (flags.worktree !== undefined || flags.branch !== undefined || flags.evidenceRef !== undefined || flags.reviewRef !== undefined)) throw new CliError("a slice retry reuses its recorded worktree, branch, and base; omit worktree, branch, evidence, and review flags");
         if (closesRejectedReview) {
           if (!existing.review_ref) throw new CliError(`slice '${sliceId}' retry requires its recorded review`);
@@ -910,7 +1014,10 @@ const HANDLERS = {
           if (!worktree) throw new CliError(`slice '${sliceId}' recorded worktree is unavailable`);
           const observedHead = observeWorktree(worktree, existing.base_ref, { ref: existing.branch }).commit;
           if (evidence.subject !== sliceId || evidence.attempt !== existing.attempts || evidence.base_ref !== existing.base_ref || review.reviewed_commit !== evidence.commit || observedHead !== evidence.commit) throw new CliError(`slice '${sliceId}' REJECT does not bind its recorded evidence and branch head`);
-          if (advances) retryReviewRef = existing.review_ref;
+          if (advances) {
+            retryReviewRef = existing.review_ref;
+            retryEvidenceRef = existing.evidence_ref;
+          }
         }
         const row = {
           ...existing,
@@ -934,6 +1041,7 @@ const HANDLERS = {
     if (status === "merged") await verifyRecordedMerge({ repo, runDir, runId, mergeCommit: row.merge_commit });
     // Slice attempts are budgeted the same way, so their rejected verdicts vanish the same way.
     const sliceReviewArchive = await archiveReviewAttempt(runDir, retryReviewRef ?? row.review_ref);
+    await archiveReviewAttempt(runDir, retryEvidenceRef ?? row.evidence_ref);
     return emit(flags, { ...mergedPayload(runId, sliceId, row), review_archive: sliceReviewArchive });
   },
 
@@ -1076,7 +1184,9 @@ const HANDLERS = {
       // is unchanged; only the shape is. Breaking for anyone parsing the strings, which is safe here
       // because an exact-match `FACTORY_VERSION` pin already forces consumers to move deliberately.
       steps: run.steps.map((step) => ({ agent: step.agent, status: step.status, attempts: step.attempts })),
-      slices: run.slices.map((slice) => ({ id: slice.id, status: slice.status, attempts: slice.attempts })),
+      slices: run.slices.map((slice) => ({ id: slice.id, status: slice.status, attempts: slice.attempts,
+        extra_attempts: slice.extra_attempts ?? 0, retry_limit: effectiveRetryLimit(run, slice) })),
+      retry_extensions: run.retry_extensions ?? [],
       // Same narrowing: the record carries `report`, `reviewed_head` and `loops`, and only the verdict
       // came out. `loops` says whether validation is converging; `reviewed_head` says what it judged.
       validator: run.validator
@@ -1314,11 +1424,15 @@ const HANDLERS = {
     if (success) await writeProtectedFileAtomic(runDir, "WORKFLOW.md", readFileSync(new URL("../WORKFLOW.md", import.meta.url)));
     const next = await transition(runDir, {
       participants: [{ familyId: "envelope", mode: success ? "resume-needs-human" : "record-bootstrap" }],
-      reobservers: new Map([["envelope", assertBinding]]), finalGuard: ({ state }) => {
+      reobservers: new Map([["envelope", assertBinding]]), finalGuard: ({ state, source }) => {
         if (!readFileSync(join(runDir, "run.json")).equals(boundRunBytes) || !isDeepStrictEqual(state, current)) {
           throw new CliError("factory resume bootstrap refused: run.json bytes changed while bootstrap ran; current state was preserved");
         }
         if (!sameSessionOwner(runDir, boundOwner)) throw new CliError("factory resume bootstrap refused: factory.lock is absent, stale, or no longer names the same owner; current state and owner were preserved");
+        if ((current.retry_extensions?.length ?? 0) > 0
+          && !observedParkSnapshot(repo, runId, runDir, new Set([RUN_JSON_LOCK_DIR, basename(source)]))) {
+          throw new CliError("factory resume requires a complete current park snapshot after grant-retry");
+        }
       },
       apply: (state) => ({ ...state, ...(success ? { status: "running" } : {}), updated_at: at,
         ...(outcome ? { bootstrap_command: config.bootstrapCommand, bootstrap_exit: outcome.exit } : {}) }),
@@ -1626,6 +1740,7 @@ function preflightInit(positional, flags) {
       mode: flags.mode ?? "interactive",
       max_parallel_slices: integer(flags.maxParallelSlices, 3, "--max-parallel-slices"),
       max_retries: integer(flags.maxRetries, 3, "--max-retries"),
+      retry_extensions: [],
       gates: {},
       steps: [],
       slices: [],
@@ -1700,6 +1815,7 @@ function usage() {
   factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
   factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID [--now ISO]
+  factory grant-retry <run-id> <slice-id> --scope slice|all --reason TEXT --session ID [--now ISO]
   factory decide <run-id> --text TEXT --session ID [--now ISO]
   factory resume <run-id> --session ID [--now ISO]
   factory restore <run-id> --repo OPERATOR --from refs/remotes/REMOTE/BRANCH [--now ISO]

@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertReviewBinding, observeMergeProof, readEvidence, readReview } from "../observe/review.js";
-import { archiveReviewAttempt } from "../state/review-archive.js";
+import { archiveReviewAttempt, publishAttemptArchive, qualifyAttemptArchive } from "../state/review-archive.js";
 
 const run = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
@@ -184,6 +184,14 @@ describe("attack 3 — an approval presented against a different commit", () => 
       assert.equal(await archiveReviewAttempt(f.runDir, "reviews/torn.json"), null);
       writeReview(f.runDir, "no-attempt", { attempt: undefined });
       assert.equal(await archiveReviewAttempt(f.runDir, "reviews/no-attempt.json"), null);
+
+      const compactRef = "reviews/compact.json", compact = Buffer.from('{"attempt":7}');
+      writeFileSync(join(f.runDir, compactRef), compact);
+      const qualified = qualifyAttemptArchive(f.runDir, compactRef);
+      assert.equal(await publishAttemptArchive(f.runDir, qualified), "reviews/compact.attempt-7.json");
+      assert.deepEqual(readFileSync(join(f.runDir, "reviews/compact.attempt-7.json")), compact,
+        "strict retry archives preserve the exact qualified bytes");
+      assert.doesNotThrow(() => qualifyAttemptArchive(f.runDir, compactRef));
 
       // Archiving an archive has nothing to preserve, and appending the suffix twice names an attempt
       // of an attempt. Run 1551 did exactly that -- the driver reported the archive path back as

@@ -12,12 +12,14 @@ const DEFAULT_LOCK_TIMEOUT_MS = 1000;
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
 const DEFAULT_STALE_LOCK_MS = 60000;
 const DEFAULT_MISSING_OWNER_STEAL_MS = 5000;
-const LOCK_DIR = "run-json.lock";
+export const RUN_JSON_LOCK_DIR = "run-json.lock";
+const LOCK_DIR = RUN_JSON_LOCK_DIR;
 const LOCK_OWNER_FILE = "owner.json";
 
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
-  const { onBeforeSteal } = options;
+  const { onBeforeSteal, nonExpiring } = options;
+  if (nonExpiring !== undefined && typeof nonExpiring !== "boolean") throw new Error("nonExpiring must be boolean");
   if (onBeforeSteal !== undefined && typeof onBeforeSteal !== "function") {
     throw new Error("onBeforeSteal must be a function");
   }
@@ -56,7 +58,7 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
     }
   }
 
-  owner = { pid: process.pid, hostname: hostname(), acquired_at: new Date().toISOString(), nonce: randomUUID() };
+  owner = { pid: process.pid, hostname: hostname(), acquired_at: new Date().toISOString(), nonce: randomUUID(), ...(nonExpiring ? { non_expiring: true } : {}) };
 
   try {
     if (!sameLockDirectoryIdentity(createdIdentity, await lockDirectoryIdentity(lockDir))) {
@@ -77,7 +79,15 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
 }
 
 function canStealRunJsonLock(owner, options = {}) {
-  return isDurableLockOwner(owner) && inspectLockOwnerLiveness(owner, options) === "dead";
+  if (!isDurableLockOwner(owner)) return false;
+  // Enforcement: an unbounded snapshot copy cannot expire and race a grant at its pre-rename seam.
+  if (owner.non_expiring === true) return owner.hostname === hostname() && !processAlive(owner.pid);
+  return inspectLockOwnerLiveness(owner, options) === "dead";
+}
+
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error?.code !== "ESRCH"; }
 }
 
 async function readLockOwnerEvidence(ownerPath) {

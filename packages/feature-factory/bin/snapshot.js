@@ -9,13 +9,13 @@
 import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CONTROL_PLANE, validateRun } from "../state/schema.js";
-import { copySnapshot, entryState, inventory } from "./restore.js";
+import { RUN_JSON_LOCK_DIR, withRunJsonLock } from "../core/run-lock.js";
+import { assertRetryExtensionBindings, copySnapshot, entryState, inventory } from "./restore.js";
 
-// The one entry excluded from the comparison: `factory.lock` at the plane root is session liveness rather
-// than run state, and is the only thing designed to change on a timer, so comparing it fails whenever a
-// heartbeat lands between reading the source and reading the copy. Qualified status excludes the same
-// single path for the same reason. A `factory.lock` anywhere below the root is run state and must match.
-const LIVENESS = new Set(["factory.lock"]);
+// The two root entries excluded from publication are coordination, not run state: `factory.lock` is session
+// liveness and `run-json.lock` serializes this copy with state transitions. Only those exact root paths are
+// excluded; either name below the root remains durable state and must match.
+const LIVENESS = new Set(["factory.lock", RUN_JSON_LOCK_DIR]);
 
 export class SnapshotError extends Error {
   constructor(message, options) { super(message, options); this.name = "SnapshotError"; }
@@ -47,20 +47,27 @@ function qualifyManifest(dir, runId, description) {
   try { run = validateRun(JSON.parse(readFileSync(manifest, "utf8"))); }
   catch (error) { throw new SnapshotError(`${description} for '${runId}' is not a valid run`, { cause: error }); }
   if (run.run_id !== runId) throw new SnapshotError(`${description} names '${run.run_id}', not the requested '${runId}'`);
-  if (run.status !== "needs-human") {
-    throw new SnapshotError(`factory snapshot requires a parked run; '${runId}' is '${run.status}'`);
-  }
+  if (run.status !== "needs-human") throw new SnapshotError(`factory snapshot requires a parked run; '${runId}' is '${run.status}'`);
+  try { assertRetryExtensionBindings(dir, run); }
+  catch (error) { throw new SnapshotError(`${description} for '${runId}' has invalid retry-extension bindings`, { cause: error }); }
   return run;
 }
 
-export function dispatchSnapshot(positional, flags, operations = {}) {
+export async function dispatchSnapshot(positional, flags, operations = {}) {
   if (positional.length !== 1 || !ID.test(positional[0])) throw new SnapshotError("factory snapshot requires exactly one valid run id");
   if (flags.repo !== undefined && (typeof flags.repo !== "string" || !flags.repo.trim())) throw new SnapshotError("--repo must name a directory");
-  const runId = positional[0];
-  const operatorRoot = resolve(flags.repo ?? process.cwd());
-  const plane = join(operatorRoot, CONTROL_PLANE, runId);
-  if (!entryState(plane)) throw new SnapshotError(`control plane '${plane}' is not observable`);
+  const runId = positional[0], operatorInput = resolve(flags.repo ?? process.cwd());
+  if (!entryState(operatorInput)) throw new SnapshotError(`operator repository '${operatorInput}' is not observable`);
+  const operatorRoot = realpathSync(operatorInput);
+  const candidates = [join(operatorRoot, CONTROL_PLANE, runId), join(operatorRoot, ".factory-sandboxes", runId, CONTROL_PLANE, runId)]
+    .filter((candidate) => entryState(join(candidate, "run.json")));
+  if (candidates.length !== 1) throw new SnapshotError(candidates.length
+    ? `factory snapshot found ambiguous live manifests for '${runId}'`
+    : `control plane for '${runId}' is not observable`);
+  const plane = candidates[0];
+  qualifyManifest(plane, runId, "run manifest");
 
+  return withRunJsonLock(plane, async () => {
   qualifyManifest(plane, runId, "run manifest");
 
   // Created one directory at a time, never written through a symlinked parent: the snapshot must land
@@ -89,6 +96,7 @@ export function dispatchSnapshot(positional, flags, operations = {}) {
     // Equality alone cannot catch a manifest replaced between qualification and copy: both trees then
     // hold the same unvalidated bytes and compare equal. Qualify what is about to be renamed.
     qualifyManifest(staging, runId, "staged run manifest");
+    await operations.beforeCommit?.({ plane, staging, canonical });
     if (!entryState(canonical)) {
       renameSync(staging, canonical);          // commit point, with no snapshot present
       committed = true;
@@ -118,4 +126,5 @@ export function dispatchSnapshot(positional, flags, operations = {}) {
     catch { residual = prior; }
   }
   return { run_id: runId, park_snapshot: canonical, residual };
+  }, { nonExpiring: true });
 }

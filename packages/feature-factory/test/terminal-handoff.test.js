@@ -10,7 +10,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
-import { withRunJsonLock } from "../core/run-lock.js";
+import { RUN_JSON_LOCK_DIR, withRunJsonLock } from "../core/run-lock.js";
 import { dispatchRestore } from "../bin/restore.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -267,7 +267,7 @@ function createFixture(label, { legacy = false, mode = "interactive", openStatus
   run.pr_url = `https://example.test/${runId}`;
   const slice = (id, status, branch, baseRef, mergeCommit = null) => ({
     id, stack: "backend", depends_on: [], status, worktree: status === "pending" ? null : sandbox,
-    branch, attempts: 1, paths: [`${id}.txt`], test_plan: [], base_ref: baseRef,
+    branch, attempts: status === "blocked" ? run.max_retries : 1, extra_attempts: 0, paths: [`${id}.txt`], test_plan: [], base_ref: baseRef,
     evidence_ref: null, review_ref: null, merge_commit: mergeCommit,
   });
   run.slices = [
@@ -348,8 +348,8 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     "$O/.factory/.parked/.staging-$R",
     "A residual\n   `$O/.factory/.parked/.prior-$R` is the trace of an earlier publication whose cleanup did not finish",
     "remove it before staging, and if that removal fails, report it and stop without\n   touching the canonical snapshot",
-    "require exact equality, **excluding the plane-root `factory.lock` only**",
-    "the plane root is run state and must match.",
+    "require exact equality, excluding only plane-root `factory.lock` and\n   `run-json.lock`.",
+    "either name below the plane root is run state and must match.",
     "rename `.prior-$R` back onto the canonical path and report: nothing was\n   committed",
     "**Before the commit point, no publication has occurred.**",
     "restoring it from `.prior-$R` when it had already been moved",
@@ -597,9 +597,9 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   const lostRun = JSON.parse(readFileSync(lostRunPath, "utf8"));
   lostRun.slices = [
     { id: "merged-code", stack: "backend", depends_on: [], status: "pending", worktree: null, branch: null,
-      attempts: 1, paths: ["survived.txt"], test_plan: [], base_ref: null, evidence_ref: null, review_ref: null, merge_commit: null },
+      attempts: 1, extra_attempts: 0, paths: ["survived.txt"], test_plan: [], base_ref: null, evidence_ref: null, review_ref: null, merge_commit: null },
     { id: "lost-review", stack: "backend", depends_on: [], status: "review", worktree: join(lostSandbox, ".factory", "worktrees", restoreRun, "lost-review"),
-      branch: `factory/${restoreRun}/lost-review`, attempts: 2, paths: ["lost.txt"], test_plan: [], base_ref: restoredHead,
+      branch: `factory/${restoreRun}/lost-review`, attempts: 2, extra_attempts: 0, paths: ["lost.txt"], test_plan: [], base_ref: restoredHead,
       evidence_ref: null, review_ref: null, merge_commit: null },
   ];
   const staleHead = git(restoreOperator, "rev-parse", "main");
@@ -695,18 +695,104 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   }, { beforeManifest: ({ sandbox }) => writeFileSync(join(sandbox, "base.txt"), "dirty\n") }),
   (error) => error?.cause?.message === "restored feature worktree changed while restore was running");
   rmSync(lostSandbox, { recursive: true });
-  const blockedAtMax = JSON.parse(sourceRunBytes);
-  blockedAtMax.slices[1] = { ...blockedAtMax.slices[1], status: "blocked", attempts: blockedAtMax.max_retries };
+  const blockedAtMax = JSON.parse(sourceRunBytes), exhaustedAttempt = blockedAtMax.max_retries;
+  const retryReviewRef = `reviews/lost-review.attempt-${exhaustedAttempt}.json`;
+  const retryEvidenceRef = `evidence/lost-review.attempt-${exhaustedAttempt}.json`;
+  const retryReviewBytes = Buffer.from(`${JSON.stringify({ subject: "lost-review", reviewer: "work-reviewer",
+    verdict: "REJECT", attempt: exhaustedAttempt, reviewed_commit: restoredHead, findings: ["still failing"],
+    required_fixes: ["repair the bounded defect"], checked_against: ["brief"] }, null, 2)}
+`);
+  const retryEvidenceBytes = Buffer.from(`${JSON.stringify({ subject: "lost-review", run_id: restoreRun,
+    attempt: exhaustedAttempt, base_ref: restoredHead, commit: restoredHead, status: "completed",
+    worktree_clean: true, files_changed: ["lost.txt"], diff_observed: true,
+    tests: { observed: false, exit: null, skipped_reason: "approved empty test plan" },
+    observed_by: "orchestrator", review_ready: true }, null, 2)}
+`);
+  writeFileSync(join(restoreSnapshot, retryReviewRef), retryReviewBytes);
+  writeFileSync(join(restoreSnapshot, retryEvidenceRef), retryEvidenceBytes);
+  blockedAtMax.retry_extensions = [{ scope: "slice", slice_id: "lost-review", base_ref: restoredHead, attempt: exhaustedAttempt + 1,
+    previous_limit: exhaustedAttempt, new_limit: exhaustedAttempt + 1,
+    previous_max_retries: exhaustedAttempt, max_retries: exhaustedAttempt,
+    session: "prior-operator", reason: "one prior bounded repair", at: "2026-09-21T16:01:30.000Z",
+    snapshot_digest: `sha256:${"0".repeat(64)}`, review_ref: retryReviewRef,
+    review_sha256: `sha256:${createHash("sha256").update(retryReviewBytes).digest("hex")}`,
+    evidence_ref: retryEvidenceRef,
+    evidence_sha256: `sha256:${createHash("sha256").update(retryEvidenceBytes).digest("hex")}` }];
+  blockedAtMax.slices[1] = { ...blockedAtMax.slices[1], status: "blocked", attempts: exhaustedAttempt + 1, extra_attempts: 1 };
   writeFileSync(join(restoreSnapshot, "run.json"), `${JSON.stringify(blockedAtMax, null, 2)}
 `);
+  const restoreAttempt = () => spawnSync(process.execPath, [cli, "restore", restoreRun, "--repo", restoreOperator,
+    "--from", remoteFeatureRef, "--now", "2026-09-21T16:02:00Z", "--json"], { encoding: "utf8" });
+  rmSync(join(restoreSnapshot, retryEvidenceRef));
+  let invalidRetryRestore = restoreAttempt();
+  assert.equal(invalidRetryRestore.status, 1);
+  assert.match(invalidRetryRestore.stderr, /must be a contained regular file/u);
+  assert.equal(existsSync(lostSandbox), false, "missing retry archive refuses before destination reservation");
+  writeFileSync(join(restoreSnapshot, retryEvidenceRef), retryEvidenceBytes);
+  rmSync(join(restoreSnapshot, retryReviewRef));
+  symlinkSync("test-verifier.json", join(restoreSnapshot, retryReviewRef));
+  invalidRetryRestore = restoreAttempt();
+  assert.equal(invalidRetryRestore.status, 1);
+  assert.match(invalidRetryRestore.stderr, /must be a contained regular file/u);
+  rmSync(join(restoreSnapshot, retryReviewRef));
+  writeFileSync(join(restoreSnapshot, retryReviewRef), retryReviewBytes);
+  for (const [name, change] of [
+    ["wrong review subject", { review: { subject: "other-slice" } }],
+    ["wrong evidence attempt", { evidence: { attempt: exhaustedAttempt - 1 } }],
+    ["approving review", { review: { verdict: "APPROVE" } }],
+    ["commit mismatch", { evidence: { commit: staleHead } }],
+    ["base mismatch", { evidence: { base_ref: staleHead } }],
+  ]) {
+    const reviewBytes = Buffer.from(`${JSON.stringify({ ...JSON.parse(retryReviewBytes.toString("utf8")), ...(change.review ?? {}) }, null, 2)}\n`);
+    const evidenceBytes = Buffer.from(`${JSON.stringify({ ...JSON.parse(retryEvidenceBytes.toString("utf8")), ...(change.evidence ?? {}) }, null, 2)}\n`);
+    const candidate = structuredClone(blockedAtMax), audit = candidate.retry_extensions[0];
+    audit.review_sha256 = `sha256:${createHash("sha256").update(reviewBytes).digest("hex")}`;
+    audit.evidence_sha256 = `sha256:${createHash("sha256").update(evidenceBytes).digest("hex")}`;
+    writeFileSync(join(restoreSnapshot, retryReviewRef), reviewBytes);
+    writeFileSync(join(restoreSnapshot, retryEvidenceRef), evidenceBytes);
+    writeFileSync(join(restoreSnapshot, "run.json"), `${JSON.stringify(candidate, null, 2)}\n`);
+    invalidRetryRestore = restoreAttempt();
+    assert.equal(invalidRetryRestore.status, 1, name);
+    assert.match(invalidRetryRestore.stderr, /does not bind its rejected attempt archives/u, name);
+    assert.equal(existsSync(lostSandbox), false, `${name} refuses before destination reservation`);
+  }
+  const baseReboundEvidence = Buffer.from(`${JSON.stringify({ ...JSON.parse(retryEvidenceBytes.toString("utf8")), base_ref: staleHead }, null, 2)}
+`);
+  const baseRebound = structuredClone(blockedAtMax);
+  baseRebound.retry_extensions[0].base_ref = staleHead;
+  baseRebound.retry_extensions[0].evidence_sha256 = `sha256:${createHash("sha256").update(baseReboundEvidence).digest("hex")}`;
+  writeFileSync(join(restoreSnapshot, retryEvidenceRef), baseReboundEvidence);
+  writeFileSync(join(restoreSnapshot, "run.json"), `${JSON.stringify(baseRebound, null, 2)}
+`);
+  invalidRetryRestore = restoreAttempt();
+  assert.equal(invalidRetryRestore.status, 1);
+  assert.match(invalidRetryRestore.stderr, /base_ref: does not match retry extension history/u,
+    "an audit and archive cannot jointly rewrite the slice's immutable base");
+  writeFileSync(join(restoreSnapshot, retryReviewRef), retryReviewBytes);
+  writeFileSync(join(restoreSnapshot, retryEvidenceRef), retryEvidenceBytes);
+  writeFileSync(join(restoreSnapshot, "run.json"), `${JSON.stringify(blockedAtMax, null, 2)}\n`);
   const blockedRestored = factory(restoreOperator, "restore", restoreRun, "--from", remoteFeatureRef, "--now", "2026-09-21T16:02:00Z");
-  const preservedBlocked = JSON.parse(readFileSync(join(blockedRestored.run_dir, "run.json"), "utf8")).slices[1];
-  assert.deepEqual({ status: preservedBlocked.status, attempts: preservedBlocked.attempts }, { status: "blocked", attempts: blockedAtMax.max_retries });
+  const blockedRestoredState = JSON.parse(readFileSync(join(blockedRestored.run_dir, "run.json"), "utf8"));
+  const preservedBlocked = blockedRestoredState.slices[1];
+  assert.deepEqual({ status: preservedBlocked.status, attempts: preservedBlocked.attempts, extra_attempts: preservedBlocked.extra_attempts },
+    { status: "blocked", attempts: blockedAtMax.max_retries + 1, extra_attempts: 1 });
+  assert.deepEqual(blockedRestoredState.retry_extensions, blockedAtMax.retry_extensions, "restore preserves retry authorization history");
   assert.deepEqual({ worktree: preservedBlocked.worktree, branch: preservedBlocked.branch,
     evidence_ref: preservedBlocked.evidence_ref, review_ref: preservedBlocked.review_ref },
   { worktree: null, branch: null, evidence_ref: null, review_ref: null });
   assert.equal(blockedRestored.reset_slices.includes("lost-review"), false, "restore never reopens a terminal blocked slice");
+  factory(blockedRestored.sandbox_path, "lock", restoreRun, "claim", "--session", "restore-operator", "--branch", `feature/${restoreRun}`);
+  const blockedRestoreBytes = readFileSync(join(blockedRestored.run_dir, "run.json"));
+  const unqualifiedGrant = spawnSync(process.execPath, [cli, "grant-retry", restoreRun, "lost-review",
+    "--scope", "slice", "--reason", "restored state lacks retry proof", "--session", "restore-operator",
+    "--repo", blockedRestored.sandbox_path, "--now", "2026-09-21T16:03:00Z", "--json"], { encoding: "utf8" });
+  assert.equal(unqualifiedGrant.status, 1);
+  assert.match(unqualifiedGrant.stderr, /requires slice 'lost-review' recorded review and evidence/u);
+  assert.deepEqual(readFileSync(join(blockedRestored.run_dir, "run.json")), blockedRestoreBytes,
+    "an unqualified restored blocked slice refuses without mutation");
   rmSync(lostSandbox, { recursive: true });
+  rmSync(join(restoreSnapshot, retryReviewRef));
+  rmSync(join(restoreSnapshot, retryEvidenceRef));
   writeFileSync(join(restoreSnapshot, "run.json"), sourceRunBytes);
 
   const overBound = JSON.parse(sourceRunBytes);
@@ -716,7 +802,7 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   const overBoundRestore = spawnSync(process.execPath, [cli, "restore", restoreRun, "--repo", restoreOperator,
     "--from", remoteFeatureRef, "--now", "2026-09-21T16:02:00Z", "--json"], { encoding: "utf8" });
   assert.equal(overBoundRestore.status, 1);
-  assert.match(overBoundRestore.stderr, /run\.slices\[1\]\.attempts: cannot exceed run\.max_retries/u);
+  assert.match(overBoundRestore.stderr, /run\.slices\[1\]\.attempts: cannot exceed effective retry limit/u);
   assert.equal(existsSync(lostSandbox), false, "an over-bound legacy snapshot refuses before destination reservation");
   writeFileSync(join(restoreSnapshot, "run.json"), sourceRunBytes);
 
@@ -1348,28 +1434,46 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     writeFileSync(join(plane, "artifacts", "brief.md"), "brief\n");
     symlinkSync("brief.md", join(plane, "artifacts", "brief-link"));
     writeFileSync(join(plane, "factory.lock"), JSON.stringify({ heartbeat_at: "one" }));
+    mkdirSync(join(plane, "nested"));
+    writeFileSync(join(plane, "nested", "run-json.lock"), "durable nested state\n");
 
     // Refused on a live plane: a snapshot of a running run records a moment no resume can return to.
     manifest("running");
-    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /requires a parked run/u,
+    await assert.rejects(() => dispatchSnapshot([runId], { repo: snapRoot }), /requires a parked run/u,
       "a live plane must not be recorded as recovery evidence");
     assert.equal(existsSync(join(snapRoot, ".factory", ".parked", runId)), false, "a refusal publishes nothing");
 
     manifest("needs-human");
-    const first = dispatchSnapshot([runId], { repo: snapRoot });
+    let staleSeamGuarded = false;
+    const first = await dispatchSnapshot([runId], { repo: snapRoot }, { beforeCommit: async () => {
+      const ownerPath = join(plane, RUN_JSON_LOCK_DIR, "owner.json"), original = readFileSync(ownerPath);
+      const owner = JSON.parse(original); owner.acquired_at = "2000-01-01T00:00:00.000Z";
+      writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`);
+      try {
+        await assert.rejects(() => withRunJsonLock(plane, async () => {}, { timeoutMs: 20, staleLockMs: 1 }), /timed out/u);
+        staleSeamGuarded = true;
+      } finally { writeFileSync(ownerPath, original); }
+    } });
+    assert.equal(staleSeamGuarded, true, "the snapshot lock cannot expire at the pre-rename seam");
     const canonical = join(snapRoot, ".factory", ".parked", runId);
     assert.equal(first.park_snapshot, canonical);
+    assert.equal(factory(snapRoot, "status", runId).park_snapshot, canonical,
+      "legacy live planes observe the snapshot they publish");
     assert.equal(readFileSync(join(canonical, "artifacts", "brief.md"), "utf8"), "brief\n");
     assert.equal(lstatSync(join(canonical, "artifacts", "brief-link")).isSymbolicLink(), true,
       "symlinks are copied as symlinks, not followed");
     assert.equal(existsSync(join(canonical, "factory.lock")), false,
-      "the plane-root lock is session liveness and is not copied");
+      "the plane-root session lock is not copied");
+    assert.equal(existsSync(join(canonical, "run-json.lock")), false,
+      "the plane-root transition lock is not copied");
+    assert.equal(readFileSync(join(canonical, "nested", "run-json.lock"), "utf8"), "durable nested state\n",
+      "a similarly named nested entry remains durable state");
 
     // The exclusion is what makes publication survive a heartbeat landing mid-copy. Control: the lock now
     // differs from the one present at the first publication, and publication still succeeds.
     writeFileSync(join(plane, "factory.lock"), JSON.stringify({ heartbeat_at: "two" }));
     writeFileSync(join(plane, "artifacts", "brief.md"), "revised\n");
-    const second = dispatchSnapshot([runId], { repo: snapRoot });
+    const second = await dispatchSnapshot([runId], { repo: snapRoot });
     assert.equal(second.residual, null, "a completed publication reports no residual");
     assert.equal(readFileSync(join(canonical, "artifacts", "brief.md"), "utf8"), "revised\n",
       "the second publication replaced the canonical snapshot");
@@ -1381,12 +1485,12 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     // Preflight: a residual staging tree stops before anything is staged, because publishing over an
     // unknown residual would make the rollback path ambiguous.
     mkdirSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`), { recursive: true });
-    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /residual staging tree/u);
+    await assert.rejects(() => dispatchSnapshot([runId], { repo: snapRoot }), /residual staging tree/u);
     rmSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`), { recursive: true, force: true });
 
     // A residual `.prior-$R` is the trace of an unfinished cleanup, not a snapshot to preserve.
     mkdirSync(join(snapRoot, ".factory", ".parked", `.prior-${runId}`), { recursive: true });
-    assert.equal(dispatchSnapshot([runId], { repo: snapRoot }).park_snapshot, canonical);
+    assert.equal((await dispatchSnapshot([runId], { repo: snapRoot })).park_snapshot, canonical);
     assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.prior-${runId}`)), false,
       "preflight removes the residual rather than publishing around it");
 
@@ -1395,7 +1499,7 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     // any real file must not. A publication that could not tell those apart would publish a partial copy
     // and report a path an operator would trust.
     const { inventory } = await import("../bin/restore.js");
-    const liveness = new Set(["factory.lock"]);
+    const liveness = new Set(["factory.lock", "run-json.lock"]);
     const twin = join(snapRoot, "twin");
     cpSync(plane, twin, { recursive: true, verbatimSymlinks: true });
     writeFileSync(join(twin, "factory.lock"), JSON.stringify({ heartbeat_at: "different" }));
@@ -1419,20 +1523,22 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     writeFileSync(elsewhere, good);
     rmSync(join(plane, "run.json"));
     symlinkSync(elsewhere, join(plane, "run.json"));
-    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /must be a regular file/u,
+    await assert.rejects(() => dispatchSnapshot([runId], { repo: snapRoot }), /must be a regular file/u,
       "a symlinked manifest must not be published");
+    assert.equal(existsSync(join(plane, RUN_JSON_LOCK_DIR)), false,
+      "an unsafe source is refused before writing a transition lock");
     intact("a symlinked manifest damages nothing");
     rmSync(join(plane, "run.json"));
 
     // Second finding, the same asymmetry one layer down: checking only `status` let a manifest restore
     // rejects as invalid, or one naming another run, reach `.parked/<requested>`.
     writeFileSync(join(plane, "run.json"), JSON.stringify({ run_id: runId, status: "needs-human" }));
-    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /is not a valid run/u,
+    await assert.rejects(() => dispatchSnapshot([runId], { repo: snapRoot }), /is not a valid run/u,
       "a manifest the restore schema rejects must not be published");
     intact("an invalid manifest damages nothing");
 
     manifest("needs-human", "chainlink-other");
-    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /names 'chainlink-other'/u,
+    await assert.rejects(() => dispatchSnapshot([runId], { repo: snapRoot }), /names 'chainlink-other'/u,
       "a manifest naming another run must not be published under this one");
     intact("a mismatched manifest damages nothing");
     writeFileSync(join(plane, "run.json"), good);
@@ -1449,21 +1555,30 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
       writeFileSync(join(source, "run.json"), replacement);
       copySnapshot(source, target, skipped);
     };
-    assert.throws(
+    await assert.rejects(
       () => dispatchSnapshot([runId], { repo: snapRoot }, { copy: swap(JSON.stringify({ run_id: runId, status: "needs-human" })) }),
       /staged run manifest for '.*' is not a valid run/u,
       "a manifest swapped in after qualification must not be published");
     intact("a swapped-in invalid manifest damages nothing");
     writeFileSync(join(plane, "run.json"), good);
-    assert.throws(
+    await assert.rejects(
       () => dispatchSnapshot([runId], { repo: snapRoot }, { copy: swap(JSON.stringify({ ...seededRun, run_id: "chainlink-other", status: "needs-human", terminal_result: { status: "needs-human", reason: "b" } })) }),
       /staged run manifest names 'chainlink-other'/u,
       "a swapped-in manifest naming another run must not be published");
     intact("a swapped-in mismatched manifest damages nothing");
     writeFileSync(join(plane, "run.json"), good);
 
-    assert.throws(() => dispatchSnapshot([runId], { repo: join(snapRoot, "absent") }), /is not observable/u);
-    assert.throws(() => dispatchSnapshot([], { repo: snapRoot }), /exactly one valid run id/u);
+    const sandboxPlane = join(snapRoot, ".factory-sandboxes", runId, ".factory", runId);
+    mkdirSync(dirname(sandboxPlane), { recursive: true });
+    cpSync(plane, sandboxPlane, { recursive: true, verbatimSymlinks: true });
+    await assert.rejects(() => dispatchSnapshot([runId], { repo: snapRoot }), /ambiguous live manifests/u);
+    assert.equal(factory(snapRoot, "status", runId).park_snapshot, null,
+      "ambiguous live planes never qualify a snapshot");
+    rmSync(plane, { recursive: true });
+    assert.equal((await dispatchSnapshot([runId], { repo: snapRoot })).park_snapshot, canonical,
+      "the public operator-root invocation publishes a sandbox live plane");
+    await assert.rejects(() => dispatchSnapshot([runId], { repo: join(snapRoot, "absent") }), /is not observable/u);
+    await assert.rejects(() => dispatchSnapshot([], { repo: snapRoot }), /exactly one valid run id/u);
   } finally {
     rmSync(snapRoot, { recursive: true, force: true });
   }

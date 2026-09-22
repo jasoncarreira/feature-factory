@@ -8,7 +8,7 @@
 // `mode` is a static, code-owned string declared by the transition descriptor. It
 // is never persisted, never produced by an agent, and never hashed.
 import { isDeepStrictEqual } from "node:util";
-import { GATE_NAMES, GATE_STATUSES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES } from "../state/schema.js";
+import { GATE_NAMES, GATE_STATUSES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, effectiveRetryLimit } from "../state/schema.js";
 
 // The steps whose output the plan is derived from. A revision to one of these after seeding would leave
 // the run describing a decomposition its slices were not built from.
@@ -54,11 +54,24 @@ const envelope = contract({
     updated_at: state.updated_at,
     terminal_result: state.terminal_result ?? null,
     operator_decision: state.operator_decision ?? null,
+    max_parallel_slices: state.max_parallel_slices,
+    max_retries: state.max_retries,
+    retry_extensions: state.retry_extensions ?? [],
     bootstrap_command: state.bootstrap_command,
     bootstrap_exit: state.bootstrap_exit,
   }),
   validateTransition: ({ mode, before, after, current, candidate }) => {
     if (before.status === "needs-human") {
+      if (["grant-retry-slice", "grant-retry-all"].includes(mode)) {
+        const scope = mode === "grant-retry-all" ? "all" : "slice";
+        if (after.status !== "needs-human" || !isDeepStrictEqual(after.terminal_result, before.terminal_result)) throw new Error("grant-retry must preserve the parked envelope and terminal_result");
+        if (Date.parse(after.updated_at) <= Date.parse(before.updated_at)) throw new Error("grant-retry must move updated_at forwards");
+        if (scope === "all" ? after.max_retries !== before.max_retries + 1 : after.max_retries !== before.max_retries) throw new Error(`grant-retry ${scope} has an invalid run-wide retry limit`);
+        if (after.retry_extensions.length !== before.retry_extensions.length + 1 || !isDeepStrictEqual(after.retry_extensions.slice(0, -1), before.retry_extensions) || after.retry_extensions.at(-1)?.scope !== scope) throw new Error("grant-retry must append one matching audit record");
+        for (const key of Object.keys(before).filter((key) => !["updated_at", "max_retries", "retry_extensions"].includes(key))) if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`grant-retry cannot change envelope.${key}`);
+        for (const key of Object.keys(current).filter((key) => !Object.hasOwn(before, key) && key !== "slices")) if (!isDeepStrictEqual(current[key], candidate[key])) throw new Error(`grant-retry cannot change run.${key}`);
+        return;
+      }
       // Recording an operator decision is the one write a parked run accepts besides amend-paths, and it
       // touches nothing but the decision itself: the park stands, its reason stands, and resuming stays an
       // explicit separate act. Answering the question is not the same as deciding to continue.
@@ -119,9 +132,10 @@ const envelope = contract({
     if (["resume-needs-human", "record-bootstrap"].includes(mode)) throw new Error(`${mode} requires current status needs-human; found '${before.status}'`);
     // Identity is immutable for the life of a run. Nothing legitimate renames a
     // run, and allowing it would let a transition retarget another run's record.
-    for (const key of ["run_id", "created_at", "pr_base", "pr_draft", "mode"]) {
+    for (const key of ["run_id", "created_at", "pr_base", "pr_draft", "mode", "max_parallel_slices", "max_retries"]) {
       if (before[key] !== after[key]) throw new Error(`envelope.${key} is immutable`);
     }
+    if (!isDeepStrictEqual(before.retry_extensions, after.retry_extensions)) throw new Error("envelope.retry_extensions is immutable outside grant-retry");
     for (const key of ["bootstrap_command", "bootstrap_exit"]) {
       if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`envelope.${key} may change only during bootstrap resume`);
     }
@@ -318,7 +332,23 @@ const slices = contract({
   id: "slices",
   reobserve: reobserveSlices,
   project: (state) => (state.slices ?? []).map((slice) => ({ ...slice })),
-  validateTransition: ({ mode, before, after, candidate }) => {
+  validateTransition: ({ mode, before, after, current, candidate }) => {
+    if (["grant-retry-slice", "grant-retry-all"].includes(mode)) {
+      const changed = after.map((slice, index) => ({ slice, index })).filter(({ slice, index }) => !isDeepStrictEqual(slice, before[index]));
+      if (changed.length !== 1) throw new Error("grant-retry must change exactly one slice");
+      const { slice, index } = changed[0], prior = before[index], scope = mode === "grant-retry-all" ? "all" : "slice";
+      if (scope === "all" && before.some((entry, entryIndex) => entryIndex !== index && entry.status === "blocked")) throw new Error("grant-retry all cannot strand another blocked slice below the raised limit");
+      if (prior.id !== slice.id || prior.status !== "blocked" || slice.status !== "running") throw new Error("grant-retry requires one blocked slice to become running");
+      const previousLimit = effectiveRetryLimit(current, prior), nextLimit = effectiveRetryLimit(candidate, slice);
+      if (prior.attempts !== previousLimit || slice.attempts !== prior.attempts + 1 || nextLimit !== previousLimit + 1) throw new Error("grant-retry must open exactly N+1 from the exhausted effective limit");
+      const previousExtra = prior.extra_attempts ?? 0, nextExtra = slice.extra_attempts ?? 0;
+      if (scope === "slice" ? nextExtra !== previousExtra + 1 : nextExtra !== previousExtra) throw new Error(`grant-retry ${scope} has an invalid slice-specific extension`);
+      for (const key of new Set([...Object.keys(prior), ...Object.keys(slice)])) if (!["status", "attempts", "extra_attempts", "evidence_ref", "review_ref"].includes(key) && !isDeepStrictEqual(prior[key], slice[key])) throw new Error(`grant-retry cannot change slice '${slice.id}' ${key}`);
+      if (slice.evidence_ref !== null || slice.review_ref !== null) throw new Error("grant-retry must clear attempt-bound evidence and review refs");
+      const audit = candidate.retry_extensions?.at(-1);
+      if (audit?.slice_id !== slice.id || audit.base_ref !== prior.base_ref || audit.attempt !== slice.attempts || audit.previous_limit !== previousLimit || audit.new_limit !== nextLimit) throw new Error("grant-retry audit does not bind the reopened slice and limits");
+      return;
+    }
     if (mode === "amend-paths") {
       if (before.length !== after.length) throw new Error("amend-paths cannot add or remove slices");
       const changed = after.map((slice, index) => ({ slice, index }))
@@ -368,7 +398,7 @@ const slices = contract({
       }
       // Enforcement: only amend-paths may append authorized ownership and its audit record;
       // every other transition keeps ownership, history, and the ratified test plan immutable.
-      for (const field of ["paths", "path_amendments", "test_plan"]) {
+      for (const field of ["paths", "path_amendments", "test_plan", "extra_attempts"]) {
         if (JSON.stringify(prior[field]) !== JSON.stringify(slice[field])) {
           throw new Error(`slice '${slice.id}' ${field} cannot change in ${mode ?? "an undeclared mode"}`);
         }
@@ -377,7 +407,8 @@ const slices = contract({
       if (prior.status === "blocked" && !isDeepStrictEqual(slice, prior)) throw new Error(`slice '${slice.id}' is already blocked`);
       if (prior.status !== "pending" && slice.status === "pending") throw new Error(`slice '${slice.id}' cannot return to pending`);
       if (prior.status !== slice.status && slice.status === "blocked" && prior.status !== "review") throw new Error(`slice '${slice.id}' may block only from review`);
-      if (prior.status === "review" && slice.status === "blocked" && prior.attempts < candidate.max_retries) throw new Error(`slice '${slice.id}' cannot block before max_retries (${candidate.max_retries})`);
+      const retryLimit = effectiveRetryLimit(candidate, slice);
+      if (prior.status === "review" && slice.status === "blocked" && prior.attempts < retryLimit) throw new Error(`slice '${slice.id}' cannot block before effective retry limit (${retryLimit})`);
       if (slice.attempts < prior.attempts) throw new Error(`slice '${slice.id}' attempts cannot decrease`);
       if (slice.attempts > prior.attempts + 1) throw new Error(`slice '${slice.id}' attempts cannot skip`);
       const advances = slice.attempts === prior.attempts + 1;
