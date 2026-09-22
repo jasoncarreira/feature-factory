@@ -8,7 +8,7 @@
 // prose for a caller that is not the driver.
 import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { CONTROL_PLANE } from "../state/schema.js";
+import { CONTROL_PLANE, validateRun } from "../state/schema.js";
 import { copySnapshot, entryState, inventory } from "./restore.js";
 
 // The one entry excluded from the comparison: `factory.lock` at the plane root is session liveness rather
@@ -50,9 +50,17 @@ export function dispatchSnapshot(positional, flags) {
     throw new SnapshotError(`run manifest for '${runId}' must be a regular file to publish a snapshot`);
   }
 
+  // Validated with the same schema `restore` applies, and required to name the run being published: the
+  // consumer rejects a manifest that fails either check, so publishing one would put evidence under
+  // `.parked/<requested>` that can never be restored. Checking only `status` left exactly that gap.
+  let run;
+  try { run = validateRun(JSON.parse(readFileSync(manifest, "utf8"))); }
+  catch (error) { throw new SnapshotError(`run manifest for '${runId}' is not a valid run`, { cause: error }); }
+  if (run.run_id !== runId) {
+    throw new SnapshotError(`run manifest names '${run.run_id}', not the requested '${runId}'`);
+  }
   // Refused rather than permitted: a snapshot of a live plane records a moment no resume can return to,
   // and reporting it as recovery evidence would be a claim the bytes do not support.
-  const run = JSON.parse(readFileSync(manifest, "utf8"));
   if (run.status !== "needs-human") {
     throw new SnapshotError(`factory snapshot requires a parked run; '${runId}' is '${run.status}'`);
   }

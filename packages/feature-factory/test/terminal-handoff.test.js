@@ -1334,9 +1334,17 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   const snapRoot = realpathSync(mkdtempSync(join(tmpdir(), "factory-snapshot-")));
   try {
     const runId = "chainlink-snap";
-    const plane = join(snapRoot, ".factory", runId);
-    mkdirSync(join(plane, "artifacts"), { recursive: true });
-    const manifest = (status) => writeFileSync(join(plane, "run.json"), JSON.stringify({ run_id: runId, status }));
+    // Seeded through the shared fixture so the manifest is schema-valid: publication now applies the same
+    // `validateRun` the restore side does, so a hand-rolled stub would prove only that the check exists.
+    const { runDir: plane } = seedLegacyRun(snapRoot, runId, { status: "running" });
+    // A parked run carries its terminal result -- the schema requires one for `needs-human` -- so the
+    // fixture writes a real parked manifest rather than a stub the validation would reject for the
+    // wrong reason.
+    const manifest = (status, id = runId) => writeFileSync(join(plane, "run.json"), JSON.stringify({
+      ...seededRun, run_id: id, status,
+      terminal_result: status === "needs-human" ? { status: "needs-human", reason: "budget" } : null,
+    }, null, 2));
+    const seededRun = JSON.parse(readFileSync(join(plane, "run.json"), "utf8"));
     writeFileSync(join(plane, "artifacts", "brief.md"), "brief\n");
     symlinkSync("brief.md", join(plane, "artifacts", "brief-link"));
     writeFileSync(join(plane, "factory.lock"), JSON.stringify({ heartbeat_at: "one" }));
@@ -1389,33 +1397,45 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     const { inventory } = await import("../bin/restore.js");
     const liveness = new Set(["factory.lock"]);
     const twin = join(snapRoot, "twin");
-    mkdirSync(twin, { recursive: true });
-    writeFileSync(join(twin, "run.json"), readFileSync(join(plane, "run.json")));
+    cpSync(plane, twin, { recursive: true, verbatimSymlinks: true });
     writeFileSync(join(twin, "factory.lock"), JSON.stringify({ heartbeat_at: "different" }));
-    mkdirSync(join(twin, "artifacts"), { recursive: true });
-    writeFileSync(join(twin, "artifacts", "brief.md"), readFileSync(join(plane, "artifacts", "brief.md")));
-    symlinkSync("brief.md", join(twin, "artifacts", "brief-link"));
     assert.equal(inventory(twin, liveness), inventory(plane, liveness),
       "a differing plane-root lock must not fail the comparison");
     writeFileSync(join(twin, "artifacts", "brief.md"), "diverged\n");
     assert.notEqual(inventory(twin, liveness), inventory(plane, liveness),
       "a differing tracked file must fail the comparison");
 
-    // Review finding: publication must accept only what `restore` will later read. restore refuses a
-    // parked manifest that is a symlink or resolves elsewhere, so publishing one would report recovery
-    // evidence its only consumer can never consume -- a snapshot that fails exactly when it is needed.
+    // Publication must accept only what `restore` will later read; every gap here publishes recovery
+    // evidence its one consumer rejects. Each refusal must also leave the last good snapshot exactly as
+    // it was, because a refusal that damaged it would be worse than the evidence it declined to write.
+    const good = readFileSync(join(plane, "run.json"));
+    const intact = (why) => {
+      assert.equal(readFileSync(join(canonical, "artifacts", "brief.md"), "utf8"), "revised\n", why);
+      assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`)), false, why);
+    };
+
+    // First review finding: restore refuses a symlinked or redirecting parked manifest.
     const elsewhere = join(snapRoot, "elsewhere.json");
-    writeFileSync(elsewhere, readFileSync(join(plane, "run.json")));
+    writeFileSync(elsewhere, good);
     rmSync(join(plane, "run.json"));
     symlinkSync(elsewhere, join(plane, "run.json"));
     assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /must be a regular file/u,
       "a symlinked manifest must not be published");
-    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`)), false,
-      "the refusal stages nothing");
-    assert.equal(readFileSync(join(canonical, "artifacts", "brief.md"), "utf8"), "revised\n",
-      "the refusal leaves the previously published snapshot untouched");
+    intact("a symlinked manifest damages nothing");
     rmSync(join(plane, "run.json"));
+
+    // Second finding, the same asymmetry one layer down: checking only `status` let a manifest restore
+    // rejects as invalid, or one naming another run, reach `.parked/<requested>`.
     writeFileSync(join(plane, "run.json"), JSON.stringify({ run_id: runId, status: "needs-human" }));
+    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /is not a valid run/u,
+      "a manifest the restore schema rejects must not be published");
+    intact("an invalid manifest damages nothing");
+
+    manifest("needs-human", "chainlink-other");
+    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /names 'chainlink-other'/u,
+      "a manifest naming another run must not be published under this one");
+    intact("a mismatched manifest damages nothing");
+    writeFileSync(join(plane, "run.json"), good);
 
     assert.throws(() => dispatchSnapshot([runId], { repo: join(snapRoot, "absent") }), /is not observable/u);
     assert.throws(() => dispatchSnapshot([], { repo: snapRoot }), /exactly one valid run id/u);

@@ -1223,12 +1223,15 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // mean unchecked, so an empty or non-string command remains a loud refusal.
     // 5192 -> 5237 for issue #352: a merit REJECT is the only slice event that spends N+1, retries retain
     // their original base across sibling merges, and wrong-attempt evidence refuses before publication.
-    // 5237 -> 5354 for issue #353: publishing a parked snapshot was specified only as driver prose, so
+    // 5237 -> 5362 for issue #353: publishing a parked snapshot was specified only as driver prose, so
     // a supervisor that parks a run it is not driving -- which `factory terminal` deliberately permits --
     // could complete step 1 of the three-step park and nothing else. The cost is the five-phase swap:
     // preflight, stage, verify by inventory equality, the two-rename commit with rollback, and cleanup
     // that reports a residual rather than failing a completed publication.
-    assert.equal(total, 5354, "publishing a parked snapshot lands at 5354 production lines");
+    // The last 8 are review's second finding: publication applies the same `validateRun` the consumer
+    // does and requires the manifest to name the run being published, so evidence restore would reject
+    // cannot be written under `.parked/<requested>` in the first place.
+    assert.equal(total, 5362, "publishing a parked snapshot lands at 5362 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
