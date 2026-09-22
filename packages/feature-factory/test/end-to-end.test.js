@@ -7,8 +7,8 @@
 // below is driven through the real CLI against a real repository.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,6 +73,175 @@ function repositoryVerifyTrace(operator, command) {
       NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preload}`].filter(Boolean).join(" "),
     },
   };
+}
+
+function decisionGrantRace(operator, repo, grantArgs) {
+  const preload = join(operator, "decision-grant-race.cjs"), trace = join(operator, "decision-grant-race.json");
+  writeFileSync(preload, [
+    'const fs = require("node:fs"), promises = require("node:fs/promises"), cp = require("node:child_process"), path = require("node:path");',
+    'const { syncBuiltinESMExports } = require("node:module");',
+    'const original = promises.open; let injected = false;',
+    'promises.open = async function(target) {',
+    '  if (!injected && path.dirname(target).endsWith("/artifacts") && path.basename(target).startsWith("operator-decisions-")) {',
+    '    injected = true; const env = { ...process.env }; delete env.NODE_OPTIONS;',
+    '    const result = cp.spawnSync(process.execPath, JSON.parse(process.env.FACTORY_RACE_ARGS), { encoding: "utf8", env });',
+    '    fs.writeFileSync(process.env.FACTORY_RACE_TRACE, JSON.stringify({ status: result.status, stderr: result.stderr }));',
+    '  }',
+    '  return original.apply(this, arguments);',
+    '};',
+    'syncBuiltinESMExports();',
+  ].join("\n"));
+  const env = { ...process.env, FACTORY_RACE_TRACE: trace,
+    FACTORY_RACE_ARGS: JSON.stringify([CLI, ...grantArgs, "--repo", repo, "--json"]),
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preload}`].filter(Boolean).join(" ") };
+  const decision = factory(repo, ["decide", RUN, "--text", "serialize before effects", "--session", "operator",
+    "--now", "2026-07-30T12:06:30Z"], { env });
+  return { decision, grant: JSON.parse(readFileSync(trace, "utf8")) };
+}
+
+function grantCommitFault(operator, repo, args, mode) {
+  const preload = join(operator, `grant-commit-${mode}.cjs`), marker = join(operator, `grant-commit-${mode}.json`);
+  writeFileSync(preload, [
+    'const fs = require("node:fs");',
+    'const promises = require("node:fs/promises");',
+    'const { syncBuiltinESMExports } = require("node:module");',
+    'const originalOpen = fs.openSync, originalWrite = fs.writeFileSync;',
+    'let stagingFd = null;',
+    'fs.openSync = function(path) { const fd = originalOpen.apply(this, arguments); if (path === process.env.FACTORY_GRANT_STAGING) stagingFd = fd; return fd; };',
+    'fs.writeFileSync = function(target) {',
+    '  if (process.env.FACTORY_GRANT_FAULT === "kill-staging-write" && target === stagingFd) {',
+    '    originalWrite(process.env.FACTORY_GRANT_MARKER, "staging-open"); process.kill(process.pid, "SIGKILL");',
+    '  }',
+    '  return originalWrite.apply(this, arguments);',
+    '};',
+    'const originalSync = fs.renameSync;',
+    'fs.renameSync = function(source, destination) {',
+    '  if (process.env.FACTORY_GRANT_FAULT === "kill-fence" && destination === process.env.FACTORY_GRANT_FENCE) {',
+    '    fs.writeFileSync(process.env.FACTORY_GRANT_MARKER, JSON.stringify({ source, destination }));',
+    '    process.kill(process.pid, "SIGKILL");',
+    '  }',
+    '  return originalSync.apply(this, arguments);',
+    '};',
+    'const original = promises.rename, originalLstat = promises.lstat;',
+    'let postSource = null, postDestination = null;',
+    'promises.rename = async function(source, destination) {',
+    '  if (destination === process.env.FACTORY_GRANT_RUN_JSON && /^\\.run\\.json\\.[0-9a-f-]{36}\\.tmp$/.test(require("node:path").basename(source))) {',
+    '    if (["post-rename-verify", "missing-run-after-rename"].includes(process.env.FACTORY_GRANT_FAULT)) {',
+    '      await original.apply(this, arguments); postSource = source; postDestination = destination; return;',
+    '    }',
+    '    if (process.env.FACTORY_GRANT_FAULT === "kill-after") {',
+    '      await original.apply(this, arguments);',
+    '      fs.writeFileSync(process.env.FACTORY_GRANT_MARKER, JSON.stringify({ source, destination }));',
+    '      process.kill(process.pid, "SIGKILL");',
+    '    }',
+    '    fs.writeFileSync(process.env.FACTORY_GRANT_MARKER, JSON.stringify({ source, destination }));',
+    '    if (process.env.FACTORY_GRANT_FAULT === "kill") process.kill(process.pid, "SIGKILL");',
+    '    throw Object.assign(new Error("injected run.json rename failure"), { code: "EIO" });',
+    '  }',
+    '  return original.apply(this, arguments);',
+    '};',
+    'promises.lstat = async function(path) {',
+    '  if (["post-rename-verify", "missing-run-after-rename"].includes(process.env.FACTORY_GRANT_FAULT) && path === postDestination) {',
+    '    if (process.env.FACTORY_GRANT_FAULT === "missing-run-after-rename") await original(postDestination, postSource);',
+    '    throw new Error("injected post-rename verification failure");',
+    '  }',
+    '  return originalLstat.apply(this, arguments);',
+    '};',
+    'syncBuiltinESMExports();',
+  ].join("\n"));
+  const env = { ...process.env, FACTORY_GRANT_RUN_JSON: join(repo, ".factory", RUN, "run.json"),
+    FACTORY_GRANT_FENCE: join(realpathSync(operator), ".factory", ".parked", `.grant-retry-${RUN}.json`),
+    FACTORY_GRANT_STAGING: join(realpathSync(operator), ".factory", ".parked", `.grant-retry-${RUN}.json.staging`),
+    FACTORY_GRANT_MARKER: marker, FACTORY_GRANT_FAULT: mode,
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preload}`].filter(Boolean).join(" ") };
+  delete env.FORCE_COLOR;
+  const result = spawnSync("node", [CLI, ...args, "--repo", repo, "--json"], { encoding: "utf8", env });
+  return { ...result, marker };
+}
+
+function heartbeatCandidateFault(operator, repo, runId) {
+  const preload = join(operator, "heartbeat-candidate-kill.cjs"), marker = join(operator, "heartbeat-candidate-kill.json");
+  writeFileSync(preload, [
+    'const fs = require("node:fs"), path = require("node:path"), promises = require("node:fs/promises");',
+    'const { syncBuiltinESMExports } = require("node:module");',
+    'const original = promises.rename;',
+    'promises.rename = async function(source, destination) {',
+    '  if (path.basename(destination) === "factory.lock") {',
+    '    fs.writeFileSync(process.env.FACTORY_GRANT_MARKER, source); process.kill(process.pid, "SIGKILL");',
+    '  }',
+    '  return original.apply(this, arguments);',
+    '};',
+    'syncBuiltinESMExports();',
+  ].join("\n"));
+  const env = { ...process.env, FACTORY_GRANT_MARKER: marker,
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preload}`].filter(Boolean).join(" ") };
+  delete env.FORCE_COLOR;
+  return { ...spawnSync("node", [CLI, "heartbeat", runId, "--session", "operator", "--repo", repo, "--json"], { encoding: "utf8", env }), marker };
+}
+
+function stagingCandidateCleanupFault(operator, runId) {
+  const preload = join(operator, "grant-staging-cleanup-kill.cjs"), marker = join(operator, "grant-staging-cleanup-kill.json");
+  writeFileSync(preload, [
+    'const fs = require("node:fs"), path = require("node:path");',
+    'const { syncBuiltinESMExports } = require("node:module");',
+    'const original = fs.unlinkSync;',
+    'fs.unlinkSync = function(target) {',
+    '  if (/^\\.run\\.json\\.[0-9a-f-]{36}\\.tmp$/.test(path.basename(target))) {',
+    '    original.apply(this, arguments); fs.writeFileSync(process.env.FACTORY_GRANT_MARKER, target);',
+    '    process.kill(process.pid, "SIGKILL");',
+    '  }',
+    '  return original.apply(this, arguments);',
+    '};',
+    'syncBuiltinESMExports();',
+  ].join("\n"));
+  const env = { ...process.env, FACTORY_GRANT_MARKER: marker,
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preload}`].filter(Boolean).join(" ") };
+  delete env.FORCE_COLOR;
+  return { ...spawnSync("node", [CLI, "snapshot", runId, "--repo", operator, "--json"], { encoding: "utf8", env }), marker };
+}
+
+function snapshotRevocationFault(operator, runId) {
+  const preload = join(operator, "grant-revocation-kill.cjs"), marker = join(operator, "grant-revocation-kill.json");
+  const fence = join(realpathSync(operator), ".factory", ".parked", `.grant-retry-${runId}.json`);
+  writeFileSync(preload, [
+    'const fs = require("node:fs");',
+    'const { syncBuiltinESMExports } = require("node:module");',
+    'const original = fs.unlinkSync;',
+    'fs.unlinkSync = function(path) {',
+    '  if (path === process.env.FACTORY_GRANT_FENCE) {',
+    '    fs.writeFileSync(process.env.FACTORY_GRANT_MARKER, path);',
+    '    process.kill(process.pid, "SIGKILL");',
+    '  }',
+    '  return original.apply(this, arguments);',
+    '};',
+    'syncBuiltinESMExports();',
+  ].join("\n"));
+  const env = { ...process.env, FACTORY_GRANT_FENCE: fence, FACTORY_GRANT_MARKER: marker,
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preload}`].filter(Boolean).join(" ") };
+  delete env.FORCE_COLOR;
+  return { ...spawnSync("node", [CLI, "snapshot", runId, "--repo", operator, "--json"], { encoding: "utf8", env }), marker };
+}
+
+function snapshotCleanupFault(operator, runId) {
+  const preload = join(operator, "grant-cleanup-kill.cjs"), marker = join(operator, "grant-cleanup-kill.json");
+  const revoked = join(realpathSync(operator), ".factory", ".parked", `.revoked-grant-retry-${runId}`);
+  writeFileSync(preload, [
+    'const fs = require("node:fs");',
+    'const { syncBuiltinESMExports } = require("node:module");',
+    'const original = fs.rmSync;',
+    'fs.rmSync = function(path) {',
+    '  if (path === process.env.FACTORY_REVOKED_PATH) {',
+    '    fs.writeFileSync(process.env.FACTORY_GRANT_MARKER, path);',
+    '    process.kill(process.pid, "SIGKILL");',
+    '  }',
+    '  return original.apply(this, arguments);',
+    '};',
+    'syncBuiltinESMExports();',
+  ].join("\n"));
+  const env = { ...process.env, FACTORY_REVOKED_PATH: revoked, FACTORY_GRANT_MARKER: marker,
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preload}`].filter(Boolean).join(" ") };
+  delete env.FORCE_COLOR;
+  return { ...spawnSync("node", [CLI, "snapshot", runId, "--repo", operator, "--json"], { encoding: "utf8", env }), marker, revoked };
 }
 
 // A repository with an integration branch and one slice branched from its head.
@@ -1235,7 +1404,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         for (const slice of legacy.slices) delete slice.extra_attempts;
         writeFileSync(join(extended.runDir, "run.json"), `${JSON.stringify(legacy, null, 2)}\n`);
         assert.equal(factory(extended.repo, ["lock", RUN, "claim", "--session", "operator", "--branch", "feature"]).ok, true);
-        const parkedBefore = readFileSync(join(extended.runDir, "run.json"), "utf8");
+        let parkedBefore = readFileSync(join(extended.runDir, "run.json"), "utf8");
         if (scope === "slice") {
           const missingSnapshot = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
             "--reason", "bounded repair", "--session", "operator", "--now", NOW(7)]);
@@ -1243,8 +1412,33 @@ describe("end to end — a merge is refused through the real CLI", () => {
           assert.match(missingSnapshot.stderr, /requires a complete current park snapshot/u);
           assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
         }
-        const snapshot = publishParkSnapshot(extended);
+        const snapshot = publishParkSnapshot(extended); let legacyPrior = null;
         assert.equal(realpathSync(factory(extended.repo, ["status", RUN]).out.park_snapshot), realpathSync(snapshot));
+        if (scope === "slice") {
+          const legacyCrash = grantCommitFault(extended.operator, extended.repo,
+            ["grant-retry", RUN, "be-thing", "--scope", scope, "--reason", "legacy crash image",
+              "--session", "operator", "--now", NOW(7)], "kill");
+          assert.equal(legacyCrash.signal, "SIGKILL");
+          const fence = join(dirname(snapshot), `.grant-retry-${RUN}.json`), prior = join(dirname(snapshot), `.prior-${RUN}`);
+          unlinkSync(fence); renameSync(snapshot, prior);
+          const newCandidate = readdirSync(extended.runDir).find((name) => /^\.run\.json\.[0-9a-f-]{36}\.tmp$/u.test(name));
+          assert.ok(newCandidate);
+          const legacyCandidate = newCandidate.replace(".run.json.", "."); renameSync(join(extended.runDir, newCandidate), join(extended.runDir, legacyCandidate));
+          const duplicateCandidate = join(extended.runDir, ".00000000-0000-0000-0000-000000000000.tmp");
+          cpSync(join(extended.runDir, legacyCandidate), duplicateCandidate);
+          const ambiguousLegacy = factory(extended.operator, ["snapshot", RUN]);
+          assert.equal(ambiguousLegacy.ok, false);
+          assert.match(ambiguousLegacy.stderr, /ambiguous atomic candidates/u);
+          assert.equal(existsSync(prior), true); assert.equal(existsSync(duplicateCandidate), true);
+          rmSync(duplicateCandidate);
+          const recoveredLegacy = factory(extended.operator, ["snapshot", RUN]);
+          assert.equal(recoveredLegacy.ok, true, recoveredLegacy.stderr);
+          assert.equal(existsSync(prior), false, "an interrupted 0.10.1 precommit grant restores its exact snapshot");
+          assert.equal(readFileSync(join(snapshot, "run.json"), "utf8"), parkedBefore);
+          assert.equal(readdirSync(extended.runDir).some((name) => /^\.[0-9a-f-]{36}\.tmp$/u.test(name)), false,
+            "legacy recovery removes only its contract-valid orphan candidate");
+
+        }
         const wrongOwner = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
           "--reason", "bounded repair", "--session", "intruder", "--now", NOW(7)]);
         assert.equal(wrongOwner.ok, false);
@@ -1305,6 +1499,110 @@ describe("end to end — a merge is refused through the real CLI", () => {
           writeFileSync(join(extended.repo, "src", "app", "thing.ts"), "slice\n");
           assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
         }
+        if (scope === "slice") {
+          const grantArgs = ["grant-retry", RUN, "be-thing", "--scope", scope,
+            "--reason", "fault-bound retry", "--session", "operator", "--now", NOW(7)];
+          const race = decisionGrantRace(extended.operator, extended.repo, grantArgs);
+          assert.equal(race.decision.ok, true, race.decision.stderr);
+          assert.notEqual(race.grant.status, 0);
+          assert.match(race.grant.stderr, /timed out waiting for run.json lock/u);
+          assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), false);
+          parkedBefore = readFileSync(join(extended.runDir, "run.json"), "utf8");
+          publishParkSnapshot(extended);
+          legacyPrior = `${snapshot}.legacy-grant`;
+          cpSync(snapshot, legacyPrior, { recursive: true });
+          const tornFenceCrash = grantCommitFault(extended.operator, extended.repo, grantArgs, "kill-staging-write");
+          assert.equal(tornFenceCrash.signal, "SIGKILL");
+          const stagingFence = join(dirname(snapshot), `.grant-retry-${RUN}.json.staging`);
+          assert.equal(readFileSync(stagingFence, "utf8"), "", "death during staging write leaves a torn unpublished fence");
+          const tornRecovery = factory(extended.operator, ["snapshot", RUN]);
+          assert.equal(tornRecovery.ok, true, tornRecovery.stderr);
+          assert.equal(existsSync(stagingFence), false);
+          assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
+
+          const stagedFenceCrash = grantCommitFault(extended.operator, extended.repo, grantArgs, "kill-fence");
+          assert.equal(stagedFenceCrash.signal, "SIGKILL");
+          assert.equal(existsSync(stagingFence), true);
+          assert.equal(factory(extended.repo, ["status", RUN]).out.park_snapshot, null);
+          const stagedCandidates = readdirSync(extended.runDir).filter((name) => /^\.run\.json\.[0-9a-f-]{36}\.tmp$/u.test(name));
+          assert.equal(stagedCandidates.length, 1);
+          const stagedCandidate = join(extended.runDir, stagedCandidates[0]), stagedBytes = readFileSync(stagedCandidate);
+          const stagedReferent = join(extended.operator, "staged-candidate.json"); writeFileSync(stagedReferent, stagedBytes);
+          rmSync(stagedCandidate); symlinkSync(stagedReferent, stagedCandidate);
+          const linkedStaging = factory(extended.operator, ["snapshot", RUN]);
+          assert.equal(linkedStaging.ok, false);
+          assert.match(linkedStaging.stderr, /atomic candidate has an unsafe type/u);
+          assert.equal(lstatSync(stagedCandidate).isSymbolicLink(), true);
+          assert.deepEqual(readFileSync(stagedReferent), stagedBytes);
+          unlinkSync(stagedCandidate); writeFileSync(stagedCandidate, stagedBytes);
+          const interruptedStagingCleanup = stagingCandidateCleanupFault(extended.operator, RUN);
+          assert.equal(interruptedStagingCleanup.signal, "SIGKILL");
+          assert.equal(existsSync(interruptedStagingCleanup.marker), true);
+          assert.equal(existsSync(stagedCandidate), false, "candidate cleanup completes before the injected death");
+          assert.equal(existsSync(stagingFence), true, "staging stays authoritative across candidate-cleanup death");
+          const stagedRecovery = factory(extended.operator, ["snapshot", RUN]);
+          assert.equal(stagedRecovery.ok, true, stagedRecovery.stderr);
+          assert.equal(existsSync(stagingFence), false, "recovery replays after candidate cleanup precedes staging cleanup");
+          assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
+
+          const failedRename = grantCommitFault(extended.operator, extended.repo, grantArgs, "throw");
+          assert.notEqual(failedRename.status, 0);
+          assert.equal(failedRename.signal, null);
+          assert.match(failedRename.stderr, /injected run.json rename failure/u);
+          assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
+          assert.equal(realpathSync(factory(extended.repo, ["status", RUN]).out.park_snapshot), realpathSync(snapshot),
+            "a caught manifest failure leaves the canonical recovery snapshot usable");
+          assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), false);
+
+          const killed = grantCommitFault(extended.operator, extended.repo, grantArgs, "kill");
+          assert.equal(killed.signal, "SIGKILL", "the process dies after the durable fence and before manifest commit");
+          assert.equal(existsSync(killed.marker), true);
+          assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
+          assert.equal(readFileSync(join(snapshot, "run.json"), "utf8"), parkedBefore,
+            "process death leaves the qualified canonical snapshot physically intact");
+          assert.equal(factory(extended.repo, ["status", RUN]).out.park_snapshot, null,
+            "the transaction fence hides pre-grant recovery authority");
+          const heartbeatCrash = heartbeatCandidateFault(extended.operator, extended.repo, RUN);
+          assert.equal(heartbeatCrash.signal, "SIGKILL");
+          assert.equal(readdirSync(join(extended.runDir, "run-json.lock")).some((name) => /^\.factory\.lock\.[0-9a-f-]{36}\.tmp$/u.test(name)), true);
+          assert.equal(readdirSync(extended.runDir).filter((name) => /^\.run\.json\.[0-9a-f-]{36}\.tmp$/u.test(name)).length, 1,
+            "a crashed heartbeat candidate cannot enter the run.json recovery namespace");
+          const heartbeatOwnerPath = join(extended.runDir, "run-json.lock", "owner.json");
+          const heartbeatOwner = JSON.parse(readFileSync(heartbeatOwnerPath, "utf8")); heartbeatOwner.acquired_at = "2000-01-01T00:00:00.000Z";
+          writeFileSync(heartbeatOwnerPath, `${JSON.stringify(heartbeatOwner, null, 2)}\n`);
+          const alias = join(extended.operator, "sandbox-alias"); symlinkSync(extended.repo, alias, "dir");
+          const artifactsBeforeAlias = readdirSync(join(extended.runDir, "artifacts")).sort();
+          const aliasedDecision = factory(alias, ["decide", RUN, "--text", "must not publish", "--session", "operator", "--now", NOW(8)]);
+          assert.equal(aliasedDecision.ok, false);
+          assert.match(aliasedDecision.stderr, /interrupted retry-grant transaction/u);
+          assert.deepEqual(readdirSync(join(extended.runDir, "artifacts")).sort(), artifactsBeforeAlias,
+            "a sandbox symlink alias cannot bypass the pre-effect transaction fence");
+          unlinkSync(alias);
+          const fencedResume = factory(extended.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]);
+          assert.equal(fencedResume.ok, false);
+          assert.match(fencedResume.stderr, /interrupted retry-grant transaction/u);
+          const fencedRestore = factory(extended.operator, ["restore", RUN, "--from", "refs/remotes/origin/feature"]);
+          assert.equal(fencedRestore.ok, false);
+          assert.match(fencedRestore.stderr, /interrupted retry-grant transaction/u);
+          assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), true);
+          assert.equal(readdirSync(extended.runDir).some((name) => /^\.run\.json\.[0-9a-f-]{36}\.tmp$/u.test(name)), true,
+            "process death leaves the exact atomic candidate for reconciliation");
+          const candidateName = readdirSync(extended.runDir).find((name) => /^\.run\.json\.[0-9a-f-]{36}\.tmp$/u.test(name));
+          const candidatePath = join(extended.runDir, candidateName), candidateBytes = readFileSync(candidatePath);
+          const candidateReferent = join(extended.operator, "fenced-candidate.json"); writeFileSync(candidateReferent, candidateBytes);
+          rmSync(candidatePath); symlinkSync(candidateReferent, candidatePath);
+          const linkedCandidate = factory(extended.operator, ["snapshot", RUN]);
+          assert.equal(linkedCandidate.ok, false);
+          assert.match(linkedCandidate.stderr, /atomic candidate has an unsafe type/u);
+          assert.equal(lstatSync(candidatePath).isSymbolicLink(), true); assert.deepEqual(readFileSync(candidateReferent), candidateBytes);
+          unlinkSync(candidatePath); writeFileSync(candidatePath, candidateBytes);
+          const recovered = factory(extended.operator, ["snapshot", RUN]);
+          assert.equal(recovered.ok, true, recovered.stderr);
+          assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), false);
+          assert.equal(readdirSync(extended.runDir).some((name) => /^\.run\.json\.[0-9a-f-]{36}\.tmp$/u.test(name)), false,
+            "reconciliation removes only the transaction-bound orphan candidate");
+          assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
+        }
         const granted = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
           "--reason", "one bounded corpus-native repair", "--session", "operator", "--now", NOW(7)]);
         assert.equal(granted.ok, true, `${scope}: ${granted.stderr}`);
@@ -1340,7 +1638,10 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.match(staleResume.stderr, /requires a complete current park snapshot after grant-retry/u);
         assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), beforeResume);
         writeFileSync(join(extended.runDir, "WORKFLOW.md"), "stale staged workflow\n");
+        if (legacyPrior) renameSync(legacyPrior, join(dirname(snapshot), `.prior-${RUN}`));
         publishParkSnapshot(extended);
+        if (legacyPrior) assert.equal(existsSync(join(dirname(snapshot), `.prior-${RUN}`)), false,
+          "an interrupted 0.10.1 committed grant never restores its pre-grant snapshot");
         const staleWorkflowResume = factory(extended.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]);
         assert.equal(staleWorkflowResume.ok, false);
         assert.match(staleWorkflowResume.stderr, /requires a complete current park snapshot after grant-retry/u);
@@ -1367,6 +1668,100 @@ describe("end to end — a merge is refused through the real CLI", () => {
           [["be-thing", 2], ["future", scope === "all" ? 2 : 1]]);
       } finally { cleanupProject(extended); }
     }
+
+    const committedCrash = project("grant-crash-after-commit", { maxRetries: 1 });
+    try {
+      const { head, basePoint } = buildSlice(committedCrash.repo);
+      assert.equal(factory(committedCrash.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".",
+        "--branch", "slice", "--now", NOW(2)]).ok, true);
+      assert.equal(factory(committedCrash.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]).ok, true);
+      writeReview(committedCrash.runDir, "be-thing", head, { verdict: "REJECT" });
+      assert.equal(factory(committedCrash.repo, ["slice", RUN, "be-thing", "review", "--attempts", "1",
+        "--evidence-ref", "evidence/be-thing.json", "--review-ref", "reviews/be-thing.json", "--now", NOW(4)]).ok, true);
+      assert.equal(factory(committedCrash.repo, ["slice", RUN, "be-thing", "blocked", "--attempts", "1", "--now", NOW(5)]).ok, true);
+      assert.equal(factory(committedCrash.repo, ["terminal", RUN, "needs-human", "--reason", "blocked-after-retries", "--now", NOW(6)]).ok, true);
+      assert.equal(factory(committedCrash.repo, ["lock", RUN, "claim", "--session", "operator", "--branch", "feature"]).ok, true);
+      const before = readFileSync(join(committedCrash.runDir, "run.json"), "utf8");
+      const snapshot = publishParkSnapshot(committedCrash);
+      const killed = grantCommitFault(committedCrash.operator, committedCrash.repo,
+        ["grant-retry", RUN, "be-thing", "--scope", "slice", "--reason", "post-commit crash",
+          "--session", "operator", "--now", NOW(7)], "kill-after");
+      assert.equal(killed.signal, "SIGKILL");
+      const committed = readFileSync(join(committedCrash.runDir, "run.json"), "utf8"), state = JSON.parse(committed);
+      assert.notEqual(committed, before);
+      assert.deepEqual([state.slices[0].status, state.slices[0].attempts, state.retry_extensions.length], ["running", 2, 1]);
+      assert.equal(readFileSync(join(snapshot, "run.json"), "utf8"), before,
+        "the fenced canonical remains physically pre-grant until recovery proves commit");
+      assert.equal(factory(committedCrash.repo, ["status", RUN]).out.park_snapshot, null);
+      const refusedRestore = factory(committedCrash.operator, ["restore", RUN, "--from", "refs/remotes/origin/feature"]);
+      assert.equal(refusedRestore.ok, false);
+      assert.match(refusedRestore.stderr, /interrupted retry-grant transaction/u);
+      writeFileSync(join(snapshot, "tampered"), "must be preserved\n");
+      const tamperedCanonical = factory(committedCrash.operator, ["snapshot", RUN]);
+      assert.equal(tamperedCanonical.ok, false);
+      assert.match(tamperedCanonical.stderr, /canonical snapshot changed/u);
+      assert.equal(readFileSync(join(snapshot, "tampered"), "utf8"), "must be preserved\n");
+      rmSync(join(snapshot, "tampered"));
+      const heldCanonical = `${snapshot}.held`; renameSync(snapshot, heldCanonical);
+      const missingFencedSnapshot = factory(committedCrash.operator, ["snapshot", RUN]);
+      assert.equal(missingFencedSnapshot.ok, false);
+      assert.match(missingFencedSnapshot.stderr, /lost its fenced snapshot/u);
+      assert.equal(existsSync(heldCanonical), true); renameSync(heldCanonical, snapshot);
+      const revocationKilled = snapshotRevocationFault(committedCrash.operator, RUN);
+      assert.equal(revocationKilled.signal, "SIGKILL", "revocation death leaves the authoritative fence and exact quarantine");
+      const revokedPath = join(dirname(snapshot), `.revoked-grant-retry-${RUN}`);
+      assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), true);
+      assert.equal(existsSync(revokedPath), true);
+      writeFileSync(join(revokedPath, "tampered"), "must be preserved\n");
+      const tamperedRecovery = factory(committedCrash.operator, ["snapshot", RUN]);
+      assert.equal(tamperedRecovery.ok, false);
+      assert.match(tamperedRecovery.stderr, /revoked snapshot changed/u);
+      assert.equal(readFileSync(join(revokedPath, "tampered"), "utf8"), "must be preserved\n");
+      assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), true);
+      rmSync(join(revokedPath, "tampered"));
+      const cleanupKilled = snapshotCleanupFault(committedCrash.operator, RUN);
+      assert.equal(cleanupKilled.signal, "SIGKILL", "cleanup death occurs only after canonical revocation");
+      assert.equal(existsSync(cleanupKilled.marker), true);
+      assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), false,
+        "the authoritative fence is removed before best-effort quarantine cleanup");
+      assert.equal(existsSync(snapshot), false);
+      assert.equal(existsSync(cleanupKilled.revoked), true);
+      const recovered = factory(committedCrash.operator, ["snapshot", RUN]);
+      assert.equal(recovered.ok, true, recovered.stderr);
+      assert.equal(readFileSync(join(committedCrash.runDir, "run.json"), "utf8"), committed);
+      assert.equal(readFileSync(join(recovered.out.park_snapshot, "run.json"), "utf8"), committed);
+      assert.equal(runJson(committedCrash.runDir).retry_extensions.length, 1, "recovery never duplicates the committed grant");
+      assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), false);
+
+      writeFileSync(join(committedCrash.runDir, "run.json"), before); publishParkSnapshot(committedCrash);
+      const verificationFailure = grantCommitFault(committedCrash.operator, committedCrash.repo,
+        ["grant-retry", RUN, "be-thing", "--scope", "slice", "--reason", "post-rename verification",
+          "--session", "operator", "--now", NOW(7)], "post-rename-verify");
+      assert.notEqual(verificationFailure.status, 0);
+      assert.match(verificationFailure.stderr, /post-rename verification failure/u);
+      assert.equal(existsSync(join(committedCrash.runDir, "run.json")), true,
+        "an exact post-rename verifier failure retains the committed destination");
+      assert.equal(readdirSync(committedCrash.runDir).some((name) => /^\.run\.json\.[0-9a-f-]{36}\.tmp$/u.test(name)), false);
+      assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), true);
+      const verificationRecovery = factory(committedCrash.operator, ["snapshot", RUN]);
+      assert.equal(verificationRecovery.ok, true, verificationRecovery.stderr);
+      assert.deepEqual([runJson(committedCrash.runDir).slices[0].attempts,
+        runJson(committedCrash.runDir).retry_extensions.length], [2, 1]);
+
+      writeFileSync(join(committedCrash.runDir, "run.json"), before); publishParkSnapshot(committedCrash);
+      const missingRunFailure = grantCommitFault(committedCrash.operator, committedCrash.repo,
+        ["grant-retry", RUN, "be-thing", "--scope", "slice", "--reason", "missing run after rename",
+          "--session", "operator", "--now", NOW(7)], "missing-run-after-rename");
+      assert.notEqual(missingRunFailure.status, 0);
+      assert.equal(existsSync(join(committedCrash.runDir, "run.json")), false);
+      assert.equal(readdirSync(committedCrash.runDir).some((name) => /^\.run\.json\.[0-9a-f-]{36}\.tmp$/u.test(name)), true,
+        "the separately injected missing-manifest case preserves the exact after-image candidate");
+      const missingRunRecovery = factory(committedCrash.operator, ["snapshot", RUN]);
+      assert.equal(missingRunRecovery.ok, true, missingRunRecovery.stderr);
+      assert.deepEqual([runJson(committedCrash.runDir).slices[0].attempts,
+        runJson(committedCrash.runDir).retry_extensions.length], [2, 1]);
+    } finally { cleanupProject(committedCrash); }
 
     const repairs = project("grant-all-exhausted-repair", { maxRetries: 1, verify: "true",
       paths: ["src/app/", "test/"], additionalSlices: [{

@@ -236,8 +236,9 @@ an archive gets a preparation-only refusal: publish the changed plane and invoke
 append the durable authorization, preserve worktree, branch and `base_ref`, clear only the live attempt-bound
 refs, and record `running@(N+1)` while top-level status and `terminal_result` remain parked.
 
-The grant atomically moves the old canonical snapshot away so restore cannot recover pre-grant authority.
-Do not dispatch or resume yet. Republish the updated live plane, then require qualified status
+The grant durably fences the old canonical snapshot before committing `run.json`, then removes it only
+when the manifest commit is proved. Restore and parked mutations refuse an interrupted fence; `factory
+snapshot` reconciles exact pre-commit or post-commit state under the run lock. Do not dispatch or resume yet. Republish the updated live plane, then require qualified status
 to report the refreshed `park_snapshot`, unchanged owner, the chosen new effective limit, and only the named
 slice at `running@(N+1)`. Only then run the ordinary explicit
 `factory resume "$R" --session "$SESSION_ID" --repo "$RUN_REPO"` and dispatch that attempt. Resume refreshes

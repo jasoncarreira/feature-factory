@@ -3,6 +3,22 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.2
+
+A patch release that makes retry-grant snapshot revocation recoverable across manifest write failure and
+process death (#359).
+
+- `grant-retry` now publishes a durable transaction fence before replacing `run.json`. The qualified
+  pre-grant snapshot stays canonical until the manifest commits, while the fence prevents stale restore,
+  resume, status, or parked mutations from treating it as current recovery authority.
+- The transaction reconciles exact before/after manifest hashes and the bound snapshot inventory. A failed
+  manifest rename keeps the old snapshot usable; a committed grant revokes it before removing the fence.
+  Ambiguous or altered transaction artifacts are preserved and refused rather than guessed or deleted.
+- `factory snapshot` recovers both fenced grants and legacy interrupted `.prior-$R` grants under the run
+  lock. Fault injection covers manifest rename failure and process death at the commit seam.
+
+All three package manifests and both exact adapter pins move together to 0.10.2. No release tag is included.
+
 ## 0.10.1
 
 A patch release that makes the slice retry budget real instead of caller-optional, gives a supervisor a

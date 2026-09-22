@@ -7,7 +7,7 @@
 // become readable. beforeCommit is the last race seam used by CAS and create-only tests.
 import { lstat, open, realpath, rename as fsRename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
 
 export class ProtectedWriteError extends Error {
   constructor(message, cause) {
@@ -23,14 +23,16 @@ export function writeProtectedJsonAtomic(rootDir, relativePath, value, options =
 export async function writeProtectedFileAtomic(rootDir, relativePath, data, options = {}) {
   const targetPath = resolveProtectedPath(rootDir, relativePath), parentDir = resolve(targetPath, "..");
   const createOnly = options.createOnly === true, beforeCommit = options.hooks?.beforeCommit;
+  const afterRename = options.hooks?.afterRename;
   const openFile = options.fsOps?.open ?? open;
   const bytes = Buffer.isBuffer(data) ? Buffer.from(data) : Buffer.from(String(data), "utf8");
   await assertSafeParent(rootDir, parentDir);
   await assertSafeTarget(targetPath, createOnly);
   if (createOnly) return writeProtectedCreate(rootDir, parentDir, targetPath, bytes, beforeCommit, openFile);
 
-  const tempPath = join(parentDir, `.${randomUUID()}.tmp`), rename = options.fsOps?.rename ?? fsRename;
-  let handle = null, published = false, targetLinked = false;
+  const tempParent = basename(targetPath) === "factory.lock" ? join(parentDir, "run-json.lock") : parentDir;
+  const tempPath = join(tempParent, `.${basename(targetPath)}.${randomUUID()}.tmp`), rename = options.fsOps?.rename ?? fsRename;
+  let handle = null, published = false, renamed = false;
   try {
     handle = await openFile(tempPath, "wx+", 0o600);
     await handle.writeFile(bytes);
@@ -40,15 +42,17 @@ export async function writeProtectedFileAtomic(rootDir, relativePath, data, opti
     await assertSafeTarget(targetPath, false);
     await assertPublishedInode(handle, tempPath, bytes);
     await rename(tempPath, targetPath);
-    targetLinked = true;
+    renamed = true;
+    if (typeof afterRename === "function") await afterRename({ source: tempPath, destination: targetPath });
     await assertPublishedInode(handle, targetPath, bytes);
     await handle.close();
     handle = null;
     published = true;
   } catch (error) {
     if (handle) try { await handle.close(); } catch { /* the original error is primary */ }
-    if (targetLinked && !published) try { await unlink(targetPath); } catch { /* integrity failure is primary */ }
-    if (!published) try { await unlink(tempPath); } catch (cleanupError) {
+    // Once rename succeeds the target is the only durable after-image. Preserve it for validation or
+    // transaction recovery instead of converting a post-commit verification failure into lost state.
+    if (!published && !renamed) try { await unlink(tempPath); } catch (cleanupError) {
       if (cleanupError?.code !== "ENOENT") throw new ProtectedWriteError("protected temporary file cleanup is indeterminate", cleanupError);
     }
     throw error instanceof ProtectedWriteError ? error : new ProtectedWriteError("protected file commit failed", error);
