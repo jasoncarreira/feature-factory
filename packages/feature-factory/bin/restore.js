@@ -95,7 +95,7 @@ function safeEvidence(runDir, ref, runId) { assertRegularRecord(runDir, ref, "ev
 function transformRun(source, at, head, worktree, sourceRunDir) {
   const resetSlices = [];
   const slices = source.slices.map((slice) => {
-    if (slice.status === "merged") return { ...slice, worktree: null };
+    if (["merged", "blocked"].includes(slice.status)) return slice.status === "merged" ? { ...slice, worktree: null } : { ...slice, worktree: null, branch: null, evidence_ref: null, review_ref: null, merge_commit: null };
     if (slice.status !== "pending" || [slice.worktree, slice.branch, slice.base_ref, slice.evidence_ref, slice.review_ref, slice.merge_commit].some((value) => value !== null)) resetSlices.push(slice.id);
     return { ...slice, status: "pending", worktree: null, branch: null, base_ref: null, evidence_ref: null, review_ref: null, merge_commit: null };
   });

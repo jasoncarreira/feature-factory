@@ -373,8 +373,20 @@ const slices = contract({
           throw new Error(`slice '${slice.id}' ${field} cannot change in ${mode ?? "an undeclared mode"}`);
         }
       }
+      // Enforcement: activated work cannot detour around the retry edge or reopen a terminal slice.
+      if (prior.status === "blocked" && slice.status !== "blocked") throw new Error(`slice '${slice.id}' is already blocked`);
+      if (prior.status !== "pending" && slice.status === "pending") throw new Error(`slice '${slice.id}' cannot return to pending`);
+      if (prior.status === "review" && slice.status === "blocked" && prior.attempts < candidate.max_retries) throw new Error(`slice '${slice.id}' cannot block before max_retries (${candidate.max_retries})`);
       if (slice.attempts < prior.attempts) throw new Error(`slice '${slice.id}' attempts cannot decrease`);
       if (slice.attempts > prior.attempts + 1) throw new Error(`slice '${slice.id}' attempts cannot skip`);
+      const advances = slice.attempts === prior.attempts + 1;
+      // Enforcement: merit retries are the only event that may spend a slice attempt.
+      if (advances && !(prior.status === "review" && slice.status === "running")) {
+        throw new Error(`slice '${slice.id}' attempts may advance only from review to running`);
+      }
+      if (prior.status === "review" && slice.status === "running" && !advances) {
+        throw new Error(`slice '${slice.id}' retry must advance to attempt ${prior.attempts + 1}`);
+      }
       if (prior.status === "merged" && slice.status !== "merged") {
         throw new Error(`slice '${slice.id}' is already merged`);
       }
@@ -382,9 +394,6 @@ const slices = contract({
         throw new Error(`slice '${slice.id}' merge_commit is immutable once merged`);
       }
       if (!SLICE_STATUSES.includes(slice.status)) throw new Error(`slice '${slice.id}' status is invalid`);
-      if (slice.attempts > candidate.max_retries && !["merged", "blocked"].includes(slice.status)) {
-        throw new Error(`slice '${slice.id}' exhausted max_retries and must be blocked`);
-      }
       // Dependency order: a slice cannot merge before everything it depends on.
       if (slice.status === "merged") {
         for (const dep of slice.depends_on ?? []) {
