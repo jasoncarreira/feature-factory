@@ -146,7 +146,7 @@ export function validateRun(run) {
 
   gates(errors, run.gates);
   steps(errors, run.steps);
-  slices(errors, run.slices);
+  slices(errors, run.slices, run.max_retries);
   validator(errors, run.validator);
   terminalResult(errors, run.terminal_result, run.status);
 
@@ -185,7 +185,7 @@ function steps(errors, value) {
   });
 }
 
-function slices(errors, value) {
+function slices(errors, value, maxRetries) {
   if (!Array.isArray(value)) return void errors.push({ path: "run.slices", message: "must be an array" });
   const ids = new Set(value.filter(isRecord).map((slice) => slice.id));
   // Finding 5: the id set existed only for dependency validation, so two slices could
@@ -202,6 +202,9 @@ function slices(errors, value) {
     required(errors, slice, "stack", path);
     enumValue(errors, slice, "status", SLICE_STATUSES, path);
     positiveInt(errors, slice, "attempts", path);
+    if (Number.isSafeInteger(slice.attempts) && Number.isSafeInteger(maxRetries) && slice.attempts > maxRetries) {
+      errors.push({ path: `${path}.attempts`, message: `cannot exceed run.max_retries (${maxRetries})` });
+    }
     for (const key of ["worktree", "branch"]) nullableString(errors, slice, key, path);
     for (const key of ["evidence_ref", "review_ref"]) runLocalRef(errors, slice, key, path);
     if (slice.base_ref !== null && slice.base_ref !== undefined) optionalPattern(errors, slice, "base_ref", SHA, path);

@@ -695,6 +695,31 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   }, { beforeManifest: ({ sandbox }) => writeFileSync(join(sandbox, "base.txt"), "dirty\n") }),
   (error) => error?.cause?.message === "restored feature worktree changed while restore was running");
   rmSync(lostSandbox, { recursive: true });
+  const blockedAtMax = JSON.parse(sourceRunBytes);
+  blockedAtMax.slices[1] = { ...blockedAtMax.slices[1], status: "blocked", attempts: blockedAtMax.max_retries };
+  writeFileSync(join(restoreSnapshot, "run.json"), `${JSON.stringify(blockedAtMax, null, 2)}
+`);
+  const blockedRestored = factory(restoreOperator, "restore", restoreRun, "--from", remoteFeatureRef, "--now", "2026-09-21T16:02:00Z");
+  const preservedBlocked = JSON.parse(readFileSync(join(blockedRestored.run_dir, "run.json"), "utf8")).slices[1];
+  assert.deepEqual({ status: preservedBlocked.status, attempts: preservedBlocked.attempts }, { status: "blocked", attempts: blockedAtMax.max_retries });
+  assert.deepEqual({ worktree: preservedBlocked.worktree, branch: preservedBlocked.branch,
+    evidence_ref: preservedBlocked.evidence_ref, review_ref: preservedBlocked.review_ref },
+  { worktree: null, branch: null, evidence_ref: null, review_ref: null });
+  assert.equal(blockedRestored.reset_slices.includes("lost-review"), false, "restore never reopens a terminal blocked slice");
+  rmSync(lostSandbox, { recursive: true });
+  writeFileSync(join(restoreSnapshot, "run.json"), sourceRunBytes);
+
+  const overBound = JSON.parse(sourceRunBytes);
+  overBound.slices[1] = { ...overBound.slices[1], status: "blocked", attempts: overBound.max_retries + 1 };
+  writeFileSync(join(restoreSnapshot, "run.json"), `${JSON.stringify(overBound, null, 2)}
+`);
+  const overBoundRestore = spawnSync(process.execPath, [cli, "restore", restoreRun, "--repo", restoreOperator,
+    "--from", remoteFeatureRef, "--now", "2026-09-21T16:02:00Z", "--json"], { encoding: "utf8" });
+  assert.equal(overBoundRestore.status, 1);
+  assert.match(overBoundRestore.stderr, /run\.slices\[1\]\.attempts: cannot exceed run\.max_retries/u);
+  assert.equal(existsSync(lostSandbox), false, "an over-bound legacy snapshot refuses before destination reservation");
+  writeFileSync(join(restoreSnapshot, "run.json"), sourceRunBytes);
+
   const noVerifierRow = JSON.parse(sourceRunBytes);
   noVerifierRow.steps = [];
   writeFileSync(join(restoreSnapshot, "run.json"), `${JSON.stringify(noVerifierRow, null, 2)}\n`);

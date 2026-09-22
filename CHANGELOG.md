@@ -3,6 +3,22 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.1
+
+A patch release that makes the slice retry budget real instead of caller-optional (#352).
+
+- A complete slice merit rejection now advances exactly `review@N -> running@(N+1)` before builder
+  redispatch. Infrastructure recovery and resume remain on N, approval proceeds only to merge, and a
+  rejection at `max_retries` blocks without inventing another attempt.
+- The CLI enforces the transition against the matching live `REJECT` review, clears stale attempt-bound
+  evidence and review refs, refuses wrong-attempt observation before evidence publication, and rejects
+  every row above the configured bound.
+- A retry preserves the slice's exact immutable `base_ref`. Integration HEAD may move when a same-wave
+  sibling merges; that does not rewrite the historical branch point or narrow the owned and reviewed diff.
+  Restore also preserves terminal blocked slices instead of reopening them at their exhausted attempt.
+
+All three packages and both exact adapter pins move together to 0.10.1.
+
 ## 0.10.0
 
 A minor release: parked control-plane snapshots can now reconstruct a lost sandbox without claiming that

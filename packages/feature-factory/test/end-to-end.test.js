@@ -76,7 +76,7 @@ function repositoryVerifyTrace(operator, command) {
 }
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], additionalSlices = [], verify = null, verifyTimeout = undefined, bootstrap = undefined, bootstrapTimeout = undefined, bootstrapMarker = null, publish = "true", configBytes = null } = {}) {
+function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], additionalSlices = [], verify = null, verifyTimeout = undefined, bootstrap = undefined, bootstrapTimeout = undefined, bootstrapMarker = null, publish = "true", configBytes = null, maxRetries = null } = {}) {
   const operator = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(operator, "init", "-q", "-b", "main");
   git(operator, "config", "user.email", "t@example.com");
@@ -108,7 +108,9 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
     git(operator, "switch", "-q", "-c", "feature");
     selected = seedLegacyRun(operator, RUN, { branch: "feature", pr_base: undefined, created_at: NOW(0) });
   } else {
-    const fresh = initFresh(operator, [RUN, "--branch", "feature", "--worktree", ".", "--pr-base", "main", "--now", NOW(0)]);
+    const initArgs = [RUN, "--branch", "feature", "--worktree", ".", "--pr-base", "main", "--now", NOW(0)];
+    if (maxRetries !== null) initArgs.push("--max-retries", String(maxRetries));
+    const fresh = initFresh(operator, initArgs);
     const operatorPush = git(operator, "remote", "get-url", "--push", "origin");
     git(fresh.repository, "config", "--replace-all", "remote.origin.pushurl", operatorPush);
     assert.equal(git(fresh.repository, "remote", "get-url", "--push", "origin"), operatorPush);
@@ -1618,6 +1620,23 @@ describe("end to end — a merge is refused through the real CLI", () => {
   // kept as the default multi-slice coverage — a single-slice fixture cannot detect a
   // proof built on "nothing lands between branch and merge".
   it("merges two file-disjoint slices from the same wave", () => {
+    for (const verdict of ["APPROVE", "REJECT"]) {
+      const exhausted = project(`exhausted-${verdict.toLowerCase()}`, { maxRetries: 1 });
+      try {
+        const { head, basePoint } = buildSlice(exhausted.repo);
+        assert.equal(factory(exhausted.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+        assert.equal(factory(exhausted.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+          "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]).ok, true);
+        writeReview(exhausted.runDir, "be-thing", head, { verdict });
+        assert.equal(factory(exhausted.repo, ["slice", RUN, "be-thing", "review", "--attempts", "1",
+          "--evidence-ref", "evidence/be-thing.json", "--review-ref", "reviews/be-thing.json", "--now", NOW(4)]).ok, true);
+        const blocked = factory(exhausted.repo, ["slice", RUN, "be-thing", "blocked", "--attempts", "1", "--now", NOW(5)]);
+        assert.equal(blocked.ok, verdict === "REJECT", `${verdict} block: ${blocked.stderr}`);
+        if (verdict === "APPROVE") assert.match(blocked.stderr, /does not have a matching REJECT review/u);
+        else assert.deepEqual(runJson(exhausted.runDir).slices.map(({ status, attempts }) => ({ status, attempts })), [{ status: "blocked", attempts: 1 }]);
+      } finally { cleanupProject(exhausted); }
+    }
+
     const admission = project("seed-command-admission", { seed: false });
     try {
       writeFileSync(join(admission.repo, "not-executable"), "not executable\n");
@@ -1750,7 +1769,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(factory(p.repo, ["slices-seed", RUN, "--now", NOW(1)]).ok, true);
       const waveBase = git(p.repo, "rev-parse", "HEAD");
 
-      const build = (id, dir, t) => {
+      const build = (id, dir, t, verdict = "APPROVE") => {
         git(p.repo, "checkout", "-q", "-b", id, waveBase);
         mkdirSync(join(p.repo, "src", "app", dir), { recursive: true });
         writeFileSync(join(p.repo, "src", "app", dir, "work.ts"), `${id}\n`);
@@ -1762,13 +1781,20 @@ describe("end to end — a merge is refused through the real CLI", () => {
         const obs = factory(p.repo, ["observe", RUN, id, "--worktree", ".", "--base", waveBase, "--attempt", "1",
           "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(t + 1)]);
         assert.equal(obs.ok, true, `observe ${id}: ${obs.stderr}`);
-        writeReview(p.runDir, id, head);
-        factory(p.repo, ["slice", RUN, id, "review", "--review-ref", `reviews/${id}.json`,
-          "--evidence-ref", `evidence/${id}.json`, "--now", NOW(t + 2)]);
+        writeReview(p.runDir, id, head, { verdict });
+        const reviewed = factory(p.repo, ["slice", RUN, id, "review", "--attempts", "1",
+          "--review-ref", `reviews/${id}.json`, "--evidence-ref", `evidence/${id}.json`, "--now", NOW(t + 2)]);
+        assert.equal(reviewed.ok, true, `review ${id}: ${reviewed.stderr}`);
         return head;
       };
       build("be-one", "one", 2);
-      build("be-two", "two", 6);
+      build("be-two", "two", 6, "REJECT");
+      const rejectedEvidence = readFileSync(join(p.runDir, "evidence", "be-two.json"), "utf8");
+      const observedFromReview = factory(p.repo, ["observe", RUN, "be-two", "--worktree", ".", "--base", waveBase,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(9)]);
+      assert.equal(observedFromReview.ok, false, "a recorded review must return through the retry transition");
+      assert.match(observedFromReview.stderr, /must be running before observation; found 'review'/u);
+      assert.equal(readFileSync(join(p.runDir, "evidence", "be-two.json"), "utf8"), rejectedEvidence);
 
       const mergeOne = (id, t) => {
         git(p.repo, "checkout", "-q", "feature");
@@ -1776,26 +1802,119 @@ describe("end to end — a merge is refused through the real CLI", () => {
         return factory(p.repo, ["slice", RUN, id, "merged", "--merge-commit", git(p.repo, "rev-parse", "HEAD"), "--now", NOW(t)]);
       };
 
+      const beforeApprovedRetry = readFileSync(join(p.runDir, "run.json"), "utf8");
+      const approvedRetry = factory(p.repo, ["slice", RUN, "be-one", "running", "--attempts", "2", "--now", NOW(9)]);
+      assert.equal(approvedRetry.ok, false, "an approval cannot spend another attempt");
+      assert.match(approvedRetry.stderr, /does not have a matching REJECT review/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), beforeApprovedRetry);
+
       const first = mergeOne("be-one", 10);
       assert.equal(first.ok, true, `first merge of a wave: ${first.stderr}`);
       assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "x");
+
+      const beforeRetry = readFileSync(join(p.runDir, "run.json"), "utf8");
+      const unadvanced = factory(p.repo, ["slice", RUN, "be-two", "running", "--attempts", "1", "--now", NOW(11)]);
+      assert.equal(unadvanced.ok, false, "a merit retry must advance its attempt");
+      assert.match(unadvanced.stderr, /retry must advance to attempt 2/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), beforeRetry);
+      const prematureBlock = factory(p.repo, ["slice", RUN, "be-two", "blocked", "--attempts", "1", "--now", NOW(11)]);
+      assert.equal(prematureBlock.ok, false, "a merit REJECT below max_retries must open N+1, not block");
+      assert.match(prematureBlock.stderr, /cannot block before max_retries \(3\)/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), beforeRetry);
+      const pendingDetour = factory(p.repo, ["slice", RUN, "be-two", "pending", "--attempts", "1", "--now", NOW(11)]);
+      assert.equal(pendingDetour.ok, false, "review cannot detour through pending at the old attempt");
+      assert.match(pendingDetour.stderr, /cannot return to pending/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), beforeRetry);
+
+      for (const extra of [["--worktree", "."], ["--branch", "be-two"],
+        ["--evidence-ref", "evidence/be-two.json"], ["--review-ref", "reviews/be-two.json"]]) {
+        const flagged = factory(p.repo, ["slice", RUN, "be-two", "running", "--attempts", "2", ...extra, "--now", NOW(11)]);
+        assert.equal(flagged.ok, false, `retry must refuse ${extra[0]}`);
+        assert.match(flagged.stderr, /omit worktree, branch, evidence, and review flags/u);
+        assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), beforeRetry);
+      }
+
+      const liveReviewPath = join(p.runDir, "reviews", "be-two.json");
+      const liveReview = JSON.parse(readFileSync(liveReviewPath, "utf8"));
+      for (const [mutation, pattern] of [
+        [{ subject: "other" }, /does not have a matching REJECT review/u],
+        [{ attempt: 2 }, /does not have a matching REJECT review/u],
+        [{ reviewed_commit: "0".repeat(40) }, /does not bind its recorded evidence and branch head/u],
+      ]) {
+        writeFileSync(liveReviewPath, JSON.stringify({ ...liveReview, ...mutation }));
+        const unbound = factory(p.repo, ["slice", RUN, "be-two", "running", "--attempts", "2", "--now", NOW(11)]);
+        assert.equal(unbound.ok, false, "retry requires the exact rejected attempt and branch head");
+        assert.match(unbound.stderr, pattern);
+        assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), beforeRetry);
+      }
+      writeFileSync(liveReviewPath, JSON.stringify(liveReview));
+      const liveEvidencePath = join(p.runDir, "evidence", "be-two.json");
+      const liveEvidence = JSON.parse(readFileSync(liveEvidencePath, "utf8"));
+      for (const mutation of [{ subject: "other" }, { attempt: 2 }, { base_ref: "0".repeat(40) }]) {
+        writeFileSync(liveEvidencePath, JSON.stringify({ ...liveEvidence, ...mutation }));
+        const unbound = factory(p.repo, ["slice", RUN, "be-two", "running", "--attempts", "2", "--now", NOW(11)]);
+        assert.equal(unbound.ok, false, "retry requires evidence for the exact slice, attempt, and base");
+        assert.match(unbound.stderr, /does not bind its recorded evidence and branch head/u);
+        assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), beforeRetry);
+      }
+      writeFileSync(liveEvidencePath, JSON.stringify(liveEvidence));
+      const rejectedHead = git(p.repo, "rev-parse", "be-two");
+      const unseenHead = git(p.repo, "commit-tree", `${rejectedHead}^{tree}`, "-p", rejectedHead, "-m", "unreviewed head");
+      git(p.repo, "update-ref", "refs/heads/be-two", unseenHead);
+      const movedRejectedHead = factory(p.repo, ["slice", RUN, "be-two", "running", "--attempts", "2", "--now", NOW(11)]);
+      assert.equal(movedRejectedHead.ok, false, "retry requires the rejected commit to remain the slice head");
+      assert.match(movedRejectedHead.stderr, /does not bind its recorded evidence and branch head/u);
+      assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), beforeRetry);
+      git(p.repo, "update-ref", "refs/heads/be-two", rejectedHead);
+
+      // Integration HEAD moved when be-one merged, but be-two's branch point is a historical fact.
+      // Opening the retry must retain that exact base and discard only attempt-bound refs.
+      const retried = factory(p.repo, ["slice", RUN, "be-two", "running", "--attempts", "2", "--now", NOW(11)]);
+      assert.equal(retried.ok, true, `retry after sibling merge: ${retried.stderr}`);
+      const retryRow = runJson(p.runDir).slices.find((slice) => slice.id === "be-two");
+      assert.equal(retryRow.attempts, 2);
+      assert.equal(retryRow.base_ref, waveBase);
+      assert.equal(retryRow.evidence_ref, null);
+      assert.equal(retryRow.review_ref, null);
+      assert.equal(JSON.parse(readFileSync(join(p.runDir, "reviews", "be-two.attempt-1.json"), "utf8")).verdict, "REJECT");
+
+      git(p.repo, "checkout", "-q", "be-two");
+      writeFileSync(join(p.repo, "src", "app", "two", "work.ts"), "be-two remediated\n");
+      git(p.repo, "add", "-A");
+      git(p.repo, "commit", "-q", "-m", "remediate be-two");
+      const retryHead = git(p.repo, "rev-parse", "HEAD");
+      const priorEvidence = readFileSync(join(p.runDir, "evidence", "be-two.json"), "utf8");
+      const wrongAttempt = factory(p.repo, ["observe", RUN, "be-two", "--worktree", ".", "--base", waveBase,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(12)]);
+      assert.equal(wrongAttempt.ok, false, "wrong-attempt evidence must refuse before publication");
+      assert.match(wrongAttempt.stderr, /does not match slice 'be-two' attempt 2/u);
+      assert.equal(readFileSync(join(p.runDir, "evidence", "be-two.json"), "utf8"), priorEvidence);
+      const retryObserved = factory(p.repo, ["observe", RUN, "be-two", "--worktree", ".", "--base", waveBase,
+        "--attempt", "2", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(12)]);
+      assert.equal(retryObserved.ok, true, `observe retry: ${retryObserved.stderr}`);
+      writeReview(p.runDir, "be-two", retryHead, { attempt: 2 });
+      const retryReviewed = factory(p.repo, ["slice", RUN, "be-two", "review", "--attempts", "2",
+        "--review-ref", "reviews/be-two.json", "--evidence-ref", "evidence/be-two.json", "--now", NOW(13)]);
+      assert.equal(retryReviewed.ok, true, `review retry: ${retryReviewed.stderr}`);
+
       const preserved = Object.fromEntries(["be-two"].flatMap((id) => [
         [`evidence/${id}.json`, readFileSync(join(p.runDir, "evidence", `${id}.json`), "utf8")],
         [`reviews/${id}.json`, readFileSync(join(p.runDir, "reviews", `${id}.json`), "utf8")],
       ]));
 
       // The second slice reviewed a tree without be-one in it; the merged tree has both.
-      const second = mergeOne("be-two", 11);
+      const second = mergeOne("be-two", 14);
       const secondMerge = git(p.repo, "rev-parse", "HEAD");
       assert.equal(second.ok, false, "the repository verify must detect the cross-slice defect");
       assert.equal(second.stderr.trim(), `factory config entry 'verify' failed after recorded merge ${secondMerge} with exit status 23; merged slice remains recorded; stop before advancing.`);
       assert.deepEqual(runJson(p.runDir).slices.map((slice) => slice.status), ["merged", "merged", "pending"]);
       for (const [ref, bytes] of Object.entries(preserved)) assert.equal(readFileSync(join(p.runDir, ref), "utf8"), bytes);
+
       const failedEvidence = JSON.parse(readFileSync(join(p.runDir, "evidence", "test-verifier.json"), "utf8"));
       assert.equal(failedEvidence.commit, secondMerge);
       assert.equal(failedEvidence.tests.cmd, verify);
       assert.equal(failedEvidence.tests.exit, 23);
-      const replay = factory(p.repo, ["slice", RUN, "be-two", "merged", "--merge-commit", secondMerge, "--now", NOW(12)]);
+      const replay = factory(p.repo, ["slice", RUN, "be-two", "merged", "--merge-commit", secondMerge, "--now", NOW(15)]);
       assert.equal(replay.ok, false);
       assert.equal(replay.stderr.trim(), second.stderr.trim(), "known failure replay must reproduce the refusal without re-execution");
       assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "xx", "failed replay must reuse canonical evidence");

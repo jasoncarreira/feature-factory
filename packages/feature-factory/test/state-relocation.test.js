@@ -64,7 +64,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "SLICE_BASE_REF = RECORDED_SLICE.base_ref",
     "`SLICE_WORKTREE` to equal `SLICE_ROOT/<slice-id>`",
     "`git -C \"$RUN_REPO\" worktree list\n--porcelain`",
-    "an unrecorded existing path or ref is a collision",
+    "unrecorded existing path or ref is a collision",
     "--worktree \"$SLICE_WORKTREE\" --base \"$SLICE_BASE_REF\"",
     "`base_ref` is fixed when the slice is activated and cannot be changed afterwards",
     "existing `resolveWorktree` containment check",
