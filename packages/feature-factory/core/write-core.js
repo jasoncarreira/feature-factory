@@ -71,7 +71,7 @@ export async function coordinateRunJsonTransition(runDir, options) {
           const finalObserved = deepFreeze(await readRunState(runDir, validateRun));
           assertUnchanged(finalObserved, initial);
           if (typeof finalGuard === "function") {
-            const guarded = finalGuard({ state: finalObserved, candidate });
+            const guarded = finalGuard({ state: finalObserved, candidate, source });
             if (guarded && typeof guarded.then === "function") throw new Error("final commit guard must be synchronous");
           }
           await rename(source, destination);

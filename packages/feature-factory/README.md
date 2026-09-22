@@ -258,6 +258,17 @@ own the same path. Duplicate, target-already-owned, malformed, privileged, repla
 requests refuse atomically. Resume never amends or reseeds. A merge continues to refuse every unamended
 or privileged changed path.
 
+A parked slice that exhausted its effective limit can receive exactly one audited extension through
+`factory grant-retry <run-id> <slice-id> --scope slice|all --reason <text> --session <id> --repo <sandbox>`.
+Slice scope raises only the target's additive allowance. All scope raises `max_retries` for pending later
+waves too, but refuses when another slice is blocked or an exhausted post-merge repair record exists. Both
+scopes reopen only the named slice after exact owner, snapshot, REJECT, evidence, base, current clean head,
+and immutable attempt archives. A legacy run missing one prepares it without granting, then requires a
+fresh snapshot and a second grant invocation. Exhaustion parks with reason `blocked-after-retries` rather
+than terminalizing `partial`. The grant moves the prior canonical snapshot away, so restore cannot recover
+pre-grant authority; run `factory snapshot <run-id> --repo <operator>` and requalify it before the separate
+explicit resume. Restored blocked slices whose physical refs were intentionally cleared do not qualify.
+
 `resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Step 6 resolves one selection: a nonblank inherited `FACTORY_PUBLISHING_COMMAND` selects its exact string; that variable set blank or whitespace selects the default; when it is unset, configured `publish` wins if present; otherwise the default wins. Only a selected nondefault command replaces `gh pr create`, after the factory-owned exact push and post-push identity guard. It receives exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE` environment values. Only exit zero with an absolute HTTPS URL on the last nonempty stdout line is recordable; every other result parks with exact reason `selected publishing command outcome indeterminate; re-observe whether the pull request exists before retry` and no fallback.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
 The recorded `publishing_identity` is read from `status` exactly as reported, without trimming,

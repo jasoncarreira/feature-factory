@@ -28,14 +28,14 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
-  "init", "status", "amend-paths", "resume", "restore", "snapshot", "decide", "lock", "heartbeat", "gate", "step", "terminal",
+  "init", "status", "amend-paths", "resume", "grant-retry", "restore", "snapshot", "decide", "lock", "heartbeat", "gate", "step", "terminal",
   "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push",
 ];
 
 const RUN_JSON_KEYS = [
   // the inherited fifteen
   "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "pr_draft", "created_at", "updated_at",
-  "status", "max_parallel_slices", "max_retries", "gates", "steps", "slices", "validator", "pr_url",
+  "status", "max_parallel_slices", "max_retries", "retry_extensions", "gates", "steps", "slices", "validator", "pr_url",
   // The operator's answer to a parked run: the one channel into a park, since resume carries no message
   // and every other write is refused there.
   "operator_decision",
@@ -113,6 +113,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
+    assert.deepEqual(COMMANDS["grant-retry"], ["--repo", "--scope", "--reason", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS.restore, ["--repo", "--from", "--now", "--json"]);
     assert.deepEqual(COMMANDS.snapshot, ["--repo", "--json"]);
     assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
@@ -678,7 +679,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 24, "twenty-four: the prior twenty-three plus the operator decision recorded against a parked run");
+    assert.equal(RUN_KEYS.length, 25, "twenty-five: retry extension history is the operator-auditable twenty-fifth field");
   });
 
   it("registers exactly the declared families", () => {
@@ -1232,7 +1233,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // same `validateRun` the consumer does, requires the manifest to name the run being published, and
     // qualifies the staged tree again before the rename -- a manifest replaced between qualification and
     // copy reaches both trees, so inventory equality passes and only re-qualifying catches it.
-    assert.equal(total, 5366, "publishing a parked snapshot lands at 5366 production lines");
+    // Issue #357 adds an audited operator grant only after snapshot, lock, REJECT, evidence, archive,
+    // clean-worktree, and live-head proof. The exact combined landing is recorded below.
+    assert.equal(total, 5643, "operator-authorized retry extensions land at 5643 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1265,11 +1268,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // the work that needed that room has now landed and the cap should tighten back toward the record.
     // Issue #343 authorizes 4900 -> 5200 for snapshot restore, including source/destination binding,
     // Git provenance, explicit loss reporting, and atomic publication. Issue #352 authorized 5200 -> 5240
-    // for bounded slice merit retries; issue #353 authorizes 5350 for the snapshot publisher, and the
-    // merged tree carries both. #353's figure was re-authorized to 5400 once #352 merged first: 5350 was
-    // estimated from a 5192 base, and the combined tree measures 5354, which neither issue anticipated.
-    // Raised on explicit operator instruction recorded in the issue; nothing was trimmed to fit.
-    assert.ok(total <= 5400, `production source is ${total} lines; the tripwire is 5400`);
+    // for bounded slice merit retries; issue #353 authorized the snapshot publisher and was re-authorized
+    // to 5400 once #352 merged first. Issue #357 authorizes the combined post-#354/#356 tripwire to 5650
+    // for operator-authorized retry extension. Nothing was trimmed or padded to fit either ledger.
+    assert.ok(total <= 5650, `production source is ${total} lines; the issue #357 tripwire is 5650`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

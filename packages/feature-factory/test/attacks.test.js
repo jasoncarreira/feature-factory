@@ -164,6 +164,29 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
     const legacySlice = structuredClone(amendedSlice);
     delete legacySlice.path_amendments;
     assert.equal(Object.hasOwn(validateRun(baseRun({ slices: [legacySlice] })).slices[0], "path_amendments"), false);
+    const unexplainedExtension = { ...amendedSlice, extra_attempts: 1 };
+    assert.throws(() => validateRun(baseRun({ slices: [unexplainedExtension] })), /extra_attempts: requires retry extension history/u);
+    const extendedSlice = { ...amendedSlice, status: "running", attempts: 4, base_ref: SHA_A, extra_attempts: 1 };
+    const extension = { scope: "slice", slice_id: "be", base_ref: SHA_A, attempt: 4, previous_limit: 3, new_limit: 4,
+      previous_max_retries: 3, max_retries: 3, session: "owner-a", reason: "bounded repair", at: LATER,
+      snapshot_digest: `sha256:${"0".repeat(64)}`, review_ref: "reviews/be.attempt-3.json",
+      review_sha256: `sha256:${"1".repeat(64)}`, evidence_ref: "evidence/be.attempt-3.json",
+      evidence_sha256: `sha256:${"2".repeat(64)}` };
+    validateRun(baseRun({ updated_at: LATER, retry_extensions: [extension], slices: [extendedSlice] }));
+    for (const [name, mutate, pattern] of [
+      ["missing ref", (run) => { delete run.retry_extensions[0].review_ref; }, /review_ref: must be a non-empty string/u],
+      ["null ref", (run) => { run.retry_extensions[0].evidence_ref = null; }, /evidence_ref: must be a non-empty string/u],
+      ["live ref", (run) => { run.retry_extensions[0].review_ref = "reviews/be.json"; }, /must end with \.attempt-3\.json/u],
+      ["unknown all target", (run) => { run.retry_extensions[0].slice_id = "ghost"; }, /references unknown slice 'ghost'/u],
+      ["missing counter defaults to zero", (run) => { delete run.slices[0].extra_attempts; }, /extra_attempts: does not match slice-scoped retry extension history/u],
+      ["predating attempt", (run) => { run.slices[0].attempts = 3; }, /attempts: predates its latest retry grant/u],
+    ]) {
+      const invalid = baseRun({ updated_at: LATER, retry_extensions: [structuredClone(extension)], slices: [structuredClone(extendedSlice)] });
+      mutate(invalid);
+      assert.throws(() => validateRun(invalid), pattern, name);
+    }
+    assert.throws(() => validateRun(baseRun({ slices: [{ ...extendedSlice, attempts: 2, extra_attempts: undefined,
+      status: "blocked" }] })), /blocked slice must equal effective retry limit \(3\)/u);
     for (const [mutate, pattern] of [
       [(slice) => { slice.path_amendments[0].unexpected = true; }, /unknown keys: unexpected/u],
       [(slice) => { slice.path_amendments[0].reason = "  "; }, /reason: must be a non-empty string/u],
@@ -647,13 +670,13 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       ["running advance", activeSlice("running"), "running", 2, /only from review to running/u],
       ["review without advance", activeSlice("review"), "running", 1, /retry must advance to attempt 2/u],
       ["review-state advance", activeSlice("review"), "review", 2, /only from review to running/u],
-      ["blocked reopen", activeSlice("blocked"), "running", 1, /already blocked/u],
+      ["blocked reopen", activeSlice("blocked", 3), "running", 3, /already blocked/u],
       ["review to pending", activeSlice("review"), "pending", 1, /cannot return to pending/u],
-      ["review blocks before max", activeSlice("review"), "blocked", 1, /cannot block before max_retries \(3\)/u],
+      ["review blocks before max", activeSlice("review"), "blocked", 1, /blocked slice must equal effective retry limit \(3\)/u],
       ["running blocks at max", activeSlice("running", 3), "blocked", 3, /may block only from review/u],
       ["pending blocks at max", activeSlice("pending", 3), "blocked", 3, /may block only from review/u],
-      ["merged above max", activeSlice("review", 3), "merged", 4, /cannot exceed run\.max_retries \(3\)/u],
-      ["blocked above max", activeSlice("review", 3), "blocked", 4, /cannot exceed run\.max_retries \(3\)/u],
+      ["merged above max", activeSlice("review", 3), "merged", 4, /cannot exceed effective retry limit \(3\)/u],
+      ["blocked above max", activeSlice("review", 3), "blocked", 4, /cannot exceed effective retry limit \(3\)/u],
     ]) {
       const f = fixture(`slice-attempt-${label.replaceAll(" ", "-")}`, { slices: [prior] });
       try {
@@ -679,5 +702,29 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       });
       assert.deepEqual({ status: next.slices[0].status, attempts: next.slices[0].attempts }, { status: "running", attempts: 2 });
     } finally { rmSync(retry.root, { recursive: true, force: true }); }
+
+    for (const scope of ["slice", "all"]) {
+      const blocked = { ...activeSlice("blocked", 3), evidence_ref: "evidence/be.json", review_ref: "reviews/be.json", extra_attempts: 0 };
+      const grant = fixture(`grant-retry-${scope}-ok`, { status: "needs-human",
+        terminal_result: { status: "needs-human", reason: "blocked-after-retries" }, retry_extensions: [], slices: [blocked] });
+      try {
+        const next = await transition(grant.runDir, {
+          participants: [{ familyId: "envelope", mode: `grant-retry-${scope}` }, { familyId: "slices", mode: `grant-retry-${scope}` }],
+          apply: (state) => {
+            const row = { ...state.slices[0], status: "running", attempts: 4,
+              extra_attempts: scope === "slice" ? 1 : 0, evidence_ref: null, review_ref: null };
+            const maxRetries = scope === "all" ? 4 : 3;
+            const audit = { scope, slice_id: "be", base_ref: SHA_A, attempt: 4, previous_limit: 3, new_limit: 4,
+              previous_max_retries: 3, max_retries: maxRetries, session: "owner-a", reason: "bounded repair",
+              at: LATER, snapshot_digest: `sha256:${"0".repeat(64)}`,
+              review_ref: "reviews/be.attempt-3.json", review_sha256: `sha256:${"1".repeat(64)}`,
+              evidence_ref: "evidence/be.attempt-3.json", evidence_sha256: `sha256:${"2".repeat(64)}` };
+            return { ...state, updated_at: LATER, max_retries: maxRetries, retry_extensions: [audit], slices: [row] };
+          },
+        });
+        assert.deepEqual({ status: next.status, max: next.max_retries, attempts: next.slices[0].attempts,
+          extra: next.slices[0].extra_attempts }, { status: "needs-human", max: scope === "all" ? 4 : 3, attempts: 4, extra: scope === "slice" ? 1 : 0 });
+      } finally { rmSync(grant.root, { recursive: true, force: true }); }
+    }
   });
 });

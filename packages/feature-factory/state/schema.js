@@ -13,7 +13,7 @@ export const CONTROL_PLANE = ".factory";
 
 export const RUN_KEYS = Object.freeze([
   "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "pr_draft", "created_at", "updated_at",
-  "status", "mode", "max_parallel_slices", "max_retries",
+  "status", "mode", "max_parallel_slices", "max_retries", "retry_extensions",
   "gates", "steps", "slices", "validator", "terminal_result", "pr_url",
   // The one channel an operator has into a parked run. `resume` carries no message and every command
   // that could carry a decision is refused while parked, so a park that asks a question -- a changed
@@ -67,9 +67,15 @@ export const SLICE_KEYS = Object.freeze([
   // tests is a decision the decompose gate makes: a nonempty test_plan means an observed
   // green run is required, and an empty one is an approved exemption. Empty by omission
   // is not possible, because the field is required.
-  "paths", "path_amendments", "test_plan", "base_ref", "evidence_ref", "review_ref", "merge_commit",
+  "paths", "path_amendments", "test_plan", "base_ref", "evidence_ref", "review_ref", "merge_commit", "extra_attempts",
 ]);
 const PATH_AMENDMENT_KEYS = Object.freeze(["added_paths", "reason", "session", "at"]);
+const RETRY_EXTENSION_KEYS = Object.freeze(["scope", "slice_id", "base_ref", "attempt", "previous_limit", "new_limit", "previous_max_retries", "max_retries", "session", "reason", "at", "snapshot_digest", "review_ref", "review_sha256", "evidence_ref", "evidence_sha256"]);
+export const RETRY_EXTENSION_SCOPES = Object.freeze(["slice", "all"]);
+
+export function effectiveRetryLimit(run, slice) {
+  return run.max_retries + (slice.extra_attempts ?? 0);
+}
 
 export const VALIDATOR_VERDICTS = Object.freeze(["GO", "GO-WITH-NITS", "NO-GO"]);
 // reviewed_head is the fourth field, justified by attack 4: a verdict that does not
@@ -103,6 +109,7 @@ function runLocalRef(errors, holder, key, path) {
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
 const SHA = /^[0-9a-f]{40}$/u;
+const DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const ID = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u;
 
 export class SchemaError extends Error {
@@ -144,14 +151,80 @@ export function validateRun(run) {
     if (run.bootstrap_exit !== null) nonNegativeInt(errors, run, "bootstrap_exit", "run");
   }
 
+  retryExtensions(errors, run);
   gates(errors, run.gates);
   steps(errors, run.steps);
-  slices(errors, run.slices, run.max_retries);
+  slices(errors, run.slices, run);
   validator(errors, run.validator);
   terminalResult(errors, run.terminal_result, run.status);
 
   if (errors.length) throw new SchemaError(errors);
   return run;
+}
+
+function retryExtensions(errors, run) {
+  const value = run.retry_extensions;
+  if (value === undefined) {
+    for (const [index, slice] of (Array.isArray(run.slices) ? run.slices : []).entries()) {
+      if ((slice?.extra_attempts ?? 0) !== 0) errors.push({ path: `run.slices[${index}].extra_attempts`, message: "requires retry extension history" });
+    }
+    return;
+  }
+  if (!Array.isArray(value)) return void errors.push({ path: "run.retry_extensions", message: "must be an array" });
+  let crossCheck = Number.isSafeInteger(run.max_retries) && run.max_retries > 0 && Array.isArray(run.slices);
+  value.forEach((entry, index) => {
+    const path = `run.retry_extensions[${index}]`;
+    if (!object(errors, entry, path, RETRY_EXTENSION_KEYS)) { crossCheck = false; return; }
+    enumValue(errors, entry, "scope", RETRY_EXTENSION_SCOPES, path);
+    pattern(errors, entry, "slice_id", ID, path);
+    pattern(errors, entry, "base_ref", SHA, path);
+    for (const key of ["attempt", "previous_limit", "new_limit", "previous_max_retries", "max_retries"]) positiveInt(errors, entry, key, path);
+    if (!RETRY_EXTENSION_SCOPES.includes(entry.scope) || !ID.test(entry.slice_id)
+      || ["attempt", "previous_limit", "new_limit", "previous_max_retries", "max_retries"].some((key) => !Number.isSafeInteger(entry[key]) || entry[key] < 1)) crossCheck = false;
+    if (Number.isSafeInteger(entry.previous_limit) && entry.new_limit !== entry.previous_limit + 1) errors.push({ path: `${path}.new_limit`, message: "must advance exactly one" });
+    if (entry.scope === "slice" && entry.max_retries !== entry.previous_max_retries) errors.push({ path: `${path}.max_retries`, message: "must stay unchanged for slice scope" });
+    if (entry.scope === "all" && entry.max_retries !== entry.previous_max_retries + 1) errors.push({ path: `${path}.max_retries`, message: "must advance exactly one for all scope" });
+    for (const key of ["session", "reason"]) required(errors, entry, key, path);
+    pattern(errors, entry, "at", ISO, path);
+    pattern(errors, entry, "snapshot_digest", DIGEST, path);
+    for (const key of ["review_ref", "evidence_ref"]) { required(errors, entry, key, path); runLocalRef(errors, entry, key, path); }
+    for (const key of ["review_sha256", "evidence_sha256"]) pattern(errors, entry, key, DIGEST, path);
+    if (Number.isSafeInteger(entry.attempt) && entry.attempt > 1) {
+      const suffix = `.attempt-${entry.attempt - 1}.json`;
+      if (typeof entry.review_ref === "string" && !entry.review_ref.endsWith(suffix)) errors.push({ path: `${path}.review_ref`, message: `must end with ${suffix}` });
+      if (typeof entry.evidence_ref === "string" && !entry.evidence_ref.endsWith(suffix)) errors.push({ path: `${path}.evidence_ref`, message: `must end with ${suffix}` });
+    }
+  });
+  if (!crossCheck) return;
+  let maxRetries = run.max_retries - value.filter((entry) => entry.scope === "all").length;
+  if (maxRetries < 1) return void errors.push({ path: "run.retry_extensions", message: "contains more run-wide grants than the final max_retries permits" });
+  const extras = new Map(), latestGrant = new Map(), grantBases = new Map(), archiveRefs = new Set();
+  let previousAt = null;
+  const sliceIds = new Set(run.slices.map((slice) => slice?.id));
+  for (const [index, entry] of value.entries()) {
+    const path = `run.retry_extensions[${index}]`, previousExtra = extras.get(entry.slice_id) ?? 0;
+    if (!sliceIds.has(entry.slice_id)) errors.push({ path: `${path}.slice_id`, message: `references unknown slice '${entry.slice_id}'` });
+    for (const ref of [entry.review_ref, entry.evidence_ref]) {
+      if (archiveRefs.has(ref)) errors.push({ path, message: `reuses retry archive '${ref}'` });
+      archiveRefs.add(ref);
+    }
+    if (previousAt !== null && Date.parse(entry.at) <= previousAt) errors.push({ path: `${path}.at`, message: "must move forwards through retry extension history" });
+    previousAt = Date.parse(entry.at);
+    const previousLimit = maxRetries + previousExtra;
+    if (entry.previous_max_retries !== maxRetries || entry.previous_limit !== previousLimit) errors.push({ path, message: "does not continue the recorded retry limits" });
+    if (entry.scope === "all") maxRetries += 1;
+    else extras.set(entry.slice_id, previousExtra + 1);
+    const newLimit = maxRetries + (extras.get(entry.slice_id) ?? 0);
+    if (entry.max_retries !== maxRetries || entry.new_limit !== newLimit || entry.attempt !== newLimit) errors.push({ path, message: "does not bind the granted attempt and resulting limits" });
+    if (grantBases.has(entry.slice_id) && grantBases.get(entry.slice_id) !== entry.base_ref) errors.push({ path: `${path}.base_ref`, message: "changes the slice's immutable retry base" });
+    grantBases.set(entry.slice_id, entry.base_ref); latestGrant.set(entry.slice_id, entry.attempt);
+  }
+  if (maxRetries !== run.max_retries) errors.push({ path: "run.retry_extensions", message: "does not reach run.max_retries" });
+  for (const [index, slice] of run.slices.entries()) if (slice) {
+    if (grantBases.has(slice.id) && slice.base_ref !== grantBases.get(slice.id)) errors.push({ path: `run.slices[${index}].base_ref`, message: "does not match retry extension history" });
+    if ((slice.extra_attempts ?? 0) !== (extras.get(slice.id) ?? 0)) errors.push({ path: `run.slices[${index}].extra_attempts`, message: "does not match slice-scoped retry extension history" });
+    if (latestGrant.has(slice.id) && (!Number.isSafeInteger(slice.attempts) || slice.attempts < latestGrant.get(slice.id))) errors.push({ path: `run.slices[${index}].attempts`, message: "predates its latest retry grant" });
+  }
 }
 
 function gates(errors, value) {
@@ -185,7 +258,7 @@ function steps(errors, value) {
   });
 }
 
-function slices(errors, value, maxRetries) {
+function slices(errors, value, run) {
   if (!Array.isArray(value)) return void errors.push({ path: "run.slices", message: "must be an array" });
   const ids = new Set(value.filter(isRecord).map((slice) => slice.id));
   // Finding 5: the id set existed only for dependency validation, so two slices could
@@ -202,8 +275,13 @@ function slices(errors, value, maxRetries) {
     required(errors, slice, "stack", path);
     enumValue(errors, slice, "status", SLICE_STATUSES, path);
     positiveInt(errors, slice, "attempts", path);
-    if (Number.isSafeInteger(slice.attempts) && Number.isSafeInteger(maxRetries) && slice.attempts > maxRetries) {
-      errors.push({ path: `${path}.attempts`, message: `cannot exceed run.max_retries (${maxRetries})` });
+    if (slice.extra_attempts !== undefined) nonNegativeInt(errors, slice, "extra_attempts", path);
+    const limit = effectiveRetryLimit(run, slice);
+    if (Number.isSafeInteger(slice.attempts) && Number.isSafeInteger(limit) && slice.attempts > limit) {
+      errors.push({ path: `${path}.attempts`, message: `cannot exceed effective retry limit (${limit})` });
+    }
+    if (slice.status === "blocked" && Number.isSafeInteger(slice.attempts) && Number.isSafeInteger(limit) && slice.attempts !== limit) {
+      errors.push({ path: `${path}.attempts`, message: `blocked slice must equal effective retry limit (${limit})` });
     }
     for (const key of ["worktree", "branch"]) nullableString(errors, slice, key, path);
     for (const key of ["evidence_ref", "review_ref"]) runLocalRef(errors, slice, key, path);

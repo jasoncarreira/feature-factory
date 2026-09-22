@@ -8,7 +8,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -135,6 +135,11 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
 }
 
 const cleanupProject = ({ operator }) => rmSync(operator, { recursive: true, force: true });
+const publishParkSnapshot = ({ operator }) => {
+  const published = factory(operator, ["snapshot", RUN]);
+  assert.equal(published.ok, true, published.stderr);
+  return published.out.park_snapshot;
+};
 
 // Build the slice, optionally touching extra paths, and return its head.
 function buildSlice(repo, { extra = null, extraContent = "extra\n", extras = [] } = {}) {
@@ -217,7 +222,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     // Nothing in this suite asserted the string form, which is how it survived; this is that coverage.
     const projected = factory(p.repo, ["status", RUN, "--json"]).out;
     assert.deepEqual(projected.slices.find((slice) => slice?.id === "be-thing"),
-      { id: "be-thing", status: "review", attempts: 1 },
+      { id: "be-thing", status: "review", attempts: 1, extra_attempts: 0, retry_limit: 3 },
       "status must project slice rows as structured records");
     assert.ok(projected.slices.every((slice) => slice !== null && typeof slice === "object"
       && typeof slice.id === "string" && typeof slice.status === "string" && Number.isInteger(slice.attempts)),
@@ -240,7 +245,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     // projection could have reverted to strings without failing. Caught in review, and measured before
     // being believed. They now live at the first fixture that records a step.
     for (const slice of projected.slices) {
-      assert.deepEqual(Object.keys(slice).sort(), ["attempts", "id", "status"]);
+      assert.deepEqual(Object.keys(slice).sort(), ["attempts", "extra_attempts", "id", "retry_limit", "status"]);
     }
     // `next` must be exactly the rendering of `next_action`, so the pair cannot drift into two answers.
     const { kind, subject } = projected.next_action;
@@ -1210,6 +1215,201 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.doesNotMatch(refused.stderr, /already owns requested path/u);
       assert.equal(readFileSync(join(privilegedOwned.runDir, "run.json"), "utf8"), before);
     } finally { cleanupProject(privilegedOwned); }
+
+    for (const scope of ["slice", "all"]) {
+      const extended = project(`grant-retry-${scope}`, { maxRetries: 1, additionalSlices: [{
+        id: "future", stack: "backend", paths: ["src/future/"], depends_on: ["be-thing"], acceptance: ["AC2"], test_plan: [],
+      }] });
+      try {
+        const { head, basePoint } = buildSlice(extended.repo);
+        assert.equal(factory(extended.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+        assert.equal(factory(extended.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+          "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]).ok, true);
+        writeReview(extended.runDir, "be-thing", head, { verdict: "REJECT" });
+        assert.equal(factory(extended.repo, ["slice", RUN, "be-thing", "review", "--attempts", "1",
+          "--evidence-ref", "evidence/be-thing.json", "--review-ref", "reviews/be-thing.json", "--now", NOW(4)]).ok, true);
+        assert.equal(factory(extended.repo, ["slice", RUN, "be-thing", "blocked", "--attempts", "1", "--now", NOW(5)]).ok, true);
+        assert.equal(factory(extended.repo, ["terminal", RUN, "needs-human", "--reason", "blocked-after-retries", "--now", NOW(6)]).ok, true);
+        const legacy = runJson(extended.runDir);
+        delete legacy.retry_extensions;
+        for (const slice of legacy.slices) delete slice.extra_attempts;
+        writeFileSync(join(extended.runDir, "run.json"), `${JSON.stringify(legacy, null, 2)}\n`);
+        assert.equal(factory(extended.repo, ["lock", RUN, "claim", "--session", "operator", "--branch", "feature"]).ok, true);
+        const parkedBefore = readFileSync(join(extended.runDir, "run.json"), "utf8");
+        if (scope === "slice") {
+          const missingSnapshot = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
+            "--reason", "bounded repair", "--session", "operator", "--now", NOW(7)]);
+          assert.equal(missingSnapshot.ok, false);
+          assert.match(missingSnapshot.stderr, /requires a complete current park snapshot/u);
+          assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
+        }
+        const snapshot = publishParkSnapshot(extended);
+        assert.equal(realpathSync(factory(extended.repo, ["status", RUN]).out.park_snapshot), realpathSync(snapshot));
+        const wrongOwner = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
+          "--reason", "bounded repair", "--session", "intruder", "--now", NOW(7)]);
+        assert.equal(wrongOwner.ok, false);
+        assert.match(wrongOwner.stderr, /held by session operator, not intruder/u);
+        assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
+        if (scope === "all") {
+          const siblingState = runJson(extended.runDir), sibling = siblingState.slices.find((slice) => slice.id === "future");
+          const pendingSibling = structuredClone(sibling);
+          Object.assign(sibling, { status: "blocked", worktree: ".", branch: "slice", base_ref: basePoint });
+          writeFileSync(join(extended.runDir, "run.json"), `${JSON.stringify(siblingState, null, 2)}\n`);
+          publishParkSnapshot(extended);
+          const blockedSiblingBytes = readFileSync(join(extended.runDir, "run.json"), "utf8");
+          const strandsSibling = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", "all",
+            "--reason", "would strand sibling", "--session", "operator", "--now", NOW(7)]);
+          assert.equal(strandsSibling.ok, false);
+          assert.match(strandsSibling.stderr, /refuses while other slices are blocked: future/u);
+          assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), blockedSiblingBytes);
+          Object.assign(sibling, pendingSibling);
+          writeFileSync(join(extended.runDir, "run.json"), `${JSON.stringify(siblingState, null, 2)}\n`);
+          publishParkSnapshot(extended);
+        }
+        if (scope === "slice") {
+          const evidenceArchivePath = join(extended.runDir, "evidence", "be-thing.attempt-1.json");
+          const evidenceArchiveBytes = readFileSync(evidenceArchivePath);
+          rmSync(evidenceArchivePath);
+          publishParkSnapshot(extended);
+          const missingArchive = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
+            "--reason", "bounded repair", "--session", "operator", "--now", NOW(7)]);
+          assert.equal(missingArchive.ok, false);
+          assert.match(missingArchive.stderr, /prepared missing immutable attempt archives.*publish a fresh snapshot and retry/u);
+          assert.deepEqual(readFileSync(evidenceArchivePath), evidenceArchiveBytes,
+            "legacy preparation restores only the exact immutable evidence archive");
+          assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore,
+            "archive preparation grants no retry authority");
+          assert.equal(factory(extended.repo, ["status", RUN]).out.park_snapshot, null,
+            "archive preparation requires a fresh complete snapshot");
+          publishParkSnapshot(extended);
+          writeFileSync(evidenceArchivePath, '{"attempt":1}\n');
+          publishParkSnapshot(extended);
+          const collision = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
+            "--reason", "bounded repair", "--session", "operator", "--now", NOW(7)]);
+          assert.equal(collision.ok, false);
+          assert.match(collision.stderr, /evidence archive .* conflicts with the live record/u);
+          writeFileSync(evidenceArchivePath, evidenceArchiveBytes);
+          publishParkSnapshot(extended);
+          const reviewPath = join(extended.runDir, "reviews", "be-thing.json"), reviewBytes = readFileSync(reviewPath);
+          writeFileSync(reviewPath, JSON.stringify({ ...JSON.parse(reviewBytes.toString("utf8")), verdict: "APPROVE" }));
+          const approved = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
+            "--reason", "bounded repair", "--session", "operator", "--now", NOW(7)]);
+          assert.equal(approved.ok, false);
+          assert.match(approved.stderr, /does not have a matching REJECT review/u);
+          writeFileSync(reviewPath, reviewBytes);
+          writeFileSync(join(extended.repo, "src", "app", "thing.ts"), "dirty\n");
+          const dirty = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
+            "--reason", "bounded repair", "--session", "operator", "--now", NOW(7)]);
+          assert.equal(dirty.ok, false);
+          assert.match(dirty.stderr, /worktree has uncommitted changes/u);
+          writeFileSync(join(extended.repo, "src", "app", "thing.ts"), "slice\n");
+          assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
+        }
+        const granted = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
+          "--reason", "one bounded corpus-native repair", "--session", "operator", "--now", NOW(7)]);
+        assert.equal(granted.ok, true, `${scope}: ${granted.stderr}`);
+        const parked = runJson(extended.runDir), target = parked.slices.find((slice) => slice.id === "be-thing");
+        const future = parked.slices.find((slice) => slice.id === "future");
+        assert.deepEqual({ status: parked.status, reason: parked.terminal_result.reason, max: parked.max_retries,
+          target: [target.status, target.attempts, target.extra_attempts ?? 0, target.evidence_ref, target.review_ref],
+          future: [future.status, future.attempts, future.extra_attempts ?? 0] }, {
+          status: "needs-human", reason: "blocked-after-retries", max: scope === "all" ? 2 : 1,
+          target: ["running", 2, scope === "slice" ? 1 : 0, null, null], future: ["pending", 1, 0],
+        });
+        assert.equal(parked.retry_extensions.at(-1).scope, scope);
+        assert.equal(existsSync(join(extended.runDir, "reviews", "be-thing.attempt-1.json")), true);
+        assert.equal(existsSync(join(extended.runDir, "evidence", "be-thing.attempt-1.json")), true);
+        assert.equal(factory(extended.repo, ["status", RUN]).out.park_snapshot, null, "the pre-grant snapshot is invalidated");
+        if (scope === "slice") {
+          const lostSandbox = `${extended.repo}.lost`;
+          renameSync(extended.repo, lostSandbox);
+          const staleRestore = factory(extended.operator, ["restore", RUN, "--from", "refs/remotes/origin/feature"]);
+          assert.equal(staleRestore.ok, false);
+          assert.match(staleRestore.stderr, /park snapshot .* is not observable/u);
+          assert.equal(existsSync(extended.repo), false, "restore cannot recreate a pre-grant generation");
+          renameSync(lostSandbox, extended.repo);
+        }
+        const beforeResume = readFileSync(join(extended.runDir, "run.json"), "utf8");
+        const replay = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
+          "--reason", "replay", "--session", "operator", "--now", NOW(8)]);
+        assert.equal(replay.ok, false);
+        assert.match(replay.stderr, /requires slice 'be-thing' blocked at effective retry limit 2/u);
+        assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), beforeResume);
+        const staleResume = factory(extended.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]);
+        assert.equal(staleResume.ok, false);
+        assert.match(staleResume.stderr, /requires a complete current park snapshot after grant-retry/u);
+        assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), beforeResume);
+        writeFileSync(join(extended.runDir, "WORKFLOW.md"), "stale staged workflow\n");
+        publishParkSnapshot(extended);
+        const staleWorkflowResume = factory(extended.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]);
+        assert.equal(staleWorkflowResume.ok, false);
+        assert.match(staleWorkflowResume.stderr, /requires a complete current park snapshot after grant-retry/u);
+        assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), beforeResume);
+        const qualifiedSnapshot = publishParkSnapshot(extended);
+        const auditRef = parked.retry_extensions.at(-1).review_ref;
+        const liveAudit = join(extended.runDir, auditRef), snapshotAudit = join(qualifiedSnapshot, auditRef);
+        const auditBytes = readFileSync(liveAudit), damaged = JSON.stringify({ ...JSON.parse(auditBytes), verdict: "APPROVE" });
+        writeFileSync(liveAudit, damaged);
+        const damagedPublish = factory(extended.repo, ["snapshot", RUN]);
+        assert.equal(damagedPublish.ok, false);
+        assert.match(damagedPublish.stderr, /invalid retry-extension bindings/u);
+        writeFileSync(snapshotAudit, damaged);
+        assert.equal(factory(extended.repo, ["status", RUN]).out.park_snapshot, null,
+          "matching live and snapshot corruption still fails semantic qualification");
+        const damagedResume = factory(extended.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]);
+        assert.equal(damagedResume.ok, false);
+        assert.match(damagedResume.stderr, /requires a complete current park snapshot after grant-retry/u);
+        writeFileSync(liveAudit, auditBytes); writeFileSync(snapshotAudit, auditBytes);
+        assert.equal(factory(extended.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]).ok, true);
+        const status = factory(extended.repo, ["status", RUN]).out;
+        assert.equal(status.status, "running");
+        assert.deepEqual(status.slices.map(({ id, retry_limit }) => [id, retry_limit]),
+          [["be-thing", 2], ["future", scope === "all" ? 2 : 1]]);
+      } finally { cleanupProject(extended); }
+    }
+
+    const repairs = project("grant-all-exhausted-repair", { maxRetries: 1, verify: "true",
+      paths: ["src/app/", "test/"], additionalSlices: [{
+        id: "merged-source", stack: "backend", paths: ["src/merged/"], depends_on: [], acceptance: ["AC2"], test_plan: [],
+      }] });
+    try {
+      const { head: startingHead, basePoint } = buildSlice(repairs.repo);
+      mkdirSync(join(repairs.repo, "test"), { recursive: true });
+      writeFileSync(join(repairs.repo, "test", "repair.test.js"), "// exhausted repair\n");
+      git(repairs.repo, "add", "test/repair.test.js");
+      git(repairs.repo, "commit", "-q", "-m", "exhausted repair");
+      const repairCommit = git(repairs.repo, "rev-parse", "HEAD");
+      const run = runJson(repairs.runDir), merged = run.slices.find((slice) => slice.id === "merged-source");
+      Object.assign(merged, { status: "merged", worktree: ".", branch: "feature", attempts: 1,
+        base_ref: basePoint, merge_commit: basePoint });
+      writeFileSync(join(repairs.runDir, "run.json"), `${JSON.stringify(run, null, 2)}
+`);
+      assert.equal(factory(repairs.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+      assert.equal(factory(repairs.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]).ok, true);
+      writeReview(repairs.runDir, "be-thing", repairCommit, { verdict: "REJECT" });
+      assert.equal(factory(repairs.repo, ["slice", RUN, "be-thing", "review", "--attempts", "1",
+        "--evidence-ref", "evidence/be-thing.json", "--review-ref", "reviews/be-thing.json", "--now", NOW(4)]).ok, true);
+      assert.equal(factory(repairs.repo, ["slice", RUN, "be-thing", "blocked", "--attempts", "1", "--now", NOW(5)]).ok, true);
+      const record = { record_id: `repair-${basePoint}-1`, introducing_merge: basePoint, attempt: 1,
+        starting_head: startingHead, trigger: { command: "true", timeout_ms: 900000 },
+        trigger_result: { observed: true, exit: 1 }, test_paths: ["test/repair.test.js"],
+        cause: "the integrated check exposed a distinct failure", property_outcome: "the property remains unchanged",
+        repair_commit: repairCommit, post_repair_result: { observed: true, exit: 1 }, status: "exhausted" };
+      mkdirSync(join(repairs.runDir, "artifacts"), { recursive: true });
+      writeFileSync(join(repairs.runDir, "artifacts", "post-merge-repairs.md"),
+        `${JSON.stringify({ version: 1, records: [record] }, null, 2)}
+`);
+      assert.equal(factory(repairs.repo, ["terminal", RUN, "needs-human", "--reason", "blocked-after-retries", "--now", NOW(6)]).ok, true);
+      publishParkSnapshot(repairs);
+      assert.equal(factory(repairs.repo, ["lock", RUN, "claim", "--session", "operator", "--branch", "feature"]).ok, true);
+      const before = readFileSync(join(repairs.runDir, "run.json"), "utf8");
+      const refused = factory(repairs.repo, ["grant-retry", RUN, "be-thing", "--scope", "all",
+        "--reason", "would move the global ceiling", "--session", "operator", "--now", NOW(7)]);
+      assert.equal(refused.ok, false);
+      assert.match(refused.stderr, /--scope all refuses an exhausted post-merge repair bound to the current run-wide limit/u);
+      assert.equal(readFileSync(join(repairs.runDir, "run.json"), "utf8"), before);
+    } finally { cleanupProject(repairs); }
   });
 
   it("governs manifests through seeded ownership while .gitignore stays privileged", () => {
@@ -1835,7 +2035,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), beforeRetry);
       const prematureBlock = factory(p.repo, ["slice", RUN, "be-two", "blocked", "--attempts", "1", "--now", NOW(11)]);
       assert.equal(prematureBlock.ok, false, "a merit REJECT below max_retries must open N+1, not block");
-      assert.match(prematureBlock.stderr, /cannot block before max_retries \(3\)/u);
+      assert.match(prematureBlock.stderr, /cannot block before effective retry limit \(3\)/u);
       assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), beforeRetry);
       const pendingDetour = factory(p.repo, ["slice", RUN, "be-two", "pending", "--attempts", "1", "--now", NOW(11)]);
       assert.equal(pendingDetour.ok, false, "review cannot detour through pending at the old attempt");
@@ -2270,7 +2470,7 @@ describe("what happens next", () => {
   const step = (agent, status) => ({ agent, status, attempts: 1, review_ref: null, evidence_ref: null });
   const slice = (id, status) => ({
     id, stack: "backend", depends_on: [], status,
-    worktree: status === "pending" ? null : ".", branch: status === "pending" ? null : id, attempts: 1,
+    worktree: status === "pending" ? null : ".", branch: status === "pending" ? null : id, attempts: status === "blocked" ? 3 : 1,
     paths: ["src/"], test_plan: ["npm test"], base_ref: status === "pending" ? null : "a".repeat(40),
     evidence_ref: null, review_ref: null, merge_commit: status === "merged" ? "b".repeat(40) : null,
   });

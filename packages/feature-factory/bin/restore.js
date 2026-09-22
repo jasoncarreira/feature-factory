@@ -91,13 +91,31 @@ function jsonAt(runDir, ref, description) {
 
 function safeReview(runDir, ref) { assertRegularRecord(runDir, ref, "review"); return readReview(runDir, ref); }
 function safeEvidence(runDir, ref, runId) { assertRegularRecord(runDir, ref, "evidence"); return readEvidence(runDir, ref, { runId }); }
+const fileDigest = (path) => `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+
+export function assertRetryExtensionBindings(runDir, run) {
+  for (const extension of run.retry_extensions ?? []) {
+    const slice = run.slices.find((entry) => entry.id === extension.slice_id), priorAttempt = extension.attempt - 1;
+    const review = safeReview(runDir, extension.review_ref), evidence = safeEvidence(runDir, extension.evidence_ref, run.run_id);
+    if (fileDigest(join(runDir, extension.review_ref)) !== extension.review_sha256
+      || fileDigest(join(runDir, extension.evidence_ref)) !== extension.evidence_sha256) {
+      throw new RestoreError(`retry extension for slice '${extension.slice_id}' archive digest does not match`);
+    }
+    if (!slice || slice.base_ref !== extension.base_ref || review.subject !== slice.id || review.attempt !== priorAttempt || review.verdict !== "REJECT"
+      || evidence.subject !== slice.id || evidence.attempt !== priorAttempt || evidence.base_ref !== extension.base_ref
+      || evidence.commit !== review.reviewed_commit) {
+      throw new RestoreError(`retry extension for slice '${extension.slice_id}' does not bind its rejected attempt archives`);
+    }
+  }
+}
 
 function transformRun(source, at, head, worktree, sourceRunDir) {
   const resetSlices = [];
   const slices = source.slices.map((slice) => {
     if (["merged", "blocked"].includes(slice.status)) return slice.status === "merged" ? { ...slice, worktree: null } : { ...slice, worktree: null, branch: null, evidence_ref: null, review_ref: null, merge_commit: null };
     if (slice.status !== "pending" || [slice.worktree, slice.branch, slice.base_ref, slice.evidence_ref, slice.review_ref, slice.merge_commit].some((value) => value !== null)) resetSlices.push(slice.id);
-    return { ...slice, status: "pending", worktree: null, branch: null, base_ref: null, evidence_ref: null, review_ref: null, merge_commit: null };
+    const retryBase = source.retry_extensions?.some((entry) => entry.slice_id === slice.id) ? slice.base_ref : null;
+    return { ...slice, status: "pending", worktree: null, branch: null, base_ref: retryBase, evidence_ref: null, review_ref: null, merge_commit: null };
   });
   const invalidated = [];
   const verifierState = source.steps.some((step) => step.agent === "test-verifier" && (step.status === "accepted" || step.review_ref || step.evidence_ref))
@@ -176,6 +194,7 @@ function qualifySource(operatorRoot, runId) {
   const bytes = readFileSync(manifest), run = validateRun(JSON.parse(bytes.toString("utf8")));
   if (run.run_id !== runId) throw new RestoreError(`park snapshot run_id '${run.run_id}' does not match requested '${runId}'`);
   if (run.status !== "needs-human") throw new RestoreError(`factory restore requires a needs-human snapshot; found '${run.status}'`);
+  assertRetryExtensionBindings(source, run);
   const entries = inventoryEntries(source), skipped = [...SKIPPED_ENTRIES];
   return { source, bytes, run, inventory: JSON.stringify(entries),
     copied: JSON.stringify(entries.filter((entry) => !skipped.some((name) => entry.startsWith(`${name} `) || entry.startsWith(`${name}/`)))) };

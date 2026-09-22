@@ -215,6 +215,35 @@ either record, park top-level `needs-human` through the common procedure instead
 N+1. This rule is instruction rather than CLI enforcement: the host owns specialist invocation errors, while
 the CLI continues to enforce every durable attempt transition the driver actually records.
 
+### Operator-authorized retry extension
+
+A slice that reached its effective retry limit remains terminal until an operator explicitly grants exactly
+one more attempt. Never edit `run.json`. Keep the top-level run in its existing parked state, claim and verify its
+fresh session lock, record a concrete reason why N+1 is now bounded and materially different, and choose one
+scope deliberately:
+
+```sh
+factory grant-retry "$R" "$SLICE_ID" --scope slice --reason "$EXTENSION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"
+factory grant-retry "$R" "$SLICE_ID" --scope all --reason "$EXTENSION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"
+```
+
+`slice` raises only that slice's additive allowance. `all` raises the run-wide default, including every
+pending later wave, but still reopens only `SLICE_ID`; it refuses while another slice is blocked or an
+exhausted post-merge repair exists. Both scopes require `blocked@N` exactly at the current effective limit;
+a matching REJECT, evidence, immutable base and live clean branch head; the exact fresh lock owner; a
+complete current park snapshot; and immutable attempt-N review and evidence archives. A legacy run missing
+an archive gets a preparation-only refusal: publish the changed plane and invoke the grant again. They
+append the durable authorization, preserve worktree, branch and `base_ref`, clear only the live attempt-bound
+refs, and record `running@(N+1)` while top-level status and `terminal_result` remain parked.
+
+The grant atomically moves the old canonical snapshot away so restore cannot recover pre-grant authority.
+Do not dispatch or resume yet. Republish the updated live plane, then require qualified status
+to report the refreshed `park_snapshot`, unchanged owner, the chosen new effective limit, and only the named
+slice at `running@(N+1)`. Only then run the ordinary explicit
+`factory resume "$R" --session "$SESSION_ID" --repo "$RUN_REPO"` and dispatch that attempt. Resume refreshes
+the staged workflow before its final snapshot check. A grant never invokes a specialist, unlocks, resumes,
+approves, merges, or publishes.
+
 ## The chain
 
 ```
@@ -404,12 +433,11 @@ and "clean up the prior copy" are contradictory instructions once that rename ha
    outside `P`; do not copy slice worktrees or any other part of `S`.
 3. **Verify.** Build source and destination inventories exactly as the completed archive does — every
    entry's relative path, type and mode, a SHA-256 for each regular file, a link target for each symlink,
-   sorted lexically — and require exact equality, **excluding the plane-root `factory.lock` only**. That
-   one entry is session liveness rather than run state and is the only thing in the plane designed to
-   change on a timer, so comparing it fails whenever a heartbeat lands between reading the source and
-   reading the copy. The exclusion is that exact path and nothing else: a `factory.lock` anywhere below
-   the plane root is run state and must match. Qualified status excludes the same single path for the same
-   reason. An unverified staging tree is never published.
+   sorted lexically — and require exact equality, excluding only plane-root `factory.lock` and
+   `run-json.lock`. The first is session liveness and can change on a timer; the second is held by the
+   snapshot command to serialize publication with state transitions. The exclusions are those exact root
+   paths and nothing else: either name below the plane root is run state and must match. Qualified status
+   applies the same exact exclusions at a transition boundary. An unverified staging tree is never published.
 4. **Commit.** With no snapshot at the canonical path, rename `.staging-$R` onto it; that rename is the
    commit point. With one present, first rename the canonical snapshot to `.prior-$R`, then rename
    `.staging-$R` onto the canonical path; that second rename is the commit point. If the first rename
@@ -1421,11 +1449,16 @@ For a fresh pending slice, set the exact names, require both `refs/heads/$SLICE_
 `SLICE_WORKTREE` path to be absent, and create the worktree from the current feature branch before
 activation:
 
+Before creating a pending slice worktree, reload its exact manifest row. Bind `ACTIVATION_START` to
+`FEATURE_BRANCH` when `base_ref` is null. When a restored retry-extension row preserves non-null `base_ref`,
+require its latest audit to name the same base and start the replacement slice branch at that exact historical
+base. This recreates the original retry branch without importing later sibling changes into its owned diff.
+
 ```sh
 SLICE_BRANCH="factory/$R/$SLICE_ID"
 SLICE_WORKTREE="$SLICE_ROOT/$SLICE_ID"
 CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
-git -C "$RUN_REPO" worktree add -b "$SLICE_BRANCH" "$SLICE_WORKTREE" "$FEATURE_BRANCH"
+git -C "$RUN_REPO" worktree add -b "$SLICE_BRANCH" "$SLICE_WORKTREE" "$ACTIVATION_START"
 $ factory slice "$R" "$SLICE_ID" running --worktree "$SLICE_WORKTREE" --branch "$SLICE_BRANCH" --repo "$RUN_REPO"
 ```
 
@@ -1440,6 +1473,7 @@ Step 0. Require `run_id === R`, select exactly one `slices` row with `id === SLI
 ```text
 RECORDED_SLICE = parsedRun.slices row whose id equals SLICE_ID
 MAX_RETRIES = parsedRun.max_retries
+SLICE_RETRY_LIMIT = MAX_RETRIES + (RECORDED_SLICE.extra_attempts when present, otherwise 0)
 SLICE_WORKTREE = RECORDED_SLICE.worktree
 SLICE_BRANCH = RECORDED_SLICE.branch
 SLICE_BASE_REF = RECORDED_SLICE.base_ref
@@ -1453,13 +1487,14 @@ for it. A driver that assumes "this is the first try" observes as attempt 1 whil
 merge then refuses that evidence — `evidence '…' is for attempt 1, slice is at attempt 2` — after the build
 and the review have already been spent. It names the report and the `--attempt` argument below.
 
-Require every bound value to be non-null, `MAX_RETRIES` and `SLICE_ATTEMPT` to be positive integers,
+Require every bound value to be non-null, `MAX_RETRIES`, `SLICE_RETRY_LIMIT`, and `SLICE_ATTEMPT` to be positive integers,
 `SLICE_BASE_REF` to be a 40-character commit SHA, `SLICE_BRANCH` to equal `factory/R/<slice-id>`, and the
 physical `SLICE_WORKTREE` to equal `SLICE_ROOT/<slice-id>`. Require `git -C "$RUN_REPO" worktree list
 --porcelain` to associate that physical path with that exact branch. Before dispatch or observation require
 status `running`. A `review` row is a completed decision checkpoint: on resume consume its recorded review
-through step 4, never re-observe it. A pending slice requires both path and ref to remain absent; an
-unrecorded existing path or ref is a collision. Refuse every mismatch instead of repairing, deleting, or
+through step 4, never re-observe it. A pending slice requires path and branch ref to remain absent. Its
+base is absent unless a restored retry-extension audit preserves that immutable base; any unrecorded path
+or branch ref is a collision. Refuse every mismatch instead of repairing, deleting, or
 reassociating it. A merged slice is never dispatched again.
 
 For a non-empty `SLICE_TEST_PLAN`, select one complete entry and bind `SLICE_TEST_COMMAND` by copying
@@ -1552,11 +1587,14 @@ Per slice:
      Only a complete merit REJECT spends an attempt; infrastructure recovery and resume preserve
      `SLICE_ATTEMPT` under the common rules above. Reload `RUN_MANIFEST`, require the recorded review to name
      this slice and `SLICE_ATTEMPT` with exact verdict `REJECT`, and require the row still to be `review`.
-     If `SLICE_ATTEMPT >= MAX_RETRIES`, record the terminal slice state and stop dispatching its
+     If `SLICE_ATTEMPT >= SLICE_RETRY_LIMIT`, record the terminal slice state and stop dispatching its
      dependents without creating another attempt:
      ```sh
      $ factory slice "$R" "$SLICE_ID" blocked --attempts "$SLICE_ATTEMPT" --repo "$RUN_REPO"
      ```
+     Then enter the common parked-stop procedure with exact reason `blocked-after-retries`; do not
+     terminalize `partial`. The parked snapshot and retained lock are what make a later audited grant
+     reachable without weakening the terminal slice transition.
      Otherwise bind `NEXT_SLICE_ATTEMPT = SLICE_ATTEMPT + 1` and, before redispatch, record:
      ```sh
      $ factory slice "$R" "$SLICE_ID" running --attempts "$NEXT_SLICE_ATTEMPT" --repo "$RUN_REPO"
@@ -1883,10 +1921,12 @@ content on those paths matches what was reviewed, so unreviewed content inside *
 while movement around it is not. What guards the branch as a whole is the integration pass: the
 validator judges the whole diff and Gate 3 will not approve unless the head it judged is still the head.
 
-Advance waves until all slices are `merged`, or a slice is `blocked`. If some merged and others
-blocked, the run is `partial`. A `partial` run is **surfaced, not published**: stop rather than pushing on,
-and record a terminal decision only through the checked terminal command.
-Use terminal needs-human only to park a running envelope; use explicit factory resume after the cause is fixed.
+Advance waves until all slices are `merged`, or a slice is `blocked`. A blocked slice stops the wave and
+enters the common parked-stop procedure as top-level `needs-human`; retry exhaustion never terminalizes the
+run as `partial`. Use explicit factory resume only after the cause is fixed or a qualified retry grant was
+recorded and the updated plane was published. Use terminal needs-human only to park a running envelope; use explicit factory resume after the cause is fixed.
+A `partial` run is **surfaced, not published** when some other checked terminal cause creates one; retry
+exhaustion uses the parked path above instead.
 A top-level needs-human sandbox stays retained while parked and continues only after explicit factory resume.
 A `blocked` or `partial` sandbox run retains `RUN_REPO`; stale nonterminal locks retain it
 too. Nothing removes any of those sandboxes automatically. Legacy runs
@@ -2406,11 +2446,11 @@ Never re-do a side effect the manifest shows already done — ticket creation, p
   Specialists are read-only toward them and builders write code only inside the worktree they receive.
 - **Never hand-write `run.json`.** If a `factory` command refuses a transition, the refusal is the
   answer; do not work around it by editing state.
-- **Bounded loops.** `max_retries` per slice and per step, recorded as attempts. On exhaustion mark
-  `blocked` or `partial` with a reason and stop. A bounded loop parks top-level needs-human; explicit resume may repark it if the external cause remains unfixed.
-  Qualified status reports the run's `max_retries`, so the budget a run is actually bounded by is
-  observable rather than assumed: a forwarded `--max-retries` that never reached the manifest is visible
-  as a different number instead of silently running at the default.
+- **Bounded loops.** Each slice is bounded by `max_retries + extra_attempts`; each step uses
+  `max_retries`. On slice exhaustion mark it `blocked` and park top-level needs-human; do not terminalize
+  `partial` solely for retry exhaustion. Explicit resume may repark if the external cause remains unfixed.
+  Qualified status reports the run's `max_retries` and each slice's effective `retry_limit`, so an
+  extended budget is observed rather than assumed.
 - **Publish a PR and stop.** Never merge, force-push, or close tickets. Humans merge. Draft or
   ready-for-review is `pr_draft`'s decision, not this rule's.
 - **Scope discipline and no fabrication.** Flag out-of-scope work at the next gate. Never invent paths,
