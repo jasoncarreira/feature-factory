@@ -1376,6 +1376,22 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     assert.notEqual(inventory(twin, liveness), inventory(plane, liveness),
       "a differing tracked file must fail the comparison");
 
+    // Review finding: publication must accept only what `restore` will later read. restore refuses a
+    // parked manifest that is a symlink or resolves elsewhere, so publishing one would report recovery
+    // evidence its only consumer can never consume -- a snapshot that fails exactly when it is needed.
+    const elsewhere = join(snapRoot, "elsewhere.json");
+    writeFileSync(elsewhere, readFileSync(join(plane, "run.json")));
+    rmSync(join(plane, "run.json"));
+    symlinkSync(elsewhere, join(plane, "run.json"));
+    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /must be a regular file/u,
+      "a symlinked manifest must not be published");
+    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`)), false,
+      "the refusal stages nothing");
+    assert.equal(readFileSync(join(canonical, "artifacts", "brief.md"), "utf8"), "revised\n",
+      "the refusal leaves the previously published snapshot untouched");
+    rmSync(join(plane, "run.json"));
+    writeFileSync(join(plane, "run.json"), JSON.stringify({ run_id: runId, status: "needs-human" }));
+
     assert.throws(() => dispatchSnapshot([runId], { repo: join(snapRoot, "absent") }), /is not observable/u);
     assert.throws(() => dispatchSnapshot([], { repo: snapRoot }), /exactly one valid run id/u);
   } finally {

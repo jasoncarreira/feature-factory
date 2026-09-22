@@ -6,7 +6,7 @@
 // the plane is worse than none -- `status` reports a path, an operator believes the run is recoverable,
 // and the copy is found partial only when it is needed -- so verify-before-commit cannot be delegated to
 // prose for a caller that is not the driver.
-import { mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CONTROL_PLANE } from "../state/schema.js";
 import { copySnapshot, entryState, inventory } from "./restore.js";
@@ -41,11 +41,18 @@ export function dispatchSnapshot(positional, flags) {
   const operatorRoot = resolve(flags.repo ?? process.cwd());
   const plane = join(operatorRoot, CONTROL_PLANE, runId);
   if (!entryState(plane)) throw new SnapshotError(`control plane '${plane}' is not observable`);
-  if (!entryState(join(plane, "run.json"))) throw new SnapshotError(`run manifest for '${runId}' is not observable`);
+  // Matched to what `restore` will accept, not merely to what exists: restore refuses a parked manifest
+  // that is a symlink or resolves elsewhere, so publishing one would report recovery evidence its only
+  // consumer can never read -- a snapshot that fails exactly when it is needed.
+  const manifest = join(plane, "run.json");
+  const manifestState = entryState(manifest);
+  if (!manifestState?.isFile() || manifestState.isSymbolicLink() || realpathSync(manifest) !== manifest) {
+    throw new SnapshotError(`run manifest for '${runId}' must be a regular file to publish a snapshot`);
+  }
 
   // Refused rather than permitted: a snapshot of a live plane records a moment no resume can return to,
   // and reporting it as recovery evidence would be a claim the bytes do not support.
-  const run = JSON.parse(readFileSync(join(plane, "run.json"), "utf8"));
+  const run = JSON.parse(readFileSync(manifest, "utf8"));
   if (run.status !== "needs-human") {
     throw new SnapshotError(`factory snapshot requires a parked run; '${runId}' is '${run.status}'`);
   }
