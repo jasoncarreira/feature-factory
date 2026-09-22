@@ -114,8 +114,35 @@ not preserve error origin, classification is unknown. A partial stream followed 
 error is not a completed response: discard it as a result, but assume execution may have started.
 Authentication, authorization, quota, rate-limit, invalid-request, context-limit, content-policy,
 cancellation, local configuration, and unknown failures are not confirmed retryable infrastructure
-failures, even if another field contains an eligible status or phrase. If they return no complete response, preserve the current attempt and enter the existing
-parked-stop procedure immediately instead of retrying or treating them as rejected work.
+failures, even if another field contains an eligible status or phrase. If they return no complete
+response, preserve the current attempt and take the common infrastructure-park sequence above
+immediately, with that branch's bounded reason, instead of retrying or treating them as rejected work.
+
+**Every infrastructure-triggered park follows one sequence**, written here once because three branches
+below reach it and three restatements of it would drift apart: quiesce every outstanding specialist, tool
+and heartbeat call; preserve the same durable attempt; enter the existing
+top-level needs-human parked-stop procedure with the bounded reason its branch names;
+attempt the parked snapshot; release the
+owner and verify the lock absent with a null owner **whether or not that snapshot published**; then
+report the retained sandbox through step 3 of that procedure. An unlock failure is the existing
+`Outcome: retained-lock-error` with its actual status, terminal result, lock state and error.
+
+Release is not conditional on the snapshot, because the shared procedure already permits recording a
+snapshot failure in the report rather than blocking the park -- so a run that cannot publish one would
+otherwise stay locked as well as unrecoverable, which is the worse of the two failures.
+
+Each branch names one bounded reason and no other text. **Never** put the provider error, response
+fragment, URL, credential, token, diagnostics, or any host-supplied string into it: the reason persists
+into `run.json`, into the parked snapshot, and into the operator report, so an error string carrying a
+token would be copied into all three.
+
+| branch | exact reason |
+|---|---|
+| excluded or non-transport failure returning no complete response | `specialist invocation failed with a non-retryable error for <role> on <subject>; inspect the host invocation log before resume` |
+| unknown outcome with neither safe path available | `specialist infrastructure outcome unknown for <role> on <subject>; confirm whether work started before resume` |
+| second consecutive confirmed failure for the same key | `specialist infrastructure failed twice consecutively for <role> on <subject>; retry after provider or network recovery` |
+
+`<role>` and `<subject>` are the run's own recorded values, not host text.
 
 For each active invocation key — exact specialist role, exact workflow subject or slice, and the current
 persisted attempt number when that subject is budgeted — hold the count described below. Use an
@@ -136,17 +163,13 @@ only through one of these two safe paths:
    worktree; never create a second child for the logical attempt and never repeat successful siblings in a
    parallel wave.
 
-If neither path is available, the outcome is unknown: preserve the same attempt and enter the parked-stop
-procedure immediately. For an unbudgeted research or design call, these rules still permit at most one
+If neither path is available, the outcome is unknown: preserve the same attempt and take the common
+infrastructure-park sequence above immediately, with that branch's bounded reason. For an unbudgeted research or design call, these rules still permit at most one
 safe same-invocation recovery and create no durable progress record.
 
 On the second consecutive confirmed failure for the same key during that safe re-dispatch or recovery,
-do not invoke it again. Quiesce every outstanding specialist, tool, and heartbeat call, preserve the same
-durable attempt, and enter the existing top-level needs-human parked-stop procedure with the bounded
-reason `specialist infrastructure failed twice consecutively for <role> on <subject>; retry after provider
-or network recovery`. Never include the provider error, response fragment, URL, credential, token, or
-diagnostics in the reason. After the parked snapshot is published, release the owner and verify the lock
-absent, then report the retained sandbox through step 3 of the existing parked-stop procedure.
+do not invoke it again. Take the common infrastructure-park sequence above with that branch's bounded
+reason.
 
 An attempt advances only after a complete specialist response reaches the ordinary workflow and that
 response is rejected on its merits or violates the specialist's required output contract. Infrastructure

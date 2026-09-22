@@ -137,6 +137,20 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Each fragment sits on one line in the raw markdown. One spanning a line wrap could never
     // match, and would fail for a reason unrelated to the rule it guards.
     for (const instruction of [
+      // Instruction only: one park sequence for three branches, and one bounded reason each. Review found
+      // two branches entering the shared stop without quiescing or releasing, and a third conditioning
+      // release on the snapshot publishing -- which the shared procedure explicitly permits failing, so a
+      // run that could not publish one stayed locked too. Each reason row is pinned because an unbounded
+      // reason is how host error text reaches run.json, the snapshot and the operator report at once.
+      "**Every infrastructure-triggered park follows one sequence**, written here once because three branches",
+      "owner and verify the lock absent with a null owner **whether or not that snapshot published**; then",
+      "Release is not conditional on the snapshot, because the shared procedure already permits recording a",
+      "Each branch names one bounded reason and no other text. **Never** put the provider error, response",
+      "into `run.json`, into the parked snapshot, and into the operator report, so an error string carrying a",
+      "| excluded or non-transport failure returning no complete response | `specialist invocation failed with a non-retryable error for <role> on <subject>; inspect the host invocation log before resume` |",
+      "| unknown outcome with neither safe path available | `specialist infrastructure outcome unknown for <role> on <subject>; confirm whether work started before resume` |",
+      "| second consecutive confirmed failure for the same key | `specialist infrastructure failed twice consecutively for <role> on <subject>; retry after provider or network recovery` |",
+
       // Instruction only: which command publishes is an environment property, like the identity beside it.
       // Each selection branch is pinned separately, because review caught the first attempt stating
       // precedence in one paragraph while the execution paragraph still keyed on the file -- a literal
