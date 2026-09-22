@@ -650,6 +650,8 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       ["blocked reopen", activeSlice("blocked"), "running", 1, /already blocked/u],
       ["review to pending", activeSlice("review"), "pending", 1, /cannot return to pending/u],
       ["review blocks before max", activeSlice("review"), "blocked", 1, /cannot block before max_retries \(3\)/u],
+      ["running blocks at max", activeSlice("running", 3), "blocked", 3, /may block only from review/u],
+      ["pending blocks at max", activeSlice("pending", 3), "blocked", 3, /may block only from review/u],
       ["merged above max", activeSlice("review", 3), "merged", 4, /cannot exceed run\.max_retries \(3\)/u],
       ["blocked above max", activeSlice("review", 3), "blocked", 4, /cannot exceed run\.max_retries \(3\)/u],
     ]) {

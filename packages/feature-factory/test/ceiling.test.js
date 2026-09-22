@@ -1220,9 +1220,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // provenance, and publishes the transformed manifest last. The issue authorizes the 5200 tripwire.
     // 5182 -> 5192: `.factory.json` `publish` stops being a required key nobody runs. Optional does not
     // mean unchecked, so an empty or non-string command remains a loud refusal.
-    // 5192 -> 5237 for issue #352: a merit REJECT is the only slice event that spends N+1, retries retain
+    // 5192 -> 5240 for issue #352: a merit REJECT is the only slice event that spends N+1, retries retain
     // their original base across sibling merges, and wrong-attempt evidence refuses before publication.
-    assert.equal(total, 5237, "bounded slice merit retries land at 5237 production lines");
+    assert.equal(total, 5240, "bounded slice merit retries land at 5240 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

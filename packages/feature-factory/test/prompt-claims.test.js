@@ -117,6 +117,7 @@ const NEEDS_HUMAN_PROSE = [
   ["bootstrap-resume-parked", "For configured order 7, the CLI binds the exact raw `run.json` bytes, the validated parked manifest, a forward `updated_at`, and the exact fresh owner before running bootstrap while durable status remains `needs-human`.", "bootstrap changes durable status before execution"],
   ["bootstrap-resume-failure", "An ordinary failure with intact bindings records the exact command and integer or `null` result, advances `updated_at`, remains `needs-human`, preserves progress and the historical result, and refuses; a later explicit resume reruns bootstrap.", "discards the historical result"],
   ["malformed-slice-output", "either record, park top-level `needs-human` through the common procedure instead of fabricating authority for", "continue at N+1"],
+  ["slice-plan-conflict", "top-level `needs-human` through the common procedure with the diagnosis below.", "mark the slice blocked"],
   ["identity-park", "factory terminal \"$R\" needs-human --reason <REASON_TOKEN> --repo \"$RUN_REPO\"", "completed"],
   ["identity-report", "Only after all of those steps succeed report the parked run, `RUN_REPO`, `Status: needs-human`, the exact", "final"],
   ["malformed-evidence", "Malformed verification evidence parks top-level needs-human; fix the evidence source and explicitly resume without editing evidence or run.json.", "malformed evidence makes the run final"],
