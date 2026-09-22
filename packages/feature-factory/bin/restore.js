@@ -24,9 +24,9 @@ function exactDirectory(path, description) {
   if (stat.isSymbolicLink() || !stat.isDirectory() || realpathSync(path) !== path) throw new RestoreError(`${description} '${path}' is not an exact canonical directory`);
 }
 
-function entryState(path) { try { return lstatSync(path); } catch (error) { if (error?.code === "ENOENT") return null; throw error; } }
+export function entryState(path) { try { return lstatSync(path); } catch (error) { if (error?.code === "ENOENT") return null; throw error; } }
 
-function inventoryEntries(root, skipped = new Set()) {
+export function inventoryEntries(root, skipped = new Set()) {
   const entries = [];
   const visit = (relative, full) => {
     if (skipped.has(relative)) return;
@@ -41,11 +41,11 @@ function inventoryEntries(root, skipped = new Set()) {
   visit(".", root);
   return entries.sort();
 }
-const inventory = (root, skipped = new Set()) => JSON.stringify(inventoryEntries(root, skipped));
+export const inventory = (root, skipped = new Set()) => JSON.stringify(inventoryEntries(root, skipped));
 
-function copySnapshot(source, target) {
+export function copySnapshot(source, target, skipped = SKIPPED_ENTRIES) {
   const copy = (relative, from, to) => {
-    if (SKIPPED_ENTRIES.has(relative)) return;
+    if (skipped.has(relative)) return;
     const stat = lstatSync(from), mode = stat.mode & 0o7777, present = entryState(to);
     if (stat.isDirectory()) {
       if (present && (present.isSymbolicLink() || !present.isDirectory())) throw new RestoreError(`restore target '${to}' has an unsafe type`);

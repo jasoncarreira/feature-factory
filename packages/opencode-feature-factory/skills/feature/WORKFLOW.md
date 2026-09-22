@@ -379,6 +379,12 @@ sandbox: the completed handoff is the only thing that archives it, and that hand
 `completed`. So anything that removed the sandbox destroyed the manifest, the approved gates, the ratified
 plan and every review verdict, leaving the run neither resumable nor reconstructable.
 
+`factory snapshot "$R" --repo "$O" --json` performs this publication and is the supported way to do it.
+The steps below remain the definition of what it does; a driver may run the command instead of carrying
+them out itself, and a supervisor that parked a run out-of-band **must** run it, because `factory
+terminal` alone completes step 1 of the park and leaves no recovery evidence. It refuses a run that is
+not parked, so it cannot record a live plane as a snapshot of a moment no resume can return to.
+
 Publish the live plane `P` to `$O/.factory/.parked/$R`. Inspect `$O/.factory` and `$O/.factory/.parked` with
 non-following metadata reads, creating each missing parent one directory at a time and requiring any present
 one to be a real directory rather than a symbolic link. Never write through a symlinked parent, and never

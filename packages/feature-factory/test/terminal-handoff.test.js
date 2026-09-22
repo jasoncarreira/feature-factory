@@ -1301,4 +1301,84 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   } finally {
     for (const fixture of fixtures) rmSync(fixture.root, { recursive: true, force: true });
   }
+
+  // `factory snapshot` publishes the parked control-plane snapshot. Bound to this site rather than a new
+  // one: the park sequence it completes is what this test already covers. Built inline because these need
+  // a plane whose status is `needs-human`, which the handoff fixtures above deliberately are not.
+  const { dispatchSnapshot } = await import("../bin/snapshot.js");
+  const snapRoot = realpathSync(mkdtempSync(join(tmpdir(), "factory-snapshot-")));
+  try {
+    const runId = "chainlink-snap";
+    const plane = join(snapRoot, ".factory", runId);
+    mkdirSync(join(plane, "artifacts"), { recursive: true });
+    const manifest = (status) => writeFileSync(join(plane, "run.json"), JSON.stringify({ run_id: runId, status }));
+    writeFileSync(join(plane, "artifacts", "brief.md"), "brief\n");
+    symlinkSync("brief.md", join(plane, "artifacts", "brief-link"));
+    writeFileSync(join(plane, "factory.lock"), JSON.stringify({ heartbeat_at: "one" }));
+
+    // Refused on a live plane: a snapshot of a running run records a moment no resume can return to.
+    manifest("running");
+    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /requires a parked run/u,
+      "a live plane must not be recorded as recovery evidence");
+    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", runId)), false, "a refusal publishes nothing");
+
+    manifest("needs-human");
+    const first = dispatchSnapshot([runId], { repo: snapRoot });
+    const canonical = join(snapRoot, ".factory", ".parked", runId);
+    assert.equal(first.park_snapshot, canonical);
+    assert.equal(readFileSync(join(canonical, "artifacts", "brief.md"), "utf8"), "brief\n");
+    assert.equal(lstatSync(join(canonical, "artifacts", "brief-link")).isSymbolicLink(), true,
+      "symlinks are copied as symlinks, not followed");
+    assert.equal(existsSync(join(canonical, "factory.lock")), false,
+      "the plane-root lock is session liveness and is not copied");
+
+    // The exclusion is what makes publication survive a heartbeat landing mid-copy. Control: the lock now
+    // differs from the one present at the first publication, and publication still succeeds.
+    writeFileSync(join(plane, "factory.lock"), JSON.stringify({ heartbeat_at: "two" }));
+    writeFileSync(join(plane, "artifacts", "brief.md"), "revised\n");
+    const second = dispatchSnapshot([runId], { repo: snapRoot });
+    assert.equal(second.residual, null, "a completed publication reports no residual");
+    assert.equal(readFileSync(join(canonical, "artifacts", "brief.md"), "utf8"), "revised\n",
+      "the second publication replaced the canonical snapshot");
+    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.prior-${runId}`)), false,
+      "the prior copy is cleaned up after the commit point");
+    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`)), false,
+      "no staging tree survives a completed publication");
+
+    // Preflight: a residual staging tree stops before anything is staged, because publishing over an
+    // unknown residual would make the rollback path ambiguous.
+    mkdirSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`), { recursive: true });
+    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /residual staging tree/u);
+    rmSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`), { recursive: true, force: true });
+
+    // A residual `.prior-$R` is the trace of an unfinished cleanup, not a snapshot to preserve.
+    mkdirSync(join(snapRoot, ".factory", ".parked", `.prior-${runId}`), { recursive: true });
+    assert.equal(dispatchSnapshot([runId], { repo: snapRoot }).park_snapshot, canonical);
+    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.prior-${runId}`)), false,
+      "preflight removes the residual rather than publishing around it");
+
+    // The publication gate is an inventory comparison, so control the comparison rather than contriving a
+    // failed copy: trees differing only in the plane-root lock must compare equal, and trees differing in
+    // any real file must not. A publication that could not tell those apart would publish a partial copy
+    // and report a path an operator would trust.
+    const { inventory } = await import("../bin/restore.js");
+    const liveness = new Set(["factory.lock"]);
+    const twin = join(snapRoot, "twin");
+    mkdirSync(twin, { recursive: true });
+    writeFileSync(join(twin, "run.json"), readFileSync(join(plane, "run.json")));
+    writeFileSync(join(twin, "factory.lock"), JSON.stringify({ heartbeat_at: "different" }));
+    mkdirSync(join(twin, "artifacts"), { recursive: true });
+    writeFileSync(join(twin, "artifacts", "brief.md"), readFileSync(join(plane, "artifacts", "brief.md")));
+    symlinkSync("brief.md", join(twin, "artifacts", "brief-link"));
+    assert.equal(inventory(twin, liveness), inventory(plane, liveness),
+      "a differing plane-root lock must not fail the comparison");
+    writeFileSync(join(twin, "artifacts", "brief.md"), "diverged\n");
+    assert.notEqual(inventory(twin, liveness), inventory(plane, liveness),
+      "a differing tracked file must fail the comparison");
+
+    assert.throws(() => dispatchSnapshot([runId], { repo: join(snapRoot, "absent") }), /is not observable/u);
+    assert.throws(() => dispatchSnapshot([], { repo: snapRoot }), /exactly one valid run id/u);
+  } finally {
+    rmSync(snapRoot, { recursive: true, force: true });
+  }
 });

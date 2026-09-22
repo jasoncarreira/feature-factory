@@ -28,7 +28,7 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
-  "init", "status", "amend-paths", "resume", "restore", "decide", "lock", "heartbeat", "gate", "step", "terminal",
+  "init", "status", "amend-paths", "resume", "restore", "snapshot", "decide", "lock", "heartbeat", "gate", "step", "terminal",
   "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push",
 ];
 
@@ -114,6 +114,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS.restore, ["--repo", "--from", "--now", "--json"]);
+    assert.deepEqual(COMMANDS.snapshot, ["--repo", "--json"]);
     assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS["reverify-repair"], ["--repo", "--now", "--json"]);
     assert.deepEqual(COMMANDS["effective-push"], []);
@@ -1218,7 +1219,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // provenance, and publishes the transformed manifest last. The issue authorizes the 5200 tripwire.
     // 5182 -> 5192: `.factory.json` `publish` stops being a required key nobody runs. Optional does not
     // mean unchecked, so an empty or non-string command remains a loud refusal.
-    assert.equal(total, 5192, "optional publish configuration lands at 5192 production lines");
+    // 5192 -> 5302 for issue #353: publishing a parked snapshot was specified only as driver prose, so a
+    // supervisor that parks a run it is not driving -- which `factory terminal` deliberately permits --
+    // could complete step 1 of the three-step park and nothing else. The cost is the five-phase swap:
+    // preflight, stage, verify by inventory equality, the two-rename commit with rollback, and cleanup
+    // that reports a residual rather than failing a completed publication. The issue authorizes 5350.
+    assert.equal(total, 5302, "publishing a parked snapshot lands at 5302 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1251,7 +1257,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // the work that needed that room has now landed and the cap should tighten back toward the record.
     // Issue #343 authorizes 4900 -> 5200 for snapshot restore, including source/destination binding,
     // Git provenance, explicit loss reporting, and atomic publication. The issue body records the approval.
-    assert.ok(total <= 5200, `production source is ${total} lines; the tripwire is 5200`);
+    // Issue #353 authorizes 5200 -> 5350 for the snapshot publisher. The issue body records the approval,
+    // written before the work; 5350 is a cap, not a target, and nothing was padded or trimmed to reach it.
+    assert.ok(total <= 5350, `production source is ${total} lines; the tripwire is 5350`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
