@@ -34,36 +34,34 @@ function preflight(staging, prior) {
   }
 }
 
-export function dispatchSnapshot(positional, flags) {
+// Applied to the live plane before staging and to the staged tree before the commit. The same schema and
+// the same identity the consumer enforces: `restore` rejects a manifest that fails either, so a snapshot
+// carrying one is recovery evidence its only reader refuses. Refused rather than permitted for a live
+// plane too -- a snapshot of a running run records a moment no resume can return to.
+function qualifyManifest(dir, runId, description) {
+  const manifest = join(dir, "run.json"), state = entryState(manifest);
+  if (!state?.isFile() || state.isSymbolicLink() || realpathSync(manifest) !== manifest) {
+    throw new SnapshotError(`${description} for '${runId}' must be a regular file to publish a snapshot`);
+  }
+  let run;
+  try { run = validateRun(JSON.parse(readFileSync(manifest, "utf8"))); }
+  catch (error) { throw new SnapshotError(`${description} for '${runId}' is not a valid run`, { cause: error }); }
+  if (run.run_id !== runId) throw new SnapshotError(`${description} names '${run.run_id}', not the requested '${runId}'`);
+  if (run.status !== "needs-human") {
+    throw new SnapshotError(`factory snapshot requires a parked run; '${runId}' is '${run.status}'`);
+  }
+  return run;
+}
+
+export function dispatchSnapshot(positional, flags, operations = {}) {
   if (positional.length !== 1 || !ID.test(positional[0])) throw new SnapshotError("factory snapshot requires exactly one valid run id");
   if (flags.repo !== undefined && (typeof flags.repo !== "string" || !flags.repo.trim())) throw new SnapshotError("--repo must name a directory");
   const runId = positional[0];
   const operatorRoot = resolve(flags.repo ?? process.cwd());
   const plane = join(operatorRoot, CONTROL_PLANE, runId);
   if (!entryState(plane)) throw new SnapshotError(`control plane '${plane}' is not observable`);
-  // Matched to what `restore` will accept, not merely to what exists: restore refuses a parked manifest
-  // that is a symlink or resolves elsewhere, so publishing one would report recovery evidence its only
-  // consumer can never read -- a snapshot that fails exactly when it is needed.
-  const manifest = join(plane, "run.json");
-  const manifestState = entryState(manifest);
-  if (!manifestState?.isFile() || manifestState.isSymbolicLink() || realpathSync(manifest) !== manifest) {
-    throw new SnapshotError(`run manifest for '${runId}' must be a regular file to publish a snapshot`);
-  }
 
-  // Validated with the same schema `restore` applies, and required to name the run being published: the
-  // consumer rejects a manifest that fails either check, so publishing one would put evidence under
-  // `.parked/<requested>` that can never be restored. Checking only `status` left exactly that gap.
-  let run;
-  try { run = validateRun(JSON.parse(readFileSync(manifest, "utf8"))); }
-  catch (error) { throw new SnapshotError(`run manifest for '${runId}' is not a valid run`, { cause: error }); }
-  if (run.run_id !== runId) {
-    throw new SnapshotError(`run manifest names '${run.run_id}', not the requested '${runId}'`);
-  }
-  // Refused rather than permitted: a snapshot of a live plane records a moment no resume can return to,
-  // and reporting it as recovery evidence would be a claim the bytes do not support.
-  if (run.status !== "needs-human") {
-    throw new SnapshotError(`factory snapshot requires a parked run; '${runId}' is '${run.status}'`);
-  }
+  qualifyManifest(plane, runId, "run manifest");
 
   // Created one directory at a time, never written through a symlinked parent: the snapshot must land
   // under the operator's own control plane and nowhere a link could redirect it.
@@ -82,12 +80,15 @@ export function dispatchSnapshot(positional, flags) {
 
   let committed = false;
   try {
-    copySnapshot(plane, staging, LIVENESS);
+    (operations.copy ?? copySnapshot)(plane, staging, LIVENESS);
     // Verify before the commit point. An unverified staging tree is never published, so a copy that
     // raced a write is discarded rather than published as evidence of a run it does not describe.
     if (inventory(plane, LIVENESS) !== inventory(staging, LIVENESS)) {
       throw new SnapshotError("staged snapshot does not match the live control plane; nothing was published");
     }
+    // Equality alone cannot catch a manifest replaced between qualification and copy: both trees then
+    // hold the same unvalidated bytes and compare equal. Qualify what is about to be renamed.
+    qualifyManifest(staging, runId, "staged run manifest");
     if (!entryState(canonical)) {
       renameSync(staging, canonical);          // commit point, with no snapshot present
       committed = true;

@@ -1437,6 +1437,31 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     intact("a mismatched manifest damages nothing");
     writeFileSync(join(plane, "run.json"), good);
 
+    // Third review finding: qualifying the live plane and copying it later leaves a window. A manifest
+    // replaced in between is copied into staging, and inventory equality still passes because both trees
+    // then hold the same unvalidated bytes -- so equality alone cannot catch it. The copy seam stands in
+    // for that race deterministically: it performs the real copy, then swaps the staged manifest for one
+    // restore would reject.
+    const { copySnapshot } = await import("../bin/restore.js");
+    // The source is replaced, not the staged copy: that is the race, and it is why inventory equality
+    // cannot catch it -- both trees end up holding the same unvalidated bytes and compare equal.
+    const swap = (replacement) => (source, target, skipped) => {
+      writeFileSync(join(source, "run.json"), replacement);
+      copySnapshot(source, target, skipped);
+    };
+    assert.throws(
+      () => dispatchSnapshot([runId], { repo: snapRoot }, { copy: swap(JSON.stringify({ run_id: runId, status: "needs-human" })) }),
+      /staged run manifest for '.*' is not a valid run/u,
+      "a manifest swapped in after qualification must not be published");
+    intact("a swapped-in invalid manifest damages nothing");
+    writeFileSync(join(plane, "run.json"), good);
+    assert.throws(
+      () => dispatchSnapshot([runId], { repo: snapRoot }, { copy: swap(JSON.stringify({ ...seededRun, run_id: "chainlink-other", status: "needs-human", terminal_result: { status: "needs-human", reason: "b" } })) }),
+      /staged run manifest names 'chainlink-other'/u,
+      "a swapped-in manifest naming another run must not be published");
+    intact("a swapped-in mismatched manifest damages nothing");
+    writeFileSync(join(plane, "run.json"), good);
+
     assert.throws(() => dispatchSnapshot([runId], { repo: join(snapRoot, "absent") }), /is not observable/u);
     assert.throws(() => dispatchSnapshot([], { repo: snapRoot }), /exactly one valid run id/u);
   } finally {
