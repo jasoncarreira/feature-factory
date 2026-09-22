@@ -509,10 +509,13 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   required(publication, "effective boolean `pr_draft` as `PR_DRAFT`", "status policy binding");
   required(publication, "without rereading repository config", "status policy binding");
   for (const fragment of [
-    "The fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or",
+    "The fully qualified `git push` above is factory-owned and unchanged for every resolved publishing",
     "The second identity observation always runs after that",
     "run that exact selected string instead\nof only `gh pr create` above",
     "Add exactly five values to",
+    "selected publishing command outcome indeterminate; re-observe whether the pull request exists before retry",
+    "persist no other reason text. Never append or interpolate stdout, stderr, exit status or status text, URLs,",
+    "both Step 6 identity guards run for every resolved selection and",
     "do not run `factory pr`, and do not fall back to `gh pr create`",
     "Before any retry, re-observe whether the pull request exists",
   ]) {

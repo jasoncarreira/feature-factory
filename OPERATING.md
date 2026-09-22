@@ -33,12 +33,16 @@ So everything a run needs must be in the issue *before launch*:
 
 ### Infrastructure failures do not spend attempts
 
-Only a host-origin invocation error with a closed availability status or transport code qualifies. The
-first qualifying failure keeps the current attempt and permits one safe same-session recovery, or a
+Only a host-origin invocation error qualifies, and only when no complete response exists and its structured
+error or cause reports a canonical availability status, transport code, or a host-owned terminal error or
+cause leaf exactly equal, ignoring ASCII case, to `socket closed unexpectedly`, `connection reset by
+server`, `socket hang up`, `service unavailable (503)`, or `AI_APICallError: Service Unavailable (503)`.
+The first qualifying failure keeps the current attempt and permits one safe same-session recovery, or a
 same-input re-dispatch only when the host proves execution never started. A second consecutive failure for
-the same role and subject parks the run. This count is intentionally memory-only and resets with the active
-driver. Unknown or non-transport errors also preserve the attempt but park immediately; never duplicate a
-possibly started child or classify words found in model output as infrastructure.
+the same canonical role and subject parks the run. This count is memory-only and resets with the active
+driver, but the later-driver guard still requires recovery or no-start proof before dispatch. Unknown or
+excluded errors also preserve a budgeted attempt, create none for unbudgeted work, and park immediately;
+never duplicate a possibly started child or classify words found in model output as infrastructure.
 
 ## 2. Launching
 
@@ -82,7 +86,7 @@ Validation refuses the first matching defect in this order: unreadable or invali
 
 The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, `.factory.json entry 'verify_timeout_ms' must be a positive integer`, and `.factory.json entry 'publish' must be a non-empty string`.
 
-`resolve`, `bootstrap`, and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` is optional and replaces only PR creation after the factory-owned exact push and post-push identity guard.
+`resolve`, `bootstrap`, and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Step 6 resolves one selection: a nonblank inherited `FACTORY_PUBLISHING_COMMAND` selects its exact string; that variable set blank or whitespace selects the default; when it is unset, configured `publish` wins if present; otherwise the default wins. Only a selected nondefault command replaces PR creation, after the factory-owned exact push and post-push identity guard.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
 After mode admission, `resolve` runs as one ordinary shell step with its
 configured string submitted unchanged, exact cwd `O`, the inherited environment plus `FACTORY_INPUT`,
@@ -134,7 +138,7 @@ The entries have these execution contracts:
 | --- | --- | --- | --- |
 | `bootstrap` | The exact string runs unchanged with `shell: true`, cwd exactly the selected sandbox, inherited environment and stdin, and child stdout and stderr both routed to CLI stderr. Each attempt gets the independent configured timeout or `900000` millisecond default. | Clean numeric zero succeeds. Tracked-state observation failure outranks named dirty worktree/index paths, which outrank unavailable or nonzero exit. | CLI-owned once during fresh init after clone, containment, and PR-base observation but before manifest publication, and again on every explicit resume while parked. No retry. |
 | `verify` | The unchanged string runs as an ordinary shell command in the exact recorded integration-worktree cwd with inherited environment and stdio; no structured stdin or factory payload. Each attempt gets the full configured timeout. Stdout and stderr are visible, informational, and unparsed rather than captured or persisted. | Numeric child exit status is authoritative. Zero succeeds; non-zero means repository verification failed; no numeric status is unavailable. | Invoked after each newly recorded merge with at most two executions per merge or replay invocation. Direct committed test-only repair observation remains one execution. |
-| `publish` | Optional exact string run as one shell step in `RUN_REPO`, with no stdin or positional arguments and inherited environment plus exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE`. The last nonempty stdout line must be an absolute HTTPS URL. | Zero plus that URL is recordable; every other result is indeterminate and parks without fallback or `factory pr`. | Replaces only `gh pr create`, after the factory-owned exact push and post-push identity guard. |
+| `publish` | Optional candidate string run as one shell step in `RUN_REPO`, with no stdin or positional arguments and inherited environment plus exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE`. The last nonempty stdout line must be an absolute HTTPS URL. | Zero plus that URL is recordable; every other result is indeterminate and parks with exact reason `selected publishing command outcome indeterminate; re-observe whether the pull request exists before retry`, without fallback or `factory pr`. | Selected only by the Step 6 environment/file/default precedence; when selected, replaces only `gh pr create` after the factory-owned exact push and post-push identity guard. |
 | `publishing_identity` | No runtime input; read the value `status` reports for the run | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three guards; only a manifest written before 0.8.0 can report `null` and skip them. |
 
 Bootstrap cleanliness checks tracked worktree and index paths only, so untracked dependency installation is allowed. Clean zero publishes paired top-level `bootstrap_command` and `bootstrap_exit` evidence; the command is exact and the result is a non-negative integer or `null`. Ordinary transitions preserve the pair, while status response shape stays unchanged.

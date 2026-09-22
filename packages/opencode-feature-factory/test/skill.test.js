@@ -38,6 +38,13 @@ describe("OpenCode skill adapter", () => {
       "SKILL.md must restate the complete canonical pre-init region verbatim, `O` derivation and config validation included");
     assert.ok(canonicalRegion.includes("rev-parse --show-toplevel") && canonicalRegion.includes("Require an absolute, nonempty `O`"),
       "the bound region must span the `O` derivation, or the copy cannot locate the repository config");
+    const checkPublishSelection = (text) => {
+      if (!/`publish` was required and invoked nowhere until this release[\s\S]*contributes only the file candidate\s+to the one Step 6 publishing selection[\s\S]*Inherited `FACTORY_PUBLISHING_COMMAND` or the default may win[\s\S]*presence alone never executes this entry/u.test(text)) {
+        throw new Error("publish-selection-candidate");
+      }
+    };
+    checkPublishSelection(skill);
+    assert.throws(() => checkPublishSelection(skill.replace("presence alone never executes this entry", "presence executes this entry")), /publish-selection-candidate/u);
 
     // Ordering is the defect, so pin ordering rather than presence: the restated region must precede the
     // operating modes, and the skill must say `init` is not exempt from coming after it.

@@ -22,11 +22,13 @@ that loads the complete workflow and drives all durable state changes through th
 
 ## Infrastructure failures and attempts
 
-A confirmed host-origin HTTP availability or transport failure does not spend a specialist attempt. The
-active driver retries once at the same persisted attempt only when the host proves execution never started
-or can recover the same child/session. It never classifies child text or blindly duplicates possibly
-started work. A second consecutive failure for the same role and subject parks the run. The counter is
-memory-only and resets with the driver; unknown or non-transport failures park without a retry.
+A confirmed host-origin availability or transport failure does not spend a specialist attempt. The active
+driver permits one same-attempt recovery for the canonical role and subject only when the host proves
+execution never started or can recover the same child/session. Unbudgeted research and design create no
+attempt. A second consecutive failure parks the run. The count is memory-only and resets with the driver,
+but resume and reset never prove that prior work did not start: the next driver must recover or prove the
+same prior invocation safe before dispatch. Child text, unknown errors, and excluded auth, quota,
+rate-limit, and configuration failures never trigger a free retry or duplicate possibly-started work.
 
 ## Repository command configuration
 
@@ -256,7 +258,7 @@ own the same path. Duplicate, target-already-owned, malformed, privileged, repla
 requests refuse atomically. Resume never amends or reseeds. A merge continues to refuse every unamended
 or privileged changed path.
 
-`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` is optional; when present it replaces only `gh pr create` in Step 6, after the factory-owned exact push and post-push identity guard. It receives exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE` environment values. Only exit zero with an absolute HTTPS URL on the last nonempty stdout line is recordable; every other result parks without fallback.
+`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Step 6 resolves one selection: a nonblank inherited `FACTORY_PUBLISHING_COMMAND` selects its exact string; that variable set blank or whitespace selects the default; when it is unset, configured `publish` wins if present; otherwise the default wins. Only a selected nondefault command replaces `gh pr create`, after the factory-owned exact push and post-push identity guard. It receives exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE` environment values. Only exit zero with an absolute HTTPS URL on the last nonempty stdout line is recordable; every other result parks with exact reason `selected publishing command outcome indeterminate; re-observe whether the pull request exists before retry` and no fallback.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
 The recorded `publishing_identity` is read from `status` exactly as reported, without trimming,
 normalization, case-folding, or reserialization. `init` refuses when neither the flag nor the environment
@@ -321,11 +323,12 @@ repositories and compares them exactly. `check` freshly captures both targets an
 configuration. Both modes use shell-free Git subprocesses, write no output on success, and retain the
 sandbox on a fixed redacted failure. Captured targets and child diagnostics are never returned, logged,
 persisted in factory state, printed, or attached as an error cause. The command is independent of
-`publishing_identity` and adds no run state or flag. Configured `publish` replaces only PR creation after
-the factory-owned exact push and post-push identity guard. Inherited `FACTORY_PUBLISHING_COMMAND`
-overrides that entry for the environment the run happens to be in, and selects the default `gh pr create`
-when it is set empty, so a repository declaring how it publishes cannot leave a host with nothing to
-delegate to unable to publish at all.
+`publishing_identity` and adds no run state or flag. After the factory-owned exact push and post-push
+identity guard, Step 6 resolves one PR-creation selection: a nonblank inherited
+`FACTORY_PUBLISHING_COMMAND` selects its exact string; that variable set blank or whitespace selects the
+default; when it is unset, configured `publish` wins if present; otherwise the default wins. Only the
+selected nondefault command replaces `gh pr create`, so a repository declaration cannot leave a host with
+nothing to delegate to unable to publish at all.
 
 ## Why the code exists at all
 

@@ -233,7 +233,9 @@ The root must be a JSON object with the two required own properties `resolve` an
 plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
 `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
 command must be non-empty. `publish` was required and invoked nowhere until this release, so every
-consumer wrote a command that could not run; it is optional now, and consumed when present. There is no `publishing_identity` key: the account a run publishes as is a
+consumer wrote a command that could not run. It is optional now and contributes only the file candidate
+to the one Step 6 publishing selection. Inherited `FACTORY_PUBLISHING_COMMAND` or the default may win, so
+presence alone never executes this entry. There is no `publishing_identity` key: the account a run publishes as is a
 property of the environment it runs in, not of the repository, and a tracked file cannot hold two values
 for one repository published from both a maintainer's checkout and an automated host. A file carrying that
 key is malformed, because the optional set above is closed. `pr_draft` must be a JSON boolean
@@ -440,17 +442,16 @@ Persisted mode determines what each driver may do:
 | `headless` | Preserve terminal `needs-human` | Terminalize `needs-human`; never masquerade as an interactive parked gate | Refused |
 | `autonomous` | Decide only when the existing preconditions authorize it | Decide under the same rules and continue through PR publication and mandatory Step 7 | Refused |
 
-An inability to ask a human never promotes interactive or headless to autonomous. When a headless run
-reaches a human gate, terminalize with reason exactly `headless run reached a human gate`:
-
-```sh
-factory terminal "$R" needs-human --reason "headless run reached a human gate" --repo "$RUN_REPO"
-```
+An inability to ask a human never promotes interactive or headless to autonomous. When a headless run reaches a human gate, use reason exactly `headless run reached a human gate` and
+execute the canonical parked-stop procedure in full: quiesce outstanding work, terminalize, attempt the
+parked control-plane snapshot, release the verified owner, prove the lock absent with null owner, and only
+then report the retained sandbox. Do not stop after the terminal command, and report only
+`Outcome: retained-lock-error` if release or unlock verification fails.
 
 Verify qualified status durably reports top-level `status: "needs-human"` with that exact terminal
-reason, retain the selected sandbox and repository, and stop. Do not look for `next: terminal:needs-human`:
-`next` names terminal only for `completed`, `partial` and `blocked`, so a parked run still reports the
-action that would resume it, and waiting for a string the CLI cannot produce hangs the handoff.
+reason. Do not look for `next: terminal:needs-human`: `next` names terminal only for `completed`, `partial`
+and `blocked`, so a parked run still reports the action that would resume it, and waiting for a string the
+CLI cannot produce hangs the handoff.
 
 The gate artifact map is exact:
 
