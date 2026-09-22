@@ -118,6 +118,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
   const nonSelectedRepositoryShapes = new Set([
     'factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"',
     'factory status "$R" --json --repo "<candidate-repository>"',
+    'factory snapshot "$R" --repo "$O" --json',
     'factory restore "$R" --repo "$O" --fr' + 'om "$RESTORE_REF" --json',
   ]);
   for (const command of commands.filter((entry) => entry.includes('"$R"'))) {

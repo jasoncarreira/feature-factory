@@ -28,7 +28,7 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // explicit resume is the sole transition that clears a parked needs-human stop. Run 257 authorizes
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
-  "init", "status", "amend-paths", "resume", "restore", "decide", "lock", "heartbeat", "gate", "step", "terminal",
+  "init", "status", "amend-paths", "resume", "restore", "snapshot", "decide", "lock", "heartbeat", "gate", "step", "terminal",
   "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push",
 ];
 
@@ -114,6 +114,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS.restore, ["--repo", "--from", "--now", "--json"]);
+    assert.deepEqual(COMMANDS.snapshot, ["--repo", "--json"]);
     assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS["reverify-repair"], ["--repo", "--now", "--json"]);
     assert.deepEqual(COMMANDS["effective-push"], []);
@@ -1222,7 +1223,16 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // mean unchecked, so an empty or non-string command remains a loud refusal.
     // 5192 -> 5240 for issue #352: a merit REJECT is the only slice event that spends N+1, retries retain
     // their original base across sibling merges, and wrong-attempt evidence refuses before publication.
-    assert.equal(total, 5240, "bounded slice merit retries land at 5240 production lines");
+    // 5240 -> 5366 for issue #353, on top of #352's reviewed slice blocking: publishing a parked
+    // snapshot was specified only as driver prose, so a supervisor that parks a run it is not driving --
+    // which `factory terminal` deliberately permits -- could complete step 1 of the three-step park and
+    // nothing else. The cost is the five-phase swap: preflight, stage, verify by inventory equality, the
+    // two-rename commit with rollback, and cleanup that reports a residual rather than failing a
+    // completed publication. The last 9 are review's second and third findings: publication applies the
+    // same `validateRun` the consumer does, requires the manifest to name the run being published, and
+    // qualifies the staged tree again before the rename -- a manifest replaced between qualification and
+    // copy reaches both trees, so inventory equality passes and only re-qualifying catches it.
+    assert.equal(total, 5366, "publishing a parked snapshot lands at 5366 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1254,9 +1264,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // before this decision returns -- deliberately smaller than the 483 lines the 4500 authorization opened, because
     // the work that needed that room has now landed and the cap should tighten back toward the record.
     // Issue #343 authorizes 4900 -> 5200 for snapshot restore, including source/destination binding,
-    // Git provenance, explicit loss reporting, and atomic publication. Issue #352 authorizes 5200 -> 5240
-    // for enforcing bounded slice merit retries without weakening the immutable branch-point proof.
-    assert.ok(total <= 5240, `production source is ${total} lines; the tripwire is 5240`);
+    // Git provenance, explicit loss reporting, and atomic publication. Issue #352 authorized 5200 -> 5240
+    // for bounded slice merit retries; issue #353 authorizes 5350 for the snapshot publisher, and the
+    // merged tree carries both. #353's figure was re-authorized to 5400 once #352 merged first: 5350 was
+    // estimated from a 5192 base, and the combined tree measures 5354, which neither issue anticipated.
+    // Raised on explicit operator instruction recorded in the issue; nothing was trimmed to fit.
+    assert.ok(total <= 5400, `production source is ${total} lines; the tripwire is 5400`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

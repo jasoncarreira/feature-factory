@@ -1326,4 +1326,145 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   } finally {
     for (const fixture of fixtures) rmSync(fixture.root, { recursive: true, force: true });
   }
+
+  // `factory snapshot` publishes the parked control-plane snapshot. Bound to this site rather than a new
+  // one: the park sequence it completes is what this test already covers. Built inline because these need
+  // a plane whose status is `needs-human`, which the handoff fixtures above deliberately are not.
+  const { dispatchSnapshot } = await import("../bin/snapshot.js");
+  const snapRoot = realpathSync(mkdtempSync(join(tmpdir(), "factory-snapshot-")));
+  try {
+    const runId = "chainlink-snap";
+    // Seeded through the shared fixture so the manifest is schema-valid: publication now applies the same
+    // `validateRun` the restore side does, so a hand-rolled stub would prove only that the check exists.
+    const { runDir: plane } = seedLegacyRun(snapRoot, runId, { status: "running" });
+    // A parked run carries its terminal result -- the schema requires one for `needs-human` -- so the
+    // fixture writes a real parked manifest rather than a stub the validation would reject for the
+    // wrong reason.
+    const manifest = (status, id = runId) => writeFileSync(join(plane, "run.json"), JSON.stringify({
+      ...seededRun, run_id: id, status,
+      terminal_result: status === "needs-human" ? { status: "needs-human", reason: "budget" } : null,
+    }, null, 2));
+    const seededRun = JSON.parse(readFileSync(join(plane, "run.json"), "utf8"));
+    writeFileSync(join(plane, "artifacts", "brief.md"), "brief\n");
+    symlinkSync("brief.md", join(plane, "artifacts", "brief-link"));
+    writeFileSync(join(plane, "factory.lock"), JSON.stringify({ heartbeat_at: "one" }));
+
+    // Refused on a live plane: a snapshot of a running run records a moment no resume can return to.
+    manifest("running");
+    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /requires a parked run/u,
+      "a live plane must not be recorded as recovery evidence");
+    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", runId)), false, "a refusal publishes nothing");
+
+    manifest("needs-human");
+    const first = dispatchSnapshot([runId], { repo: snapRoot });
+    const canonical = join(snapRoot, ".factory", ".parked", runId);
+    assert.equal(first.park_snapshot, canonical);
+    assert.equal(readFileSync(join(canonical, "artifacts", "brief.md"), "utf8"), "brief\n");
+    assert.equal(lstatSync(join(canonical, "artifacts", "brief-link")).isSymbolicLink(), true,
+      "symlinks are copied as symlinks, not followed");
+    assert.equal(existsSync(join(canonical, "factory.lock")), false,
+      "the plane-root lock is session liveness and is not copied");
+
+    // The exclusion is what makes publication survive a heartbeat landing mid-copy. Control: the lock now
+    // differs from the one present at the first publication, and publication still succeeds.
+    writeFileSync(join(plane, "factory.lock"), JSON.stringify({ heartbeat_at: "two" }));
+    writeFileSync(join(plane, "artifacts", "brief.md"), "revised\n");
+    const second = dispatchSnapshot([runId], { repo: snapRoot });
+    assert.equal(second.residual, null, "a completed publication reports no residual");
+    assert.equal(readFileSync(join(canonical, "artifacts", "brief.md"), "utf8"), "revised\n",
+      "the second publication replaced the canonical snapshot");
+    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.prior-${runId}`)), false,
+      "the prior copy is cleaned up after the commit point");
+    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`)), false,
+      "no staging tree survives a completed publication");
+
+    // Preflight: a residual staging tree stops before anything is staged, because publishing over an
+    // unknown residual would make the rollback path ambiguous.
+    mkdirSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`), { recursive: true });
+    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /residual staging tree/u);
+    rmSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`), { recursive: true, force: true });
+
+    // A residual `.prior-$R` is the trace of an unfinished cleanup, not a snapshot to preserve.
+    mkdirSync(join(snapRoot, ".factory", ".parked", `.prior-${runId}`), { recursive: true });
+    assert.equal(dispatchSnapshot([runId], { repo: snapRoot }).park_snapshot, canonical);
+    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.prior-${runId}`)), false,
+      "preflight removes the residual rather than publishing around it");
+
+    // The publication gate is an inventory comparison, so control the comparison rather than contriving a
+    // failed copy: trees differing only in the plane-root lock must compare equal, and trees differing in
+    // any real file must not. A publication that could not tell those apart would publish a partial copy
+    // and report a path an operator would trust.
+    const { inventory } = await import("../bin/restore.js");
+    const liveness = new Set(["factory.lock"]);
+    const twin = join(snapRoot, "twin");
+    cpSync(plane, twin, { recursive: true, verbatimSymlinks: true });
+    writeFileSync(join(twin, "factory.lock"), JSON.stringify({ heartbeat_at: "different" }));
+    assert.equal(inventory(twin, liveness), inventory(plane, liveness),
+      "a differing plane-root lock must not fail the comparison");
+    writeFileSync(join(twin, "artifacts", "brief.md"), "diverged\n");
+    assert.notEqual(inventory(twin, liveness), inventory(plane, liveness),
+      "a differing tracked file must fail the comparison");
+
+    // Publication must accept only what `restore` will later read; every gap here publishes recovery
+    // evidence its one consumer rejects. Each refusal must also leave the last good snapshot exactly as
+    // it was, because a refusal that damaged it would be worse than the evidence it declined to write.
+    const good = readFileSync(join(plane, "run.json"));
+    const intact = (why) => {
+      assert.equal(readFileSync(join(canonical, "artifacts", "brief.md"), "utf8"), "revised\n", why);
+      assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`)), false, why);
+    };
+
+    // First review finding: restore refuses a symlinked or redirecting parked manifest.
+    const elsewhere = join(snapRoot, "elsewhere.json");
+    writeFileSync(elsewhere, good);
+    rmSync(join(plane, "run.json"));
+    symlinkSync(elsewhere, join(plane, "run.json"));
+    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /must be a regular file/u,
+      "a symlinked manifest must not be published");
+    intact("a symlinked manifest damages nothing");
+    rmSync(join(plane, "run.json"));
+
+    // Second finding, the same asymmetry one layer down: checking only `status` let a manifest restore
+    // rejects as invalid, or one naming another run, reach `.parked/<requested>`.
+    writeFileSync(join(plane, "run.json"), JSON.stringify({ run_id: runId, status: "needs-human" }));
+    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /is not a valid run/u,
+      "a manifest the restore schema rejects must not be published");
+    intact("an invalid manifest damages nothing");
+
+    manifest("needs-human", "chainlink-other");
+    assert.throws(() => dispatchSnapshot([runId], { repo: snapRoot }), /names 'chainlink-other'/u,
+      "a manifest naming another run must not be published under this one");
+    intact("a mismatched manifest damages nothing");
+    writeFileSync(join(plane, "run.json"), good);
+
+    // Third review finding: qualifying the live plane and copying it later leaves a window. A manifest
+    // replaced in between is copied into staging, and inventory equality still passes because both trees
+    // then hold the same unvalidated bytes -- so equality alone cannot catch it. The copy seam stands in
+    // for that race deterministically: it performs the real copy, then swaps the staged manifest for one
+    // restore would reject.
+    const { copySnapshot } = await import("../bin/restore.js");
+    // The source is replaced, not the staged copy: that is the race, and it is why inventory equality
+    // cannot catch it -- both trees end up holding the same unvalidated bytes and compare equal.
+    const swap = (replacement) => (source, target, skipped) => {
+      writeFileSync(join(source, "run.json"), replacement);
+      copySnapshot(source, target, skipped);
+    };
+    assert.throws(
+      () => dispatchSnapshot([runId], { repo: snapRoot }, { copy: swap(JSON.stringify({ run_id: runId, status: "needs-human" })) }),
+      /staged run manifest for '.*' is not a valid run/u,
+      "a manifest swapped in after qualification must not be published");
+    intact("a swapped-in invalid manifest damages nothing");
+    writeFileSync(join(plane, "run.json"), good);
+    assert.throws(
+      () => dispatchSnapshot([runId], { repo: snapRoot }, { copy: swap(JSON.stringify({ ...seededRun, run_id: "chainlink-other", status: "needs-human", terminal_result: { status: "needs-human", reason: "b" } })) }),
+      /staged run manifest names 'chainlink-other'/u,
+      "a swapped-in manifest naming another run must not be published");
+    intact("a swapped-in mismatched manifest damages nothing");
+    writeFileSync(join(plane, "run.json"), good);
+
+    assert.throws(() => dispatchSnapshot([runId], { repo: join(snapRoot, "absent") }), /is not observable/u);
+    assert.throws(() => dispatchSnapshot([], { repo: snapRoot }), /exactly one valid run id/u);
+  } finally {
+    rmSync(snapRoot, { recursive: true, force: true });
+  }
 });
