@@ -28,9 +28,23 @@ unpublished branch-local work survived.
   escaping-link refusal, inventory equality, Git containment, and create-only manifest publication through
   a held, unreadable target inode are checked around every effect that could otherwise produce a
   partially restored live run.
-- **Configured publication is optional and real.** A declared `publish` command replaces only PR creation,
-  after the factory-owned exact push and post-push identity guard. It receives explicit base, head, mode,
-  title, and body inputs. Indeterminate results park without a default fallback or duplicate-PR claim.
+- **Configured publication is optional and real.** Step 6 selects the exact nonblank inherited override,
+  selects the default for a set blank or whitespace override, otherwise selects configured `publish` when
+  present, and selects the default when neither source exists. Only the selected nondefault command replaces
+  PR creation, after the factory-owned exact push and post-push identity guard. It receives explicit base,
+  head, mode, title, and body inputs.
+  Indeterminate results park with exact reason `selected publishing command outcome indeterminate; re-observe whether the pull request exists before retry`, without a default fallback or duplicate-PR claim.
+- **Post-merge production defects have an explicit operator exit (#342).** The operating guide preserves the
+  merged run, names the external-fix and resume sequence, and does not misroute production repair into the
+  test-only repair journal.
+- **Prime specialist dispatch is live again (#345).** Prime profiles select optional model and thinking values,
+  spawn through the supported `rlm.spawn` interface, recover direct children by host identity, and keep
+  runtime factory state as the only package dependency.
+- **A single-slice run skips only the duplicate validator verdict (#346).** Its integrated diff still receives the
+  fresh test-verifier reading that catches cross-cutting production defects before publication.
+- **Specialist transport failures preserve the work-attempt budget (#349, #350).** A closed host-origin classifier permits
+  one safe same-attempt recovery, never duplicates possibly-started work, and parks repeated or ambiguous
+  outcomes through bounded redacted reasons, snapshot publication, and verified unlock.
 
 The production ledger lands at 5192 lines against the issue-authorized 5200 tripwire. Tests extend existing
 call sites: one restores a proved merge and its negative control; another restores a lost active slice,

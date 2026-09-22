@@ -142,14 +142,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // release on the snapshot publishing -- which the shared procedure explicitly permits failing, so a
       // run that could not publish one stayed locked too. Each reason row is pinned because an unbounded
       // reason is how host error text reaches run.json, the snapshot and the operator report at once.
-      "**Every infrastructure-triggered park follows one sequence**, written here once because three branches",
-      "owner and verify the lock absent with a null owner **whether or not that snapshot published**; then",
-      "Release is not conditional on the snapshot, because the shared procedure already permits recording a",
-      "Each branch names one bounded reason and no other text. **Never** put the provider error, response",
-      "into `run.json`, into the parked snapshot, and into the operator report, so an error string carrying a",
-      "| excluded or non-transport failure returning no complete response | `specialist invocation failed with a non-retryable error for <role> on <subject>; inspect the host invocation log before resume` |",
-      "| unknown outcome with neither safe path available | `specialist infrastructure outcome unknown for <role> on <subject>; confirm whether work started before resume` |",
-      "| second consecutive confirmed failure for the same key | `specialist infrastructure failed twice consecutively for <role> on <subject>; retry after provider or network recovery` |",
+      "**Every infrastructure-triggered needs-human park follows one sequence.** This sequence explicitly splices unlock",
+      "5. Whether or not step 2 published a snapshot, release this driver's verified owning session and require",
+      "parked-success report. Report only `Outcome: retained-lock-error` with actual status, terminal result,",
+      "| `NON_RETRYABLE_REASON` | `specialist invocation failed with a non-retryable error for <role> on <subject>; inspect the host invocation log, then prove execution never started or recover the same invocation before continuing` |",
+      "| `UNKNOWN_OUTCOME_REASON` | `specialist infrastructure outcome unknown for <role> on <subject>; prove execution never started or recover the same invocation before continuing` |",
+      "| `SECOND_FAILURE_REASON` | `specialist infrastructure failed twice consecutively for <role> on <subject>; after provider or network recovery, prove execution never started or recover the same invocation before continuing` |",
+      "resume, `status.next`, provider recovery, the reset count, and an operator assertion alone establish",
 
       // Instruction only: which command publishes is an environment property, like the identity beside it.
       // Each selection branch is pinned separately, because review caught the first attempt stating
@@ -166,10 +165,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // Enforcement is in repository-config.js; these pin the contract it implements, because a `publish`
       // that is optional in code and still documented as required is the same defect one layer over.
       "`publish` was required and invoked nowhere until this release, so every",
-      "The fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or",
+      "The fully qualified `git push` above is factory-owned and unchanged for every resolved publishing",
       "as one shell command in `RUN_REPO` cwd with no stdin or positional arguments. Add exactly five values to",
-      "do not run `factory pr`, and do not fall back to `gh pr create`. Follow the",
-      "later-driver procedure. Before any retry, re-observe whether the pull request exists and record an",
+      "`selected publishing command outcome indeterminate; re-observe whether the pull request exists before retry`;",
+      "persist no other reason text. Never append or interpolate stdout, stderr, exit status or status text, URLs,",
+      "When the recorded identity is non-null, both Step 6 identity guards run for every resolved selection and",
 
       // Instruction only: the single-slice validator skip removes a duplicate verdict, not the second
       // reading. mimir's chainlink-1304 merged one slice clean and the test-verifier review then found

@@ -114,47 +114,72 @@ not preserve error origin, classification is unknown. A partial stream followed 
 error is not a completed response: discard it as a result, but assume execution may have started.
 Authentication, authorization, quota, rate-limit, invalid-request, context-limit, content-policy,
 cancellation, local configuration, and unknown failures are not confirmed retryable infrastructure
-failures, even if another field contains an eligible status or phrase. If they return no complete
-response, preserve the current attempt and take the common infrastructure-park sequence above
-immediately, with that branch's bounded reason, instead of retrying or treating them as rejected work.
+failures, even if another field contains an eligible status or phrase.
 
-**Every infrastructure-triggered park follows one sequence**, written here once because three branches
-below reach it and three restatements of it would drift apart: quiesce every outstanding specialist, tool
-and heartbeat call; preserve the same durable attempt; enter the existing
-top-level needs-human parked-stop procedure with the bounded reason its branch names;
-attempt the parked snapshot; release the
-owner and verify the lock absent with a null owner **whether or not that snapshot published**; then
-report the retained sandbox through step 3 of that procedure. An unlock failure is the existing
-`Outcome: retained-lock-error` with its actual status, terminal result, lock state and error.
+**Every infrastructure-triggered needs-human park follows one sequence.** This sequence explicitly splices unlock
+between the shared parked-stop procedure's snapshot and report steps:
 
-Release is not conditional on the snapshot, because the shared procedure already permits recording a
-snapshot failure in the report rather than blocking the park -- so a run that cannot publish one would
-otherwise stay locked as well as unrecoverable, which is the worse of the two failures.
+1. Quiesce every outstanding specialist, tool, and heartbeat call.
+2. Preserve the current persisted attempt when the subject is budgeted; for an unbudgeted subject, create
+   no durable attempt or progress record.
+3. Execute shared parked-stop step 1 with the exact reason token selected below.
+4. Execute shared parked-stop step 2. Attempt the parked snapshot and retain its verified path or its
+   publication failure for the report.
+5. Whether or not step 2 published a snapshot, release this driver's verified owning session and require
+   qualified status to show an absent lock and a null owner.
+6. Only after unlock verification succeeds, execute shared parked-stop step 3 and report the retained
+   sandbox with the snapshot path or failure.
 
-Each branch names one bounded reason and no other text. **Never** put the provider error, response
-fragment, URL, credential, token, diagnostics, or any host-supplied string into it: the reason persists
-into `run.json`, into the parked snapshot, and into the operator report, so an error string carrying a
-token would be copied into all three.
+If release or unlock verification fails, do not execute shared step 3 and do not issue the normal
+parked-success report. Report only `Outcome: retained-lock-error` with actual status, terminal result,
+lock state, and error.
 
-| branch | exact reason |
+Each branch selects exactly one reason token and no other text. Never put the provider error, response
+fragment, URL, credential, token, diagnostics, or any host-supplied string into it. Bind the selected
+reason as `PRE_QUOTING_REASON` and transport it as the sole `--reason` argument with the deterministic
+POSIX single-quote encoding defined under Publishing identity enforcement; the encoded token is never
+persisted.
+
+| branch token | exact persisted reason template |
 |---|---|
-| excluded or non-transport failure returning no complete response | `specialist invocation failed with a non-retryable error for <role> on <subject>; inspect the host invocation log before resume` |
-| unknown outcome with neither safe path available | `specialist infrastructure outcome unknown for <role> on <subject>; confirm whether work started before resume` |
-| second consecutive confirmed failure for the same key | `specialist infrastructure failed twice consecutively for <role> on <subject>; retry after provider or network recovery` |
+| `NON_RETRYABLE_REASON` | `specialist invocation failed with a non-retryable error for <role> on <subject>; inspect the host invocation log, then prove execution never started or recover the same invocation before continuing` |
+| `UNKNOWN_OUTCOME_REASON` | `specialist infrastructure outcome unknown for <role> on <subject>; prove execution never started or recover the same invocation before continuing` |
+| `SECOND_FAILURE_REASON` | `specialist infrastructure failed twice consecutively for <role> on <subject>; after provider or network recovery, prove execution never started or recover the same invocation before continuing` |
 
-`<role>` and `<subject>` are the run's own recorded values, not host text.
+`<role>` is the exact canonical dispatch target, never agent frontmatter or host/provider text. Select
+`<subject>` from this closed map:
+
+| role | canonical subject |
+|---|---|
+| `story-reader`, `story-writer` | `stage:story` |
+| `codebase-researcher` | `stage:research` |
+| `design-interpreter` | `stage:design` |
+| `spec-writer` | `step:spec-writer` |
+| `work-decomposer` | `step:work-decomposer` |
+| `backend-builder`, `frontend-builder` | `slice:<slice-id>` |
+| `test-verifier` | `step:test-verifier` |
+| `implementation-validator` | `stage:implementation-validator` |
+| `work-reviewer` | the exact reviewed subject: `step:spec-writer`, `step:work-decomposer`, `slice:<slice-id>`, or `step:test-verifier` |
+
+For a reason template, render `<slice-id>` from at most the first 80 ASCII characters of the schema-valid
+persisted slice ID and append `~` when truncated. The in-memory invocation key still uses the exact full
+role, subject, and persisted attempt when one exists. Constants come only from the table and slice IDs
+come only from `run.json`; neither field comes from host or provider diagnostics.
+
+If an excluded or non-transport failure returns no complete response, preserve the persisted attempt when
+one exists, create no attempt for unbudgeted work, and take the common infrastructure-park sequence with
+`NON_RETRYABLE_REASON`. Do not retry it or treat it as rejected work.
 
 For each active invocation key — exact specialist role, exact workflow subject or slice, and the current
-persisted attempt number when that subject is budgeted — hold the count described below. Use an
-in-memory consecutive-infrastructure-failure count. Start it at zero in every new driver invocation,
-including after resume; never write it to `run.json` or any artifact. A complete specialist response or a
-non-infrastructure outcome for that same key resets it to zero. Activity for another key neither combines
-with nor resets it.
+persisted attempt number when that subject is budgeted — hold an in-memory consecutive-infrastructure-
+failure count. Start it at zero in every new driver invocation, including after resume; never write it to
+`run.json` or any artifact. A complete specialist response or a non-infrastructure outcome for that same
+key resets it to zero. Activity for another key neither combines with nor resets it.
 
 On the first confirmed failure for a key, increment only that in-memory count. Keep the control plane
-unchanged: do not issue any step or slice transition with `--attempts N+1`, do not observe
-or review partial output, and do not record `accepted`, `rejected`, or `blocked`. Continue automatically
-only through one of these two safe paths:
+unchanged: do not issue any step or slice transition with `--attempts N+1`, do not observe or review
+partial output, and do not record `accepted`, `rejected`, or `blocked`. Continue automatically only
+through one of these two safe paths:
 
 1. When trusted host metadata proves execution never started, re-dispatch the exact same role, subject,
    inputs and, when budgeted, the persisted attempt number.
@@ -163,19 +188,30 @@ only through one of these two safe paths:
    worktree; never create a second child for the logical attempt and never repeat successful siblings in a
    parallel wave.
 
-If neither path is available, the outcome is unknown: preserve the same attempt and take the common
-infrastructure-park sequence above immediately, with that branch's bounded reason. For an unbudgeted research or design call, these rules still permit at most one
-safe same-invocation recovery and create no durable progress record.
+If neither path is available, preserve the persisted attempt when one exists, create none for unbudgeted
+work, and take the common infrastructure-park sequence with `UNKNOWN_OUTCOME_REASON`. An unbudgeted
+research or design call still permits at most one safe same-invocation recovery and creates no durable
+progress record.
 
 On the second consecutive confirmed failure for the same key during that safe re-dispatch or recovery,
-do not invoke it again. Take the common infrastructure-park sequence above with that branch's bounded
-reason.
+do not invoke it again. Take the common infrastructure-park sequence with `SECOND_FAILURE_REASON`.
 
-An attempt advances only after a complete specialist response reaches the ordinary workflow and that
-response is rejected on its merits or violates the specialist's required output contract. Infrastructure
-recovery is the same attempt, not another use of `max_retries`. This rule is instruction rather than CLI
-enforcement: the host owns specialist invocation errors, while the CLI continues to enforce every durable
-attempt transition the driver actually records.
+The failure count remains invocation-local: every new driver, including one entered after explicit resume,
+starts it at zero. That reset is not proof that prior execution did not start. When the preserved historical
+terminal reason matches any infrastructure reason template, it guards the first later dispatch of the
+named canonical role and subject at the retained attempt, or the named unbudgeted stage. Before that
+dispatch, trusted host metadata must prove the prior invocation never started, or the driver must recover
+and inspect that same host dispatch or child identity and its expected artifact or worktree. Explicit
+resume, `status.next`, provider recovery, the reset count, and an operator assertion alone establish
+neither fact. If neither safe path is available, do not dispatch; re-enter the common infrastructure-park
+sequence with `UNKNOWN_OUTCOME_REASON`. Never repeat successful siblings.
+
+A budgeted attempt advances only after a complete specialist response reaches the ordinary workflow and
+that response is rejected on its merits or violates the specialist's required output contract. A complete
+unbudgeted result returns to its ordinary workflow without creating an attempt. Infrastructure recovery is
+the same attempt, not another use of `max_retries`. This rule is instruction rather than CLI enforcement:
+the host owns specialist invocation errors, while the CLI continues to enforce every durable attempt
+transition the driver actually records.
 
 ## The chain
 
@@ -475,7 +511,9 @@ The root must be a JSON object with the two required own properties `resolve` an
 plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and
 `bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
 command must be non-empty. `publish` was required and invoked nowhere until this release, so every
-consumer wrote a command that could not run; it is optional now, and consumed when present. There is no `publishing_identity` key: the account a run publishes as is a
+consumer wrote a command that could not run. It is optional now and contributes only the file candidate
+to the one Step 6 publishing selection. Inherited `FACTORY_PUBLISHING_COMMAND` or the default may win, so
+presence alone never executes this entry. There is no `publishing_identity` key: the account a run publishes as is a
 property of the environment it runs in, not of the repository, and a tracked file cannot hold two values
 for one repository published from both a maintainer's checkout and an automated host. A file carrying that
 key is malformed, because the optional set above is closed. `pr_draft` must be a JSON boolean
@@ -634,8 +672,10 @@ change platform placement, background-tool, title-association, or host-session b
 `story-reader` remains lookup-free and capability-free beyond its existing generic read tools.
 
 `resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the
-guards below. Configured `publish`, when present, replaces only the driver's `gh pr create` in Step 6;
-the factory-owned exact push and post-push identity guard remain unchanged.
+guards below. Step 6 resolves exactly one publishing selection from inherited
+`FACTORY_PUBLISHING_COMMAND`, the optional `publish` entry, or the default, in the precedence defined
+below. Only a selected nondefault command replaces the driver's `gh pr create`; the factory-owned exact
+push and post-push identity guard remain unchanged.
 
 Configured `bootstrap` is consumed only by CLI-owned fresh init and explicit resume; the workflow consumer validates it but never executes it itself.
 
@@ -645,7 +685,7 @@ Effective push-target capture and comparison are active through the package-owne
 |---|---|---|---|---|
 | `bootstrap` | Exact configured string as one shell command with `shell: true`, inherited environment and stdin, cwd exactly the selected sandbox, and child stdout and stderr both routed to CLI stderr. Each execution receives its own `bootstrap_timeout_ms`, independently `900000` when omitted. | Numeric exit status or unavailable `null`; output is visible on CLI stderr and never parsed | Clean zero succeeds; dirty or unobservable tracked state outranks unavailable or nonzero exit | Invoked by the CLI once during configured fresh init and again on every explicit configured resume; never invoked by resolver, merge verification or replay, direct repository verification, slice or Gate 3 observation, effective push, or publication. |
 | `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are inherited, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status means unavailable | Invoked after each newly recorded merge through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
-| `publish` | Optional. Exact configured string as one shell step in `RUN_REPO` cwd, no stdin or positional arguments, and inherited environment plus exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE` | Exit status is authoritative; the last nonempty stdout line must be an absolute HTTPS URL and becomes `PR_URL` | Zero plus that URL is recordable; any other result is indeterminate and parks before `factory pr` | Invoked in Step 6 in place of only `gh pr create`, after the factory-owned exact push and post-push identity guard. Inherited `FACTORY_PUBLISHING_COMMAND` overrides it, and overrides it with the default when set empty. `factory pr` is unchanged and still records the URL. |
+| `publish` | Optional file candidate for the one Step 6 publishing selection. A nonblank inherited `FACTORY_PUBLISHING_COMMAND` selects its exact string; the same variable set empty or to whitespace selects the default; when the variable is unset this entry is selected if present, otherwise the default. A selected nondefault command runs as one shell step in `RUN_REPO` cwd, with no stdin or positional arguments and inherited environment plus exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE`. | Exit status is authoritative; the last nonempty stdout line must be an absolute HTTPS URL and becomes `PR_URL` | Zero plus that URL is recordable; any other result is indeterminate and parks before `factory pr` | The resolved selection replaces only `gh pr create`, after the factory-owned exact push and post-push identity guard. `factory pr` is unchanged and still records the URL. |
 | `publishing_identity` | No runtime input; read the value `status` reports for the run, recorded at init from `--publishing-identity` or the inherited `FACTORY_PUBLISHING_IDENTITY` | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; only a manifest written before 0.8.0 can report `null` and skip them. |
 
 When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.
@@ -753,7 +793,7 @@ intervene between the verified running/same-owner result and that guard, or betw
 and reconciliation. A pre-0.8.0 manifest reporting `null` preserves the nine orders without adding an operation.
 The refreshed workflow read belongs to order 7 verification, before this boundary.
 
-For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment and before effective-push proof. Order 3 never absorbs containment, binding, or the post-selection exact-ref guard. During order 4 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 5 and claim or justified steal. Order 6 requires `lock_session === SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --session "$SESSION_ID" --repo "$RUN_REPO"` for order 7 — the same session order 6 just verified as the fresh owner — then require that owner unchanged. Resume refuses without it, and refuses a lock that is absent, stale, or held by anyone else. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 never uses the pre-resume observation or the stop reason.
+For order 1 require the intended run ID, a valid manifest, recorded branch and mode, current parked status, and the original terminal result. Order 2 stays after selection and containment and before effective-push proof. Order 3 never absorbs containment, binding, or the post-selection exact-ref guard. During order 4 preserve every existing exact-ref recheck and the stated provenance sequence. No unrelated observation or effect occurs between order 5 and claim or justified steal. Order 6 requires `lock_session === SESSION_ID`, a fresh lock, unchanged parked status, and a terminal result deeply equal to the one first observed. Invoke `factory resume "$R" --session "$SESSION_ID" --repo "$RUN_REPO"` for order 7 — the same session order 6 just verified as the fresh owner — then require that owner unchanged. Resume refuses without it, and refuses a lock that is absent, stale, or held by anyone else. Order 8 may replay only the existing recorded-merge reconciliation path and must not move pre-lock proofs across the lock boundary. Order 9 uses only the newly qualified next action for workflow progress, but before its first matching specialist dispatch it must apply the preserved infrastructure-reason guard above; it never treats explicit resume or the count reset as no-start proof.
 
 If resume refuses after claim or the run later reparks, quiesce builders, tools, specialist tasks, and
 heartbeat loops. Qualify the intended retained run again before reporting the stop. If it is still parked
@@ -2086,8 +2126,8 @@ gh api --method GET /user --jq .login
 factory pr "$R" --url "$PR_URL" --repo "$RUN_REPO"
 ```
 
-The fully qualified `git push` above is factory-owned and unchanged whether `publish` is absent or
-declared. It is the only push in this procedure. The second identity observation always runs after that
+The fully qualified `git push` above is factory-owned and unchanged for every resolved publishing
+selection. It is the only push in this procedure. The second identity observation always runs after that
 push is known successful and immediately before the selected pull-request operation, with no intervening
 operation.
 
@@ -2105,8 +2145,9 @@ as of the repository -- the same reason there is no `publishing_identity` key in
 repository is published from both a maintainer's checkout and an automated host. Empty selecting the
 default is what keeps a repository from declaring its way into a run that cannot publish at all from a
 host with nothing to delegate to, and it makes empty and absent behave alike rather than needing two
-rules. The override removes no guard: the Step 6 identity guards are already skipped when that file is
-absent. Report which source the selection came from, since the two are indistinguishable afterwards and
+rules. The override removes no guard: every run with a non-null recorded `publishing_identity` runs all
+three identity guards whether or not `$O/.factory.json` exists. Only a legacy manifest reporting `null`
+skips them. Report which source the selection came from, since the sources are indistinguishable afterwards and
 an operator debugging a publication needs to know which one ran.
 
 **When the resolution selects a command rather than the default, run that exact selected string instead
@@ -2114,25 +2155,30 @@ of only `gh pr create` above**,
 as one shell command in `RUN_REPO` cwd with no stdin or positional arguments. Add exactly five values to
 the inherited environment: exact `PR_BASE`, exact `FEATURE_BRANCH`, `PR_DRAFT` as `true` or `false`, exact
 decorated `TITLE` as `PR_TITLE`, and an absolute `PR_BODY_FILE` naming the exact decorated body bytes.
-Read the last nonempty stdout line as `PR_URL` and require it to be an absolute HTTPS URL. The configured
-command owns PR creation, but these inputs preserve the recorded base, head, mode, title, and body intent;
+Read the last nonempty stdout line as `PR_URL` and require it to be an absolute HTTPS URL. The selected
+nondefault command owns PR creation, but these inputs preserve the recorded base, head, mode, title, and body intent;
 do not claim the factory verified that the command honored them. `factory pr` still records the returned
 URL. Exit zero **with** that absolute HTTPS URL is the only recordable result. A non-zero exit, or a zero
 exit whose last line is not a URL, is indeterminate: do not claim that no external effect occurred,
-do not run `factory pr`, and do not fall back to `gh pr create`. Follow the
-common quiesce, park, durable-reason, owning release, unlock-verification, retention, reporting, and
-later-driver procedure. Before any retry, re-observe whether the pull request exists and record an
-existing one rather than creating another.
+do not run `factory pr`, and do not fall back to `gh pr create`. Bind `PRE_QUOTING_REASON` exactly to
+`selected publishing command outcome indeterminate; re-observe whether the pull request exists before retry`;
+persist no other reason text. Never append or interpolate stdout, stderr, exit status or status text, URLs,
+credentials, tokens, provider diagnostics, or any other command-supplied text. Follow the common quiesce,
+park, durable-reason transport, owning release, unlock-verification, retention, reporting, and later-driver
+procedure. Before any retry, re-observe whether the pull request exists and record an existing one rather
+than creating another.
 
-Both Step 6 identity guards are skipped when `.factory.json` is absent. A mismatch or unobservable result
-follows the common quiesce, park, durable-reason, owning release, unlock-verification, retention,
+When the recorded identity is non-null, both Step 6 identity guards run for every resolved selection and
+whether or not `.factory.json` exists; only a legacy recorded `null` skips them. A mismatch or unobservable
+result follows the common quiesce, park, durable-reason, owning release, unlock-verification, retention,
 reporting, and later-driver procedure above. There is no separate identity guard before `factory pr`;
 preserve that command and every existing publication mode, status, and gate exactly.
 
-The default `gh` call or configured `publish` command is the orchestrator's external effect; the package
-makes no forge call and `factory pr` does not verify the forge's base. For a legacy manifest where
+The selected PR-creation operation is the orchestrator's external effect; the package makes no forge call
+and `factory pr` does not verify the forge's base. For a legacy manifest where
 `pr_base` is absent or null, stop and require a human/operator to choose or confirm the exact target,
-then pass that value through `gh pr create --base` or the configured command's exact `PR_BASE`. Never
+then pass that value through `gh pr create --base` or the selected nondefault command's exact `PR_BASE`.
+Never
 infer it from HEAD, the feature branch, repository or forge defaults, and
 never backfill the legacy manifest.
 

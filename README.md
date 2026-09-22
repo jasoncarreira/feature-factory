@@ -33,12 +33,13 @@ rest.*
 
 ## Infrastructure failures and attempts
 
-A confirmed host-origin HTTP availability or transport failure does not spend a specialist attempt. The
-active driver retries once at the same persisted attempt only when the host proves execution never started
-or can recover the same child/session. It never classifies child text, blindly duplicates a possibly
-started builder, or repeats successful siblings. A second consecutive failure for the same role and
-subject parks the run for a human. The per-subject failure count is memory-only and resets with the driver;
-unknown, auth, quota, rate-limit, configuration, and other non-transport failures park without a retry.
+A confirmed host-origin availability or transport failure does not spend a specialist attempt. The active
+driver permits one same-attempt recovery for the canonical role and subject only when the host proves
+execution never started or can recover the same child/session. Unbudgeted research and design create no
+attempt. A second consecutive failure parks the run. The count is memory-only and resets with the driver,
+but resume and reset never prove that prior work did not start: the next driver must recover or prove the
+same prior invocation safe before dispatch. Child text, unknown errors, and excluded auth, quota,
+rate-limit, and configuration failures never trigger a free retry or duplicate possibly-started work.
 
 ## The chain
 
@@ -226,7 +227,7 @@ Gate 3 always performs its own fresh integrated `test-verifier` observation at t
 the existing command mode. It overwrites the canonical evidence independently and never shares,
 substitutes, or optimizes from post-merge evidence, even when the head has not moved.
 
-`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Configured `publish` is optional and replaces only PR creation after the factory-owned exact push and post-push identity guard. It receives exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE` environment values. Only exit zero with an absolute HTTPS URL on the last nonempty stdout line is recordable; every other result parks without fallback.
+`resolve` and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Step 6 resolves one selection: a nonblank inherited `FACTORY_PUBLISHING_COMMAND` selects its exact string; that variable set blank or whitespace selects the default; when it is unset, configured `publish` wins if present; otherwise the default wins. Only a selected nondefault command replaces PR creation, after the factory-owned exact push and post-push identity guard. It receives exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE` environment values. Only exit zero with an absolute HTTPS URL on the last nonempty stdout line is recordable; every other result parks with exact reason `selected publishing command outcome indeterminate; re-observe whether the pull request exists before retry` and no fallback.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
 The recorded `publishing_identity` is read from `status` exactly as reported, without trimming,
 normalization, case-folding, or reserialization. `init` refuses when neither the flag nor the environment
