@@ -10,7 +10,8 @@ supervisor a way to publish the park evidence it could not produce (#353).
 
 - A complete slice merit rejection now advances exactly `review@N -> running@(N+1)` before builder
   redispatch. Infrastructure recovery and resume remain on N, approval proceeds only to merge, and a
-  rejection at `max_retries` blocks without inventing another attempt.
+  rejection at `max_retries` blocks without inventing another attempt. Every slice `blocked` transition
+  starts from that fully bound max-attempt review; a ratified-plan conflict parks top-level `needs-human`.
 - The CLI enforces the transition against the matching live `REJECT` review, clears stale attempt-bound
   evidence and review refs, refuses wrong-attempt observation before evidence publication, and rejects
   every row above the configured bound.

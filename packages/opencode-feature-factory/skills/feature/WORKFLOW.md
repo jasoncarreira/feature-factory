@@ -1514,23 +1514,24 @@ Per slice:
    is no repair available at this step.** The slice is already activated, so `base_ref` is fixed; the suite
    runs in `SLICE_WORKTREE`, so a commit on the integration branch is invisible to the re-observation; and
    bringing that commit into the slice would put an out-of-lane test path in the observed diff, which the
-   merge refuses. Mark the slice `blocked`, stop dispatching its dependents, and follow the wave rule below
-   — the slices that did merge are retained on the integration branch in the retained sandbox
-   rather than discarded. A `partial` run is **surfaced, not published**: Gate 3 refuses the
-   approval that authorizes publication unless every slice is `merged`, so an operator decides
-   what to do with the merged work rather than a PR appearing for a plan that did not finish.
+   merge refuses. This is a ratified-plan conflict, not a merit REJECT: do not mark the slice `blocked`
+   without canonical evidence and a matching max-attempt review. Stop dispatching its dependents and park
+   top-level `needs-human` through the common procedure with the diagnosis below. Retain merged siblings on
+   the integration branch and the whole sandbox for operator replanning. The parked run is **surfaced, not
+   published**: Gate 3 refuses the approval that authorizes publication unless every slice is `merged`, so
+   an operator decides what to do with the work rather than a PR appearing for a plan that did not finish.
 
    **Never narrow the ratified command to get past this.** `factory observe` compares the raw supplied
    slice command with the persisted ratified entries before tokenization or execution and refuses a
-   shortened, appended, or normalized command without writing evidence. A narrowed command is a false green wearing evidence's clothes; blocking is the honest outcome when the verbatim command fails.
+   shortened, appended, or normalized command without writing evidence. A narrowed command is a false green wearing evidence's clothes; parking for replanning is the honest outcome when the verbatim command fails.
 
    If the same incompatibility instead first appears in the **integrated** suite, this step is not involved
    at all — Step 5's NO-GO repair owns it, on the branch where that suite actually runs.
 
-   When you block, record the **diagnosis** and not just the failure, in the terminal transition's
-   `--reason`: which slice owns the test, which assertion cannot hold, and what would make it hold. A
-   reason naming only "tests failed" makes the operator repeat the whole investigation, which is the
-   difference between their fix being one commit and being an afternoon.
+   When you park this plan conflict, record the **diagnosis** and not just the failure in the park
+   terminal transition's `--reason`: which slice owns the test, which assertion cannot hold, and what would
+   make it hold. A reason naming only "tests failed" makes the operator repeat the whole investigation,
+   which is the difference between their fix being one commit and being an afternoon.
 
    An out-of-lane **production** change is a different thing entirely and follows **Ownership disclosure**
    below, where the reviewer decides whether the plan or the change is wrong.
@@ -1883,8 +1884,8 @@ while movement around it is not. What guards the branch as a whole is the integr
 validator judges the whole diff and Gate 3 will not approve unless the head it judged is still the head.
 
 Advance waves until all slices are `merged`, or a slice is `blocked`. If some merged and others
-blocked, the run is `partial` — surface it at the next gate rather than pushing on. Record a terminal
-decision only through the checked terminal command.
+blocked, the run is `partial`. A `partial` run is **surfaced, not published**: stop rather than pushing on,
+and record a terminal decision only through the checked terminal command.
 Use terminal needs-human only to park a running envelope; use explicit factory resume after the cause is fixed.
 A top-level needs-human sandbox stays retained while parked and continues only after explicit factory resume.
 A `blocked` or `partial` sandbox run retains `RUN_REPO`; stale nonterminal locks retain it

@@ -1221,18 +1221,18 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // provenance, and publishes the transformed manifest last. The issue authorizes the 5200 tripwire.
     // 5182 -> 5192: `.factory.json` `publish` stops being a required key nobody runs. Optional does not
     // mean unchecked, so an empty or non-string command remains a loud refusal.
-    // 5192 -> 5237 for issue #352: a merit REJECT is the only slice event that spends N+1, retries retain
+    // 5192 -> 5240 for issue #352: a merit REJECT is the only slice event that spends N+1, retries retain
     // their original base across sibling merges, and wrong-attempt evidence refuses before publication.
-    // 5237 -> 5363 for issue #353: publishing a parked snapshot was specified only as driver prose, so
-    // a supervisor that parks a run it is not driving -- which `factory terminal` deliberately permits --
-    // could complete step 1 of the three-step park and nothing else. The cost is the five-phase swap:
-    // preflight, stage, verify by inventory equality, the two-rename commit with rollback, and cleanup
-    // that reports a residual rather than failing a completed publication.
-    // The last 9 are review's second and third findings: publication applies the same `validateRun` the
-    // consumer does and requires the manifest to name the run being published, and qualifies the staged
-    // tree again before the rename -- a manifest replaced between qualification and copy reaches both
-    // trees, so inventory equality passes and only re-qualifying what is about to be published catches it.
-    assert.equal(total, 5363, "publishing a parked snapshot lands at 5363 production lines");
+    // 5240 -> 5366 for issue #353, on top of #352's reviewed slice blocking: publishing a parked
+    // snapshot was specified only as driver prose, so a supervisor that parks a run it is not driving --
+    // which `factory terminal` deliberately permits -- could complete step 1 of the three-step park and
+    // nothing else. The cost is the five-phase swap: preflight, stage, verify by inventory equality, the
+    // two-rename commit with rollback, and cleanup that reports a residual rather than failing a
+    // completed publication. The last 9 are review's second and third findings: publication applies the
+    // same `validateRun` the consumer does, requires the manifest to name the run being published, and
+    // qualifies the staged tree again before the rename -- a manifest replaced between qualification and
+    // copy reaches both trees, so inventory equality passes and only re-qualifying catches it.
+    assert.equal(total, 5366, "publishing a parked snapshot lands at 5366 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

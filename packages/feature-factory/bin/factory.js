@@ -893,10 +893,12 @@ const HANDLERS = {
         if (!existing) throw new Error(`unknown slice '${sliceId}'`);
         const attempts = flags.attempts === undefined ? existing.attempts : integer(flags.attempts, 1, "--attempts");
         const advances = attempts === existing.attempts + 1;
-        const closesRejectedReview = existing.status === "review" && (advances || status === "blocked");
+        const blocks = status === "blocked";
+        const closesRejectedReview = existing.status === "review" && (advances || blocks);
         // Enforcement: only a bound merit REJECT may spend N+1 or terminalize an exhausted review.
         if (advances && (existing.status !== "review" || status !== "running")) throw new CliError(`slice '${sliceId}' attempts may advance only from review to running`);
-        if (existing.status === "review" && status === "blocked" && existing.attempts < state.max_retries) throw new CliError(`slice '${sliceId}' cannot block before max_retries (${state.max_retries})`);
+        if (blocks && existing.status !== "review") throw new CliError(`slice '${sliceId}' may block only from review`);
+        if (blocks && existing.attempts < state.max_retries) throw new CliError(`slice '${sliceId}' cannot block before max_retries (${state.max_retries})`);
         if (advances && (flags.worktree !== undefined || flags.branch !== undefined || flags.evidenceRef !== undefined || flags.reviewRef !== undefined)) throw new CliError("a slice retry reuses its recorded worktree, branch, and base; omit worktree, branch, evidence, and review flags");
         if (closesRejectedReview) {
           if (!existing.review_ref) throw new CliError(`slice '${sliceId}' retry requires its recorded review`);

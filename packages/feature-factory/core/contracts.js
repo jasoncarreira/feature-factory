@@ -374,8 +374,9 @@ const slices = contract({
         }
       }
       // Enforcement: activated work cannot detour around the retry edge or reopen a terminal slice.
-      if (prior.status === "blocked" && slice.status !== "blocked") throw new Error(`slice '${slice.id}' is already blocked`);
+      if (prior.status === "blocked" && !isDeepStrictEqual(slice, prior)) throw new Error(`slice '${slice.id}' is already blocked`);
       if (prior.status !== "pending" && slice.status === "pending") throw new Error(`slice '${slice.id}' cannot return to pending`);
+      if (prior.status !== slice.status && slice.status === "blocked" && prior.status !== "review") throw new Error(`slice '${slice.id}' may block only from review`);
       if (prior.status === "review" && slice.status === "blocked" && prior.attempts < candidate.max_retries) throw new Error(`slice '${slice.id}' cannot block before max_retries (${candidate.max_retries})`);
       if (slice.attempts < prior.attempts) throw new Error(`slice '${slice.id}' attempts cannot decrease`);
       if (slice.attempts > prior.attempts + 1) throw new Error(`slice '${slice.id}' attempts cannot skip`);

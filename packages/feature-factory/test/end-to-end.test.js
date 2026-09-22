@@ -1289,8 +1289,8 @@ describe("end to end — a merge is refused through the real CLI", () => {
       // mimir refused both: `factory observe` runs the suite with `cwd: worktree` on a pinned `base_ref`,
       // so an integration-branch commit is invisible; and a foreign test *outside*
       // `SLICE_TEST_COMMAND` cannot fail the observation at all, so there is no detection point for a
-      // pre-merge repair. What survives is the honest outcome — block, do not narrow — plus a pointer to
-      // Step 5, which owns the repair because that is where the suite runs on the branch being repaired.
+      // pre-merge repair. What survives is the honest outcome — park for replanning, do not narrow — plus
+      // a pointer to Step 5, which owns integrated-suite repair on the branch where that suite runs.
       //
       // Pinned inside this site rather than at a new one: the budget in ceiling.test.js constrains call
       // sites, and binding existing prose to existing behaviour is meant to arrive as data at a site
@@ -1301,7 +1301,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       for (const required of [
         "ratified suite fails on something this slice may not touch", // the trigger condition
         "is no repair available at this step",                        // the only reachable outcome
-        "follow the wave rule below",                                 // terminalizing is an explicit transition
+        "top-level `needs-human` through the common procedure with the diagnosis below.", // no unreviewed slice block
         "Never narrow the ratified command",                          // the false green this invites
         "a false green wearing evidence's",                            // named, because it already happened
         "Step 5's NO-GO repair owns it",                              // where the repair actually lives
@@ -1625,6 +1625,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
       try {
         const { head, basePoint } = buildSlice(exhausted.repo);
         assert.equal(factory(exhausted.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+        if (verdict === "APPROVE") {
+          const runningBefore = readFileSync(join(exhausted.runDir, "run.json"), "utf8");
+          const runningBlock = factory(exhausted.repo, ["slice", RUN, "be-thing", "blocked", "--attempts", "1", "--now", NOW(2)]);
+          assert.equal(runningBlock.ok, false, "a running slice cannot bypass evidence and review at the retry ceiling");
+          assert.match(runningBlock.stderr, /may block only from review/u);
+          assert.equal(readFileSync(join(exhausted.runDir, "run.json"), "utf8"), runningBefore);
+        }
         assert.equal(factory(exhausted.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
           "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]).ok, true);
         writeReview(exhausted.runDir, "be-thing", head, { verdict });
@@ -1636,6 +1643,15 @@ describe("end to end — a merge is refused through the real CLI", () => {
         else assert.deepEqual(runJson(exhausted.runDir).slices.map(({ status, attempts }) => ({ status, attempts })), [{ status: "blocked", attempts: 1 }]);
       } finally { cleanupProject(exhausted); }
     }
+
+    const pendingAtCeiling = project("pending-block-at-ceiling", { maxRetries: 1 });
+    try {
+      const before = readFileSync(join(pendingAtCeiling.runDir, "run.json"), "utf8");
+      const blocked = factory(pendingAtCeiling.repo, ["slice", RUN, "be-thing", "blocked", "--attempts", "1", "--now", NOW(1)]);
+      assert.equal(blocked.ok, false, "a pending slice cannot bypass review at the retry ceiling");
+      assert.match(blocked.stderr, /may block only from review/u);
+      assert.equal(readFileSync(join(pendingAtCeiling.runDir, "run.json"), "utf8"), before);
+    } finally { cleanupProject(pendingAtCeiling); }
 
     const admission = project("seed-command-admission", { seed: false });
     try {
@@ -2208,11 +2224,10 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
   });
 
   it("refuses to approve Gate 3 while a slice is still open", () => {
-    const p = project("open-slice");
+    const p = project("open-slice", { maxRetries: 1 });
     try {
-      buildSlice(p.repo);
+      const { head, basePoint } = buildSlice(p.repo);
       factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
-      const head = git(p.repo, "rev-parse", "slice");
       recordValidator(p.repo, p.runDir, head, "GO", NOW(5));
       const running = approveGate(p.repo, "pre_pr", NOW(5));
       assert.equal(running.ok, false);
@@ -2221,8 +2236,13 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       // Folded in rather than added, per the test budget: a *blocked* slice must refuse
       // too. This accepted "merged or blocked", so a run with blocked work published
       // while its status stayed running.
-      factory(p.repo, ["slice", RUN, "be-thing", "blocked", "--now", NOW(7)]);
-      const blocked = approveGate(p.repo, "pre_pr", NOW(8));
+      assert.equal(factory(p.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(6)]).ok, true);
+      writeReview(p.runDir, "be-thing", head, { verdict: "REJECT" });
+      assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "review", "--attempts", "1",
+        "--evidence-ref", "evidence/be-thing.json", "--review-ref", "reviews/be-thing.json", "--now", NOW(7)]).ok, true);
+      assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "blocked", "--attempts", "1", "--now", NOW(8)]).ok, true);
+      const blocked = approveGate(p.repo, "pre_pr", NOW(9));
       assert.equal(blocked.ok, false, "blocked work must not be published");
       assert.match(blocked.stderr, /every slice must be merged; not merged: be-thing\(blocked\)/u);
     } finally { cleanupProject(p); }
