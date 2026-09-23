@@ -3,7 +3,7 @@
 // untested claim in crash-safety code is worse than no claim.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { open as fsOpen } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -177,6 +177,14 @@ describe("atomic writer", () => {
       }
       await assert.rejects(() => writeProtectedJsonAtomic("relative/root", "run.json", { version: 1 }),
         /protected file root is invalid/u);
+      await assert.rejects(() => writeProtectedJsonAtomic(dir, "factory.lock", { version: 1 }, { tempDirectory: "missing-lock" }),
+        /protected file parent could not be inspected/u);
+      const outsideTemps = root("redirected-temps"); symlinkSync(outsideTemps, join(dir, "run-json.lock"));
+      try {
+        await assert.rejects(() => writeProtectedJsonAtomic(dir, "factory.lock", { version: 1 }, { tempDirectory: "run-json.lock" }),
+          /protected file parent has an unsafe symlink/u);
+        assert.deepEqual(readdirSync(outsideTemps), [], "an unsafe temp parent receives no protected bytes");
+      } finally { unlinkSync(join(dir, "run-json.lock")); rmSync(outsideTemps, { recursive: true, force: true }); }
       // A sibling directory sharing a name prefix is outside the root.
       const sibling = `${dir}-sibling`;
       mkdirSync(sibling, { recursive: true });

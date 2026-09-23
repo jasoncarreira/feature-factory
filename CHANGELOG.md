@@ -15,7 +15,7 @@ process death (#359).
   manifest rename keeps the old snapshot usable; a committed grant revokes it before removing the fence.
   Ambiguous or altered transaction artifacts are preserved and refused rather than guessed or deleted.
 - `factory snapshot` recovers both fenced grants and legacy interrupted `.prior-$R` grants under the run
-  lock. Fault injection covers manifest rename failure and process death at the commit seam.
+  lock. Fault injection covers manifest rename failure, directory-durability ordering, delayed restore, and process death at the commit seam.
 
 All three package manifests and both exact adapter pins move together to 0.10.2. No release tag is included.
 

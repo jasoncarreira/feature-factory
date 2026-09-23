@@ -200,6 +200,43 @@ function stagingCandidateCleanupFault(operator, runId) {
   return { ...spawnSync("node", [CLI, "snapshot", runId, "--repo", operator, "--json"], { encoding: "utf8", env }), marker };
 }
 
+function snapshotDurabilityFault(operator, runId, mode) {
+  const preload = join(operator, `grant-durability-${mode}.cjs`), marker = join(operator, `grant-durability-${mode}.json`);
+  writeFileSync(preload, [
+    'const fs = require("node:fs"), path = require("node:path");',
+    'const { syncBuiltinESMExports } = require("node:module");',
+    'const originalOpen = fs.openSync, originalSync = fs.fsyncSync, originalRename = fs.renameSync, originalUnlink = fs.unlinkSync;',
+    'const paths = new Map(); let runSynced = false, candidateRemoved = false;',
+    'fs.openSync = function(target) { const fd = originalOpen.apply(this, arguments); paths.set(fd, target); return fd; };',
+    'fs.fsyncSync = function(fd) { const result = originalSync.apply(this, arguments); if (paths.get(fd) === process.env.FACTORY_GRANT_RUN_DIR) runSynced = true; return result; };',
+    'fs.renameSync = function(source, destination) {',
+    '  if (process.env.FACTORY_GRANT_MODE === "post" && destination === process.env.FACTORY_GRANT_REVOKED) {',
+    '    if (!runSynced) throw new Error("revoked snapshot before durable run manifest");',
+    '    fs.writeFileSync(process.env.FACTORY_GRANT_MARKER, "post-durable"); process.kill(process.pid, "SIGKILL");',
+    '  }',
+    '  return originalRename.apply(this, arguments);',
+    '};',
+    'fs.unlinkSync = function(target) {',
+    '  if (process.env.FACTORY_GRANT_MODE === "pre" && /^\.run\.json\.[0-9a-f-]{36}\.tmp$/.test(path.basename(target))) {',
+    '    const result = originalUnlink.apply(this, arguments); candidateRemoved = true; runSynced = false; return result;',
+    '  }',
+    '  if (process.env.FACTORY_GRANT_MODE === "pre" && target === process.env.FACTORY_GRANT_FENCE && candidateRemoved) {',
+    '    if (!runSynced) throw new Error("fence removed before durable candidate cleanup");',
+    '    fs.writeFileSync(process.env.FACTORY_GRANT_MARKER, "pre-durable"); process.kill(process.pid, "SIGKILL");',
+    '  }',
+    '  return originalUnlink.apply(this, arguments);',
+    '};',
+    'syncBuiltinESMExports();',
+  ].join("\n"));
+  const parked = join(realpathSync(operator), ".factory", ".parked");
+  const env = { ...process.env, FACTORY_GRANT_MODE: mode, FACTORY_GRANT_MARKER: marker,
+    FACTORY_GRANT_RUN_DIR: join(realpathSync(operator), ".factory-sandboxes", runId, ".factory", runId),
+    FACTORY_GRANT_FENCE: join(parked, `.grant-retry-${runId}.json`), FACTORY_GRANT_REVOKED: join(parked, `.revoked-grant-retry-${runId}`),
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preload}`].filter(Boolean).join(" ") };
+  delete env.FORCE_COLOR;
+  return { ...spawnSync("node", [CLI, "snapshot", runId, "--repo", operator, "--json"], { encoding: "utf8", env }), marker };
+}
+
 function snapshotRevocationFault(operator, runId) {
   const preload = join(operator, "grant-revocation-kill.cjs"), marker = join(operator, "grant-revocation-kill.json");
   const fence = join(realpathSync(operator), ".factory", ".parked", `.grant-retry-${runId}.json`);
@@ -1596,6 +1633,9 @@ describe("end to end — a merge is refused through the real CLI", () => {
           assert.match(linkedCandidate.stderr, /atomic candidate has an unsafe type/u);
           assert.equal(lstatSync(candidatePath).isSymbolicLink(), true); assert.deepEqual(readFileSync(candidateReferent), candidateBytes);
           unlinkSync(candidatePath); writeFileSync(candidatePath, candidateBytes);
+          const rollbackDurability = snapshotDurabilityFault(extended.operator, RUN, "pre");
+          assert.equal(rollbackDurability.signal, "SIGKILL"); assert.equal(readFileSync(rollbackDurability.marker, "utf8"), "pre-durable");
+          assert.equal(existsSync(candidatePath), false); assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), true);
           const recovered = factory(extended.operator, ["snapshot", RUN]);
           assert.equal(recovered.ok, true, recovered.stderr);
           assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), false);
@@ -1708,6 +1748,9 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(missingFencedSnapshot.ok, false);
       assert.match(missingFencedSnapshot.stderr, /lost its fenced snapshot/u);
       assert.equal(existsSync(heldCanonical), true); renameSync(heldCanonical, snapshot);
+      const commitDurability = snapshotDurabilityFault(committedCrash.operator, RUN, "post");
+      assert.equal(commitDurability.signal, "SIGKILL"); assert.equal(readFileSync(commitDurability.marker, "utf8"), "post-durable");
+      assert.equal(existsSync(snapshot), true); assert.equal(existsSync(join(dirname(snapshot), `.grant-retry-${RUN}.json`)), true);
       const revocationKilled = snapshotRevocationFault(committedCrash.operator, RUN);
       assert.equal(revocationKilled.signal, "SIGKILL", "revocation death leaves the authoritative fence and exact quarantine");
       const revokedPath = join(dirname(snapshot), `.revoked-grant-retry-${RUN}`);

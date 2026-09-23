@@ -84,7 +84,14 @@ export async function run(argv) {
   const handler = HANDLERS[command];
   if (["init", "status", "snapshot", "lock", "heartbeat", "effective-push"].includes(command)) return handler(positional, flags);
   const repo = resolve(flags.repo ?? process.cwd()), runId = positional[0];
-  if (["restore", "resume", "observe", "reverify-repair"].includes(command)) { assertNoRetryGrantTransaction(repo, runId, command); return handler(positional, flags); }
+  if (command === "restore") {
+    const live = [join(repo, CONTROL_PLANE, runId), join(repo, ".factory-sandboxes", runId, CONTROL_PLANE, runId)]
+      .find((candidate) => existsSync(join(candidate, "run.json")));
+    if (!live) { assertNoRetryGrantTransaction(repo, runId, command); return handler(positional, flags); }
+    return withRunJsonLock(live, async () => { assertNoRetryGrantTransaction(repo, runId, command); return handler(positional, flags); },
+      { nonExpiring: true });
+  }
+  if (["resume", "observe", "reverify-repair"].includes(command)) { assertNoRetryGrantTransaction(repo, runId, command); return handler(positional, flags); }
   if (typeof runId === "string" && /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u.test(runId)
     && existsSync(join(repo, CONTROL_PLANE, runId, "run.json"))) {
     return withRunJsonLock(join(repo, CONTROL_PLANE, runId), async () => {

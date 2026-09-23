@@ -26,11 +26,11 @@ export async function writeProtectedFileAtomic(rootDir, relativePath, data, opti
   const afterRename = options.hooks?.afterRename;
   const openFile = options.fsOps?.open ?? open;
   const bytes = Buffer.isBuffer(data) ? Buffer.from(data) : Buffer.from(String(data), "utf8");
-  await assertSafeParent(rootDir, parentDir);
+  const tempParent = options.tempDirectory === undefined ? parentDir : resolveProtectedPath(rootDir, options.tempDirectory);
+  for (const parent of new Set([parentDir, tempParent])) await assertSafeParent(rootDir, parent);
   await assertSafeTarget(targetPath, createOnly);
   if (createOnly) return writeProtectedCreate(rootDir, parentDir, targetPath, bytes, beforeCommit, openFile);
 
-  const tempParent = basename(targetPath) === "factory.lock" ? join(parentDir, "run-json.lock") : parentDir;
   const tempPath = join(tempParent, `.${basename(targetPath)}.${randomUUID()}.tmp`), rename = options.fsOps?.rename ?? fsRename;
   let handle = null, published = false, renamed = false;
   try {

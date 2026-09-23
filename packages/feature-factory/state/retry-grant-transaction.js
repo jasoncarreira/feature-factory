@@ -83,6 +83,7 @@ export function reconcileRetryGrantTransaction({ canonical, runDir, runId }) {
   if (liveDigest !== record.after_sha256) throw new Error("retry-grant transaction does not bind the live run manifest");
   const after = validateRun(JSON.parse(liveBytes));
   if (!isRetryGrantTransition(record.before_run, after, record.snapshot_digest)) throw new Error("retry-grant transaction candidate is not an authorized grant");
+  syncDir(runDir);
   const canonicalState = state(canonical);
   if (canonicalState && revokedState) throw new Error("retry-grant transaction has ambiguous snapshot copies");
   if (!canonicalState && !revokedState) throw new Error("retry-grant transaction has lost its fenced snapshot");
@@ -162,7 +163,7 @@ function removeAbandonedCandidate(runDir, canonical, afterDigest) {
   if (candidates.length !== 1 || sha256(readCandidate(runDir, candidates[0])) !== afterDigest) {
     throw new Error("retry-grant transaction has an ambiguous atomic candidate");
   }
-  unlinkSync(join(runDir, candidates[0]));
+  unlinkSync(join(runDir, candidates[0])); syncDir(runDir);
 }
 
 function readCandidate(runDir, name) {

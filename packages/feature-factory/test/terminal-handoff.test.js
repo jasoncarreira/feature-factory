@@ -680,6 +680,14 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     "a competing live manifest prevents publication of a second generation");
   rmSync(lostSandbox, { recursive: true });
   rmSync(competingRun, { recursive: true });
+  const restoreFence = join(dirname(restoreSnapshot), `.grant-retry-${restoreRun}.json`);
+  await assert.rejects(() => dispatchRestore([restoreRun], {
+    repo: restoreOperator, from: remoteFeatureRef, now: "2026-09-21T16:02:00Z",
+  }, { beforeManifest: () => writeFileSync(restoreFence, "{}\n") }),
+  (error) => error?.cause?.message === "restore refuses an interrupted retry-grant transaction");
+  assert.equal(existsSync(join(lostSandbox, ".factory", restoreRun, "run.json")), false,
+    "a fence published after restore qualification still prevents manifest authority");
+  rmSync(lostSandbox, { recursive: true }); unlinkSync(restoreFence);
   await assert.rejects(() => dispatchRestore([restoreRun], {
     repo: restoreOperator, from: remoteFeatureRef, now: "2026-09-21T16:02:00Z",
   }, { beforeManifest: () => writeFileSync(join(restoreSnapshot, "WORKFLOW.md"), Buffer.concat([sourceWorkflowBytes, Buffer.from("changed\n")])) }),

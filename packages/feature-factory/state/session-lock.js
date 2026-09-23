@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { rm } from "node:fs/promises";
-import { withRunJsonLock } from "../core/run-lock.js";
+import { RUN_JSON_LOCK_DIR, withRunJsonLock } from "../core/run-lock.js";
 
 export const SESSION_LOCK_FILE = "factory.lock";
 export const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
@@ -65,7 +65,7 @@ export async function claimSessionLock(runDir, { session, runId, branch, now, tt
       claimed_at: observed.owner?.session === session ? observed.owner.claimed_at : at,
       heartbeat_at: at,
     };
-    await writeProtectedJsonAtomic(runDir, SESSION_LOCK_FILE, owner);
+    await writeProtectedJsonAtomic(runDir, SESSION_LOCK_FILE, owner, { tempDirectory: RUN_JSON_LOCK_DIR });
     return { ...owner, stolen_from: observed.state === "stale" || force ? observed.owner : null };
   });
 }
@@ -77,7 +77,7 @@ export async function refreshSessionLock(runDir, { session, now } = {}) {
     // Refreshing someone else's lock would silently extend a run you do not own.
     if (session && owner.session !== session) throw new SessionLockHeldError(owner);
     const next = { ...owner, heartbeat_at: new Date(now ?? Date.now()).toISOString() };
-    await writeProtectedJsonAtomic(runDir, SESSION_LOCK_FILE, next);
+    await writeProtectedJsonAtomic(runDir, SESSION_LOCK_FILE, next, { tempDirectory: RUN_JSON_LOCK_DIR });
     return next;
   });
 }
