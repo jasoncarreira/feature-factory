@@ -12,13 +12,14 @@ import { isDeepStrictEqual } from "node:util";
 import { readFileSync } from "node:fs";
 import { nextAction, nextActionRecord, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
-import { RUN_JSON_LOCK_DIR } from "../core/run-lock.js";
+import { RUN_JSON_LOCK_DIR, withRunJsonLock } from "../core/run-lock.js";
 import { buildEvidence, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
 import { assertPublicationReady, assertReviewBinding, isApproving, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { readRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
 import { reverifyRepair } from "../observe/repair-reverification.js";
 import { readRepairState } from "../observe/repair-record.js";
 import { archiveReviewAttempt, publishAttemptArchive, qualifyAttemptArchive } from "../state/review-archive.js";
+import { hasRetryGrantTransaction, prepareRetryGrantTransaction, reconcileRetryGrantTransaction } from "../state/retry-grant-transaction.js";
 import { writeProtectedFileAtomic, writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
 import { resolveSpawnExecutable } from "../core/executable.js";
@@ -81,6 +82,24 @@ export async function run(argv) {
   if (!Object.hasOwn(COMMANDS, command)) throw new CliError(`unknown command '${command}' (try --help)`);
   const { positional, flags } = parse(command, rest);
   const handler = HANDLERS[command];
+  if (["init", "status", "snapshot", "lock", "heartbeat", "effective-push"].includes(command)) return handler(positional, flags);
+  const repo = resolve(flags.repo ?? process.cwd()), runId = positional[0];
+  if (command === "restore") {
+    const live = [join(repo, CONTROL_PLANE, runId), join(repo, ".factory-sandboxes", runId, CONTROL_PLANE, runId)]
+      .find((candidate) => existsSync(join(candidate, "run.json")));
+    if (!live) { assertNoRetryGrantTransaction(repo, runId, command); return handler(positional, flags); }
+    return withRunJsonLock(live, async () => { assertNoRetryGrantTransaction(repo, runId, command); return handler(positional, flags); },
+      { nonExpiring: true });
+  }
+  if (["resume", "observe", "reverify-repair"].includes(command)) { assertNoRetryGrantTransaction(repo, runId, command); return handler(positional, flags); }
+  if (typeof runId === "string" && /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u.test(runId)
+    && existsSync(join(repo, CONTROL_PLANE, runId, "run.json"))) {
+    return withRunJsonLock(join(repo, CONTROL_PLANE, runId), async () => {
+      assertNoRetryGrantTransaction(repo, runId, command);
+      return handler(positional, flags);
+    }, { allowReentrant: true, nonExpiring: true });
+  }
+  assertNoRetryGrantTransaction(repo, runId, command);
   return handler(positional, flags);
 }
 
@@ -213,6 +232,7 @@ function observedParkSnapshot(repo, runId, runDir, liveSkipped = new Set()) {
   const container = dirname(repo), sandbox = basename(container) === ".factory-sandboxes" && basename(repo) === runId;
   const operatorRoot = sandbox ? dirname(container) : repo, candidate = join(operatorRoot, CONTROL_PLANE, ".parked", runId);
   try {
+    if (hasRetryGrantTransaction(candidate, runId)) return null;
     const live = [join(operatorRoot, CONTROL_PLANE, runId), join(operatorRoot, ".factory-sandboxes", runId, CONTROL_PLANE, runId)]
       .filter((plane) => existsSync(join(plane, "run.json")));
     if (live.length !== 1 || realpathSync(live[0]) !== realpathSync(runDir)) return null;
@@ -241,10 +261,21 @@ function qualifyRetryGrant(repo, runDir, runId, state, sliceId, { requireSnapsho
   if (!cleanliness.clean) throw new CliError(`slice '${sliceId}' ${cleanliness.reason}`);
   const observed = observeWorktree(worktree, slice.base_ref, { ref: slice.branch });
   if (!observed.diff_observed || observed.commit !== evidence.commit) throw new CliError(`slice '${sliceId}' REJECT does not bind the live branch head`);
-  const snapshot = requireSnapshot ? observedParkSnapshot(repo, runId, runDir) : null;
+  const snapshot = requireSnapshot ? observedParkSnapshot(repo, runId, runDir, new Set([RUN_JSON_LOCK_DIR])) : null;
   if (requireSnapshot && !snapshot) throw new CliError(`grant-retry requires a complete current park snapshot for run '${runId}'`);
   return { slice, limit, review, evidence, worktree, snapshot,
     snapshotDigest: snapshot ? planDigest(Buffer.from(planeInventory(snapshot))) : null };
+}
+
+function assertNoRetryGrantTransaction(repo, runId, command) {
+  if (typeof runId !== "string" || !/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u.test(runId)) return;
+  const canonicalRepo = existsSync(repo) ? realpathSync(repo) : repo;
+  const container = dirname(canonicalRepo), sandbox = basename(container) === ".factory-sandboxes" && basename(canonicalRepo) === runId;
+  const operatorRoot = sandbox ? dirname(container) : canonicalRepo;
+  const canonical = join(operatorRoot, CONTROL_PLANE, ".parked", runId);
+  if (hasRetryGrantTransaction(canonical, runId)) {
+    throw new CliError(`factory ${command} refuses an interrupted retry-grant transaction for '${runId}'; run factory snapshot first`);
+  }
 }
 
 function runDirFor(flags, runId) {
@@ -367,7 +398,7 @@ function branchPoint(run) {
   return base;
 }
 
-async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs }) {
+async function writeObservedEvidence({ repo, runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs }) {
   const evidence = buildEvidence({
     subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, runId,
     testCommand, skipReason, shellCommand, testTimeoutMs,
@@ -377,7 +408,10 @@ async function writeObservedEvidence({ runDir, runId, subject, attempt, branch, 
     evidence.review_ready = false;
     evidence.blocked_reason = evidence.blocked_reason ?? `base ${baseRef} is ${ancestry} of HEAD`;
   }
-  await writeProtectedJsonAtomic(runDir, evidenceRef(subject), evidence);
+  await withRunJsonLock(runDir, async () => {
+    assertNoRetryGrantTransaction(repo, runId, "observe");
+    await writeProtectedJsonAtomic(runDir, evidenceRef(subject), evidence);
+  }, { nonExpiring: true, reentrant: true });
   return { evidence, ancestry };
 }
 
@@ -491,7 +525,7 @@ async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeComm
   // False-green enforcement: one invocation gets at most two executions, never an unbounded recovery loop.
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const { evidence } = await writeObservedEvidence({
-      runDir, runId, subject: "test-verifier", attempt, branch: run.branch,
+      repo, runDir, runId, subject: "test-verifier", attempt, branch: run.branch,
       baseRef, worktree: attemptIntegration.worktree, status: "completed", blockedReason: null,
       claim: null, testCommand: verify.command, skipReason: null, shellCommand: true,
       testTimeoutMs: verify.timeoutMs,
@@ -541,7 +575,7 @@ const HANDLERS = {
     const at = stamp(flags);
     const repo = resolve(flags.repo ?? process.cwd());
     const runDir = runDirFor(flags, runId);
-    return emit(flags, await reverifyRepair({ repo, runDir, runId, recordId, at }));
+    return emit(flags, await reverifyRepair({ repo, runDir, runId, recordId, at, beforeWrite: () => assertNoRetryGrantTransaction(repo, runId, "reverify-repair") }));
   },
 
   "effective-push"(positional) {
@@ -812,7 +846,18 @@ const HANDLERS = {
     const next = await transition(runDir, {
       participants: [{ familyId: "envelope", mode }, { familyId: "slices", mode }],
       reobservers: new Map([["envelope", async () => recheck()]]),
-      finalGuard: () => { recheck(); renameSync(qualified.snapshot, priorSnapshot); },
+      // Enforcement: the durable fence is published while the qualified snapshot is still canonical.
+      // It hides stale recovery authority across process death until the manifest outcome is reconciled.
+      finalGuard: ({ source }) => {
+        recheck();
+        prepareRetryGrantTransaction({ canonical: qualified.snapshot, runDir, runId, source,
+          expectedSnapshotDigest: qualified.snapshotDigest });
+      },
+      commitFailureGuard: () => reconcileRetryGrantTransaction({ canonical: qualified.snapshot, runDir, runId }),
+      afterCommit: () => {
+        try { return reconcileRetryGrantTransaction({ canonical: qualified.snapshot, runDir, runId }); }
+        catch (error) { throw new CliError("grant-retry committed; snapshot revocation cleanup is pending", { cause: error }); }
+      },
       apply: (state) => {
         if (!isDeepStrictEqual(state, current)) throw new CliError("grant-retry refused because run state changed after qualification");
         const existing = state.slices.find((slice) => slice.id === sliceId), previousLimit = effectiveRetryLimit(state, existing);
@@ -1119,7 +1164,7 @@ const HANDLERS = {
       : null;
 
     const { evidence, ancestry } = await writeObservedEvidence({
-      runDir, runId, subject,
+      repo, runDir, runId, subject,
       attempt,
       branch: flags.repositoryVerify ? run.branch : flags.branch ?? null,
       baseRef: flags.base, worktree, status: flags.status ?? "completed",
@@ -1420,9 +1465,11 @@ const HANDLERS = {
       if (!isDeepStrictEqual(state, current)) throw new CliError("factory resume bootstrap refused: run.json bytes changed while bootstrap ran; current state was preserved");
       if (!sameSessionOwner(runDir, boundOwner)) throw new CliError("factory resume bootstrap refused: factory.lock is absent, stale, or no longer names the same owner; current state and owner were preserved");
     };
-    // Enforcement: never unpark a driver that would keep reading an obsolete staged contract.
-    if (success) await writeProtectedFileAtomic(runDir, "WORKFLOW.md", readFileSync(new URL("../WORKFLOW.md", import.meta.url)));
-    const next = await transition(runDir, {
+    // Enforcement: bootstrap permits its bound session heartbeat; serialize every later effect with grants.
+    const next = await withRunJsonLock(runDir, async () => {
+      assertNoRetryGrantTransaction(repo, runId, "resume"); assertBinding({ state: validateRun(JSON.parse(readFileSync(join(runDir, "run.json")))) });
+      if (success) await writeProtectedFileAtomic(runDir, "WORKFLOW.md", readFileSync(new URL("../WORKFLOW.md", import.meta.url)));
+      return transition(runDir, {
       participants: [{ familyId: "envelope", mode: success ? "resume-needs-human" : "record-bootstrap" }],
       reobservers: new Map([["envelope", assertBinding]]), finalGuard: ({ state, source }) => {
         if (!readFileSync(join(runDir, "run.json")).equals(boundRunBytes) || !isDeepStrictEqual(state, current)) {
@@ -1436,7 +1483,8 @@ const HANDLERS = {
       },
       apply: (state) => ({ ...state, ...(success ? { status: "running" } : {}), updated_at: at,
         ...(outcome ? { bootstrap_command: config.bootstrapCommand, bootstrap_exit: outcome.exit } : {}) }),
-    });
+      });
+    }, { allowReentrant: true, nonExpiring: true });
     if (outcome?.refusal) throw new CliError(`${outcome.refusal}; run remains needs-human and its historical terminal result is preserved`);
     return emit(flags, {
       run_id: runId, status: next.status, terminal_result: next.terminal_result,

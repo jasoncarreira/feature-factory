@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
+  chmodSync, closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync,
   readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -480,16 +480,24 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
   factory(obsSandbox, "lock", "obs-run", "claim", "--session", "snapshot-owner");
   const parkedBytes = readFileSync(join(livePlane, "run.json"));
   const resumeAt = new Date(Date.parse(JSON.parse(parkedBytes).updated_at) + 1).toISOString();
+  // The parent owns the contended lock; file-backed stderr keeps pipe lifetime out of the lock proof.
+  const refusalPath = join(obsRoot, "resume-refusal.txt");
   await withRunJsonLock(livePlane, async () => {
-    const refused = spawnSync(process.execPath, [cli, "resume", "obs-run", "--session", "snapshot-owner",
-      "--now", resumeAt, "--repo", obsSandbox, "--json"], { encoding: "utf8" });
+    const refusalFd = openSync(refusalPath, "w");
+    let refused;
+    try {
+      refused = spawnSync(process.execPath, [cli, "resume", "obs-run", "--session", "snapshot-owner",
+        "--now", resumeAt, "--repo", obsSandbox, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", refusalFd] });
+    } finally { closeSync(refusalFd); }
     assert.notEqual(refused.status, 0);
-    assert.match(refused.stderr, /timed out waiting for run.json lock/u);
   });
+  assert.match(readFileSync(refusalPath, "utf8"), /timed out waiting for run.json lock/u);
   assert.deepEqual(readFileSync(join(livePlane, "run.json")), parkedBytes);
-  assert.deepEqual(readFileSync(join(livePlane, "WORKFLOW.md")), workflowBytes);
-  assert.ok(existsSync(published), "a stale snapshot is retained, not deleted");
-  assert.equal(snapshotOf(), null, "the refreshed contract is not silently excluded from snapshot verification");
+  assert.equal(readFileSync(join(livePlane, "WORKFLOW.md"), "utf8"), "# Previous packaged workflow\n",
+    "the command-wide run lock refuses resume before its contract-refresh side effect");
+  assert.ok(existsSync(published), "the current snapshot is retained, not deleted");
+  assert.equal(snapshotOf(), published, "a pre-effect refusal leaves the existing snapshot current");
+  writeFileSync(join(livePlane, "WORKFLOW.md"), workflowBytes);
   const staging = join(obsOperator, ".factory", ".parked", ".staging-obs-run");
   const prior = join(obsOperator, ".factory", ".parked", ".prior-obs-run");
   cpSync(livePlane, staging, { recursive: true });
@@ -672,6 +680,14 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     "a competing live manifest prevents publication of a second generation");
   rmSync(lostSandbox, { recursive: true });
   rmSync(competingRun, { recursive: true });
+  const restoreFence = join(dirname(restoreSnapshot), `.grant-retry-${restoreRun}.json`);
+  await assert.rejects(() => dispatchRestore([restoreRun], {
+    repo: restoreOperator, from: remoteFeatureRef, now: "2026-09-21T16:02:00Z",
+  }, { beforeManifest: () => writeFileSync(restoreFence, "{}\n") }),
+  (error) => error?.cause?.message === "restore refuses an interrupted retry-grant transaction");
+  assert.equal(existsSync(join(lostSandbox, ".factory", restoreRun, "run.json")), false,
+    "a fence published after restore qualification still prevents manifest authority");
+  rmSync(lostSandbox, { recursive: true }); unlinkSync(restoreFence);
   await assert.rejects(() => dispatchRestore([restoreRun], {
     repo: restoreOperator, from: remoteFeatureRef, now: "2026-09-21T16:02:00Z",
   }, { beforeManifest: () => writeFileSync(join(restoreSnapshot, "WORKFLOW.md"), Buffer.concat([sourceWorkflowBytes, Buffer.from("changed\n")])) }),
@@ -1488,10 +1504,27 @@ test("AC10-AC13/AC20 completed handoff fetches, archives, verifies, and only the
     await assert.rejects(() => dispatchSnapshot([runId], { repo: snapRoot }), /residual staging tree/u);
     rmSync(join(snapRoot, ".factory", ".parked", `.staging-${runId}`), { recursive: true, force: true });
 
-    // A residual `.prior-$R` is the trace of an unfinished cleanup, not a snapshot to preserve.
-    mkdirSync(join(snapRoot, ".factory", ".parked", `.prior-${runId}`), { recursive: true });
+    const priorPath = join(snapRoot, ".factory", ".parked", `.prior-${runId}`);
+    writeFileSync(priorPath, "unsafe residual\n");
+    await assert.rejects(() => dispatchSnapshot([runId], { repo: snapRoot }), /residual .* has an unsafe type/u);
+    assert.equal(readFileSync(priorPath, "utf8"), "unsafe residual\n", "an unsafe prior is preserved, not cleaned up");
+    rmSync(priorPath);
+    const fencePath = join(snapRoot, ".factory", ".parked", `.grant-retry-${runId}.json`);
+    writeFileSync(fencePath, "{malformed");
+    await assert.rejects(() => dispatchSnapshot([runId], { repo: snapRoot }), /could not reconcile retry-grant transaction/u);
+    assert.equal(readFileSync(fencePath, "utf8"), "{malformed", "an unresolved fence is preserved exactly");
+    rmSync(fencePath);
+    const stagingFencePath = `${fencePath}.staging`;
+    writeFileSync(stagingFencePath, "{partial");
+    await assert.rejects(() => dispatchSnapshot([runId], { repo: snapRoot }),
+      (error) => /staging fence is malformed/u.test(`${error.message} ${error.cause?.message ?? ""}`));
+    assert.equal(readFileSync(stagingFencePath, "utf8"), "{partial", "a partial staging fence is preserved exactly");
+    rmSync(stagingFencePath);
+
+    // A valid residual `.prior-$R` beside a qualified canonical is completed-publication cleanup.
+    mkdirSync(priorPath, { recursive: true });
     assert.equal((await dispatchSnapshot([runId], { repo: snapRoot })).park_snapshot, canonical);
-    assert.equal(existsSync(join(snapRoot, ".factory", ".parked", `.prior-${runId}`)), false,
+    assert.equal(existsSync(priorPath), false,
       "preflight removes the residual rather than publishing around it");
 
     // The publication gate is an inventory comparison, so control the comparison rather than contriving a

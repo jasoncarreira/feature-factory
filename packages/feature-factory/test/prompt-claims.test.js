@@ -1649,7 +1649,7 @@ const CLAIMS = [
         "`slice` raises only that slice's additive allowance. `all` raises the run-wide default, including every",
         "pending later wave, but still reopens only `SLICE_ID`; it refuses while another slice is blocked or an",
         "an archive gets a preparation-only refusal: publish the changed plane and invoke the grant again.",
-        "The grant atomically moves the old canonical snapshot away so restore cannot recover pre-grant authority.",
+        "The grant durably fences the old canonical snapshot before committing `run.json`, then removes it only",
         'Do not dispatch or resume yet. Republish the updated live plane, then require qualified status',
         "the staged workflow before its final snapshot check.",
         "start the replacement slice branch at that exact historical",

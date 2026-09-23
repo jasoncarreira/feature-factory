@@ -14,6 +14,8 @@ export async function coordinateRunJsonTransition(runDir, options) {
     reobservers = new Map(),
     atomicWriteHooks,
     finalGuard,
+    commitFailureGuard,
+    afterCommit,
   } = options ?? {};
   const registry = contractRegistry(contracts);
   const participants = participantRegistry(descriptor, registry);
@@ -70,16 +72,27 @@ export async function coordinateRunJsonTransition(runDir, options) {
           // Only the synchronous final guard may run between this line and the rename.
           const finalObserved = deepFreeze(await readRunState(runDir, validateRun));
           assertUnchanged(finalObserved, initial);
+          let guarded = false;
           if (typeof finalGuard === "function") {
-            const guarded = finalGuard({ state: finalObserved, candidate, source });
-            if (guarded && typeof guarded.then === "function") throw new Error("final commit guard must be synchronous");
+            const result = finalGuard({ state: finalObserved, candidate, source });
+            if (result && typeof result.then === "function") throw new Error("final commit guard must be synchronous");
+            guarded = true;
           }
-          await rename(source, destination);
+          try {
+            await rename(source, destination);
+          } catch (error) {
+            if (guarded && typeof commitFailureGuard === "function") {
+              const result = commitFailureGuard({ state: finalObserved, candidate, source, error });
+              if (result && typeof result.then === "function") throw new Error("commit failure guard must be synchronous");
+            }
+            throw error;
+          }
         },
       },
     });
+    if (typeof afterCommit === "function") await afterCommit({ state: initial, candidate });
     return candidate;
-  });
+  }, { reentrant: true });
 }
 
 function assertUnchanged(observed, initial) {

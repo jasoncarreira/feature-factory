@@ -286,6 +286,7 @@ export async function dispatchRestore(positional, flags, operations = {}) {
   // Test seam only: production supplies no hook. The final guard below must catch any intervening writer.
   if (operations.beforeManifest) await operations.beforeManifest({ runDir, sandbox });
   const finalGuard = () => {
+    if ([`.grant-retry-${runId}.json`, `.grant-retry-${runId}.json.staging`].some((name) => entryState(join(dirname(qualified.source), name)))) throw new RestoreError("restore refuses an interrupted retry-grant transaction");
     if (!readFileSync(join(qualified.source, "run.json")).equals(qualified.bytes) || inventory(qualified.source) !== qualified.inventory) throw new RestoreError("park snapshot changed while restore was running; run.json was not published");
     if (inventory(runDir) !== preparedInventory) throw new RestoreError("restored control plane changed before manifest publication; run.json was not published");
     if (entryState(legacyManifest)) throw new RestoreError(`live run manifest appeared at '${legacyManifest}' while restore was running`);

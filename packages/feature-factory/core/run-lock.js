@@ -2,11 +2,12 @@
 // The 0c spike reused this lock as-is, which is why it is lifted rather than
 // rewritten: hand-rolling lock reclaim and steal logic is where subtle crash bugs
 // live. Only the imports and the extracted constants below are new.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const DEFAULT_LOCK_TIMEOUT_MS = 1000;
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
@@ -15,11 +16,14 @@ const DEFAULT_MISSING_OWNER_STEAL_MS = 5000;
 export const RUN_JSON_LOCK_DIR = "run-json.lock";
 const LOCK_DIR = RUN_JSON_LOCK_DIR;
 const LOCK_OWNER_FILE = "owner.json";
+const LOCK_CONTEXT = new AsyncLocalStorage();
 
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
-  const { onBeforeSteal, nonExpiring } = options;
-  if (nonExpiring !== undefined && typeof nonExpiring !== "boolean") throw new Error("nonExpiring must be boolean");
+  const key = resolve(runDir), inherited = LOCK_CONTEXT.getStore()?.get(key);
+  if (options.reentrant === true && inherited?.active === true) return fn(inherited);
+  const { allowReentrant, onBeforeSteal, nonExpiring, reentrant } = options;
+  if ([allowReentrant, reentrant, nonExpiring].some((value) => value !== undefined && typeof value !== "boolean")) throw new Error("run lock boolean options must be boolean");
   if (onBeforeSteal !== undefined && typeof onBeforeSteal !== "function") {
     throw new Error("onBeforeSteal must be a function");
   }
@@ -32,6 +36,7 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
   let stealAttempted = false;
   let createdIdentity = null;
   let owner = null;
+  let context = null;
   let ownerPublished = false;
   let publishedEvidence = null;
 
@@ -68,8 +73,13 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
     publishedEvidence = await readLockOwnerEvidence(ownerPath);
     if (!sameLockOwner(owner, publishedEvidence?.owner)) throw new Error(`run.json lock owner publication failed at ${lockDir}`);
     ownerPublished = true;
-    return await fn({ lock_dir: lockDir, owner });
+    const lease = { lock_dir: lockDir, owner, active: true };
+    if (!allowReentrant) return await fn(lease);
+    context = lease;
+    const locks = new Map(LOCK_CONTEXT.getStore() ?? []); locks.set(key, context);
+    return await LOCK_CONTEXT.run(locks, () => fn(context));
   } finally {
+    if (context) context.active = false;
     if (ownerPublished) {
       await releaseOwnedRunJsonLock(runDir, lockDir, createdIdentity, publishedEvidence);
     } else if (!ownerPublished && !(await lockOwnerEntryExists(ownerPath))) {

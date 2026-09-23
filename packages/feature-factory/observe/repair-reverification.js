@@ -66,7 +66,7 @@ function removeDetached(repo, temporary) {
   }
 }
 
-export async function reverifyRepair({ repo, runDir, runId, recordId, at }) {
+export async function reverifyRepair({ repo, runDir, runId, recordId, at, beforeWrite = () => {} }) {
   const parsedAt = typeof at === "string" ? Date.parse(at) : NaN;
   if (!Number.isFinite(parsedAt) || new Date(parsedAt).toISOString() !== at) throw new Error("repair re-verification timestamp is not canonical");
   const preread = readRepairState({ repo, runDir, runId, recordId });
@@ -84,7 +84,7 @@ export async function reverifyRepair({ repo, runDir, runId, recordId, at }) {
   let reservation;
   try {
     reservation = await withRunJsonLock(runDir, async () => {
-      const current = readRepairState({ repo, runDir, runId, recordId });
+      const current = readRepairState({ repo, runDir, runId, recordId }); beforeWrite();
       assertEnvelope(current.run);
       assertDetached(temporary.worktree, current.selected.repair_commit);
       const history = current.selectedHistory;
@@ -131,7 +131,7 @@ export async function reverifyRepair({ repo, runDir, runId, recordId, at }) {
   removeDetached(repo, temporary);
 
   const completed = await withRunJsonLock(runDir, async () => {
-    const current = readRepairState({ repo, runDir, runId, recordId });
+    const current = readRepairState({ repo, runDir, runId, recordId }); beforeWrite();
     assertEnvelope(current.run);
     if (!current.runBytes.equals(reservation.runBytes) || !current.journalBytes.equals(reservation.journalBytes)) {
       throw new Error("run or repair journal bytes changed during re-verification");

@@ -10,7 +10,7 @@ import { validateRun } from "./schema.js";
 import { coordinateRunJsonTransition } from "../core/write-core.js";
 import { FAMILY_CONTRACTS } from "../core/contracts.js";
 
-export async function transition(runDir, { participants, apply, reobservers, hooks, finalGuard } = {}) {
+export async function transition(runDir, { participants, apply, reobservers, hooks, finalGuard, commitFailureGuard, afterCommit } = {}) {
   const descriptor = Object.freeze({
     participants: Object.freeze((participants ?? []).map((entry) => Object.freeze({ ...entry }))),
     apply,
@@ -22,5 +22,7 @@ export async function transition(runDir, { participants, apply, reobservers, hoo
     reobservers: reobservers ?? new Map(),
     atomicWriteHooks: hooks,
     finalGuard,
+    commitFailureGuard,
+    afterCommit,
   });
 }

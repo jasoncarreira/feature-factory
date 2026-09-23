@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { FAMILY_CONTRACTS } from "../core/contracts.js";
 import { withRunJsonLock } from "../core/run-lock.js";
 import { coordinateRunJsonTransition } from "../core/write-core.js";
@@ -265,6 +266,22 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
       await after(attempt);
       rmSync(locked.root, { recursive: true, force: true });
     }
+
+    const escaped = fixture("escaped-reentrant-owner");
+    try {
+      let escapedAttempt;
+      await withRunJsonLock(escaped.runDir, async () => {
+        escapedAttempt = new Promise((resolveAttempt) => setTimeout(async () => {
+          try {
+            await withRunJsonLock(escaped.runDir, async () => {}, { reentrant: true, timeoutMs: 20 });
+            resolveAttempt("entered");
+          } catch (error) { resolveAttempt(/timed out/u.test(error.message) ? "blocked" : "wrong-error"); }
+        }, 25));
+      }, { allowReentrant: true });
+      await withRunJsonLock(escaped.runDir, async () => {
+        assert.equal(await escapedAttempt, "blocked", "an escaped descendant cannot reuse an inactive lock lease");
+      }, { nonExpiring: true });
+    } finally { rmSync(escaped.root, { recursive: true, force: true }); }
   });
 });
 
@@ -399,6 +416,13 @@ describe("attack 11 — a concurrent writer changes run.json mid-transition", ()
         }), (error) => /final refusal|must be synchronous/u.test(`${error.message}\n${error.cause?.message ?? ""}`));
         assert.equal(bytes(f.runDir), before);
       }
+      const durablePath = join(f.root, "durable.json"); writeFileSync(durablePath, '{"state":"before"}\n');
+      await assert.rejects(() => writeProtectedJsonAtomic(f.root, "durable.json", { state: "after" }, {
+        hooks: { afterRename: async () => { throw new Error("post-rename verification failed"); } },
+      }), /protected file commit failed/u);
+      assert.deepEqual(JSON.parse(readFileSync(durablePath, "utf8")), { state: "after" },
+        "a post-rename failure preserves the only durable after-image for transaction recovery");
+
       const ownerAt = new Date().toISOString();
       writeFileSync(join(f.runDir, "factory.lock"), `${JSON.stringify({ session: "owner-a", run_id: "app-1", branch: "branch", claimed_at: ownerAt, heartbeat_at: ownerAt })}\n`);
       let competitor;
