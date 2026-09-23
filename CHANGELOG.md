@@ -3,6 +3,21 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.4
+
+A patch release that lets an operator set the run-wide retry limit in one grant (#363).
+
+- `factory grant-retry <run> <slice> --scope all --max-retries N` sets `max_retries` to `N` directly
+  instead of raising it by one. `N` must exceed the current limit, and the flag is refused with
+  `--scope slice`. Omitted, `all` still raises by one.
+- Everything else is unchanged: the named slice must be blocked at its effective limit with its REJECT
+  and evidence, only that slice reopens (at N+1), and the snapshot refresh and separate `resume` are
+  still required. Later rejections below the new limit retry without another grant.
+- Schema replay reconstructs the initial limit from each grant's recorded raise, so manifests with a
+  multi-step raise validate on read, restore and status.
+
+All three package manifests and both exact adapter pins move together to 0.10.4.
+
 ## 0.10.3
 
 A patch release so evidence whose builder claim disagrees with the observation can be read back (#361).
