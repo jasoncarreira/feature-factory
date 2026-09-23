@@ -600,6 +600,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       assert.ok(/"status": "completed\|blocked"/u.test(text),
         `${name} must document the claim status vocabulary evidence uses; "pass" reads as a disagreement`);
     }
+    // Instruction, not enforcement: the observer already records the disagreement. Without it a retry's
+    // builder claimed only that attempt's edits and every retry reconciled as a mismatch (baleyg run 9).
+    for (const name of ["backend-builder", "frontend-builder"]) {
+      assert.match(byName.get(name) ?? "", /changed since the slice's `base_ref`, not since your last attempt/u,
+        `${name} must scope files_changed to the whole slice on a retry`);
+    }
 
     // Widened after a review found survivors: my first pass listed frameworks and file trees and
     // missed *named products and fixtures* — database grant roles, a feature-flag vendor, a commit
@@ -1235,7 +1241,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // copy reaches both trees, so inventory equality passes and only re-qualifying catches it.
     // Issue #357 adds the audited operator grant. Issue #359 authorizes up to 5960 lines to make its
     // snapshot revocation recoverable across manifest failure and process death; the exact landing is recorded.
-    assert.equal(total, 5959, "recoverable retry-grant transactions land at 5959 production lines");
+    // 5959 -> 5962 for issue #361: `review_ready` was derived twice and only the writer knew a claim
+    // mismatch forbids it, so the reader refused every mismatched record and wedged its slice. The issue
+    // records the operator's authorization to raise the tripwire 5960 -> 5975.
+    assert.equal(total, 5962, "a claim mismatch derives review_ready false on read as on write: 5962 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1270,9 +1279,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Git provenance, explicit loss reporting, and atomic publication. Issue #352 authorized 5200 -> 5240
     // for bounded slice merit retries; issue #353 authorized the snapshot publisher and was re-authorized
     // to 5400 once #352 merged first. Issue #357 authorizes the combined post-#354/#356 tripwire to 5650
-    // for operator-authorized retry extension. Issue #359 authorizes 5960 for crash-safe grant recovery.
+    // for operator-authorized retry extension. Issue #359 authorizes 5960 for crash-safe grant recovery;
+    // issue #361 authorizes 5975 so a mismatched claim can be read back.
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 5960, `production source is ${total} lines; the issue #359 tripwire is 5960`);
+    assert.ok(total <= 5975, `production source is ${total} lines; the issue #361 tripwire is 5975`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

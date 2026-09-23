@@ -3,6 +3,20 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.3
+
+A patch release so evidence whose builder claim disagrees with the observation can be read back (#361).
+
+- `review_ready` was derived twice. The writer forced it `false` on a claim mismatch; `readEvidence`
+  recomputed it without that term and refused the stored `false` as self-contradicting. Every consumer
+  reads through `readEvidence`, so `slice blocked`, `grant-retry` and merge all refused, and a slice
+  with a mismatched claim could never leave `review` (baleyg run 9). The mismatch term now lives in
+  `deriveReviewReady`, so writer and reader agree; a mismatched record still cannot be review-ready.
+- Builders are told `files_changed` spans everything since the slice's `base_ref`, not the last
+  attempt. The observer diffs the whole slice because that is what merges.
+
+All three package manifests and both exact adapter pins move together to 0.10.3.
+
 ## 0.10.2
 
 A patch release that makes retry-grant snapshot revocation recoverable across manifest write failure and

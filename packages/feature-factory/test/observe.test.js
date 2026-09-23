@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readEvidence } from "../observe/review.js";
 import {
   buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, observeAncestry,
   observeWorktree, privilegedPaths, reconcileClaim, runTests, unownedPaths,
@@ -214,6 +215,18 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       assert.ok(evidence.files_changed.length > 0);
       assert.deepEqual(evidence.claim_reconciliation.mismatches.map((entry) => entry.field), ["files_changed"]);
       assert.equal(evidence.review_ready, false, "a claim that disagrees with observation cannot be review-ready");
+
+      // The reader must derive the same verdict the writer stored. It recomputed without the
+      // mismatch term, refused this exact record as self-contradicting, and so a slice whose
+      // builder under-claimed a retry's files could never be recorded blocked (baleyg run 9).
+      const runDir = join(f.root, ".factory", "app-1");
+      mkdirSync(join(runDir, "evidence"), { recursive: true });
+      const write = (value) => writeFileSync(join(runDir, "evidence", "be-thing.json"), JSON.stringify(value));
+      write({ ...evidence, run_id: "app-1" });
+      assert.equal(readEvidence(runDir, "evidence/be-thing.json", { runId: "app-1" }).review_ready, false);
+      write({ ...evidence, run_id: "app-1", review_ready: true });
+      assert.throws(() => readEvidence(runDir, "evidence/be-thing.json", { runId: "app-1" }),
+        /claims review_ready: true but its own contents derive false/u, "a mismatched record cannot be promoted by editing");
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 

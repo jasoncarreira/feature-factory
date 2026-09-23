@@ -123,10 +123,16 @@ export function runTests(worktree, command, { runner = spawnSync, skipReason = n
   return { cmd: shellCommand ? command : command.join(" "), exit, observed: exit !== null, skipped_reason: null };
 }
 
-// Readiness requires completed, clean, changed, observed-diff evidence and tests
-// observed passing or ratified as explicitly skipped with a reason.
+// Readiness requires completed, clean, changed, observed-diff evidence, no disagreement between
+// the builder's claim and the observation, and tests observed passing or ratified as explicitly
+// skipped with a reason.
 export function deriveReviewReady(evidence) {
   if (evidence.status !== "completed") return false;
+  // Enforcement (false green): a claim that disagrees with observation is itself the finding. It
+  // lives here, not beside the writer, because `readEvidence` recomputes readiness from this
+  // function alone; with the term only at write time, every mismatched record read back as
+  // tampered and wedged its slice where `slice blocked` could never record it.
+  if (evidence.claim_reconciliation?.mismatches?.length > 0) return false;
   // A tree with uncommitted changes cannot produce evidence about the commit it
   // claims, whatever the tests said.
   if (evidence.worktree_clean !== true) return false;
@@ -250,11 +256,8 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
     review_ready: false,
     claim_reconciliation: { claimed: false, mismatches: [] },
   };
-  evidence.review_ready = deriveReviewReady(evidence);
   evidence.claim_reconciliation = reconcileClaim(claim, evidence);
-  // A claim that disagrees with what we observed cannot be review-ready: the
-  // disagreement is itself the finding.
-  if (evidence.claim_reconciliation.mismatches.length > 0) evidence.review_ready = false;
+  evidence.review_ready = deriveReviewReady(evidence);
   return evidence;
 }
 

@@ -106,7 +106,9 @@ Use exactly these field names and exactly this `status` vocabulary. The orchestr
 block to `factory observe --claim`, which compares each field against what it observes itself and
 records every disagreement as a review finding. `completed` is the word the evidence uses; any
 other spelling reads as a disagreement about status and blocks your own slice. `files_changed`
-must list every path, and `tests.exit` must be the real exit code — a claimed zero against an
+must list every path changed since the slice's `base_ref`, not since your last attempt — on a retry
+the observer diffs the whole slice, because that is what merges, and a list of only this attempt's
+edits is a disagreement. `tests.exit` must be the real exit code — a claimed zero against an
 observed failure is the single most important disagreement this mechanism catches.
 
 If the brief is wrong or impossible as written (e.g. the entity doesn't support it), stop, set `status: blocked` with the reason in `blockers`, and report the conflict — do not silently improvise a different design.
