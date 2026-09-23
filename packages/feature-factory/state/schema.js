@@ -181,9 +181,10 @@ function retryExtensions(errors, run) {
     for (const key of ["attempt", "previous_limit", "new_limit", "previous_max_retries", "max_retries"]) positiveInt(errors, entry, key, path);
     if (!RETRY_EXTENSION_SCOPES.includes(entry.scope) || !ID.test(entry.slice_id)
       || ["attempt", "previous_limit", "new_limit", "previous_max_retries", "max_retries"].some((key) => !Number.isSafeInteger(entry[key]) || entry[key] < 1)) crossCheck = false;
-    if (Number.isSafeInteger(entry.previous_limit) && entry.new_limit !== entry.previous_limit + 1) errors.push({ path: `${path}.new_limit`, message: "must advance exactly one" });
+    const raise = entry.scope === "all" ? entry.max_retries - entry.previous_max_retries : 1;
+    if (Number.isSafeInteger(entry.previous_limit) && entry.new_limit !== entry.previous_limit + raise) errors.push({ path: `${path}.new_limit`, message: "must advance by the granted raise" });
     if (entry.scope === "slice" && entry.max_retries !== entry.previous_max_retries) errors.push({ path: `${path}.max_retries`, message: "must stay unchanged for slice scope" });
-    if (entry.scope === "all" && entry.max_retries !== entry.previous_max_retries + 1) errors.push({ path: `${path}.max_retries`, message: "must advance exactly one for all scope" });
+    if (entry.scope === "all" && !(raise >= 1)) errors.push({ path: `${path}.max_retries`, message: "must rise for all scope" });
     for (const key of ["session", "reason"]) required(errors, entry, key, path);
     pattern(errors, entry, "at", ISO, path);
     pattern(errors, entry, "snapshot_digest", DIGEST, path);
@@ -196,7 +197,7 @@ function retryExtensions(errors, run) {
     }
   });
   if (!crossCheck) return;
-  let maxRetries = run.max_retries - value.filter((entry) => entry.scope === "all").length;
+  let maxRetries = run.max_retries - value.reduce((sum, entry) => sum + (entry.scope === "all" ? entry.max_retries - entry.previous_max_retries : 0), 0);
   if (maxRetries < 1) return void errors.push({ path: "run.retry_extensions", message: "contains more run-wide grants than the final max_retries permits" });
   const extras = new Map(), latestGrant = new Map(), grantBases = new Map(), archiveRefs = new Set();
   let previousAt = null;
@@ -212,10 +213,10 @@ function retryExtensions(errors, run) {
     previousAt = Date.parse(entry.at);
     const previousLimit = maxRetries + previousExtra;
     if (entry.previous_max_retries !== maxRetries || entry.previous_limit !== previousLimit) errors.push({ path, message: "does not continue the recorded retry limits" });
-    if (entry.scope === "all") maxRetries += 1;
+    if (entry.scope === "all") maxRetries = entry.max_retries;
     else extras.set(entry.slice_id, previousExtra + 1);
     const newLimit = maxRetries + (extras.get(entry.slice_id) ?? 0);
-    if (entry.max_retries !== maxRetries || entry.new_limit !== newLimit || entry.attempt !== newLimit) errors.push({ path, message: "does not bind the granted attempt and resulting limits" });
+    if (entry.max_retries !== maxRetries || entry.new_limit !== newLimit || entry.attempt !== previousLimit + 1) errors.push({ path, message: "does not bind the granted attempt and resulting limits" });
     if (grantBases.has(entry.slice_id) && grantBases.get(entry.slice_id) !== entry.base_ref) errors.push({ path: `${path}.base_ref`, message: "changes the slice's immutable retry base" });
     grantBases.set(entry.slice_id, entry.base_ref); latestGrant.set(entry.slice_id, entry.attempt);
   }

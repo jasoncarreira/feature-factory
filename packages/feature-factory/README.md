@@ -258,8 +258,9 @@ own the same path. Duplicate, target-already-owned, malformed, privileged, repla
 requests refuse atomically. Resume never amends or reseeds. A merge continues to refuse every unamended
 or privileged changed path.
 
-A parked slice that exhausted its effective limit can receive exactly one audited extension through
-`factory grant-retry <run-id> <slice-id> --scope slice|all --reason <text> --session <id> --repo <sandbox>`.
+A parked slice that exhausted its effective limit can be reopened for one more attempt through
+`factory grant-retry <run-id> <slice-id> --scope slice|all [--max-retries N] --reason <text> --session <id> --repo <sandbox>`;
+`--max-retries` (with `all` only) sets the new run-wide limit in one call instead of raising it by one.
 Slice scope raises only the target's additive allowance. All scope raises `max_retries` for pending later
 waves too, but refuses when another slice is blocked or an exhausted post-merge repair record exists. Both
 scopes reopen only the named slice after exact owner, snapshot, REJECT, evidence, base, current clean head,

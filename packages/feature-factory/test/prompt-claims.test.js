@@ -1645,9 +1645,11 @@ const CLAIMS = [
       ]) assert.ok(prose.includes(postMergeClaim), `post-merge policy is missing: ${postMergeClaim}`);
       const retryExtensionClaims = [
         'factory grant-retry "$R" "$SLICE_ID" --scope slice --reason "$EXTENSION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"',
-        'factory grant-retry "$R" "$SLICE_ID" --scope all --reason "$EXTENSION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"',
-        "`slice` raises only that slice's additive allowance. `all` raises the run-wide default, including every",
-        "pending later wave, but still reopens only `SLICE_ID`; it refuses while another slice is blocked or an",
+        'factory grant-retry "$R" "$SLICE_ID" --scope all [--max-retries "$N"] --reason "$EXTENSION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"',
+        "`slice` raises only that slice's additive allowance by one. `all` raises the run-wide default, including",
+        "every pending later wave, but still reopens only `SLICE_ID`; it refuses while another slice is blocked or an",
+        "`all` raises by one unless `--max-retries N` sets the new run-wide limit",
+        "Choose `N` for the whole remaining plan: once granted, later",
         "an archive gets a preparation-only refusal: publish the changed plane and invoke the grant again.",
         "The grant durably fences the old canonical snapshot before committing `run.json`, then removes it only",
         'Do not dispatch or resume yet. Republish the updated live plane, then require qualified status',
