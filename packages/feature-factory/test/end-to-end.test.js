@@ -1643,7 +1643,15 @@ describe("end to end — a merge is refused through the real CLI", () => {
             "reconciliation removes only the transaction-bound orphan candidate");
           assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), parkedBefore);
         }
-        const granted = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
+        // `all` sets the run-wide limit in one call (1 -> 3) rather than one grant per exhaustion; it still
+        // reopens only attempt N+1. A non-rising value and a slice-scoped value are refused untouched.
+        const beforeRefusals = readFileSync(join(extended.runDir, "run.json"), "utf8");
+        for (const [bad, pattern] of [[["--scope", "all", "--max-retries", "1"], /must exceed the current run-wide limit 1/u],
+          [["--scope", "slice", "--max-retries", "3"], /--max-retries requires --scope all/u]]) {
+          const refused = factory(extended.repo, ["grant-retry", RUN, "be-thing", ...bad, "--reason", "r", "--session", "operator", "--now", NOW(7)]);
+          assert.match(refused.stderr, pattern); assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), beforeRefusals);
+        }
+        const granted = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope, ...(scope === "all" ? ["--max-retries", "3"] : []),
           "--reason", "one bounded corpus-native repair", "--session", "operator", "--now", NOW(7)]);
         assert.equal(granted.ok, true, `${scope}: ${granted.stderr}`);
         const parked = runJson(extended.runDir), target = parked.slices.find((slice) => slice.id === "be-thing");
@@ -1651,7 +1659,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.deepEqual({ status: parked.status, reason: parked.terminal_result.reason, max: parked.max_retries,
           target: [target.status, target.attempts, target.extra_attempts ?? 0, target.evidence_ref, target.review_ref],
           future: [future.status, future.attempts, future.extra_attempts ?? 0] }, {
-          status: "needs-human", reason: "blocked-after-retries", max: scope === "all" ? 2 : 1,
+          status: "needs-human", reason: "blocked-after-retries", max: scope === "all" ? 3 : 1,
           target: ["running", 2, scope === "slice" ? 1 : 0, null, null], future: ["pending", 1, 0],
         });
         assert.equal(parked.retry_extensions.at(-1).scope, scope);
@@ -1671,7 +1679,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         const replay = factory(extended.repo, ["grant-retry", RUN, "be-thing", "--scope", scope,
           "--reason", "replay", "--session", "operator", "--now", NOW(8)]);
         assert.equal(replay.ok, false);
-        assert.match(replay.stderr, /requires slice 'be-thing' blocked at effective retry limit 2/u);
+        assert.match(replay.stderr, new RegExp(`requires slice 'be-thing' blocked at effective retry limit ${scope === "all" ? 3 : 2}`, "u"));
         assert.equal(readFileSync(join(extended.runDir, "run.json"), "utf8"), beforeResume);
         const staleResume = factory(extended.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]);
         assert.equal(staleResume.ok, false);
@@ -1705,7 +1713,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         const status = factory(extended.repo, ["status", RUN]).out;
         assert.equal(status.status, "running");
         assert.deepEqual(status.slices.map(({ id, retry_limit }) => [id, retry_limit]),
-          [["be-thing", 2], ["future", scope === "all" ? 2 : 1]]);
+          [["be-thing", scope === "all" ? 3 : 2], ["future", scope === "all" ? 3 : 1]]);
       } finally { cleanupProject(extended); }
     }
 

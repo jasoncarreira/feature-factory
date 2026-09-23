@@ -40,7 +40,7 @@ export const COMMANDS = Object.freeze({
   status: Object.freeze(["--repo", "--json"]),
   "amend-paths": Object.freeze(["--repo", "--add", "--reason", "--session", "--now", "--json"]),
   resume: Object.freeze(["--repo", "--session", "--now", "--json"]),
-  "grant-retry": Object.freeze(["--repo", "--scope", "--reason", "--session", "--now", "--json"]),
+  "grant-retry": Object.freeze(["--repo", "--scope", "--max-retries", "--reason", "--session", "--now", "--json"]),
   restore: Object.freeze(["--repo", "--from", "--now", "--json"]),
   snapshot: Object.freeze(["--repo", "--json"]),
   decide: Object.freeze(["--repo", "--text", "--session", "--now", "--json"]),
@@ -799,11 +799,16 @@ const HANDLERS = {
     if (positional.length !== 2) throw new CliError("factory grant-retry requires exactly <run-id> <slice-id>");
     const [runId, sliceId] = positional;
     if (!RETRY_EXTENSION_SCOPES.includes(flags.scope)) throw new CliError(`factory grant-retry requires --scope ${RETRY_EXTENSION_SCOPES.join("|")}`);
+    if (flags.maxRetries !== undefined && flags.scope !== "all") throw new CliError("factory grant-retry --max-retries requires --scope all");
     if (typeof flags.reason !== "string" || !flags.reason.trim()) throw new CliError("factory grant-retry requires nonblank --reason <text>");
     if (typeof flags.session !== "string" || !flags.session.trim()) throw new CliError("factory grant-retry requires nonblank --session <id>");
     const runDir = runDirFor(flags, runId), repo = resolve(flags.repo ?? process.cwd());
     const boundBytes = readFileSync(join(runDir, "run.json")), current = validateRun(JSON.parse(boundBytes.toString("utf8")));
     if (current.status !== "needs-human") throw new CliError(`factory grant-retry requires current status needs-human; found '${current.status}'`);
+    // Instruction, not enforcement, on the size: a higher run-wide limit buys more reviewed attempts, never an
+    // unearned merge. Enforced only that it rises, since the grant must reopen the exhausted slice at N+1.
+    const grantedMax = flags.scope === "all" ? integer(flags.maxRetries, current.max_retries + 1, "--max-retries") : current.max_retries;
+    if (flags.scope === "all" && grantedMax <= current.max_retries) throw new CliError(`grant-retry --max-retries must exceed the current run-wide limit ${current.max_retries}`);
     const owner = assertFreshSessionOwner(runDir, runId, flags.session, "grant-retry"), at = stamp(flags);
     if (Date.parse(at) <= Date.parse(current.updated_at)) throw new CliError("grant-retry must move updated_at forwards");
     const qualified = qualifyRetryGrant(repo, runDir, runId, current, sliceId);
@@ -864,7 +869,7 @@ const HANDLERS = {
         const row = { ...existing, status: "running", attempts: existing.attempts + 1,
           ...(flags.scope === "slice" ? { extra_attempts: (existing.extra_attempts ?? 0) + 1 } : {}),
           evidence_ref: null, review_ref: null };
-        const maxRetries = state.max_retries + (flags.scope === "all" ? 1 : 0), newLimit = maxRetries + (row.extra_attempts ?? 0);
+        const maxRetries = grantedMax, newLimit = maxRetries + (row.extra_attempts ?? 0);
         const audit = { scope: flags.scope, slice_id: sliceId, base_ref: existing.base_ref, attempt: row.attempts, previous_limit: previousLimit,
           new_limit: newLimit, previous_max_retries: state.max_retries, max_retries: maxRetries,
           session: flags.session, reason: flags.reason.trim(), at, snapshot_digest: qualified.snapshotDigest,
@@ -1863,7 +1868,7 @@ function usage() {
   factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
   factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID [--now ISO]
-  factory grant-retry <run-id> <slice-id> --scope slice|all --reason TEXT --session ID [--now ISO]
+  factory grant-retry <run-id> <slice-id> --scope slice|all [--max-retries N] --reason TEXT --session ID [--now ISO]
   factory decide <run-id> --text TEXT --session ID [--now ISO]
   factory resume <run-id> --session ID [--now ISO]
   factory restore <run-id> --repo OPERATOR --from refs/remotes/REMOTE/BRANCH [--now ISO]

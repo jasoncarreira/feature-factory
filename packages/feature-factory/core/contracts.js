@@ -66,7 +66,7 @@ const envelope = contract({
         const scope = mode === "grant-retry-all" ? "all" : "slice";
         if (after.status !== "needs-human" || !isDeepStrictEqual(after.terminal_result, before.terminal_result)) throw new Error("grant-retry must preserve the parked envelope and terminal_result");
         if (Date.parse(after.updated_at) <= Date.parse(before.updated_at)) throw new Error("grant-retry must move updated_at forwards");
-        if (scope === "all" ? after.max_retries !== before.max_retries + 1 : after.max_retries !== before.max_retries) throw new Error(`grant-retry ${scope} has an invalid run-wide retry limit`);
+        if (scope === "all" ? !(after.max_retries > before.max_retries) : after.max_retries !== before.max_retries) throw new Error(`grant-retry ${scope} has an invalid run-wide retry limit`);
         if (after.retry_extensions.length !== before.retry_extensions.length + 1 || !isDeepStrictEqual(after.retry_extensions.slice(0, -1), before.retry_extensions) || after.retry_extensions.at(-1)?.scope !== scope) throw new Error("grant-retry must append one matching audit record");
         for (const key of Object.keys(before).filter((key) => !["updated_at", "max_retries", "retry_extensions"].includes(key))) if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`grant-retry cannot change envelope.${key}`);
         for (const key of Object.keys(current).filter((key) => !Object.hasOwn(before, key) && key !== "slices")) if (!isDeepStrictEqual(current[key], candidate[key])) throw new Error(`grant-retry cannot change run.${key}`);
@@ -340,7 +340,8 @@ const slices = contract({
       if (scope === "all" && before.some((entry, entryIndex) => entryIndex !== index && entry.status === "blocked")) throw new Error("grant-retry all cannot strand another blocked slice below the raised limit");
       if (prior.id !== slice.id || prior.status !== "blocked" || slice.status !== "running") throw new Error("grant-retry requires one blocked slice to become running");
       const previousLimit = effectiveRetryLimit(current, prior), nextLimit = effectiveRetryLimit(candidate, slice);
-      if (prior.attempts !== previousLimit || slice.attempts !== prior.attempts + 1 || nextLimit !== previousLimit + 1) throw new Error("grant-retry must open exactly N+1 from the exhausted effective limit");
+      const raise = scope === "all" ? candidate.max_retries - current.max_retries : 1;
+      if (prior.attempts !== previousLimit || slice.attempts !== prior.attempts + 1 || nextLimit !== previousLimit + raise) throw new Error("grant-retry must open exactly N+1 from the exhausted effective limit");
       const previousExtra = prior.extra_attempts ?? 0, nextExtra = slice.extra_attempts ?? 0;
       if (scope === "slice" ? nextExtra !== previousExtra + 1 : nextExtra !== previousExtra) throw new Error(`grant-retry ${scope} has an invalid slice-specific extension`);
       for (const key of new Set([...Object.keys(prior), ...Object.keys(slice)])) if (!["status", "attempts", "extra_attempts", "evidence_ref", "review_ref"].includes(key) && !isDeepStrictEqual(prior[key], slice[key])) throw new Error(`grant-retry cannot change slice '${slice.id}' ${key}`);

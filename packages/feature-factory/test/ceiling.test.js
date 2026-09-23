@@ -113,7 +113,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "--max-parallel-slices", "--max-retries", "--now", "--json",
     ]);
     assert.deepEqual(COMMANDS.resume, ["--repo", "--session", "--now", "--json"]);
-    assert.deepEqual(COMMANDS["grant-retry"], ["--repo", "--scope", "--reason", "--session", "--now", "--json"]);
+    assert.deepEqual(COMMANDS["grant-retry"], ["--repo", "--scope", "--max-retries", "--reason", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS.restore, ["--repo", "--from", "--now", "--json"]);
     assert.deepEqual(COMMANDS.snapshot, ["--repo", "--json"]);
     assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
@@ -1244,7 +1244,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // 5959 -> 5962 for issue #361: `review_ready` was derived twice and only the writer knew a claim
     // mismatch forbids it, so the reader refused every mismatched record and wedged its slice. The issue
     // records the operator's authorization to raise the tripwire 5960 -> 5975.
-    assert.equal(total, 5962, "a claim mismatch derives review_ready false on read as on write: 5962 production lines");
+    // 5962 -> 5969: `grant-retry --scope all --max-retries N` sets the run-wide limit in one call instead of
+    // one +1 grant per exhaustion; still reopens only N+1. Inside #361's 5975 tripwire; nothing was trimmed.
+    assert.equal(total, 5969, "grant-retry sets the run-wide limit in one call: 5969 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

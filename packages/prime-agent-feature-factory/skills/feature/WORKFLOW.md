@@ -224,12 +224,14 @@ scope deliberately:
 
 ```sh
 factory grant-retry "$R" "$SLICE_ID" --scope slice --reason "$EXTENSION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"
-factory grant-retry "$R" "$SLICE_ID" --scope all --reason "$EXTENSION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"
+factory grant-retry "$R" "$SLICE_ID" --scope all [--max-retries "$N"] --reason "$EXTENSION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"
 ```
 
-`slice` raises only that slice's additive allowance. `all` raises the run-wide default, including every
-pending later wave, but still reopens only `SLICE_ID`; it refuses while another slice is blocked or an
-exhausted post-merge repair exists. Both scopes require `blocked@N` exactly at the current effective limit;
+`slice` raises only that slice's additive allowance by one. `all` raises the run-wide default, including
+every pending later wave, but still reopens only `SLICE_ID`; it refuses while another slice is blocked or an
+exhausted post-merge repair exists. `all` raises by one unless `--max-retries N` sets the new run-wide limit
+directly; `N` must exceed the current limit. Choose `N` for the whole remaining plan: once granted, later
+rejections below it retry without another operator grant. Both scopes require `blocked@N` exactly at the current effective limit;
 a matching REJECT, evidence, immutable base and live clean branch head; the exact fresh lock owner; a
 complete current park snapshot; and immutable attempt-N review and evidence archives. A legacy run missing
 an archive gets a preparation-only refusal: publish the changed plane and invoke the grant again. They
