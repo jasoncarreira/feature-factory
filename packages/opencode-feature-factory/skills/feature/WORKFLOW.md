@@ -909,6 +909,12 @@ with `git check-ref-format --branch "$FEATURE_BRANCH"`. Bind
 `git -C "$O" show-ref --verify --quiet "$FEATURE_REF"` to exit exactly 1 for ref absence. Exit 0 means
 present and every other result is a lookup error; either refuses before init.
 
+Bind `KEY` from how `R` was bound, never from anything else: when the configured resolver returned a
+payload, `KEY` is exactly `R`, its `run_id`; when `R` is a ticket key from the request or branch, `KEY`
+is that key; when `R` was derived from free text, `KEY` is absent and `--issue` is omitted. Never add a
+`#` or other decoration. `issue_key` is immutable after init, and publication reads it for the title
+prefix and closing reference, so a run whose resolver found issue `25` must record `25`.
+
 An explicit `PR_BASE` wins. Otherwise require the symbolic branch in the configured operator worktree;
 detached, missing, escaping, or unprovable worktree state is refused by init. Request one fresh sandbox
 by running exactly the command below, command first, including each bracketed flag only when its value
