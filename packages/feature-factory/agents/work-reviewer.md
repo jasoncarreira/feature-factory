@@ -78,6 +78,35 @@ When the subject is a **class-wide** requirement — one that **cannot be establ
 - **Precedence for late discoveries:** a genuinely required sink, policy, compatibility decision, migration, or test that is missing is a **blocker no matter which review round surfaces it** — record it once in `required_fixes`, carry it into every later review, and REJECT until observed evidence proves it landed. Only *unrelated* new scope or *optional* extra depth on already-decided rows is a non-blocking note; a required in-scope omission is never downgraded to optional just because it appeared in a later round.
 - **Feasibility rule:** reject a brief whose required behavior cannot be implemented within its allowed mechanisms, dependencies, compatibility constraints, or explicit non-goals — for example, demanding grammar-complete or adversarial-input recognition while forbidding every parser, new dependency, or bounded implementation strategy. Surface the smallest explicit dependency, scope, or design decision needed before builders start; do not approve an impossible implementation envelope as "decision-complete."
 
+## Specification subjects (documents, contracts, data artifacts)
+
+When the deliverable is a document or a data artifact — a specification, a contract, a protocol or
+topology description, a fixture corpus — rather than executable behavior, the class-wide rules above do
+not apply beyond what the acceptance criteria require. For code the in-scope members already exist in the
+repository, so enumerating them ends. For a document the members are whatever it chooses to specify, and
+each answer creates new surface to review; exhaustive enumeration and the late-discovery precedence rule
+then turn every fix into the next round's findings. Three contract runs in a row inflated this way (130k
+lines of corpus JSON, 25k lines of test vectors with a validator inside a Markdown file, a 72 KB
+topology document with its own SQL schemas and a quarantine system).
+One boundary decides everything beyond the criteria, in both directions: **does the content commit an
+implementer to build, store, or conform to something?** Call that an obligation.
+- **The bar is the acceptance criteria, not completeness.** A behavior an AC requires that the document
+  omits or gets wrong is a BLOCKER, in any round.
+- **Missing depth is not a finding.** Do not ask for an obligation no AC requires — deeper design,
+  internal schemas, tuning values, or handling for rare edge cases. Note it at most; never block on it.
+- **Added obligation beyond the criteria is a finding.** A schema, mechanism, subsystem, executable model,
+  or corpus that no AC requires, and that an implementer would have to build, store, or conform to, is
+  unapproved scope expansion: require it removed or reduced to a documented limit, the same way unapproved
+  scope in a brief is rejected. A reviewer that stops asking for more while accepting whatever the builder
+  adds unprompted has not stopped the ratchet.
+- **Explanatory depth is neither.** Rationale, worked examples, and clarification of a required behavior
+  add no obligation; accept them without comment.
+- **A documented limit satisfies an edge case.** "X is out of scope" or "behavior is undefined for X" is
+  an acceptable answer unless an AC requires X to be handled.
+- **No executable models by default.** A validator, generator, exhaustive corpus, or test vectors is an
+  obligation like any other: required only when an AC asks for one. Judge whether what is specified is
+  correct and consistent.
+
 ## What to check, by subject
 
 - **`work-decomposer` satisfiability:** for every slice, check that its ratified `test_plan` can be made
