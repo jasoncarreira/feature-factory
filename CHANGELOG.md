@@ -3,6 +3,19 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.6
+
+A patch release that binds the issue key a run records.
+
+- The init command has carried `[--issue "$KEY"]` since the Prime adapter landed (#245), but nothing
+  bound `KEY`, so a driver following the text omitted the flag and every resolver-named run recorded
+  `issue_key: null` (baleyg run 25). Publication reads `issue_key` for the `<key> : ` title prefix and
+  the `Closes #<key>` reference, so those PRs lost both. The workflow and the OpenCode skill now bind it:
+  a resolver payload gives `KEY = R`, a ticket key gives that key, and a free-text slug gives none.
+  Instruction only; no production code changes.
+
+All three package manifests and both exact adapter pins move together to 0.10.6.
+
 ## 0.10.5
 
 A patch release that moves the publishing-identity guard into the CLI and lets a project commit its

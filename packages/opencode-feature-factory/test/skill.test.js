@@ -44,6 +44,10 @@ describe("OpenCode skill adapter", () => {
       }
     };
     checkPublishSelection(skill);
+    // The init section runs before the staged workflow is read, so it carries the KEY binding itself (#245
+    // left `[--issue "$KEY"]` with no binding, and resolver-named runs recorded `issue_key: null`).
+    const keyBinding = skill.indexOf("when the configured resolver returned a\npayload, `KEY` is exactly `R`, its `run_id`;");
+    assert.ok(keyBinding >= 0 && keyBinding < skill.indexOf('INIT_RESPONSE="$(factory init'), "SKILL.md must bind KEY before init");
     assert.throws(() => checkPublishSelection(skill.replace("presence alone never executes this entry", "presence executes this entry")), /publish-selection-candidate/u);
 
     // Ordering is the defect, so pin ordering rather than presence: the restated region must precede the

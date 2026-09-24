@@ -338,6 +338,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "the private dispatcher must invoke the create-only protected writer");
     assert.ok(cliSource.includes("[--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET]"));
     assert.ok(markdown.includes('factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json'));
+    // Instruction, not enforcement: `[--issue "$KEY"]` shipped from #245 with nothing binding `KEY`, so a
+    // driver following the text omitted it and every resolver-named run recorded `issue_key: null` (baleyg
+    // run 25). The binding must exist and precede the command it feeds.
+    const keyBinding = markdown.indexOf("when the configured resolver returned a\npayload, `KEY` is exactly `R`, its `run_id`;");
+    assert.ok(keyBinding >= 0 && keyBinding < markdown.indexOf('INIT_RESPONSE="$(factory init'), "the workflow must bind KEY before init");
     // The workflow must not construct `--publishing-identity`. It has no value to supply, so the flag would
     // be built from an unbound shell variable, expand to an empty argument, and -- before the resolution
     // fix below it -- mask a valid inherited value and refuse the run. Caught in review of 0.8.0.

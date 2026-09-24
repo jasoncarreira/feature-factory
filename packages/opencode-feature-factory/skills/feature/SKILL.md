@@ -158,6 +158,12 @@ bytes — derive it exactly as follows:
 `git check-ref-format --branch "$FEATURE_BRANCH"`, and require its ref absent before init. Do not ask the
 engineer for a branch or worktree.
 
+Bind `KEY` from how `R` was bound, never from anything else: when the configured resolver returned a
+payload, `KEY` is exactly `R`, its `run_id`; when `R` is a ticket key from the request or branch, `KEY`
+is that key; when `R` was derived from free text, `KEY` is absent and `--issue` is omitted. Never add a
+`#` or other decoration. `issue_key` is immutable after init, and publication reads it for the title
+prefix and closing reference, so a run whose resolver found issue `25` must record `25`.
+
 ```sh
 INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"
 ```
