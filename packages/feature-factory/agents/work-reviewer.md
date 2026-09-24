@@ -88,18 +88,24 @@ each answer creates new surface to review; exhaustive enumeration and the late-d
 then turn every fix into the next round's findings. Three contract runs in a row inflated this way (130k
 lines of corpus JSON, 25k lines of test vectors with a validator inside a Markdown file, a 72 KB
 topology document with its own SQL schemas and a quarantine system).
+One boundary decides everything beyond the criteria, in both directions: **does the content commit an
+implementer to build, store, or conform to something?** Call that an obligation.
 - **The bar is the acceptance criteria, not completeness.** A behavior an AC requires that the document
-  omits or gets wrong is a BLOCKER, in any round. Everything else is a non-blocking note: deeper design,
-  internal schemas, tuning values, and rare edge cases beyond the criteria.
-- **A documented limit satisfies an edge case.** "X is out of scope" or "behavior is undefined for X" is
-  an acceptable answer unless an AC requires X to be handled.
-- **No executable models by default.** Do not require a validator, generator, exhaustive corpus, or test
-  vectors to prove a document correct unless an AC asks for one; judge whether what is specified is
-  correct and consistent.
-- **Over-building is itself a finding.** Mechanism, schemas, subsystems, or artifact volume no AC asks for
-  is unapproved scope expansion — record it as a finding and require it removed, the same way unapproved
+  omits or gets wrong is a BLOCKER, in any round.
+- **Missing depth is not a finding.** Do not ask for an obligation no AC requires — deeper design,
+  internal schemas, tuning values, or handling for rare edge cases. Note it at most; never block on it.
+- **Added obligation beyond the criteria is a finding.** A schema, mechanism, subsystem, executable model,
+  or corpus that no AC requires, and that an implementer would have to build, store, or conform to, is
+  unapproved scope expansion: require it removed or reduced to a documented limit, the same way unapproved
   scope in a brief is rejected. A reviewer that stops asking for more while accepting whatever the builder
   adds unprompted has not stopped the ratchet.
+- **Explanatory depth is neither.** Rationale, worked examples, and clarification of a required behavior
+  add no obligation; accept them without comment.
+- **A documented limit satisfies an edge case.** "X is out of scope" or "behavior is undefined for X" is
+  an acceptable answer unless an AC requires X to be handled.
+- **No executable models by default.** A validator, generator, exhaustive corpus, or test vectors is an
+  obligation like any other: required only when an AC asks for one. Judge whether what is specified is
+  correct and consistent.
 
 ## What to check, by subject
 

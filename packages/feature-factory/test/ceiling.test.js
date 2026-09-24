@@ -616,9 +616,16 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     for (const [name, fragment, why] of [
       ["work-reviewer", "## Specification subjects (documents, contracts, data artifacts)", "the reviewer must scope specification subjects"],
       ["work-reviewer", "**The bar is the acceptance criteria, not completeness.**", "a document's bar is its criteria"],
-      ["work-reviewer", "**Over-building is itself a finding.**", "the reviewer must push back on unprompted mechanism"],
+      ["work-reviewer", "**Added obligation beyond the criteria is a finding.**", "the reviewer must push back on unprompted mechanism"],
+      ["work-reviewer", "**Missing depth is not a finding.**", "the reviewer must not demand depth beyond the criteria"],
+      ["work-reviewer", "does the content commit an", "one boundary must decide both directions"],
       ["spec-writer", "**Document deliverables:** when the issue's deliverable is a specification, contract, or data artifact", "the brief must not expand a document into a model"],
     ]) assert.ok((byName.get(name) ?? "").includes(fragment), `${name}: ${why}`);
+    // Review of #371: the first draft called internal schemas a non-blocking note in one bullet and required
+    // unrequested schemas removed in another, so one artifact could be approved or rejected. Missing depth is
+    // never blocking and added obligation always is; no other bullet may classify schemas as non-blocking.
+    const specSection = (byName.get("work-reviewer") ?? "").split("## Specification subjects")[1]?.split("\n## ")[0] ?? "";
+    assert.doesNotMatch(specSection, /non-blocking note[^.]*schemas/u, "schemas beyond the criteria cannot be both a note and a finding");
 
     // Widened after a review found survivors: my first pass listed frameworks and file trees and
     // missed *named products and fixtures* — database grant roles, a feature-flag vendor, a commit
