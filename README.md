@@ -243,14 +243,18 @@ report `null`, skips all three guards; an absent config does not affect them.
 
 Before each guard, inherited `GH_TOKEN` must exist and contain at least one character. Missing or empty
 means identity is unobservable without invoking `gh`, the network, stored authentication, credential
-queries, or any fallback. A prepared environment submits exactly this read-only network probe as one
+queries, or any fallback. A prepared environment submits exactly this command as one
 ordinary host shell step with cwd exactly `RUN_REPO`, inherited environment, and no stdin:
 
 ```sh
-gh api --method GET /user --jq .login
+factory identity "$R" --json --repo "$RUN_REPO"
 ```
 
-The direct stdout bytes, stderr bytes, and numeric status are parsed strictly. Only numeric zero, empty
+The CLI runs the read-only network probe `gh api --method GET /user --jq .login` itself, with separate
+stdout and stderr pipes, so a host whose shell tool combines the two streams can still run the guard. It
+returns JSON whose `reason` is null on a match and is otherwise the complete rendered park reason.
+
+The probe's stdout bytes, stderr bytes, and numeric status are parsed strictly. Only numeric zero, empty
 stderr, and exactly one ASCII GitHub login plus one LF are observable; the required LF alone is removed,
 then the raw login is compared exactly and case-sensitively with the raw declaration. `gh auth status`
 does not prove the publishing identity.

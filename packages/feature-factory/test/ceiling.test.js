@@ -29,7 +29,7 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
   "init", "status", "amend-paths", "resume", "grant-retry", "restore", "snapshot", "decide", "lock", "heartbeat", "gate", "step", "terminal",
-  "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push",
+  "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push", "identity",
 ];
 
 const RUN_JSON_KEYS = [
@@ -1246,7 +1246,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // records the operator's authorization to raise the tripwire 5960 -> 5975.
     // 5962 -> 5969: `grant-retry --scope all --max-retries N` sets the run-wide limit in one call instead of
     // one +1 grant per exhaustion; still reopens only N+1. Inside #361's 5975 tripwire; nothing was trimmed.
-    assert.equal(total, 5969, "grant-retry sets the run-wide limit in one call: 5969 production lines");
+    // 5969 -> 6027 for issue #365: the publishing-identity guard moves from driver prose into `factory identity`.
+    // The prose required the host to return stdout and stderr separately, which Prime's bash cannot (it
+    // returns them combined), so a compliant Prime driver could never observe the identity. The note beside
+    // the 4550 -> 4600 raise deferred this as "a different and larger change"; a host that cannot run the prose is the
+    // reason it is no longer deferrable. The issue records the operator's authorization to raise 5975 -> 6050.
+    assert.equal(total, 6027, "the CLI owns the publishing-identity observation: 6027 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1282,9 +1287,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // for bounded slice merit retries; issue #353 authorized the snapshot publisher and was re-authorized
     // to 5400 once #352 merged first. Issue #357 authorizes the combined post-#354/#356 tripwire to 5650
     // for operator-authorized retry extension. Issue #359 authorizes 5960 for crash-safe grant recovery;
-    // issue #361 authorizes 5975 so a mismatched claim can be read back.
+    // issue #361 authorizes 5975 so a mismatched claim can be read back; issue #365 authorizes 6050 so the
+    // publishing-identity guard runs in the CLI rather than depending on the host's shell tool.
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 5975, `production source is ${total} lines; the issue #361 tripwire is 5975`);
+    assert.ok(total <= 6050, `production source is ${total} lines; the issue #365 tripwire is 6050`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

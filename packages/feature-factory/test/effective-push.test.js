@@ -9,6 +9,7 @@ import { enforceEffectivePushTarget } from "../core/effective-push.js";
 import { describeError } from "../bin/factory.js";
 import { validateRun } from "../state/schema.js";
 import { initFresh } from "./init-fixture.js";
+import { asciiJson, classifyIdentity, identityReason } from "../observe/identity.js";
 
 test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", () => {
   const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,41 +48,12 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     cwd: options.cwd,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const identityCommand = "gh api --method GET /user --jq .login";
+  // The guard sites run the package command; the CLI runs gh itself with separate pipes (#365).
+  const identityCommand = 'factory identity "$R" --json --repo "$RUN_REPO"';
+  const ghCommand = "gh api --method GET /user --jq .login";
   const absoluteShell = "/bin/sh";
   const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
-  const asciiJson = (value) => {
-    let rendered = '"';
-    const short = new Map([[8, "\\b"], [9, "\\t"], [10, "\\n"], [12, "\\f"], [13, "\\r"]]);
-    for (let index = 0; index < value.length; index += 1) {
-      const unit = value.charCodeAt(index);
-      if (short.has(unit)) rendered += short.get(unit);
-      else if (unit === 34) rendered += '\\"';
-      else if (unit === 92) rendered += "\\\\";
-      else if (unit >= 0x20 && unit <= 0x7e) rendered += value[index];
-      else rendered += `\\u${unit.toString(16).padStart(4, "0")}`;
-    }
-    return `${rendered}"`;
-  };
-  const classifyIdentity = ({ status, stdout, stderr }) => {
-    if (typeof status !== "number" || status !== 0 || !Buffer.isBuffer(stdout) || !Buffer.isBuffer(stderr) || stderr.length !== 0) {
-      return { observable: false };
-    }
-    if (stdout.length < 2 || stdout[stdout.length - 1] !== 10) return { observable: false };
-    const bytes = stdout.subarray(0, -1);
-    if ([...bytes].some((byte) => byte > 0x7f)) return { observable: false };
-    const value = bytes.toString("ascii");
-    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u.test(value)) return { observable: false };
-    return { observable: true, value };
-  };
-  const identityFailure = (declared, result) => {
-    const observed = classifyIdentity(result);
-    if (!observed.observable) {
-      return `publishing identity unobservable: declared ${asciiJson(declared)}; launch with inherited GH_TOKEN for ${asciiJson(declared)} as documented in OPERATING.md and retry.`;
-    }
-    if (declared === observed.value) return null;
-    return `publishing identity mismatch: declared ${asciiJson(declared)}, observed ${asciiJson(observed.value)}; authenticate as ${asciiJson(declared)} and retry.`;
-  };
+  const identityFailure = (declared, result) => identityReason(declared, classifyIdentity(result));
   const gitResult = (repository, ...args) => command("git", ["-C", repository, ...args]);
   const git = (repository, ...args) => {
     const result = gitResult(repository, ...args);
@@ -607,7 +579,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     const freshNext = seam("fresh-next-operation", "With a declared identity, the very next operation is the guard below.");
     const freshNoWork = seam("fresh-no-work-before-success", "Only after\nownership and any required guard succeed may the driver reconcile or consult `status.next`. Only then\ndispatch the planned ticket, story, or design agent or transition state.");
     const freshPolicy = seam("fresh-probe-policy", "For a fresh run with `DECLARED_PUBLISHING_IDENTITY`, immediately after qualified status verifies fresh\nlock ownership by this driver's `SESSION_ID`, run the identity observation below before\nreconciliation, reading `status.next`, dispatch, or any transition.");
-    const firstProbe = seam("fresh-first-probe", "After that preflight succeeds, submit exactly this command as one ordinary host shell step with cwd\nexactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin:\n\n```sh\ngh api --method GET /user --jq .login\n```");
+    const firstProbe = seam("fresh-first-probe", "At every one of the three guards, submit exactly this command as one ordinary host shell step with cwd\nexactly `RUN_REPO`, the inherited environment, and no stdin:");
     assert.deepEqual([freshLock, freshNext, freshNoWork, freshPolicy, firstProbe],
       [freshLock, freshNext, freshNoWork, freshPolicy, firstProbe].sort((left, right) => left - right),
       "identity seam fresh ordering must keep the verified owner, immediate guard, no-work rule, and probe together");
@@ -666,15 +638,12 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     checkIdentityGuardSites(source);
     assert.match(policy, /verification is enforcement under AGENTS\.md and CLAUDE\.md because it prevents a false-green\s+publication/u);
     assert.match(policy, /Provisioning `GH_TOKEN` and\s+configuring credential helpers are instruction only/u);
-    assert.match(policy, /At every one of the three guards, before submitting a host shell step, inspect only the inherited\s+environment value and require `GH_TOKEN` to exist and contain at least one character/u);
-    assert.match(policy, /Missing or empty\s+`GH_TOKEN` is immediately the same unobservable reason[\s\S]*Do not invoke `gh`, hit the network,\s+inspect stored authentication, query or attempt credentials, or run any fallback/u);
-    assert.match(policy, /preflight succeeds, submit exactly this command as one ordinary host shell step with cwd\s+exactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin/u);
-    assert.match(policy, /host result directly as three separate values: exact stdout bytes, exact stderr bytes, and the\s+numeric status/u);
-    assert.match(policy, /Do not use command substitution, pipes, redirection, shell capture variables, temporary\s+files, nested capture, retry, fallback, `gh auth`, credential queries, Git configuration, a token in\s+argv, or persistence of output or diagnostics/u);
-    assert.match(policy, /status is numeric zero, stderr has exactly zero bytes, and stdout\s+is exactly one ASCII login followed by exactly one LF byte/u);
     assert.ok(policy.includes("`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`"));
-    assert.match(policy, /compare the raw declared and observed strings exactly and\s+case-sensitively before rendering/u);
-    assert.match(policy, /deterministic ASCII-only JSON-string renderer[\s\S]*lowercase `\\uXXXX`[\s\S]*unpaired surrogate[\s\S]*Leave slash unescaped/u);
+    assert.match(policy, /refuses without invoking `gh` when inherited `GH_TOKEN` is missing or\s+empty/u);
+    assert.match(policy, /with separate stdout and stderr pipes/u);
+    assert.match(policy, /A host whose shell tool combines stdout and\s+stderr can run this guard/u);
+    assert.ok(policy.includes("Use the returned `reason` exactly; do not re-render, trim, or edit it."));
+    assert.match(policy, /Never run `gh` yourself for this\s+guard/u);
     assert.ok(policy.includes("publishing identity mismatch: declared <declared-ascii-json>, observed <observed-ascii-json>; authenticate as <declared-ascii-json> and retry."));
     assert.ok(policy.includes("publishing identity unobservable: declared <declared-ascii-json>; launch with inherited GH_TOKEN for <declared-ascii-json> as documented in OPERATING.md and retry."));
     assert.match(policy, /Never expose the token, raw stdout or stderr, diagnostics, status, command text, target, helper output,\s+or environment/u);
@@ -693,7 +662,8 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     assert.match(policy, /report only `Outcome: retained-lock-error`[\s\S]*no parked-success or resumability claim/u);
     assert.match(source, /exact\s+boundary between completion of resume order 7 and the first operation in resume order 8/u);
     assert.match(source, /There is no\s+separate identity guard before `factory pr`/u);
-    const positions = [...source.matchAll(new RegExp(identityCommand, "gu"))].map((match) => match.index);
+    const positions = [];
+    for (let at = source.indexOf(identityCommand); at !== -1; at = source.indexOf(identityCommand, at + 1)) positions.push(at);
     assert.equal(positions.length, 3);
     const push = required(source, 'git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"', "identity push order");
     const pr = required(source, 'gh pr create --draft --base "$PR_BASE" --head "$FEATURE_BRANCH"', "identity PR order");
@@ -707,7 +677,7 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
     ["fresh-next-operation", "With a declared identity, the very next operation is the guard below."],
     ["fresh-no-work-before-success", "Only after\nownership and any required guard succeed may the driver reconcile or consult `status.next`. Only then\ndispatch the planned ticket, story, or design agent or transition state."],
     ["fresh-probe-policy", "For a fresh run with `DECLARED_PUBLISHING_IDENTITY`, immediately after qualified status verifies fresh\nlock ownership by this driver's `SESSION_ID`, run the identity observation below before\nreconciliation, reading `status.next`, dispatch, or any transition."],
-    ["fresh-first-probe", "After that preflight succeeds, submit exactly this command as one ordinary host shell step with cwd\nexactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin:\n\n```sh\ngh api --method GET /user --jq .login\n```"],
+    ["fresh-first-probe", "At every one of the three guards, submit exactly this command as one ordinary host shell step with cwd\nexactly `RUN_REPO`, the inherited environment, and no stdin:"],
     ["resume-order-seven", "Resume order 7 — invoke explicit factory resume with the verified owning session, then verify running status, unchanged historical terminal result, real next action, and the same fresh owner; read the refreshed staged WORKFLOW.md in full as part of this verification."],
     ["resume-order-eight-reconciliation", "Resume order 8 — run only existing post-lock reconciliation for an already-recorded merge, its evidence, and repository verification."],
     ["resume-identity-boundary", "When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact\nboundary between completion of resume order 7 and the first operation in resume order 8. Nothing may"],
@@ -766,10 +736,8 @@ test("AC4/AC8-AC12 skill init, push, branch, recovery, and publication policy", 
   }
   for (const marker of [
     "#### Publishing identity enforcement",
-    "At every one of the three guards, before submitting a host shell step",
-    "Missing or empty\n`GH_TOKEN` is immediately the same unobservable reason",
-    "Use the host result directly as three separate values",
-    "deterministic ASCII-only JSON-string renderer",
+    "with separate stdout and stderr pipes",
+    "Use the returned `reason` exactly",
     "publishing identity mismatch: declared <declared-ascii-json>",
     "publishing identity unobservable: declared <declared-ascii-json>",
     "Bind `PRE_QUOTING_REASON` to the complete already-rendered ASCII reason",
@@ -810,11 +778,19 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
         FAKE_GH_STATUS: String(status),
       };
       if (ghToken === null) delete env.GH_TOKEN;
-      return spawnSync(absoluteShell, ["-c", identityCommand], {
+      return spawnSync(absoluteShell, ["-c", ghCommand], {
         cwd,
         env,
         stdio: ["ignore", "pipe", "pipe"],
       });
+    };
+    // The guard as a driver runs it: the package command, with gh resolved from PATH like any host.
+    const cliIdentity = (repository, run, { stdout = Buffer.from("A\n"), stderr = Buffer.alloc(0), ghToken = "prepared-token" } = {}) => {
+      const env = { ...process.env, PATH: fakeBin, GH_TOKEN: ghToken, FAKE_GH_MARKER: invocationMarker,
+        FAKE_GH_STDOUT_B64: stdout.toString("base64"), FAKE_GH_STDERR_B64: stderr.toString("base64"), FAKE_GH_STATUS: "0" };
+      if (ghToken === null) delete env.GH_TOKEN;
+      return JSON.parse(execFileSync(process.execPath, [cli, "identity", run, "--repo", repository, "--json"],
+        { cwd: repository, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
     };
     const terminalThroughShell = (repository, run, reason) => {
       const reasonToken = shellQuote(reason);
@@ -879,11 +855,11 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
       ["\ud800", '"\\ud800"'],
     ]) assert.equal(asciiJson(value), expected);
     rmSync(invocationMarker, { force: true });
-    assert.deepEqual(classifyIdentity(observeIdentity(root)), { observable: true, value: "A" });
+    assert.equal(classifyIdentity(observeIdentity(root)), "A");
     assert.deepEqual(markerLines(), [JSON.stringify(["api", "--method", "GET", "/user", "--jq", ".login"])]);
     const noFallbackBin = join(root, "no-fallback-bin");
     mkdirSync(noFallbackBin);
-    const unresolvedGh = spawnSync(absoluteShell, ["-c", identityCommand], {
+    const unresolvedGh = spawnSync(absoluteShell, ["-c", ghCommand], {
       cwd: root,
       env: { ...process.env, PATH: noFallbackBin, GH_TOKEN: "prepared-token" },
       stdio: ["ignore", "pipe", "pipe"],
@@ -899,7 +875,7 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
       observeIdentity(root, { stdout: Buffer.from(`${"A".repeat(40)}\n`) }),
       observeIdentity(root, { stdout: Buffer.from([0x41, 0x85, 0x0a]) }),
       observeIdentity(root, { stderr: Buffer.from("diagnostic-secret") }),
-    ]) assert.deepEqual(classifyIdentity(result), { observable: false });
+    ]) assert.equal(classifyIdentity(result), null);
     assert.equal(identityFailure("A", observeIdentity(root)), null);
     assert.equal(identityFailure("a", observeIdentity(root)), 'publishing identity mismatch: declared "a", observed "A"; authenticate as "a" and retry.');
     const unobservableReason = identityFailure("A\u2028🚀", observeIdentity(root, {
@@ -907,7 +883,7 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
       stderr: Buffer.from("diagnostic-secret token-that-must-never-appear"),
     }));
     assert.equal(unobservableReason, 'publishing identity unobservable: declared "A\\u2028\\ud83d\\ude80"; launch with inherited GH_TOKEN for "A\\u2028\\ud83d\\ude80" as documented in OPERATING.md and retry.');
-    for (const hidden of ["raw-output-secret", "diagnostic-secret", "token-that-must-never-appear", identityCommand, root]) {
+    for (const hidden of ["raw-output-secret", "diagnostic-secret", "token-that-must-never-appear", ghCommand, root]) {
       assert.equal(unobservableReason.includes(hidden), false);
     }
     for (const ghToken of [null, ""]) {
@@ -996,8 +972,9 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
     ];
     for (const [index, declared] of hostileIdentities.entries()) {
       const run = `identity-transport-${index}`;
-      const parkedIdentity = initFresh(operator, [run, "--branch", `feature/${run}`, "--pr-base", "main", "--now", `2026-08-04T11:59:${String(index).padStart(2, "0")}.000Z`]);
-      const parkedReason = identityFailure(declared, { status: 0, stdout: Buffer.from("B\n"), stderr: Buffer.alloc(0) });
+      const parkedIdentity = initFresh(operator, [run, "--branch", `feature/${run}`, "--pr-base", "main", "--publishing-identity", declared, "--now", `2026-08-04T11:59:${String(index).padStart(2, "0")}.000Z`]);
+      const parkedReason = cliIdentity(parkedIdentity.repository, run, { stdout: Buffer.from("B\n") }).reason;
+      assert.equal(parkedReason, identityFailure(declared, { status: 0, stdout: Buffer.from("B\n"), stderr: Buffer.alloc(0) }));
       const releasedSession = `released-session-${index}`;
       const freshSession = `fresh-session-${index}`;
       rmSync(sideEffectSentinel, { force: true });
@@ -1033,6 +1010,18 @@ process.exit(Number(process.env.FAKE_GH_STATUS ?? "0"));
       assert.equal(resumedIdentity.lock_session, freshSession);
       assert.equal(existsSync(sideEffectSentinel), false);
     }
+
+    // #365: through the CLI, not a model of the driver. Noise on stderr beside a correct login is what a
+    // host that merges the two streams could never tell apart, and it must stay unobservable here.
+    const guarded = initFresh(operator, ["identity-cli", "--branch", "feature/identity-cli", "--pr-base", "main", "--publishing-identity", "A", "--now", "2026-08-04T11:58:00.000Z"]);
+    const unobservableA = 'publishing identity unobservable: declared "A"; launch with inherited GH_TOKEN for "A" as documented in OPERATING.md and retry.';
+    assert.deepEqual(cliIdentity(guarded.repository, "identity-cli"), { run_id: "identity-cli", publishing_identity: "A", checked: true, observable: true, reason: null });
+    assert.equal(cliIdentity(guarded.repository, "identity-cli", { stdout: Buffer.from("a\n") }).reason,
+      'publishing identity mismatch: declared "A", observed "a"; authenticate as "A" and retry.');
+    assert.equal(cliIdentity(guarded.repository, "identity-cli", { stderr: Buffer.from("warning: diagnostic-secret\n") }).reason, unobservableA);
+    rmSync(invocationMarker, { force: true });
+    for (const ghToken of [null, ""]) assert.equal(cliIdentity(guarded.repository, "identity-cli", { ghToken }).reason, unobservableA);
+    assert.equal(existsSync(invocationMarker), false, "a missing or empty GH_TOKEN never invokes gh");
 
     const mismatchBranch = "feature/push-mismatch";
     assert.equal(operatorRefAbsent(operator, mismatchBranch), true);
