@@ -109,11 +109,13 @@ resolved Git top level:
 }
 ```
 
-The root has two required properties, `resolve` and `verify`, and five optional properties: `publish`,
-`pr_draft`, `verify_timeout_ms`, `bootstrap`, and `bootstrap_timeout_ms`. Required commands and any present
+The root has two required properties, `resolve` and `verify`, and six optional properties: `publish`,
+`pr_draft`, `verify_timeout_ms`, `bootstrap`, `bootstrap_timeout_ms`, and `max_retries`. Required commands and any present
 `publish` or `bootstrap` are non-empty strings. There is no `publishing_identity` key, and a file carrying one is malformed because the
 optional set is closed. A present `pr_draft` must be a JSON boolean and omission means `true`.
 Both timeouts are positive safe integers. `bootstrap_timeout_ms` requires `bootstrap`.
+A present `max_retries` must be a positive integer. It is the run's attempt budget when `init` runs
+without `--max-retries`, which still outranks it; omission leaves the default `3`.
 Each omitted timeout independently defaults to `900000`; neither shares the other's budget. The file is
 operator-owned, committed, and protected as a privileged path: a run cannot create, write, merge,
 archive, package, or repair it.
@@ -128,9 +130,9 @@ value stops the run instead of publishing under whatever credential the host hap
 it from `gh`, the token, stored authentication, or Git configuration: an expectation read from the
 credential being checked would always match.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; then invalid `publish`.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; then invalid `max_retries`.
 
-The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, and `.factory.json entry 'verify_timeout_ms' must be a positive integer`.
+The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, `.factory.json entry 'verify_timeout_ms' must be a positive integer`, and `.factory.json entry 'max_retries' must be a positive integer`.
 
 `resolve`, `bootstrap`, and `verify` are consumed now. `resolve` runs as one ordinary shell step with the configured string submitted
 unchanged, repository-root cwd, inherited environment plus the exact admitted request in

@@ -746,7 +746,7 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     const configuredSource = operator(root, "configured-bootstrap", (repository) => {
       writeFileSync(join(repository, ".factory.json"), `${JSON.stringify({
         resolve: "true", verify: "true", publish: "true",
-        pr_draft: false, bootstrap: configuredCommand, bootstrap_timeout_ms: 120000,
+        pr_draft: false, bootstrap: configuredCommand, bootstrap_timeout_ms: 120000, max_retries: 5,
       }, null, 2)}\n`);
     });
     const configuredRecord = recorder(join(root, "configured-recorder"));
@@ -778,8 +778,13 @@ test("AC1/AC2/AC3/AC4/AC5/AC6/AC7/AC8 init creates and proves one retained local
     assert.deepEqual(Object.fromEntries(Object.entries(configuredRun)
       .filter(([key]) => key.startsWith("bootstrap_"))), { bootstrap_command: configuredCommand, bootstrap_exit: 0 });
     assert.equal(configuredRun.pr_draft, false);
+    // The committed default replaces 3 without a flag, and an explicit flag still outranks it.
+    assert.deepEqual([defaultRun.max_retries, configuredRun.max_retries], [3, 5]);
+    const overridden = initFresh(configuredSource, ["configured-override", "--max-retries", "2", "--now", NOW]);
+    assert.equal(JSON.parse(readFileSync(join(overridden.response.run_dir, "run.json"), "utf8")).max_retries, 2);
     const configuredJsonStatus = invoke(configured.response.sandbox_path, ["status", "configured-bootstrap", "--json"], configuredRecord);
     assert.equal(configuredJsonStatus.response.pr_draft, false);
+    assert.equal(configuredJsonStatus.response.max_retries, 5, "status reports the budget the committed default set");
     const configuredPlainStatus = invoke(configured.response.sandbox_path, ["status", "configured-bootstrap"], configuredRecord);
     assert.match(configuredPlainStatus.stdout, /^pr_draft: false$/mu);
 

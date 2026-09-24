@@ -464,7 +464,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
     for (const config of [
       { resolve: "true", verify: "true" },
       { resolve: "true", verify: "true", publish: "true" },
+      { resolve: "true", verify: "true", max_retries: 5 },
     ]) assert.doesNotThrow(() => parseRepositoryConfig(JSON.stringify(config)));
+    for (const max_retries of [0, -1, 2.5, "5", null]) {
+      assert.throws(() => parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", max_retries })),
+        (error) => error instanceof RepositoryConfigError
+          && error.message === "invalid .factory.json: entry 'max_retries' must be a positive integer");
+    }
     for (const publish of ["", "   ", null, 7, {}, []]) {
       assert.throws(() => parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", publish })),
         (error) => error instanceof RepositoryConfigError

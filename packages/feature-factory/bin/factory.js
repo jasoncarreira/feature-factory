@@ -1739,7 +1739,9 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
   proveContainedBranch();
   let run;
   try {
-    run = validateRun({ ...candidate, pr_base: prBase, pr_draft: config?.prDraft ?? true, ...bootstrapEvidence });
+    // An explicit `--max-retries` outranks the committed `.factory.json` default, which outranks 3.
+    const configuredRetries = flags.maxRetries === undefined && config?.maxRetries ? { max_retries: config.maxRetries } : {};
+    run = validateRun({ ...candidate, ...configuredRetries, pr_base: prBase, pr_draft: config?.prDraft ?? true, ...bootstrapEvidence });
   } catch (error) {
     throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
   }
