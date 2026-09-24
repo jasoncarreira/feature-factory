@@ -611,6 +611,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       assert.match(byName.get(name) ?? "", /changed since the slice's `base_ref`, not since your last attempt/u,
         `${name} must scope files_changed to the whole slice on a retry`);
     }
+    // Instruction, not enforcement: over-building a contract costs rounds, not a false green. Three contract
+    // runs inflated round over round because the class-wide rules had no end for a document (#34 in baleyg).
+    for (const [name, fragment, why] of [
+      ["work-reviewer", "## Specification subjects (documents, contracts, data artifacts)", "the reviewer must scope specification subjects"],
+      ["work-reviewer", "**The bar is the acceptance criteria, not completeness.**", "a document's bar is its criteria"],
+      ["work-reviewer", "**Over-building is itself a finding.**", "the reviewer must push back on unprompted mechanism"],
+      ["spec-writer", "**Document deliverables:** when the issue's deliverable is a specification, contract, or data artifact", "the brief must not expand a document into a model"],
+    ]) assert.ok((byName.get(name) ?? "").includes(fragment), `${name}: ${why}`);
 
     // Widened after a review found survivors: my first pass listed frameworks and file trees and
     // missed *named products and fixtures* — database grant roles, a feature-flag vendor, a commit

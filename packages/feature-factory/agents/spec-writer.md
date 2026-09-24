@@ -49,6 +49,11 @@ Resolve every ambiguity so builders don't have to. Follow the repository's agent
 - Auth/role gating
 - Test plan: unit tests, and acceptance (which criterion maps to which test, and at what level)
 - **Class-wide work:** convert the research inventory into a closed implementation matrix — one row per sink/call site, each assigned an exact primitive/policy, a compatibility (preserve/migrate) or explicit exclusion decision, and a mapped test. No sink is left to the builder to discover.
+- **Document deliverables:** when the issue's deliverable is a specification, contract, or data artifact
+  rather than executable behavior, the brief specifies the content each AC requires and nothing more. Do
+  not expand "test vectors", "examples", or "fixtures" into an executable model, a validator, or an
+  exhaustive corpus unless a criterion says so; an edge case beyond the criteria gets a documented limit,
+  not new mechanism.
 
 ## Output contract
 
