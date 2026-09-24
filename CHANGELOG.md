@@ -3,6 +3,23 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.5
+
+A patch release that moves the publishing-identity guard into the CLI and lets a project commit its
+attempt budget.
+
+- `factory identity <run-id> --json` runs the publishing-identity probe (`gh api --method GET /user
+  --jq .login`) itself, with separate stdout and stderr pipes, and returns the already-rendered park
+  reason (#365). The workflow's three guard sites call it. The rules are unchanged: no `gh` call without
+  a nonempty `GH_TOKEN`, numeric zero, zero-byte stderr, one login plus one LF, exact comparison. Prime's
+  `bash` returns stdout and stderr combined, so a compliant Prime driver previously could never observe
+  the identity and had to park.
+- `.factory.json` accepts an optional positive-integer `max_retries` as the project's default attempt
+  budget (#367). `init` uses an explicit `--max-retries` first, then the committed value, then 3. An
+  invalid present value is refused.
+
+All three package manifests and both exact adapter pins move together to 0.10.5.
+
 ## 0.10.4
 
 A patch release that lets an operator set the run-wide retry limit in one grant (#363).
