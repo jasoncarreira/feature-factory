@@ -14,6 +14,7 @@ import { nextAction, nextActionRecord, readRun, readRunUnchecked } from "../stat
 import { transition } from "../state/transition.js";
 import { RUN_JSON_LOCK_DIR, withRunJsonLock } from "../core/run-lock.js";
 import { buildEvidence, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
+import { identityReason, observeIdentity } from "../observe/identity.js";
 import { assertPublicationReady, assertReviewBinding, isApproving, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { readRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
 import { reverifyRepair } from "../observe/repair-reverification.js";
@@ -60,6 +61,7 @@ export const COMMANDS = Object.freeze({
   pr: Object.freeze(["--repo", "--url", "--now", "--json"]),
   "reverify-repair": Object.freeze(["--repo", "--now", "--json"]),
   "effective-push": Object.freeze([]),
+  identity: Object.freeze(["--repo", "--json"]),
 });
 
 const BOOLEAN_FLAGS = new Set(["--json", "--repository-verify"]);
@@ -82,7 +84,7 @@ export async function run(argv) {
   if (!Object.hasOwn(COMMANDS, command)) throw new CliError(`unknown command '${command}' (try --help)`);
   const { positional, flags } = parse(command, rest);
   const handler = HANDLERS[command];
-  if (["init", "status", "snapshot", "lock", "heartbeat", "effective-push"].includes(command)) return handler(positional, flags);
+  if (["init", "status", "snapshot", "lock", "heartbeat", "effective-push", "identity"].includes(command)) return handler(positional, flags);
   const repo = resolve(flags.repo ?? process.cwd()), runId = positional[0];
   if (command === "restore") {
     const live = [join(repo, CONTROL_PLANE, runId), join(repo, ".factory-sandboxes", runId, CONTROL_PLANE, runId)]
@@ -1281,6 +1283,16 @@ const HANDLERS = {
     throw new CliError("factory lock requires <claim|steal|release>");
   },
 
+  // Read-only: no lock, no state write. The driver parks with `reason` when it is non-null.
+  async identity(positional, flags) {
+    if (positional.length !== 1) throw new CliError("factory identity requires exactly <run-id>");
+    const [runId] = positional, run = readRun(runDirFor(flags, runId)), declared = run.publishing_identity ?? null;
+    if (declared === null) return emit(flags, { run_id: runId, publishing_identity: null, checked: false, reason: null });
+    const observed = observeIdentity(resolve(flags.repo ?? process.cwd()));
+    return emit(flags, { run_id: runId, publishing_identity: declared, checked: true, observable: observed !== null,
+      reason: identityReason(declared, observed) });
+  },
+
   async heartbeat([runId], flags) {
     const runDir = runDirFor(flags, runId);
     const owner = await refreshSessionLock(runDir, {
@@ -1873,6 +1885,7 @@ function usage() {
   factory resume <run-id> --session ID [--now ISO]
   factory restore <run-id> --repo OPERATOR --from refs/remotes/REMOTE/BRANCH [--now ISO]
   factory snapshot <run-id> --repo OPERATOR
+  factory identity <run-id> [--repo PATH] [--json]
   factory reverify-repair <run-id> <repair-record-id> [--repo PATH] [--now ISO] [--json]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID

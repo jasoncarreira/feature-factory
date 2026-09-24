@@ -157,14 +157,18 @@ across any guard boundary. There is no separate guard before `factory pr`. `publ
 
 Before each guard, inherited `GH_TOKEN` must exist and contain at least one character. Missing or empty
 parks identity as unobservable without invoking `gh`, the network, stored authentication, credential
-queries, or any fallback. A prepared environment submits exactly this read-only network probe as one
+queries, or any fallback. A prepared environment submits exactly this command as one
 ordinary host shell step with cwd exactly `RUN_REPO`, inherited environment, and no stdin:
 
 ```sh
-gh api --method GET /user --jq .login
+factory identity "$R" --json --repo "$RUN_REPO"
 ```
 
-Use the host result directly as exact stdout bytes, exact stderr bytes, and numeric status. Identity is
+The CLI runs the read-only network probe `gh api --method GET /user --jq .login` itself, with separate
+stdout and stderr pipes, so a host whose shell tool combines the two streams can still run the guard. It
+returns JSON whose `reason` is null on a match and is otherwise the complete rendered park reason.
+
+The CLI reads the probe's exact stdout bytes, exact stderr bytes, and numeric status. Identity is
 observable only for numeric zero, exactly zero stderr bytes, and exactly one ASCII login matching
 `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$` followed by exactly one LF byte. Remove only that LF,
 then compare the raw declared and observed strings exactly and case-sensitively. Do not trim, normalize,

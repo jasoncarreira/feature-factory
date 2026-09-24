@@ -1073,53 +1073,41 @@ reconciliation, reading `status.next`, dispatch, or any transition. For a parked
 immediately after explicit resume has been verified `running` with unchanged historical result, real
 next action, and the same fresh owner. No operation may intervene on either side of this guard.
 
-At every one of the three guards, before submitting a host shell step, inspect only the inherited
-environment value and require `GH_TOKEN` to exist and contain at least one character. Missing or empty
-`GH_TOKEN` is immediately the same unobservable reason below. Do not invoke `gh`, hit the network,
-inspect stored authentication, query or attempt credentials, or run any fallback in that case.
-
-After that preflight succeeds, submit exactly this command as one ordinary host shell step with cwd
-exactly `RUN_REPO`, the inherited environment including that nonempty `GH_TOKEN`, and no stdin:
+At every one of the three guards, submit exactly this command as one ordinary host shell step with cwd
+exactly `RUN_REPO`, the inherited environment, and no stdin:
 
 ```sh
-gh api --method GET /user --jq .login
+factory identity "$R" --json --repo "$RUN_REPO"
 ```
 
-Use the host result directly as three separate values: exact stdout bytes, exact stderr bytes, and the
-numeric status. Do not use command substitution, pipes, redirection, shell capture variables, temporary
-files, nested capture, retry, fallback, `gh auth`, credential queries, Git configuration, a token in
-argv, or persistence of output or diagnostics. The real command is a read-only network observation.
+The CLI owns the observation, so the verdict does not depend on what the host's shell tool reports. It
+refuses without invoking `gh` when inherited `GH_TOKEN` is missing or empty. Otherwise it runs the
+read-only network observation `gh api --method GET /user --jq .login` with separate stdout and stderr pipes,
+accepts only numeric status zero, zero-byte stderr, and exactly one ASCII login matching
+`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$` followed by one LF, and compares it exactly and
+case-sensitively with the recorded `publishing_identity`. A host whose shell tool combines stdout and
+stderr can run this guard; it could never run the probe itself.
 
-The identity is observable only when status is numeric zero, stderr has exactly zero bytes, and stdout
-is exactly one ASCII login followed by exactly one LF byte. The login grammar is
-`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`. Every other status or byte sequence is unobservable;
-do not trim, decode-and-normalize, retry, or recover a partial value. Remove only the required final LF
-from an observable value, then compare the raw declared and observed strings exactly and
-case-sensitively before rendering either one.
-
-Render a value for the reason with the deterministic ASCII-only JSON-string renderer. Surround it with
-double quotes. Emit printable ASCII U+0020 through U+007E literally except quote and backslash, which
-use `\"` and `\\`. Use the fixed JSON short escapes `\b`, `\t`, `\n`, `\f`, and `\r` for U+0008,
-U+0009, U+000A, U+000C, and U+000D. Render every other UTF-16 code unit outside U+0020 through U+007E
-as lowercase `\uXXXX`. A non-BMP code point therefore renders as its two surrogate units, and an
-unpaired surrogate renders as its one unit. Leave slash unescaped. This covers C0, C1, DEL, U+0085,
-U+2028, U+2029, and non-BMP input without a literal non-ASCII or control byte.
-
-An observable unequal value uses exactly:
+Require exit zero and one JSON object. `reason: null` passes the guard. A non-null `reason` is the
+complete already-rendered ASCII park reason, rendered with deterministic ASCII-only JSON strings, and is
+exactly one of:
 
 ```text
 publishing identity mismatch: declared <declared-ascii-json>, observed <observed-ascii-json>; authenticate as <declared-ascii-json> and retry.
 ```
 
-An unobservable result uses exactly:
-
 ```text
 publishing identity unobservable: declared <declared-ascii-json>; launch with inherited GH_TOKEN for <declared-ascii-json> as documented in OPERATING.md and retry.
 ```
 
+Use the returned `reason` exactly; do not re-render, trim, or edit it. Never run `gh` yourself for this
+guard, retry, fall back to stored authentication, or put a token in argv. A nonzero exit or output that is
+not that JSON object is a failed guard: perform no further operation and report only
+`Outcome: retained-lock-error`.
+
 Never expose the token, raw stdout or stderr, diagnostics, status, command text, target, helper output,
 or environment. On either reason, quiesce every builder, tool, background task, and heartbeat call.
-Bind `PRE_QUOTING_REASON` to the complete already-rendered ASCII reason. Encode it as one deterministic
+Bind `PRE_QUOTING_REASON` to the complete already-rendered ASCII reason the CLI returned. Encode it as one deterministic
 POSIX shell token by surrounding the complete reason with single quotes and replacing every literal
 `'` inside it with the exact shell sequence `'\''`. Use that encoded token as the sole `--reason`
 argument in the host shell command string:
@@ -2168,12 +2156,12 @@ this is not a claim that a target is unobservable. Use the same three exact reda
 from Step 0.
 
 With `DECLARED_PUBLISHING_IDENTITY`, immediately after exact target equality and before the unchanged
-push, run the same ordinary host observation under its exact cwd, environment, no-stdin, direct-result,
-validation, rendering, redaction, and parking rules. No operation may intervene between equality, this
+push, run the same identity guard command under its exact cwd, environment, no-stdin, verdict,
+redaction, and parking rules. No operation may intervene between equality, this
 guard, and the push:
 
 ```sh
-gh api --method GET /user --jq .login
+factory identity "$R" --json --repo "$RUN_REPO"
 ```
 
 Publish the fully qualified recorded feature ref from `RUN_REPO`, run `gh` from `O` with that exact head
@@ -2183,7 +2171,7 @@ legacy local runs use `O` through the selection already made in Step 0:
 
 ```sh
 git -C "$RUN_REPO" push origin "refs/heads/$FEATURE_BRANCH:refs/heads/$FEATURE_BRANCH"
-gh api --method GET /user --jq .login
+factory identity "$R" --json --repo "$RUN_REPO"
 (
   cd "$O"
   if [ "$PR_DRAFT" = true ]; then
