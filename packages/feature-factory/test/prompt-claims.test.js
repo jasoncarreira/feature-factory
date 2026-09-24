@@ -160,7 +160,7 @@ const RESUME_ORDER = [
 ];
 
 const BOOTSTRAP_POLICY_FRAGMENTS = [
-  "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; then invalid `publish`.",
+  "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; then invalid `max_retries`.",
   "Configured `bootstrap` is consumed only by CLI-owned fresh init and explicit resume; the workflow consumer validates it but never executes it itself.",
   "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.",
   "Bootstrap cleanliness examines tracked worktree and index paths only; untracked dependency output is ignored.",
@@ -178,11 +178,12 @@ const BOOTSTRAP_POLICY_CONTRACTS = [
   ...BOOTSTRAP_POLICY_FRAGMENTS.map((fragment, index) => [
     `fragment-${index}`, fragment, (text) => text.includes(fragment),
   ]),
-  ["schema-optionals", "plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and", (text) => /root must be a JSON object with the two required own properties `resolve` and `verify`,\s+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and\s+`bootstrap_timeout_ms`/u.test(text)],
+  ["schema-optionals", "`bootstrap_timeout_ms`, and `max_retries`.", (text) => /root must be a JSON object with the two required own properties `resolve` and `verify`,\s+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`,\s+`bootstrap_timeout_ms`, and `max_retries`\./u.test(text)],
+  ["schema-max-retries-default", "without `--max-retries`, which still outranks it; omission leaves the default `3`.", (text) => /A present `max_retries` must be a positive integer\. It is the run's attempt budget when `init` runs\s+without `--max-retries`, which still outranks it; omission leaves the default `3`\./u.test(text)],
   // 0.8.0 removed `publishing_identity` from the file. The optional set is closed, so a file still carrying
   // it is malformed -- pinned here because a reader who only saw the key disappear might assume it is ignored.
   ["schema-no-identity-key", "key is malformed, because the optional set above is closed", (text) => /A file carrying that\s+key is malformed, because the optional set above is closed/u.test(text)],
-  ["command-shapes", "`bootstrap_timeout_ms`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present", (text) => /`resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present\s+command must be non-empty/u.test(text)],
+  ["command-shapes", "`max_retries`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present", (text) => /`resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present\s+command must be non-empty/u.test(text)],
   ["timeout-shape", "safe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`.", (text) => /Both timeout values must be positive\nsafe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`/u.test(text)],
   ["timeout-defaults", "`verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;", (text) => /`verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;\s+neither timeout shares or consumes the other's budget/u.test(text)],
   ["bootstrap-precedence", "The two bootstrap keys are known keys. Invalid `bootstrap` outranks missing required entries and every", (text) => /Invalid `bootstrap` outranks missing required entries and every\ntimeout defect, including an invalid or otherwise orphaned bootstrap timeout/u.test(text)],

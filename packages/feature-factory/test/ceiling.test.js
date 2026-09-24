@@ -1251,7 +1251,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // returns them combined), so a compliant Prime driver could never observe the identity. The note beside
     // the 4550 -> 4600 raise deferred this as "a different and larger change"; a host that cannot run the prose is the
     // reason it is no longer deferrable. The issue records the operator's authorization to raise 5975 -> 6050.
-    assert.equal(total, 6027, "the CLI owns the publishing-identity observation: 6027 production lines");
+    // 6027 -> 6035 for issue #367: `.factory.json` `max_retries` is a project default for `init`, so the budget
+    // need not ride on every invocation; an explicit flag still outranks it. #367 authorized 6000 against a
+    // 5969 base; it landed after #365 and fits inside #365's 6050.
+    assert.equal(total, 6035, "a committed max_retries default reaches init: 6035 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1288,7 +1291,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // to 5400 once #352 merged first. Issue #357 authorizes the combined post-#354/#356 tripwire to 5650
     // for operator-authorized retry extension. Issue #359 authorizes 5960 for crash-safe grant recovery;
     // issue #361 authorizes 5975 so a mismatched claim can be read back; issue #365 authorizes 6050 so the
-    // publishing-identity guard runs in the CLI rather than depending on the host's shell tool.
+    // publishing-identity guard runs in the CLI rather than depending on the host's shell tool; issue #367
+    // authorizes 6000 for a committed max_retries default, landed inside #365's cap.
     // Nothing was trimmed or padded to fit either ledger.
     assert.ok(total <= 6050, `production source is ${total} lines; the issue #365 tripwire is 6050`);
   });

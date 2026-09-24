@@ -63,14 +63,16 @@ resolved Git top level of the invocation checkout:
 }
 ```
 
-The root object has two required properties, `resolve` and `verify`, and five optional properties:
-`publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, and `bootstrap_timeout_ms`. Required commands and
+The root object has two required properties, `resolve` and `verify`, and six optional properties:
+`publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, `bootstrap_timeout_ms`, and `max_retries`. Required commands and
 any present `publish` or `bootstrap` are non-empty strings. There is no `publishing_identity` key, and a file carrying one is malformed
 because the optional set is closed. A present `pr_draft` must be a JSON boolean and omission means `true`.
 Both timeouts must be positive safe integers. `bootstrap_timeout_ms`
 requires `bootstrap`. Each omitted timeout independently defaults to `900000` milliseconds and neither
 shares the other's budget. A command may name credentials supplied through inherited environment, but
 credential values must not appear in the file.
+A present `max_retries` must be a positive integer. It is the run's attempt budget when `init` runs
+without `--max-retries`, which still outranks it; omission leaves the default `3`.
 
 The publishing identity is not a config key. `factory init` resolves it from `--publishing-identity
 <account>` or the inherited `FACTORY_PUBLISHING_IDENTITY`, refuses when neither supplies at least one
@@ -82,9 +84,9 @@ value stops the run instead of publishing under whatever credential the host hap
 it from `gh`, the token, stored authentication, or Git configuration: an expectation read from the
 credential being checked would always match.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; then invalid `publish`.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; then invalid `max_retries`.
 
-The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, `.factory.json entry 'verify_timeout_ms' must be a positive integer`, and `.factory.json entry 'publish' must be a non-empty string`.
+The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, `.factory.json entry 'verify_timeout_ms' must be a positive integer`, `.factory.json entry 'publish' must be a non-empty string`, and `.factory.json entry 'max_retries' must be a positive integer`.
 
 `resolve`, `bootstrap`, and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Step 6 resolves one selection: a nonblank inherited `FACTORY_PUBLISHING_COMMAND` selects its exact string; that variable set blank or whitespace selects the default; when it is unset, configured `publish` wins if present; otherwise the default wins. Only a selected nondefault command replaces PR creation, after the factory-owned exact push and post-push identity guard.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
