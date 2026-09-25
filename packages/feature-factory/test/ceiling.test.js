@@ -1285,7 +1285,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // commit and records it as `repository_verify`, so a lint failure is an ordinary rejection and retry rather
     // than a post-merge park with no in-band repair (baleyg run 37 parked 1 of 13 slices in on one Clippy
     // warning). The issue records the operator's authorization to raise the tripwire 6050 -> 6100.
-    assert.equal(total, 6063, "slice observation runs the repository verify: 6063 production lines");
+    // 6063 -> 6077 for issue #376, the 0.10.7 regression: slices build in their own worktrees, which never had
+    // bootstrap output, so a verify needing it failed every slice. Bootstrap now runs immediately before every
+    // verify execution in the tree it runs in; `FACTORY_VERIFY_SCOPE` is removed (a scope-dependent verifier
+    // would make slice and integration results differ); post-merge verify output moves to stderr so
+    // `slice merged --json` stays parseable. The issue records the authorization to raise 6100 -> 6150.
+    assert.equal(total, 6077, "verify always runs on a freshly bootstrapped tree: 6077 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1324,9 +1329,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // issue #361 authorizes 5975 so a mismatched claim can be read back; issue #365 authorizes 6050 so the
     // publishing-identity guard runs in the CLI rather than depending on the host's shell tool; issue #367
     // authorizes 6000 for a committed max_retries default, landed inside #365's cap; issue #372 authorizes 6100
-    // so slice observation runs the repository verify.
+    // so slice observation runs the repository verify; issue #376 authorizes 6150 so verify runs on a freshly
+    // bootstrapped tree, and for the rework of #374 on top of it.
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 6100, `production source is ${total} lines; the issue #372 tripwire is 6100`);
+    assert.ok(total <= 6150, `production source is ${total} lines; the issue #376 tripwire is 6150`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

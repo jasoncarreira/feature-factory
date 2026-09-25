@@ -214,18 +214,19 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   // result about bytes that are not going to merge.
   const tests = cleanliness.clean
     ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand, timeoutMs: testTimeoutMs,
-      ...(shellCommand ? { env: { ...process.env, FACTORY_VERIFY_SCOPE: "integration" } } : {}) })
+      // Output to stderr, stdin inherited: `slice merged --json` and `observe --json` stay one JSON object.
+      ...(shellCommand ? { stdio: ["inherit", 2, 2] } : {}) })
     : { cmd: testCommand ? (shellCommand ? testCommand : testCommand.join(" ")) : null, exit: null, observed: false, skipped_reason: null };
   // Enforcement (false green, #372): a slice ran only its ratified test command, so the repository's
   // configured `verify` (lint, format, full suite) first ran after merge, where production repair is
   // forbidden and one Clippy warning parked a 13-slice run. The same suite now runs on the slice's commit.
   // Skipped after a failing test run, which is already not review-ready; its output goes to stderr so
-  // `observe --json` stays one JSON object. `FACTORY_VERIFY_SCOPE` tells the command which run this is.
-  const verifyRuns = repositoryVerify && cleanliness.clean && !(tests.observed && tests.exit !== 0);
+  // `observe --json` stays one JSON object. A bootstrap refusal (#376) means the tree is not prepared, so the
+  // verify is not run and the refusal is the evidence's blocked reason.
+  const verifyRuns = repositoryVerify && !repositoryVerify.bootstrapRefusal && cleanliness.clean && !(tests.observed && tests.exit !== 0);
   const verified = !repositoryVerify ? null : verifyRuns
     ? (({ cmd, exit, observed }) => ({ cmd, exit, observed }))(runTests(worktree, repositoryVerify.command,
-      { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs, stdio: ["ignore", 2, 2],
-        env: { ...process.env, FACTORY_VERIFY_SCOPE: "slice" } }))
+      { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs, stdio: ["ignore", 2, 2] }))
     : { cmd: repositoryVerify.command, exit: null, observed: false };
 
   // Third round, finding 1: cleanliness was a pre-test snapshot, so a test that wrote
@@ -257,7 +258,8 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
     base_ref: baseRef,
     worktree,
     status,
-    blocked_reason: blockedReason ?? cleanliness.reason ?? (stableUnderTest ? null : "worktree changed while the tests ran"),
+    blocked_reason: blockedReason ?? cleanliness.reason ?? repositoryVerify?.bootstrapRefusal
+      ?? (stableUnderTest ? null : "worktree changed while the tests ran"),
     // Named for what it asserts: clean before the run, still clean after, and HEAD did
     // not move. A pre-test snapshot alone was not enough.
     worktree_clean: stableUnderTest,

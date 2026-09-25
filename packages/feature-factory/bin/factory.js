@@ -394,6 +394,13 @@ function bootstrapOutcome(worktree, config, phase) {
 }
 
 
+// Enforcement (#376): verify runs on a tree bootstrap has just prepared, the same way in every place it runs.
+// Bootstrap output is untracked, so a slice worktree never had it and a merge that changes what bootstrap
+// installs was verified against the dependencies from init. A verify that does not execute runs no bootstrap.
+function bootstrapBeforeVerify(worktree, config, phase) {
+  return config?.bootstrapCommand ? bootstrapOutcome(worktree, config, phase).refusal : null;
+}
+
 function branchPoint(run) {
   const base = run.slices.find((slice) => Array.isArray(slice.depends_on) && slice.depends_on.length === 0)?.base_ref;
   if (!/^[0-9a-f]{40}$/u.test(base ?? "")) throw new CliError("first seeded root slice has no immutable 40-character base_ref");
@@ -525,6 +532,8 @@ function repositoryVerifyRetrySafety(repo, run, mergeCommit) {
 
 async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration }) {
   const baseRef = branchPoint(run);
+  const refusal = bootstrapBeforeVerify(integration.worktree, verify, "post-merge verify");
+  if (refusal) throw new CliError(`${refusal} after recorded merge ${mergeCommit}; merged slice remains recorded; stop before advancing.`);
   let attemptIntegration = integration;
   // False-green enforcement: one invocation gets at most two executions, never an unbounded recovery loop.
   for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -1126,6 +1135,8 @@ const HANDLERS = {
         if (error instanceof RepositoryConfigError) throw new CliError(error.message);
         throw error;
       }
+      const refusal = bootstrapBeforeVerify(worktree, repositoryVerify, "repository verification");
+      if (refusal) throw new CliError(refusal);
     }
 
     let claim = null;
@@ -1176,6 +1187,7 @@ const HANDLERS = {
         throw error;
       }
     }
+    const bootstrapRefusal = bootstrapBeforeVerify(worktree, sliceVerify, "slice observation");
     const skipReason = slice && slice.test_plan.length === 0
       ? `test_plan for '${subject}' was approved empty at slices-seed`
       : null;
@@ -1189,7 +1201,7 @@ const HANDLERS = {
       testCommand: flags.repositoryVerify ? repositoryVerify.command : flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
       skipReason, shellCommand: flags.repositoryVerify === true,
       testTimeoutMs: flags.repositoryVerify ? repositoryVerify.timeoutMs : undefined,
-      repositoryVerify: sliceVerify && { command: sliceVerify.command, timeoutMs: sliceVerify.timeoutMs },
+      repositoryVerify: sliceVerify && { command: sliceVerify.command, timeoutMs: sliceVerify.timeoutMs, bootstrapRefusal },
     });
     return emit(flags, {
       run_id: runId, subject, evidence_ref: evidenceRef(subject),

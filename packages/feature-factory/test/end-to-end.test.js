@@ -296,11 +296,12 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
   writeFileSync(join(operator, ".gitignore"), ".factory/\n.factory-sandboxes/\n");
   if (configBytes !== null) writeFileSync(join(operator, ".factory.json"), configBytes);
   else if (verify !== null) {
-    // These fixtures count and sequence post-merge executions, so they pass slice scope (#372) unless a
-    // test opts in; the slice run itself is proven by the rows that set `sliceVerify`.
+    // These fixtures count and sequence post-merge executions, so their verify runs only while the `feature`
+    // integration branch is checked out and exits 0 during slice observation (#372), unless a test opts in with
+    // `sliceVerify`, which is what the rows proving the slice run do. Test-only: the branch is fixture state.
     const command = typeof verify === "function" ? verify(operator) : verify;
     const config = {
-      resolve: "true", verify: sliceVerify ? command : `[ "$FACTORY_VERIFY_SCOPE" = slice ] || ${command}`,
+      resolve: "true", verify: sliceVerify ? command : `[ "$(git rev-parse --abbrev-ref HEAD)" != feature ] || { ${command}; }`,
       publish,
     };
     if (verifyTimeout !== undefined) config.verify_timeout_ms = verifyTimeout;
@@ -468,12 +469,12 @@ describe("end to end — a merge is refused through the real CLI", () => {
 
   it("records a clean serial merge", () => {
     // #372: the configured verify also runs on the slice's commit during observation, so a lint failure is an
-    // ordinary rejection instead of a post-merge park. It sees FACTORY_VERIFY_SCOPE=slice, and its stdout
-    // goes to stderr so `observe --json` stays one JSON object (the helper parses it).
+    // ordinary rejection instead of a post-merge park. Its stdout goes to stderr so `observe --json` stays one
+    // JSON object (the helper parses it).
     for (const [exit, ready] of [[0, true], [3, false], [null, true]]) {
       const scope = (operator) => join(operator, "verify-scope");
       const sv = project(`slice-verify-${exit}`, exit === null ? {} : { sliceVerify: true, verify: (operator) =>
-        `node -e "console.log('verify-noise');require('fs').writeFileSync('${scope(operator)}',process.env.FACTORY_VERIFY_SCOPE);process.exit(${exit})"` });
+        `node -e "console.log('verify-noise');require('fs').appendFileSync('${scope(operator)}','x');process.exit(${exit})"` });
       try {
         const { basePoint } = buildSlice(sv.repo);
         assert.equal(factory(sv.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
@@ -483,9 +484,30 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.deepEqual([observed.out.review_ready, observed.out.repository_verify], [ready, exit === null ? null : `exit ${exit}`]);
         const recorded = JSON.parse(readFileSync(join(sv.runDir, "evidence", "be-thing.json"), "utf8")).repository_verify;
         assert.deepEqual(recorded && [recorded.exit, recorded.observed], exit === null ? null : [exit, true]);
-        if (exit !== null) assert.equal(readFileSync(scope(sv.operator), "utf8"), "slice");
+        if (exit !== null) assert.equal(readFileSync(scope(sv.operator), "utf8"), "x");
       } finally { cleanupProject(sv); }
     }
+    // #376, the 0.10.7 regression: slices build in their own worktrees, which never received bootstrap output,
+    // so a verify needing it failed every slice. Every earlier row built in the sandbox root, where init had
+    // bootstrapped -- which is how it shipped. Bootstrap now runs in the slice worktree before its verify.
+    const separate = project("slice-verify-own-worktree", { sliceVerify: true,
+      bootstrap: "node -e \"const f=require('fs');f.mkdirSync('.factory',{recursive:true});f.writeFileSync('.factory/deps','ok')\"",
+      verify: "node -e \"process.exit(require('fs').existsSync('.factory/deps')?0:9)\"" });
+    try {
+      const base = git(separate.repo, "rev-parse", "HEAD"), own = join(".factory", "worktrees", "own");
+      git(separate.repo, "worktree", "add", "-q", "-b", "slice-own", own, base);
+      writeFileSync(join(separate.repo, own, "src", "app", "thing.ts"), "slice\n");
+      git(join(separate.repo, own), "add", "-A");
+      git(join(separate.repo, own), "commit", "-q", "-m", "slice in its own worktree");
+      assert.equal(existsSync(join(separate.repo, own, ".factory", "deps")), false, "a fresh slice worktree has no bootstrap output");
+      const activated = factory(separate.repo, ["slice", RUN, "be-thing", "running", "--worktree", own, "--branch", "slice-own", "--now", NOW(2)]);
+      assert.equal(activated.ok, true, activated.stderr);
+      const observed = factory(separate.repo, ["observe", RUN, "be-thing", "--worktree", own, "--base", activated.out.base_ref,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]);
+      assert.equal(observed.ok, true, observed.stderr);
+      assert.deepEqual([observed.out.repository_verify, observed.out.review_ready], ["exit 0", true],
+        "the slice worktree must be bootstrapped before its verify runs");
+    } finally { cleanupProject(separate); }
     for (const config of [
       { resolve: "true", verify: "true" },
       { resolve: "true", verify: "true", publish: "true" },
@@ -686,14 +708,18 @@ describe("end to end — a merge is refused through the real CLI", () => {
     const green = upToReview("clean-config", undefined, {
       verify: (operator) => `node -e "require('fs').appendFileSync('${join(operator, "verify-count")}','x')"`,
       verifyTimeout: 120001,
-      bootstrap: "node -e \"require('fs').writeFileSync('.factory/excluded-bootstrap-marker','ran')\"",
+      bootstrap: "node -e \"require('fs').appendFileSync('.factory/excluded-bootstrap-marker','x')\"",
       bootstrapMarker: ".factory/excluded-bootstrap-marker",
       publish: "node -e \"require('fs').writeFileSync('excluded-publish-marker','ran')\"",
     });
     try {
-      assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "slice observation must not bootstrap");
+      // #376: bootstrap runs immediately before every verify execution and nowhere else, so this counter moves
+      // exactly when a verify runs -- slice observation and post-merge -- and never for effective-push,
+      // publication, or a replay that reuses its evidence.
+      const bootstraps = () => (existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")) ? readFileSync(join(green.repo, ".factory", "excluded-bootstrap-marker"), "utf8") : "");
+      assert.equal(bootstraps(), "x", "slice observation must bootstrap before its verify");
       execFileSync(process.execPath, [CLI, "effective-push", "check", green.operator, green.repo]);
-      assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "effective-push must not execute config bootstrap");
+      assert.equal(bootstraps(), "x", "effective-push must not execute config bootstrap");
       const mergeCommit = mergeIntoFeature(green.repo);
       const configuredCommand = JSON.parse(readFileSync(join(green.repo, ".factory.json"), "utf8")).verify;
       const configuredTrace = repositoryVerifyTrace(green.operator, configuredCommand);
@@ -710,7 +736,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(Object.hasOwn(evidence, "verify_timeout_ms"), false);
       assert.equal(Object.hasOwn(runJson(green.runDir), "verify_timeout_ms"), false);
       assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x");
-      assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "post-merge verify must not bootstrap");
+      assert.equal(bootstraps(), "xx", "post-merge verify must bootstrap before it runs");
       assert.equal(recordValidator(green.repo, green.runDir, mergeCommit, "GO", NOW(4)).ok, true);
       // The validator half of the narrowing guard, placed here because it is the first point a validator
       // record exists -- asserted in the slice helper it sat behind a `!== null` that never fired, which
@@ -720,13 +746,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
         [...VALIDATOR_KEYS].sort(), "status must project the whole validator record, not just its verdict");
       assert.equal(approveGate(green.repo, "pre_pr", NOW(4)).ok, true);
       assert.equal(factory(green.repo, ["pr", RUN, "--url", "https://example.test/pr/bootstrap-exclusion", "--now", NOW(4)]).ok, true);
-      assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "Gate 3 and publication must not bootstrap or run configured publish");
+      assert.equal(bootstraps(), "xx", "publication must not bootstrap or run configured publish");
       assert.equal(existsSync(join(green.repo, "excluded-publish-marker")), false, "factory pr must leave configured publish to the workflow");
       const before = readFileSync(join(green.runDir, "run.json"), "utf8");
       const replay = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(5)]);
       assert.equal(replay.ok, true, replay.stderr);
       assert.equal(readFileSync(join(green.operator, "verify-count"), "utf8"), "x", "same-SHA replay must not execute verify");
-      assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "same-SHA replay must not bootstrap");
+      assert.equal(bootstraps(), "xx", "same-SHA replay reuses evidence, so it must not bootstrap");
       assert.equal(readFileSync(join(green.runDir, "run.json"), "utf8"), before, "same-SHA replay must not update the run");
       writeFileSync(join(green.repo, "src", "app", "after-merge.ts"), "moved\n");
       git(green.repo, "add", "-A");
@@ -891,7 +917,9 @@ describe("end to end — a merge is refused through the real CLI", () => {
           assert.equal(observed.ok, false, row.name);
           assert.deepEqual([...observed.stderr.matchAll(/entry '([^']+)'/gu)].map((match) => match[1]), row.named, row.name);
         }
-        assert.equal(existsSync(join(configured.repo, "direct-bootstrap-marker")), false, "direct repository verification must not bootstrap");
+        // #376: a valid declared bootstrap runs before the direct repository verify; an invalid config refuses first.
+        assert.equal(existsSync(join(configured.repo, "direct-bootstrap-marker")), row.name === "valid",
+          "direct repository verification bootstraps exactly when a valid bootstrap is declared");
       } finally { cleanupProject(configured); }
     }
 
