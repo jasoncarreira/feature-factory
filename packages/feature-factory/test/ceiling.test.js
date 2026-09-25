@@ -349,6 +349,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.ok(markdown.includes("There is no in-band resume for it: production source is never repaired on the integration branch"),
       "a post-merge production defect must not promise an in-band resume");
     assert.ok(!markdown.includes("after the external fix, explicitly resume the intact run"), "the old resume promise must be gone");
+    assert.ok(markdown.includes("post-merge verify reuses that result instead of running again, and its evidence names the slice commit"),
+      "the workflow must describe when post-merge verify is reused (#374)");
     // The workflow must not construct `--publishing-identity`. It has no value to supply, so the flag would
     // be built from an unbound shell variable, expand to an empty argument, and -- before the resolution
     // fix below it -- mask a valid inherited value and refuse the run. Caught in review of 0.8.0.
@@ -1285,7 +1287,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // commit and records it as `repository_verify`, so a lint failure is an ordinary rejection and retry rather
     // than a post-merge park with no in-band repair (baleyg run 37 parked 1 of 13 slices in on one Clippy
     // warning). The issue records the operator's authorization to raise the tripwire 6050 -> 6100.
-    assert.equal(total, 6063, "slice observation runs the repository verify: 6063 production lines");
+    // 6063 -> 6087 for issue #374: a merge whose tree is byte-identical to the slice commit whose repository
+    // verify passed reuses that result instead of running the suite again, recorded as `reused_from` and
+    // re-checked on replay; post-merge verify output also moves to stderr so `slice merged --json` stays
+    // parseable. Inside #372's 6100 tripwire; nothing was trimmed.
+    assert.equal(total, 6087, "an identical merged tree reuses the slice's repository verify: 6087 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

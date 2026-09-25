@@ -386,8 +386,16 @@ function recordValidator(repo, runDir, head, verdict, at) {
   return factory(repo, ["validator", RUN, "--report", "artifacts/validation-report.md", "--now", at]);
 }
 
-function mergeIntoFeature(repo) {
+// `sibling` lands an unrelated commit on the feature branch first, as a sibling slice's merge would. The merge
+// tree then differs from the verified slice commit, so post-merge verify executes rather than reusing the
+// slice's result (#374) -- which is what fixtures about post-merge execution need.
+function mergeIntoFeature(repo, { sibling = false } = {}) {
   git(repo, "checkout", "-q", "feature");
+  if (sibling) {
+    writeFileSync(join(repo, "src", "sibling.ts"), "sibling\n");
+    git(repo, "add", "src/sibling.ts");
+    git(repo, "commit", "-q", "-m", "sibling merge");
+  }
   git(repo, "merge", "-q", "--no-ff", "slice", "-m", "merge slice");
   return git(repo, "rev-parse", "HEAD");
 }
@@ -473,7 +481,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     for (const [exit, ready] of [[0, true], [3, false], [null, true]]) {
       const scope = (operator) => join(operator, "verify-scope");
       const sv = project(`slice-verify-${exit}`, exit === null ? {} : { sliceVerify: true, verify: (operator) =>
-        `node -e "console.log('verify-noise');require('fs').writeFileSync('${scope(operator)}',process.env.FACTORY_VERIFY_SCOPE);process.exit(${exit})"` });
+        `node -e "console.log('verify-noise');require('fs').appendFileSync('${scope(operator)}',process.env.FACTORY_VERIFY_SCOPE+';');process.exit(${exit})"` });
       try {
         const { basePoint } = buildSlice(sv.repo);
         assert.equal(factory(sv.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
@@ -483,7 +491,23 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.deepEqual([observed.out.review_ready, observed.out.repository_verify], [ready, exit === null ? null : `exit ${exit}`]);
         const recorded = JSON.parse(readFileSync(join(sv.runDir, "evidence", "be-thing.json"), "utf8")).repository_verify;
         assert.deepEqual(recorded && [recorded.exit, recorded.observed], exit === null ? null : [exit, true]);
-        if (exit !== null) assert.equal(readFileSync(scope(sv.operator), "utf8"), "slice");
+        if (exit !== null) assert.equal(readFileSync(scope(sv.operator), "utf8"), "slice;");
+        if (exit === 0) {
+          // #374: a serial merge's tree is byte-identical to the verified slice commit, so the post-merge verify
+          // reuses that result instead of executing -- one run in total -- and says so in `reused_from`.
+          assert.equal(factory(sv.repo, ["slice", RUN, "be-thing", "review", "--review-ref", writeReview(sv.runDir, "be-thing", git(sv.repo, "rev-parse", "HEAD")),
+            "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]).ok, true);
+          const mergeCommit = mergeIntoFeature(sv.repo);
+          const merged = factory(sv.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
+          assert.equal(merged.ok, true, merged.stderr);
+          assert.equal(readFileSync(scope(sv.operator), "utf8"), "slice;", "post-merge verify must not re-execute on identical bytes");
+          const post = join(sv.runDir, "evidence", "test-verifier.json"), reusedEvidence = JSON.parse(readFileSync(post, "utf8"));
+          assert.deepEqual([reusedEvidence.reused_from, reusedEvidence.commit, reusedEvidence.review_ready], [recorded && git(sv.repo, "rev-parse", "slice"), mergeCommit, true]);
+          // Replay trusts a reuse only while the trees still match; a record pointing at other bytes is unknown.
+          writeFileSync(post, JSON.stringify({ ...reusedEvidence, reused_from: git(sv.repo, "rev-parse", "HEAD~1") }));
+          const replay = factory(sv.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(5)]);
+          assert.match(replay.stderr ?? "", /post-merge verify outcome is unknown/u);
+        }
       } finally { cleanupProject(sv); }
     }
     for (const config of [
@@ -694,7 +718,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "slice observation must not bootstrap");
       execFileSync(process.execPath, [CLI, "effective-push", "check", green.operator, green.repo]);
       assert.equal(existsSync(join(green.repo, ".factory", "excluded-bootstrap-marker")), false, "effective-push must not execute config bootstrap");
-      const mergeCommit = mergeIntoFeature(green.repo);
+      const mergeCommit = mergeIntoFeature(green.repo, { sibling: true });
       const configuredCommand = JSON.parse(readFileSync(join(green.repo, ".factory.json"), "utf8")).verify;
       const configuredTrace = repositoryVerifyTrace(green.operator, configuredCommand);
       const merged = factory(green.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)], { env: configuredTrace.env });
@@ -781,7 +805,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       verify: "node -e \"process.exit(0)\"",
     });
     try {
-      const mergeCommit = mergeIntoFeature(defaultTimeout.repo);
+      const mergeCommit = mergeIntoFeature(defaultTimeout.repo, { sibling: true });
       const defaultCommand = JSON.parse(readFileSync(join(defaultTimeout.repo, ".factory.json"), "utf8")).verify;
       const defaultTrace = repositoryVerifyTrace(defaultTimeout.operator, defaultCommand);
       const merged = factory(defaultTimeout.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)], { env: defaultTrace.env });
@@ -900,7 +924,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       verifyTimeout: 1000,
     });
     try {
-      const mergeCommit = mergeIntoFeature(retry.repo);
+      const mergeCommit = mergeIntoFeature(retry.repo, { sibling: true });
       const review = readFileSync(join(retry.runDir, "reviews", "be-thing.json"), "utf8");
       const sliceEvidence = readFileSync(join(retry.runDir, "evidence", "be-thing.json"), "utf8");
       const merged = factory(retry.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
@@ -916,7 +940,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       verifyTimeout: 1000,
     });
     try {
-      const mergeCommit = mergeIntoFeature(dirty.repo);
+      const mergeCommit = mergeIntoFeature(dirty.repo, { sibling: true });
       const beforeReview = readFileSync(join(dirty.runDir, "reviews", "be-thing.json"), "utf8");
       const beforeEvidence = readFileSync(join(dirty.runDir, "evidence", "be-thing.json"), "utf8");
       const merged = factory(dirty.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
@@ -933,7 +957,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       verifyTimeout: 1000,
     });
     try {
-      const mergeCommit = mergeIntoFeature(moved.repo);
+      const mergeCommit = mergeIntoFeature(moved.repo, { sibling: true });
       const beforeReview = readFileSync(join(moved.runDir, "reviews", "be-thing.json"), "utf8");
       const beforeEvidence = readFileSync(join(moved.runDir, "evidence", "be-thing.json"), "utf8");
       const merged = factory(moved.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
@@ -951,7 +975,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     });
     try {
       assert.equal(factory(resumed.repo, ["lock", RUN, "claim", "--session", "session-a", "--branch", "feature"]).ok, true);
-      const mergeCommit = mergeIntoFeature(resumed.repo);
+      const mergeCommit = mergeIntoFeature(resumed.repo, { sibling: true });
       const beforeReview = readFileSync(join(resumed.runDir, "reviews", "be-thing.json"), "utf8");
       const beforeEvidence = readFileSync(join(resumed.runDir, "evidence", "be-thing.json"), "utf8");
       const exhausted = factory(resumed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
@@ -1121,7 +1145,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     });
     try {
       assert.equal(factory(unfixed.repo, ["lock", RUN, "claim", "--session", "session-a", "--branch", "feature"]).ok, true);
-      const mergeCommit = mergeIntoFeature(unfixed.repo);
+      const mergeCommit = mergeIntoFeature(unfixed.repo, { sibling: true });
       const first = factory(unfixed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
       const reason = first.stderr.trim();
       assert.match(reason, /repository verification retry is unsafe.*uncommitted changes/u);
@@ -2514,7 +2538,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
 
       const first = mergeOne("be-one", 10);
       assert.equal(first.ok, true, `first merge of a wave: ${first.stderr}`);
-      assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "x");
+      // #374: the first merge's tree is byte-identical to be-one's verified commit, so its green slice verify is
+      // reused and nothing executes. The second merge follows a sibling, so its tree differs and verify runs --
+      // and catches the two slices' interaction (exit 23) that neither slice's own verify could see.
+      assert.equal(existsSync(join(p.operator, "wave-count")), false, "an identical merged tree reuses the slice's verify");
+      const reusedFirst = JSON.parse(readFileSync(join(p.runDir, "evidence", "test-verifier.json"), "utf8"));
+      assert.deepEqual([reusedFirst.reused_from, reusedFirst.tests.exit, reusedFirst.review_ready],
+        [JSON.parse(readFileSync(join(p.runDir, "evidence", "be-one.json"), "utf8")).commit, 0, true]);
 
       const beforeRetry = readFileSync(join(p.runDir, "run.json"), "utf8");
       const unadvanced = factory(p.repo, ["slice", RUN, "be-two", "running", "--attempts", "1", "--now", NOW(11)]);
@@ -2621,7 +2651,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const replay = factory(p.repo, ["slice", RUN, "be-two", "merged", "--merge-commit", secondMerge, "--now", NOW(15)]);
       assert.equal(replay.ok, false);
       assert.equal(replay.stderr.trim(), second.stderr.trim(), "known failure replay must reproduce the refusal without re-execution");
-      assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "xx", "failed replay must reuse canonical evidence");
+      assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "x", "failed replay must reuse canonical evidence");
     } finally { cleanupProject(p); }
   });
 
