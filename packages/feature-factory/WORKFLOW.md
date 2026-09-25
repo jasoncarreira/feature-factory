@@ -1535,6 +1535,9 @@ Per slice:
    waive it. Its output appears on stderr: give the failing part of it (the lint, format, or test
    failure) to the builder with the rejection, because otherwise the retry cannot see what to fix. This
    is what keeps a one-line lint failure from surfacing only after merge, where it cannot be repaired.
+   When a merge's tree is byte-identical to the slice commit whose repository verify passed, the
+   post-merge verify reuses that result instead of running again, and its evidence names the slice commit
+   in `reused_from`; any other merge, such as one after a sibling merged, runs the verify as before.
 
    `BUILDER_REPORT` is a path and not the report. Write the builder's returned report to
    `BUILDER_REPORT=".factory/$R/artifacts/$SLICE_ID-builder-attempt-$SLICE_ATTEMPT.json"` and pass that path,

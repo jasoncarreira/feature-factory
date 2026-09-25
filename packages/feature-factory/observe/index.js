@@ -14,7 +14,7 @@ export const EVIDENCE_KEYS = Object.freeze([
   "subject", "run_id", "attempt", "branch", "base_ref", "worktree", "status", "blocked_reason",
   "worktree_clean",
   "files_changed", "diff_stat", "diff_observed", "commands", "tests", "commit",
-  "observed_by", "review_ready", "claim_reconciliation", "repository_verify",
+  "observed_by", "review_ready", "claim_reconciliation", "repository_verify", "reused_from",
 ]);
 
 export function git(cwd, args, { runner = spawnSync } = {}) {
@@ -204,7 +204,7 @@ export function privilegedPaths(filesChanged) {
     || PRIVILEGED_EXACT.includes(file));
 }
 
-export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, testTimeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, repositoryVerify = null, options = {} }) {
+export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, testTimeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, repositoryVerify = null, reused = null, options = {} }) {
   // Cleanliness is established before anything else is observed, because every later
   // fact - the diff, the commit, and above all the test result - is only about the
   // recorded commit if the tree has nothing uncommitted in it.
@@ -212,7 +212,8 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   const observation = observeWorktree(worktree, baseRef, options);
   // Tests are not run at all against a dirty tree: running them would produce a
   // result about bytes that are not going to merge.
-  const tests = cleanliness.clean
+  // `reused` carries a slice's green repository verify for a merge whose tree is byte-identical (#374).
+  const tests = cleanliness.clean && reused ? reused.tests : cleanliness.clean
     ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand, timeoutMs: testTimeoutMs,
       // Output to stderr, stdin inherited: `slice merged --json` and `observe --json` stay one JSON object.
       ...(shellCommand ? { stdio: ["inherit", 2, 2] } : {}) })
@@ -273,6 +274,7 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
     review_ready: false,
     claim_reconciliation: { claimed: false, mismatches: [] },
     repository_verify: verified,
+    ...(reused ? { reused_from: reused.commit } : {}),
   };
   evidence.claim_reconciliation = reconcileClaim(claim, evidence);
   evidence.review_ready = deriveReviewReady(evidence);

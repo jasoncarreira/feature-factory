@@ -22,6 +22,11 @@ received bootstrap output (#376).
 - `FACTORY_VERIFY_SCOPE`, added in 0.10.7, is removed. With both runs freshly bootstrapped from the same
   tracked tree, a verifier that behaves differently by scope is the one thing that could make slice and
   integration results disagree.
+- A merge whose tree is byte-identical to the slice commit whose repository verify passed now reuses that
+  result instead of running the suite again (#374). This is the normal serial case, and it halves the verify
+  cost per slice. The reuse is recorded as `reused_from` on the post-merge evidence and re-checked against the
+  tree on replay. A merge after a sibling slice merged has a different tree and still runs verify, which is
+  where slices that break each other are caught. A reused verify runs no bootstrap.
 - Post-merge and direct repository verify output now goes to the CLI's stderr. It inherited stdout, so a
   verify that prints (`cargo test` does) corrupted `factory slice ... merged --json` and
   `observe --repository-verify --json`.
