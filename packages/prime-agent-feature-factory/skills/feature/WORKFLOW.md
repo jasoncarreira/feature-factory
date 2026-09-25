@@ -1528,9 +1528,9 @@ Per slice:
    unless its ratified `test_plan` is empty — the waiver comes from the plan, not from you.
 
    When `.factory.json` declares `verify`, this step also runs it on the slice's commit, after the
-   ratified test command, and records the result as `repository_verify`. A declared `bootstrap` runs
-   first in the slice worktree, which never received init's bootstrap output; a bootstrap refusal is
-   the evidence's blocked reason and the verify does not run. A failing repository verify makes the slice not `review_ready`, the
+   ratified test command, and records the result as `repository_verify`. A declared `bootstrap` runs in
+   the slice worktree, which never received init's bootstrap output, immediately before that verify and
+   only when it will run; a bootstrap refusal is the evidence's blocked reason and the verify does not run. A failing repository verify makes the slice not `review_ready`, the
    same as a failing test, so the review rejects and the slice retries; an empty `test_plan` does not
    waive it. Its output appears on stderr: give the failing part of it (the lint, format, or test
    failure) to the builder with the rejection, because otherwise the retry cannot see what to fix. This

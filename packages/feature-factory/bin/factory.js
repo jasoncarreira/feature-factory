@@ -551,12 +551,12 @@ function reusableSliceVerify({ runDir, runId, ref, worktree, mergeCommit, comman
 
 async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration, reused = null }) {
   const baseRef = branchPoint(run);
-  // A reused result executes nothing, so it prepares nothing (#374/#376).
-  const refusal = reused ? null : bootstrapBeforeVerify(integration.worktree, verify, "post-merge verify");
-  if (refusal) throw new CliError(`${refusal} after recorded merge ${mergeCommit}; merged slice remains recorded; stop before advancing.`);
   let attemptIntegration = integration;
   // False-green enforcement: one invocation gets at most two executions, never an unbounded recovery loop.
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    // Every execution is freshly bootstrapped, the retry included; a reused result executes nothing (#376).
+    const refusal = attempt === 1 && reused ? null : bootstrapBeforeVerify(attemptIntegration.worktree, verify, "post-merge verify");
+    if (refusal) throw new CliError(`${refusal} after recorded merge ${mergeCommit}; merged slice remains recorded; stop before advancing.`);
     const { evidence } = await writeObservedEvidence({
       repo, runDir, runId, subject: "test-verifier", attempt, branch: run.branch,
       baseRef, worktree: attemptIntegration.worktree, status: "completed", blockedReason: null,
@@ -1209,7 +1209,6 @@ const HANDLERS = {
         throw error;
       }
     }
-    const bootstrapRefusal = bootstrapBeforeVerify(worktree, sliceVerify, "slice observation");
     const skipReason = slice && slice.test_plan.length === 0
       ? `test_plan for '${subject}' was approved empty at slices-seed`
       : null;
@@ -1223,7 +1222,8 @@ const HANDLERS = {
       testCommand: flags.repositoryVerify ? repositoryVerify.command : flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
       skipReason, shellCommand: flags.repositoryVerify === true,
       testTimeoutMs: flags.repositoryVerify ? repositoryVerify.timeoutMs : undefined,
-      repositoryVerify: sliceVerify && { command: sliceVerify.command, timeoutMs: sliceVerify.timeoutMs, bootstrapRefusal },
+      repositoryVerify: sliceVerify && { command: sliceVerify.command, timeoutMs: sliceVerify.timeoutMs,
+        prepare: () => bootstrapBeforeVerify(worktree, sliceVerify, "slice observation") },
     });
     return emit(flags, {
       run_id: runId, subject, evidence_ref: evidenceRef(subject),

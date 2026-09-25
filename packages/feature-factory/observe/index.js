@@ -223,8 +223,12 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   // forbidden and one Clippy warning parked a 13-slice run. The same suite now runs on the slice's commit.
   // Skipped after a failing test run, which is already not review-ready; its output goes to stderr so
   // `observe --json` stays one JSON object. A bootstrap refusal (#376) means the tree is not prepared, so the
-  // verify is not run and the refusal is the evidence's blocked reason.
-  const verifyRuns = repositoryVerify && !repositoryVerify.bootstrapRefusal && cleanliness.clean && !(tests.observed && tests.exit !== 0);
+  // verify does not run and the refusal is the evidence's blocked reason.
+  // Bootstrap is the verify's own first step (#376 review): it runs only when the verify will, and after the
+  // ratified test, so nothing the test does can remove its output before the verify reads it.
+  const eligible = repositoryVerify && cleanliness.clean && !(tests.observed && tests.exit !== 0);
+  const bootstrapRefusal = eligible ? repositoryVerify.prepare?.() ?? null : null;
+  const verifyRuns = eligible && !bootstrapRefusal;
   const verified = !repositoryVerify ? null : verifyRuns
     ? (({ cmd, exit, observed }) => ({ cmd, exit, observed }))(runTests(worktree, repositoryVerify.command,
       { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs, stdio: ["ignore", 2, 2] }))
@@ -259,7 +263,7 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
     base_ref: baseRef,
     worktree,
     status,
-    blocked_reason: blockedReason ?? cleanliness.reason ?? repositoryVerify?.bootstrapRefusal
+    blocked_reason: blockedReason ?? cleanliness.reason ?? bootstrapRefusal
       ?? (stableUnderTest ? null : "worktree changed while the tests ran"),
     // Named for what it asserts: clean before the run, still clean after, and HEAD did
     // not move. A pre-test snapshot alone was not enough.

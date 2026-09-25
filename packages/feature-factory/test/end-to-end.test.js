@@ -534,6 +534,24 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.deepEqual([observed.out.repository_verify, observed.out.review_ready], ["exit 0", true],
         "the slice worktree must be bootstrapped before its verify runs");
     } finally { cleanupProject(separate); }
+    // #376 review: bootstrap is the verify's own first step. A slice test that removes bootstrap output cannot
+    // starve the verify, because bootstrap runs after it; and a failing slice test, which skips the verify,
+    // skips the bootstrap too.
+    for (const [name, testPlan, verifies] of [["intervening-mutation", "rm -f .factory/deps", true], ["verify-skipped", "false", false]]) {
+      const row = project(`slice-bootstrap-${name}`, { sliceVerify: true, testPlan: [testPlan],
+        bootstrap: "node -e \"const f=require('fs');f.mkdirSync('.factory',{recursive:true});f.writeFileSync('.factory/deps','ok');f.appendFileSync('.factory/boots','x')\"",
+        bootstrapMarker: ".factory/boots",
+        verify: "node -e \"process.exit(require('fs').existsSync('.factory/deps')?0:9)\"" });
+      try {
+        const { basePoint } = buildSlice(row.repo);
+        assert.equal(factory(row.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+        const observed = factory(row.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+          "--attempt", "1", "--test-cmd", testPlan, "--now", NOW(3)]);
+        assert.equal(observed.ok, true, observed.stderr);
+        const boots = existsSync(join(row.repo, ".factory", "boots")) ? readFileSync(join(row.repo, ".factory", "boots"), "utf8") : "";
+        assert.deepEqual([observed.out.repository_verify, boots], verifies ? ["exit 0", "x"] : ["not run", ""], name);
+      } finally { cleanupProject(row); }
+    }
     for (const config of [
       { resolve: "true", verify: "true" },
       { resolve: "true", verify: "true", publish: "true" },
@@ -952,6 +970,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
     const retry = upToReview("verify-retry", undefined, {
       verify: (operator) => `node -e "const f=require('fs'),p='${join(operator, "verify-count")}';f.appendFileSync(p,'x');if(f.readFileSync(p,'utf8').length<2)setTimeout(()=>{},10000)"`,
       verifyTimeout: 1000,
+      bootstrap: "node -e \"require('fs').appendFileSync('.factory/retry-boot','x')\"", bootstrapMarker: ".factory/retry-boot",
     });
     try {
       const mergeCommit = mergeIntoFeature(retry.repo, { sibling: true });
@@ -961,6 +980,9 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(merged.ok, true, merged.stderr);
       assert.equal(readFileSync(join(retry.operator, "verify-count"), "utf8"), "xx");
       assert.equal(JSON.parse(readFileSync(join(retry.runDir, "evidence", "test-verifier.json"), "utf8")).attempt, 2);
+      // #376 review: the retry is its own execution, so it is freshly bootstrapped -- one for slice observation,
+      // then one per post-merge attempt.
+      assert.equal(readFileSync(join(retry.repo, ".factory", "retry-boot"), "utf8"), "xxx", "every verify execution bootstraps, the retry included");
       assert.equal(readFileSync(join(retry.runDir, "reviews", "be-thing.json"), "utf8"), review);
       assert.equal(readFileSync(join(retry.runDir, "evidence", "be-thing.json"), "utf8"), sliceEvidence);
     } finally { cleanupProject(retry); }
