@@ -400,10 +400,10 @@ function branchPoint(run) {
   return base;
 }
 
-async function writeObservedEvidence({ repo, runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs }) {
+async function writeObservedEvidence({ repo, runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify = null }) {
   const evidence = buildEvidence({
     subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, runId,
-    testCommand, skipReason, shellCommand, testTimeoutMs,
+    testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify,
   });
   const ancestry = observeAncestry(worktree, baseRef, "HEAD");
   if (ancestry !== "ancestor") {
@@ -420,7 +420,8 @@ async function writeObservedEvidence({ repo, runDir, runId, subject, attempt, br
 
 function canonicalRepositoryVerifyEvidence(evidence, { runId, run, integration, verifyCommand }) {
   const baseRef = branchPoint(run);
-  const keys = Object.keys(evidence).sort();
+  // `repository_verify` is slice-only: null on test-verifier evidence, absent on evidence written before #372.
+  const keys = Object.keys(evidence).filter((key) => key !== "repository_verify").sort();
   const commandNames = [
     "git rev-parse HEAD",
     `git --literal-pathspecs diff --name-only -z ${baseRef}...HEAD`,
@@ -438,7 +439,8 @@ function canonicalRepositoryVerifyEvidence(evidence, { runId, run, integration, 
     && ((tests.observed === true && Number.isInteger(tests.exit))
       || (tests.observed === false && tests.exit === null));
   const reconciliation = evidence.claim_reconciliation;
-  return JSON.stringify(keys) === JSON.stringify([...EVIDENCE_KEYS].sort())
+  return JSON.stringify(keys) === JSON.stringify(EVIDENCE_KEYS.filter((key) => key !== "repository_verify").sort())
+    && (evidence.repository_verify ?? null) === null
     && evidence.subject === "test-verifier" && evidence.run_id === runId
     && Number.isSafeInteger(evidence.attempt) && evidence.attempt >= 1
     && evidence.branch === run.branch && evidence.base_ref === baseRef
@@ -1166,6 +1168,14 @@ const HANDLERS = {
         + `expected ${JSON.stringify(slice.test_plan)}; received ${JSON.stringify(flags.testCmd)}`,
       );
     }
+    // A slice also runs the configured repository `verify`, read from its own committed config (#372).
+    let sliceVerify = null;
+    if (slice) {
+      try { sliceVerify = readRepositoryConfig(worktree, { optional: true }); } catch (error) {
+        if (error instanceof RepositoryConfigError) throw new CliError(error.message);
+        throw error;
+      }
+    }
     const skipReason = slice && slice.test_plan.length === 0
       ? `test_plan for '${subject}' was approved empty at slices-seed`
       : null;
@@ -1179,12 +1189,14 @@ const HANDLERS = {
       testCommand: flags.repositoryVerify ? repositoryVerify.command : flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
       skipReason, shellCommand: flags.repositoryVerify === true,
       testTimeoutMs: flags.repositoryVerify ? repositoryVerify.timeoutMs : undefined,
+      repositoryVerify: sliceVerify && { command: sliceVerify.command, timeoutMs: sliceVerify.timeoutMs },
     });
     return emit(flags, {
       run_id: runId, subject, evidence_ref: evidenceRef(subject),
       review_ready: evidence.review_ready, files_changed: evidence.files_changed.length,
       tests: evidence.tests.observed ? `exit ${evidence.tests.exit}` : `skipped: ${evidence.tests.skipped_reason}`,
       ancestry, mismatches: evidence.claim_reconciliation.mismatches.map((entry) => entry.field),
+      repository_verify: evidence.repository_verify && (evidence.repository_verify.observed ? `exit ${evidence.repository_verify.exit}` : "not run"),
     });
   },
   async init(positional, flags) {

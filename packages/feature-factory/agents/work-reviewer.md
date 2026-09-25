@@ -145,6 +145,9 @@ implementer to build, store, or conform to something?** Call that an obligation.
   - Code comments follow the target repository's documented policy; do not invent a blanket ban.
   - **Slice discipline:** the diff stays within the slice's `paths` (out-of-lane edits are a finding).
   - The slice's `acceptance` is actually implemented. This is never waived.
+  - A present `repository_verify` that did not exit zero is a BLOCKER: the repository's own verify
+    (lint, format, full suite) fails on this commit and will fail again after merge, where it cannot be
+    repaired. Name the failing check in `required_fixes`. An empty `test_plan` does not waive it.
   - The observed tests cover that acceptance — **unless the slice's ratified `test_plan` is empty**,
     which the plan decided at Gate 2 and which the workflow and `deriveReviewReady` both honour. A
     docs-only slice reviewed against tests it was ratified not to have is rejected forever; that

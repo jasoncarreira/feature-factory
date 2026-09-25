@@ -125,7 +125,7 @@ const NEEDS_HUMAN_PROSE = [
   ["unsafe-retry", "An unsafe repository-verification retry parks top-level needs-human; clean the external cause before explicit factory resume and merge replay.", "unsafe retry is restart-ineligible forever"],
   ["moved-head", "A moved integration head parks top-level needs-human; restore provenance before explicit factory resume and safety replay.", "a moved head requires hand-finishing"],
   ["replay-safety", "Top-level needs-human remains parked while replay safety is false; explicit resume does not bypass the same safety check.", "needs-human can never be restarted"],
-  ["production-defect", "A production defect parks top-level needs-human; after the external fix, explicitly resume the intact run.", "a production defect requires a new run"],
+  ["production-defect", "A production defect parks top-level needs-human. There is no in-band resume for it: production source is never repaired on the integration branch", "a production defect requires a new run"],
   ["repair-status", "Status is exactly `planned`, `committed`, `verified`, `failed`, `exhausted`, or `needs-human`.", "envelope resume clears this repair-record"],
   ["repair-planned-transition", "`planned → committed|needs-human`", "factory resume resolves the repair-record"],
   ["repair-committed-transition", "`committed → verified|failed|exhausted|needs-human`", "factory resume resolves the repair-record"],
@@ -1632,7 +1632,7 @@ const CLAIMS = [
       assert.match(prose, /uses its own non-empty resolver stdout unchanged as `ISSUE_PAYLOAD`, requires exact equality between its\nderived `R` and the adapter-provided expected canonical ID before its first `factory` command/u);
       assert.match(prose, /configured exit-zero, zero-byte result may therefore classify a bare integer as ordinary prose/u);
       for (const postMergeClaim of [
-        "A production defect parks top-level needs-human; after the external fix, explicitly resume the intact run.",
+        "A production defect parks top-level needs-human. There is no in-band resume for it: production source is never repaired on the integration branch",
         "`unavailable` is the only replay-eligible class",
         "exact run, subject, current head, and unchanged `verify` command binding",
         "canonical `observed: false`, `exit: null`, and\n  `skipped_reason: null`",
@@ -1757,7 +1757,7 @@ const CLAIMS = [
   {
     id: "post-merge-production-defect-terminalizes",
     file: "WORKFLOW.md",
-    fragment: "A production defect parks top-level needs-human; after the external fix, explicitly resume the intact run.",
+    fragment: "A production defect parks top-level needs-human. There is no in-band resume for it: production source is never repaired on the integration branch",
     expect: "allowed",
     matches: /"status": "needs-human"[\s\S]*factory config entry 'verify'[\s\S]*\.factory\.json verify suite[\s\S]*"next": "gate:story"/u,
     act(repo) {

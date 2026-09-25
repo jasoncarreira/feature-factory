@@ -1527,6 +1527,14 @@ Per slice:
    not a detail to reconcile in your head. Omit `--test-cmd` and the slice is not `review_ready`
    unless its ratified `test_plan` is empty — the waiver comes from the plan, not from you.
 
+   When `.factory.json` declares `verify`, this step also runs it on the slice's commit, after the
+   ratified test command and with `FACTORY_VERIFY_SCOPE=slice` in its environment, and records the
+   result as `repository_verify`. A failing repository verify makes the slice not `review_ready`, the
+   same as a failing test, so the review rejects and the slice retries; an empty `test_plan` does not
+   waive it. Its output appears on stderr: give the failing part of it (the lint, format, or test
+   failure) to the builder with the rejection, because otherwise the retry cannot see what to fix. This
+   is what keeps a one-line lint failure from surfacing only after merge, where it cannot be repaired.
+
    `BUILDER_REPORT` is a path and not the report. Write the builder's returned report to
    `BUILDER_REPORT=".factory/$R/artifacts/$SLICE_ID-builder-attempt-$SLICE_ATTEMPT.json"` and pass that path,
    which keeps the report beside the run's other evidence instead of in argv. It holds `status`, `slice`,
@@ -1706,7 +1714,7 @@ Gate 3 remains a fresh independent observation.
 
 ### Post-merge finding routing and repair journal
 
-Route a known post-merge failure before any next-wave action. A production defect parks top-level needs-human; after the external fix, explicitly resume the intact run.
+Route a known post-merge failure before any next-wave action. A production defect parks top-level needs-human. There is no in-band resume for it: production source is never repaired on the integration branch, and a configured command reruns only after a test-only repair. Say so in the reason, and name preserving the feature branch and starting a fresh run as the recovery; do not tell the operator to resume.
 Production source is never repaired on the integration branch. Unclassifiable,
 interrupted-unknown, invalid-config, unsafe dirty or moved replay, unobservable, journal-invalid, or
 repair-exhausted outcomes also terminalize. Clean unchanged repository-verification exhaustion follows

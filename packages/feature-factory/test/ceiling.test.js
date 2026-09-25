@@ -343,6 +343,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // run 25). The binding must exist and precede the command it feeds.
     const keyBinding = markdown.indexOf("when the configured resolver returned a\npayload, `KEY` is exactly `R`, its `run_id`;");
     assert.ok(keyBinding >= 0 && keyBinding < markdown.indexOf('INIT_RESPONSE="$(factory init'), "the workflow must bind KEY before init");
+    // #372, instruction half: the driver must hand the verify failure to the builder, and a post-merge production
+    // defect must not promise a resume the workflow cannot perform.
+    assert.ok(markdown.includes("give the failing part of it (the lint, format, or test"), "the driver must pass slice verify output to the builder");
+    assert.ok(markdown.includes("There is no in-band resume for it: production source is never repaired on the integration branch"),
+      "a post-merge production defect must not promise an in-band resume");
+    assert.ok(!markdown.includes("after the external fix, explicitly resume the intact run"), "the old resume promise must be gone");
     // The workflow must not construct `--publishing-identity`. It has no value to supply, so the flag would
     // be built from an unbound shell variable, expand to an empty argument, and -- before the resolution
     // fix below it -- mask a valid inherited value and refuse the run. Caught in review of 0.8.0.
@@ -620,6 +626,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       ["work-reviewer", "**Missing depth is not a finding.**", "the reviewer must not demand depth beyond the criteria"],
       ["work-reviewer", "does the content commit an", "one boundary must decide both directions"],
       ["spec-writer", "**Document deliverables:** when the issue's deliverable is a specification, contract, or data artifact", "the brief must not expand a document into a model"],
+      ["work-reviewer", "A present `repository_verify` that did not exit zero is a BLOCKER", "a failing slice-level verify must block review (#372)"],
     ]) assert.ok((byName.get(name) ?? "").includes(fragment), `${name}: ${why}`);
     // Review of #371: the first draft called internal schemas a non-blocking note in one bullet and required
     // unrequested schemas removed in another, so one artifact could be approved or rejected. Missing depth is
@@ -1274,7 +1281,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // 6027 -> 6035 for issue #367: `.factory.json` `max_retries` is a project default for `init`, so the budget
     // need not ride on every invocation; an explicit flag still outranks it. #367 authorized 6000 against a
     // 5969 base; it landed after #365 and fits inside #365's 6050.
-    assert.equal(total, 6035, "a committed max_retries default reaches init: 6035 production lines");
+    // 6035 -> 6063 for issue #372: slice observation also runs the configured repository `verify` on the slice's
+    // commit and records it as `repository_verify`, so a lint failure is an ordinary rejection and retry rather
+    // than a post-merge park with no in-band repair (baleyg run 37 parked 1 of 13 slices in on one Clippy
+    // warning). The issue records the operator's authorization to raise the tripwire 6050 -> 6100.
+    assert.equal(total, 6063, "slice observation runs the repository verify: 6063 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1312,9 +1323,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // for operator-authorized retry extension. Issue #359 authorizes 5960 for crash-safe grant recovery;
     // issue #361 authorizes 5975 so a mismatched claim can be read back; issue #365 authorizes 6050 so the
     // publishing-identity guard runs in the CLI rather than depending on the host's shell tool; issue #367
-    // authorizes 6000 for a committed max_retries default, landed inside #365's cap.
+    // authorizes 6000 for a committed max_retries default, landed inside #365's cap; issue #372 authorizes 6100
+    // so slice observation runs the repository verify.
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 6050, `production source is ${total} lines; the issue #365 tripwire is 6050`);
+    assert.ok(total <= 6100, `production source is ${total} lines; the issue #372 tripwire is 6100`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
