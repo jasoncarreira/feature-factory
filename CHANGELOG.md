@@ -3,6 +3,26 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.7
+
+A patch release that runs the repository verify on every slice before it can merge, and bounds review of
+specification subjects.
+
+- `factory observe` for a slice now also runs the configured `.factory.json` `verify` on the slice's commit,
+  after the ratified test command, and records `repository_verify` in the evidence (#372). A result that is
+  not green makes the slice not `review_ready`, so a lint, format or suite failure is an ordinary rejection
+  and retry instead of first appearing after merge, where production repair is forbidden. It runs whenever
+  `verify` is configured, including slices with an empty `test_plan`. The command sees
+  `FACTORY_VERIFY_SCOPE=slice` (and `integration` after a merge), and its output goes to stderr so
+  `observe --json` stays one JSON object. A malformed config now refuses at slice observation. Post-merge
+  verify is unchanged. baleyg run 37 parked 1 of 13 slices in on one Clippy `collapsible_if`.
+- A mid-run post-merge production defect no longer promises an in-band resume; the reason names preserving
+  the branch and starting a fresh run.
+- `work-reviewer` bounds specification subjects by their acceptance criteria: missing depth is never
+  blocking, added obligation beyond the criteria always is (#371). `spec-writer` gains the matching rule.
+
+All three package manifests and both exact adapter pins move together to 0.10.7.
+
 ## 0.10.6
 
 A patch release that binds the issue key a run records.

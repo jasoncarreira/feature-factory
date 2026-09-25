@@ -282,7 +282,7 @@ function snapshotCleanupFault(operator, runId) {
 }
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], additionalSlices = [], verify = null, verifyTimeout = undefined, bootstrap = undefined, bootstrapTimeout = undefined, bootstrapMarker = null, publish = "true", configBytes = null, maxRetries = null } = {}) {
+function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], additionalSlices = [], verify = null, sliceVerify = false, verifyTimeout = undefined, bootstrap = undefined, bootstrapTimeout = undefined, bootstrapMarker = null, publish = "true", configBytes = null, maxRetries = null } = {}) {
   const operator = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(operator, "init", "-q", "-b", "main");
   git(operator, "config", "user.email", "t@example.com");
@@ -296,8 +296,11 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
   writeFileSync(join(operator, ".gitignore"), ".factory/\n.factory-sandboxes/\n");
   if (configBytes !== null) writeFileSync(join(operator, ".factory.json"), configBytes);
   else if (verify !== null) {
+    // These fixtures count and sequence post-merge executions, so they pass slice scope (#372) unless a
+    // test opts in; the slice run itself is proven by the rows that set `sliceVerify`.
+    const command = typeof verify === "function" ? verify(operator) : verify;
     const config = {
-      resolve: "true", verify: typeof verify === "function" ? verify(operator) : verify,
+      resolve: "true", verify: sliceVerify ? command : `[ "$FACTORY_VERIFY_SCOPE" = slice ] || ${command}`,
       publish,
     };
     if (verifyTimeout !== undefined) config.verify_timeout_ms = verifyTimeout;
@@ -404,7 +407,7 @@ function approveGate(repo, name, at) {
 }
 
 describe("end to end — a merge is refused through the real CLI", () => {
-  function upToReview(name, buildOptions, projectOptions = {}) {
+  function upToReview(name, buildOptions, { lateConfig = null, ...projectOptions } = {}) {
     const p = project(name, projectOptions);
     const { head: sliceHead } = buildSlice(p.repo, buildOptions);
     const activated = factory(p.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
@@ -422,6 +425,9 @@ describe("end to end — a merge is refused through the real CLI", () => {
     const reviewRef = writeReview(p.runDir, "be-thing", sliceHead);
     assert.equal(factory(p.repo, ["slice", RUN, "be-thing", "review", "--review-ref", reviewRef,
       "--evidence-ref", "evidence/be-thing.json", "--now", NOW(3)]).ok, true);
+    // A config that is invalid from the start now refuses at slice observation (#372); the post-merge
+    // refusal is reached by a config that goes bad after the slice was observed and reviewed.
+    if (lateConfig !== null) writeFileSync(join(p.repo, ".factory.json"), lateConfig);
     // `status --json` is a machine contract, so its step and slice rows are objects. They used to arrive
     // as `be-thing:review(1)`, and `attempts` is exactly the field a controller reads to decide whether an
     // attempt was consumed -- so the one number that mattered had to be regexed back out of a rendering.
@@ -461,6 +467,25 @@ describe("end to end — a merge is refused through the real CLI", () => {
   }
 
   it("records a clean serial merge", () => {
+    // #372: the configured verify also runs on the slice's commit during observation, so a lint failure is an
+    // ordinary rejection instead of a post-merge park. It sees FACTORY_VERIFY_SCOPE=slice, and its stdout
+    // goes to stderr so `observe --json` stays one JSON object (the helper parses it).
+    for (const [exit, ready] of [[0, true], [3, false], [null, true]]) {
+      const scope = (operator) => join(operator, "verify-scope");
+      const sv = project(`slice-verify-${exit}`, exit === null ? {} : { sliceVerify: true, verify: (operator) =>
+        `node -e "console.log('verify-noise');require('fs').writeFileSync('${scope(operator)}',process.env.FACTORY_VERIFY_SCOPE);process.exit(${exit})"` });
+      try {
+        const { basePoint } = buildSlice(sv.repo);
+        assert.equal(factory(sv.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+        const observed = factory(sv.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+          "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]);
+        assert.equal(observed.ok, true, observed.stderr);
+        assert.deepEqual([observed.out.review_ready, observed.out.repository_verify], [ready, exit === null ? null : `exit ${exit}`]);
+        const recorded = JSON.parse(readFileSync(join(sv.runDir, "evidence", "be-thing.json"), "utf8")).repository_verify;
+        assert.deepEqual(recorded && [recorded.exit, recorded.observed], exit === null ? null : [exit, true]);
+        if (exit !== null) assert.equal(readFileSync(scope(sv.operator), "utf8"), "slice");
+      } finally { cleanupProject(sv); }
+    }
     for (const config of [
       { resolve: "true", verify: "true" },
       { resolve: "true", verify: "true", publish: "true" },
@@ -771,7 +796,18 @@ describe("end to end — a merge is refused through the real CLI", () => {
       }, "an omitted timeout must reach the repository shell spawn as exactly 900000");
     } finally { cleanupProject(defaultTimeout); }
 
-    const malformed = upToReview("malformed-config", undefined, { configBytes: "{\"resolve\":\"true\"}\n", legacy: true });
+    // #372: slice observation reads the committed config, so a malformed file now refuses there, before
+    // any merge. The post-merge refusal stays covered by a config that becomes malformed after observation.
+    const early = project("malformed-config-at-observe", { configBytes: "{\"resolve\":\"true\"}\n", legacy: true });
+    try {
+      const { basePoint: earlyBase } = buildSlice(early.repo);
+      assert.equal(factory(early.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+      const refused = factory(early.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", earlyBase,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(3)]);
+      assert.equal(refused.ok, false);
+      assert.equal(refused.stderr.trim(), "invalid .factory.json");
+    } finally { cleanupProject(early); }
+    const malformed = upToReview("malformed-config", undefined, { lateConfig: "{\"resolve\":\"true\"}\n", legacy: true });
     try {
       const mergeCommit = mergeIntoFeature(malformed.repo);
       const merged = factory(malformed.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]);
@@ -780,7 +816,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(runJson(malformed.runDir).slices[0].status, "merged");
     } finally { cleanupProject(malformed); }
 
-    const unexpected = upToReview("unexpected-config-entry", undefined, { configBytes: `${JSON.stringify({
+    const unexpected = upToReview("unexpected-config-entry", undefined, { lateConfig: `${JSON.stringify({
       resolve: "true", verify: "node -e \"require('fs').writeFileSync('unexpected-verify-ran','x')\"",
       publish: "true", unexpected: true,
     }, null, 2)}\n`, legacy: true });
@@ -800,7 +836,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         verify_timeout_ms: value,
       }, null, 2)}\n`;
       const invalid = index === 0
-        ? upToReview(`invalid-timeout-${index}`, undefined, { configBytes, legacy: true })
+        ? upToReview(`invalid-timeout-${index}`, undefined, { lateConfig: configBytes, legacy: true })
         : project(`invalid-timeout-${index}`, { configBytes, legacy: true });
       try {
         if (index !== 0) {
@@ -1820,7 +1856,7 @@ describe("end to end — a merge is refused through the real CLI", () => {
         runJson(committedCrash.runDir).retry_extensions.length], [2, 1]);
     } finally { cleanupProject(committedCrash); }
 
-    const repairs = project("grant-all-exhausted-repair", { maxRetries: 1, verify: "true",
+    const repairs = project("grant-all-exhausted-repair", { maxRetries: 1, verify: "true", sliceVerify: true,
       paths: ["src/app/", "test/"], additionalSlices: [{
         id: "merged-source", stack: "backend", paths: ["src/merged/"], depends_on: [], acceptance: ["AC2"], test_plan: [],
       }] });

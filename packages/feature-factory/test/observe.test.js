@@ -74,7 +74,7 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       assert.equal(shellCalls[0].options.cwd, f.root);
       assert.equal(shellCalls[0].options.shell, true);
       assert.equal(shellCalls[0].options.stdio, "inherit");
-      assert.equal(shellCalls[0].options.env, process.env);
+      assert.deepEqual(shellCalls[0].options.env, { ...process.env, FACTORY_VERIFY_SCOPE: "integration" });
       assert.equal(shellCalls[0].options.timeout, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS);
       assert.deepEqual(Object.keys(shellEvidence.tests).sort(), ["cmd", "exit", "observed", "skipped_reason"]);
       assert.equal(shellEvidence.tests.cmd, shellCommand);

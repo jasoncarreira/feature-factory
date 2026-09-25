@@ -14,7 +14,7 @@ export const EVIDENCE_KEYS = Object.freeze([
   "subject", "run_id", "attempt", "branch", "base_ref", "worktree", "status", "blocked_reason",
   "worktree_clean",
   "files_changed", "diff_stat", "diff_observed", "commands", "tests", "commit",
-  "observed_by", "review_ready", "claim_reconciliation",
+  "observed_by", "review_ready", "claim_reconciliation", "repository_verify",
 ]);
 
 export function git(cwd, args, { runner = spawnSync } = {}) {
@@ -109,7 +109,7 @@ export function observeAncestry(worktree, ancestor, descendant, options = {}) {
 // Attack 1: the test command is run here, by us, and its exit code is recorded
 // from the process rather than from anybody's report. `observed: false` means we
 // could not run it, which is not the same as a pass.
-export function runTests(worktree, command, { runner = spawnSync, skipReason = null, shellCommand = false, timeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS } = {}) {
+export function runTests(worktree, command, { runner = spawnSync, skipReason = null, shellCommand = false, timeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, stdio = "inherit", env = process.env } = {}) {
   if (!command) {
     // Finding 1: defaulting a skip reason let omission manufacture review readiness.
     // Tests must be observed green or explicitly skipped with a caller-declared reason;
@@ -117,7 +117,7 @@ export function runTests(worktree, command, { runner = spawnSync, skipReason = n
     return { cmd: null, exit: null, observed: false, skipped_reason: skipReason };
   }
   const result = shellCommand
-    ? runner(command, [], { cwd: worktree, shell: true, stdio: "inherit", env: process.env, timeout: timeoutMs })
+    ? runner(command, [], { cwd: worktree, shell: true, stdio, env, timeout: timeoutMs })
     : runner(command[0], command.slice(1), { cwd: worktree, encoding: "utf8", shell: false });
   const exit = Number.isInteger(result?.status) ? result.status : null;
   return { cmd: shellCommand ? command : command.join(" "), exit, observed: exit !== null, skipped_reason: null };
@@ -133,6 +133,9 @@ export function deriveReviewReady(evidence) {
   // function alone; with the term only at write time, every mismatched record read back as
   // tampered and wedged its slice where `slice blocked` could never record it.
   if (evidence.claim_reconciliation?.mismatches?.length > 0) return false;
+  // Absent on evidence written before #372, and null when no `verify` is configured.
+  const verify = evidence.repository_verify;
+  if (verify && !(verify.observed === true && verify.exit === 0)) return false;
   // A tree with uncommitted changes cannot produce evidence about the commit it
   // claims, whatever the tests said.
   if (evidence.worktree_clean !== true) return false;
@@ -201,7 +204,7 @@ export function privilegedPaths(filesChanged) {
     || PRIVILEGED_EXACT.includes(file));
 }
 
-export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, testTimeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, options = {} }) {
+export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, testTimeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, repositoryVerify = null, options = {} }) {
   // Cleanliness is established before anything else is observed, because every later
   // fact - the diff, the commit, and above all the test result - is only about the
   // recorded commit if the tree has nothing uncommitted in it.
@@ -210,8 +213,20 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   // Tests are not run at all against a dirty tree: running them would produce a
   // result about bytes that are not going to merge.
   const tests = cleanliness.clean
-    ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand, timeoutMs: testTimeoutMs })
+    ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand, timeoutMs: testTimeoutMs,
+      ...(shellCommand ? { env: { ...process.env, FACTORY_VERIFY_SCOPE: "integration" } } : {}) })
     : { cmd: testCommand ? (shellCommand ? testCommand : testCommand.join(" ")) : null, exit: null, observed: false, skipped_reason: null };
+  // Enforcement (false green, #372): a slice ran only its ratified test command, so the repository's
+  // configured `verify` (lint, format, full suite) first ran after merge, where production repair is
+  // forbidden and one Clippy warning parked a 13-slice run. The same suite now runs on the slice's commit.
+  // Skipped after a failing test run, which is already not review-ready; its output goes to stderr so
+  // `observe --json` stays one JSON object. `FACTORY_VERIFY_SCOPE` tells the command which run this is.
+  const verifyRuns = repositoryVerify && cleanliness.clean && !(tests.observed && tests.exit !== 0);
+  const verified = !repositoryVerify ? null : verifyRuns
+    ? (({ cmd, exit, observed }) => ({ cmd, exit, observed }))(runTests(worktree, repositoryVerify.command,
+      { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs, stdio: ["ignore", 2, 2],
+        env: { ...process.env, FACTORY_VERIFY_SCOPE: "slice" } }))
+    : { cmd: repositoryVerify.command, exit: null, observed: false };
 
   // Third round, finding 1: cleanliness was a pre-test snapshot, so a test that wrote
   // tracked files left the tree dirty while the evidence still claimed a clean HEAD -
@@ -255,6 +270,7 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
     observed_by: "orchestrator",
     review_ready: false,
     claim_reconciliation: { claimed: false, mismatches: [] },
+    repository_verify: verified,
   };
   evidence.claim_reconciliation = reconcileClaim(claim, evidence);
   evidence.review_ready = deriveReviewReady(evidence);
