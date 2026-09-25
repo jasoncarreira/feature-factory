@@ -394,16 +394,23 @@ function bootstrapOutcome(worktree, config, phase) {
 }
 
 
+// Enforcement (#376): verify runs on a tree bootstrap has just prepared, the same way in every place it runs.
+// Bootstrap output is untracked, so a slice worktree never had it and a merge that changes what bootstrap
+// installs was verified against the dependencies from init. A verify that does not execute runs no bootstrap.
+function bootstrapBeforeVerify(worktree, config, phase) {
+  return config?.bootstrapCommand ? bootstrapOutcome(worktree, config, phase).refusal : null;
+}
+
 function branchPoint(run) {
   const base = run.slices.find((slice) => Array.isArray(slice.depends_on) && slice.depends_on.length === 0)?.base_ref;
   if (!/^[0-9a-f]{40}$/u.test(base ?? "")) throw new CliError("first seeded root slice has no immutable 40-character base_ref");
   return base;
 }
 
-async function writeObservedEvidence({ repo, runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify = null }) {
+async function writeObservedEvidence({ repo, runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify = null, reused = null }) {
   const evidence = buildEvidence({
     subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, runId,
-    testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify,
+    testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify, reused,
   });
   const ancestry = observeAncestry(worktree, baseRef, "HEAD");
   if (ancestry !== "ancestor") {
@@ -421,7 +428,7 @@ async function writeObservedEvidence({ repo, runDir, runId, subject, attempt, br
 function canonicalRepositoryVerifyEvidence(evidence, { runId, run, integration, verifyCommand }) {
   const baseRef = branchPoint(run);
   // `repository_verify` is slice-only: null on test-verifier evidence, absent on evidence written before #372.
-  const keys = Object.keys(evidence).filter((key) => key !== "repository_verify").sort();
+  const keys = Object.keys(evidence).filter((key) => !["repository_verify", "reused_from"].includes(key)).sort();
   const commandNames = [
     "git rev-parse HEAD",
     `git --literal-pathspecs diff --name-only -z ${baseRef}...HEAD`,
@@ -439,8 +446,9 @@ function canonicalRepositoryVerifyEvidence(evidence, { runId, run, integration, 
     && ((tests.observed === true && Number.isInteger(tests.exit))
       || (tests.observed === false && tests.exit === null));
   const reconciliation = evidence.claim_reconciliation;
-  return JSON.stringify(keys) === JSON.stringify(EVIDENCE_KEYS.filter((key) => key !== "repository_verify").sort())
+  return JSON.stringify(keys) === JSON.stringify(EVIDENCE_KEYS.filter((key) => !["repository_verify", "reused_from"].includes(key)).sort())
     && (evidence.repository_verify ?? null) === null
+    && (evidence.reused_from === undefined || sameTree(integration.worktree, evidence.reused_from, evidence.commit))
     && evidence.subject === "test-verifier" && evidence.run_id === runId
     && Number.isSafeInteger(evidence.attempt) && evidence.attempt >= 1
     && evidence.branch === run.branch && evidence.base_ref === baseRef
@@ -523,16 +531,37 @@ function repositoryVerifyRetrySafety(repo, run, mergeCommit) {
   return integration;
 }
 
-async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration }) {
+// Enforcement (#374): a post-merge verify is skipped only when the merge's tree is byte-identical to a slice
+// commit whose own repository verify ran the same command green -- the same bytes already passed. A tree
+// equality also implies the same committed `.factory.json`, so command and timeout cannot differ.
+function sameTree(worktree, left, right) {
+  const tree = (sha) => git(worktree, ["rev-parse", "--verify", `${sha}^{tree}`]);
+  const [a, b] = [tree(left), tree(right)];
+  return a.ok && b.ok && a.stdout.trim() === b.stdout.trim();
+}
+
+function reusableSliceVerify({ runDir, runId, ref, worktree, mergeCommit, command }) {
+  let evidence;
+  try { evidence = readEvidence(runDir, ref, { runId }); } catch { return null; }
+  const verified = evidence.repository_verify;
+  if (!verified || verified.observed !== true || verified.exit !== 0 || verified.cmd !== command) return null;
+  if (!sameTree(worktree, evidence.commit, mergeCommit)) return null;
+  return { commit: evidence.commit, tests: { cmd: command, exit: 0, observed: true, skipped_reason: null } };
+}
+
+async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration, reused = null }) {
   const baseRef = branchPoint(run);
   let attemptIntegration = integration;
   // False-green enforcement: one invocation gets at most two executions, never an unbounded recovery loop.
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    // Every execution is freshly bootstrapped, the retry included; a reused result executes nothing (#376).
+    const refusal = attempt === 1 && reused ? null : bootstrapBeforeVerify(attemptIntegration.worktree, verify, "post-merge verify");
+    if (refusal) throw new CliError(`${refusal} after recorded merge ${mergeCommit}; merged slice remains recorded; stop before advancing.`);
     const { evidence } = await writeObservedEvidence({
       repo, runDir, runId, subject: "test-verifier", attempt, branch: run.branch,
       baseRef, worktree: attemptIntegration.worktree, status: "completed", blockedReason: null,
       claim: null, testCommand: verify.command, skipReason: null, shellCommand: true,
-      testTimeoutMs: verify.timeoutMs,
+      testTimeoutMs: verify.timeoutMs, reused: attempt === 1 ? reused : null,
     });
     const classified = classifyRepositoryVerifyEvidence(runDir, {
       runId, run, integration: attemptIntegration, verifyCommand: verify.command,
@@ -546,7 +575,7 @@ async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeComm
   return null;
 }
 
-async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit }) {
+async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit, sliceEvidenceRef = null }) {
   const run = readRun(runDir);
   const integration = requireIntegrationWorktree(repo, run, run.worktree);
   if (integration.head !== mergeCommit) {
@@ -562,7 +591,9 @@ async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit }) {
     throw error;
   }
   if (verify === null) return null;
-  return runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration });
+  const reused = sliceEvidenceRef && reusableSliceVerify({ runDir, runId, ref: sliceEvidenceRef,
+    worktree: integration.worktree, mergeCommit, command: verify.command });
+  return runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration, reused });
 }
 
 const HANDLERS = {
@@ -1092,7 +1123,7 @@ const HANDLERS = {
     // step needs it: `observe --base` is compared for exact equality against this value at
     // merge time. The skill previously said to read it from `factory status`, which does not
     // expose it — so the documented path could not be followed at all.
-    if (status === "merged") await verifyRecordedMerge({ repo, runDir, runId, mergeCommit: row.merge_commit });
+    if (status === "merged") await verifyRecordedMerge({ repo, runDir, runId, mergeCommit: row.merge_commit, sliceEvidenceRef: row.evidence_ref });
     // Slice attempts are budgeted the same way, so their rejected verdicts vanish the same way.
     const sliceReviewArchive = await archiveReviewAttempt(runDir, retryReviewRef ?? row.review_ref);
     await archiveReviewAttempt(runDir, retryEvidenceRef ?? row.evidence_ref);
@@ -1126,6 +1157,8 @@ const HANDLERS = {
         if (error instanceof RepositoryConfigError) throw new CliError(error.message);
         throw error;
       }
+      const refusal = bootstrapBeforeVerify(worktree, repositoryVerify, "repository verification");
+      if (refusal) throw new CliError(refusal);
     }
 
     let claim = null;
@@ -1189,7 +1222,8 @@ const HANDLERS = {
       testCommand: flags.repositoryVerify ? repositoryVerify.command : flags.testCmd ? flags.testCmd.split(" ").filter(Boolean) : null,
       skipReason, shellCommand: flags.repositoryVerify === true,
       testTimeoutMs: flags.repositoryVerify ? repositoryVerify.timeoutMs : undefined,
-      repositoryVerify: sliceVerify && { command: sliceVerify.command, timeoutMs: sliceVerify.timeoutMs },
+      repositoryVerify: sliceVerify && { command: sliceVerify.command, timeoutMs: sliceVerify.timeoutMs,
+        prepare: () => bootstrapBeforeVerify(worktree, sliceVerify, "slice observation") },
     });
     return emit(flags, {
       run_id: runId, subject, evidence_ref: evidenceRef(subject),

@@ -349,6 +349,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.ok(markdown.includes("There is no in-band resume for it: production source is never repaired on the integration branch"),
       "a post-merge production defect must not promise an in-band resume");
     assert.ok(!markdown.includes("after the external fix, explicitly resume the intact run"), "the old resume promise must be gone");
+    assert.ok(markdown.includes("post-merge verify reuses that result instead of running again, and its evidence names the slice commit"),
+      "the workflow must describe when post-merge verify is reused (#374)");
     // The workflow must not construct `--publishing-identity`. It has no value to supply, so the flag would
     // be built from an unbound shell variable, expand to an empty argument, and -- before the resolution
     // fix below it -- mask a valid inherited value and refuse the run. Caught in review of 0.8.0.
@@ -1285,7 +1287,16 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // commit and records it as `repository_verify`, so a lint failure is an ordinary rejection and retry rather
     // than a post-merge park with no in-band repair (baleyg run 37 parked 1 of 13 slices in on one Clippy
     // warning). The issue records the operator's authorization to raise the tripwire 6050 -> 6100.
-    assert.equal(total, 6063, "slice observation runs the repository verify: 6063 production lines");
+    // 6063 -> 6077 for issue #376, the 0.10.7 regression: slices build in their own worktrees, which never had
+    // bootstrap output, so a verify needing it failed every slice. Bootstrap now runs immediately before every
+    // verify execution in the tree it runs in; `FACTORY_VERIFY_SCOPE` is removed (a scope-dependent verifier
+    // would make slice and integration results differ); post-merge verify output moves to stderr so
+    // `slice merged --json` stays parseable. The issue records the authorization to raise 6100 -> 6150.
+    // 6077 -> 6105 for issue #374, folded into 0.10.8 (review of #377 moved bootstrap to each verify execution): a merge whose tree is byte-identical to the slice commit whose
+    // repository verify passed reuses that result instead of running the suite again, recorded as `reused_from`
+    // and re-checked on replay. Sound only because both runs now see the same bootstrapped tree and environment
+    // (#376). Inside the 6150 tripwire; nothing was trimmed.
+    assert.equal(total, 6105, "an identical merged tree reuses the slice's repository verify: 6105 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1324,9 +1335,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // issue #361 authorizes 5975 so a mismatched claim can be read back; issue #365 authorizes 6050 so the
     // publishing-identity guard runs in the CLI rather than depending on the host's shell tool; issue #367
     // authorizes 6000 for a committed max_retries default, landed inside #365's cap; issue #372 authorizes 6100
-    // so slice observation runs the repository verify.
+    // so slice observation runs the repository verify; issue #376 authorizes 6150 so verify runs on a freshly
+    // bootstrapped tree, and for the rework of #374 on top of it.
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 6100, `production source is ${total} lines; the issue #372 tripwire is 6100`);
+    assert.ok(total <= 6150, `production source is ${total} lines; the issue #376 tripwire is 6150`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

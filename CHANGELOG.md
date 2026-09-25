@@ -3,6 +3,36 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.8
+
+A patch release fixing a 0.10.7 regression: the slice-level repository verify ran in worktrees that never
+received bootstrap output (#376).
+
+- Slices build in their own worktrees (`.factory/worktrees/<R>/<slice>`), and `bootstrap` ran only in the
+  sandbox root at `init` and `resume`. A `verify` that needs bootstrap output therefore failed in every slice
+  worktree under 0.10.7, and each slice was rejected and retried to exhaustion regardless of its code. In
+  baleyg, `verify` runs `node --test runtime/acp/runner.test.mjs`, which imports a package only `npm ci`
+  installs. **Do not run 0.10.7 against a repository that declares `bootstrap`.**
+- `bootstrap` now runs immediately before every `verify` execution, in the tree that verify runs in: the slice
+  worktree during slice observation, and the integration worktree for post-merge verify, its replay, and
+  direct repository verification. That also closes a latent gap: a merge that changed what bootstrap
+  installs used to be verified against the dependencies from `init`. A bootstrap refusal is its own outcome
+  (the slice evidence's blocked reason, or a post-merge refusal), not a verify failure. A replay that reuses
+  recorded evidence runs neither.
+- `FACTORY_VERIFY_SCOPE`, added in 0.10.7, is removed. With both runs freshly bootstrapped from the same
+  tracked tree, a verifier that behaves differently by scope is the one thing that could make slice and
+  integration results disagree.
+- A merge whose tree is byte-identical to the slice commit whose repository verify passed now reuses that
+  result instead of running the suite again (#374). This is the normal serial case, and it halves the verify
+  cost per slice. The reuse is recorded as `reused_from` on the post-merge evidence and re-checked against the
+  tree on replay. A merge after a sibling slice merged has a different tree and still runs verify, which is
+  where slices that break each other are caught. A reused verify runs no bootstrap.
+- Post-merge and direct repository verify output now goes to the CLI's stderr. It inherited stdout, so a
+  verify that prints (`cargo test` does) corrupted `factory slice ... merged --json` and
+  `observe --repository-verify --json`.
+
+All three package manifests and both exact adapter pins move together to 0.10.8.
+
 ## 0.10.7
 
 A patch release that runs the repository verify on every slice before it can merge, and bounds review of

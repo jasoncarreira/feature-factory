@@ -171,7 +171,8 @@ const BOOTSTRAP_POLICY_FRAGMENTS = [
   "Every factory-mediated claim, force-steal, refresh, and release holds `run-json.lock`",
   "A clean zero records the command and exit `0`",
   "child stdout and stderr both routed to CLI stderr",
-  "never invoked by resolver, merge verification or replay, direct repository verification, slice or Gate 3 observation, effective push, or publication",
+  "immediately before every configured `verify` execution in the tree that verify runs in",
+  "Never invoked by the resolver, effective push, publication, or a replay that reuses recorded verify evidence.",
 ];
 
 const BOOTSTRAP_POLICY_CONTRACTS = [
