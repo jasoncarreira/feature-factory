@@ -57,6 +57,7 @@ const envelope = contract({
     max_parallel_slices: state.max_parallel_slices,
     max_retries: state.max_retries,
     retry_extensions: state.retry_extensions ?? [],
+    remediations: state.remediations ?? [],
     bootstrap_command: state.bootstrap_command,
     bootstrap_exit: state.bootstrap_exit,
   }),
@@ -110,6 +111,14 @@ const envelope = contract({
         }
         return;
       }
+      // An operator may open a remediation on a parked run; the park stands and resume stays a separate act.
+      if (mode === "remediate") {
+        if (after.status !== "needs-human" || !isDeepStrictEqual(after.terminal_result, before.terminal_result)) throw new Error("remediate must preserve the parked envelope and terminal_result");
+        if (Date.parse(after.updated_at) <= Date.parse(before.updated_at)) throw new Error("remediate must move updated_at forwards");
+        for (const key of Object.keys(before).filter((key) => !["updated_at", "remediations"].includes(key))) if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`remediate cannot change envelope.${key}`);
+        if (!appendsOneRemediation(before, after)) throw new Error("remediate must append exactly one remediation record");
+        return;
+      }
       if (!["resume-needs-human", "record-bootstrap"].includes(mode)) throw new Error("a needs-human run must be resumed before any transition");
       const targetStatus = mode === "resume-needs-human" ? "running" : "needs-human";
       if (after.status !== targetStatus) throw new Error(`${mode} must change status to ${targetStatus}`);
@@ -136,6 +145,9 @@ const envelope = contract({
       if (before[key] !== after[key]) throw new Error(`envelope.${key} is immutable`);
     }
     if (!isDeepStrictEqual(before.retry_extensions, after.retry_extensions)) throw new Error("envelope.retry_extensions is immutable outside grant-retry");
+    if (mode === "remediate" ? !appendsOneRemediation(before, after) : !isDeepStrictEqual(before.remediations, after.remediations)) {
+      throw new Error("envelope.remediations changes only by one remediate append");
+    }
     for (const key of ["bootstrap_command", "bootstrap_exit"]) {
       if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`envelope.${key} may change only during bootstrap resume`);
     }
@@ -388,6 +400,15 @@ const slices = contract({
         if (mode === "seed" && !isDeepStrictEqual(slice.path_amendments, [])) {
           throw new Error(`seeded slice '${slice.id}' path_amendments must start empty`);
         }
+        // Enforcement: after seeding, the only new slice is the one fresh pending row a remediation records (#344).
+        if (mode === "remediate") {
+          const record = candidate.remediations?.at(-1);
+          if (after.length !== before.length + 1 || after.at(-1) !== slice || record?.slice_id !== slice.id || slice.status !== "pending"
+            || slice.attempts !== 1 || (slice.extra_attempts ?? 0) !== 0 || !isDeepStrictEqual(slice.path_amendments, [])
+            || [slice.base_ref, slice.worktree, slice.branch, slice.evidence_ref, slice.review_ref, slice.merge_commit].some((value) => value !== null)) {
+            throw new Error(`remediation slice '${slice.id}' must be one fresh pending row matching its record`);
+          }
+        } else if (mode !== "seed") throw new Error(`slice '${slice.id}' may be added only by seeding or remediation`);
         continue;
       }
       // Finding 3: base_ref was replaceable on every update, so supplying the slice
@@ -450,6 +471,10 @@ async function checkPublication({ mode, observe, current, candidate, state, next
   if (mode !== "publish") return;
   if (typeof observe !== "function") throw new Error("publishing a PR requires an observer");
   await observe({ current, candidate, state, nextState });
+}
+
+function appendsOneRemediation(before, after) {
+  return after.remediations.length === before.remediations.length + 1 && isDeepStrictEqual(after.remediations.slice(0, -1), before.remediations);
 }
 
 const verdict = contract({

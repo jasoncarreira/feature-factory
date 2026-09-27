@@ -20,6 +20,7 @@ import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
 import { GATE_KEYS, VALIDATOR_KEYS } from "../state/schema.js";
 import { assertPublicationReady, REVIEW_KEYS } from "../observe/review.js";
 import { parseRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
+import { FAMILY_CONTRACTS } from "../core/contracts.js";
 import { resolveSpawnExecutable } from "../core/executable.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
@@ -2708,6 +2709,72 @@ describe("end to end — a merge is refused through the real CLI", () => {
   });
 
   it("refuses a merge with evidence but no review", () => {
+    // #344: a production finding at the integrated stage opens one reviewed fix slice instead of parking the run.
+    {
+      const count = (operator) => join(operator, "remediation-verify-count");
+      const r = upToReview("remediation", undefined, { sliceVerify: true,
+        verify: (operator) => `node -e "require('fs').appendFileSync('${count(operator)}','x')"` });
+      try {
+        const mergeCommit = mergeIntoFeature(r.repo);
+        assert.equal(factory(r.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
+        const finding = writeReview(r.runDir, "test-verifier", mergeCommit, { verdict: "REJECT", findings: ["production defect in src/app/thing.ts"] });
+        assert.equal(factory(r.repo, ["lock", RUN, "claim", "--session", "driver", "--branch", "feature"]).ok, true);
+        const remediate = (extra, t) => factory(r.repo, ["remediate", RUN, "--finding", finding, "--reason", "fix the integrated finding",
+          "--session", "driver", "--now", NOW(t), ...extra]);
+        const unchanged = readFileSync(join(r.runDir, "run.json"), "utf8");
+        for (const [extra, pattern] of [
+          [["--path", "src/other/x.ts"], /outside every merged slice's ratified paths: src\/other\/x\.ts/u],
+          [["--path", "src/app/thing.ts", "--finding", "reviews/be-thing.json"], /is not a test-verifier REJECT/u],
+        ]) {
+          const refused = remediate(extra, 5);
+          assert.equal(refused.ok, false); assert.match(refused.stderr, pattern);
+          assert.equal(readFileSync(join(r.runDir, "run.json"), "utf8"), unchanged, "a refused remediation changes nothing");
+        }
+        const opened = remediate(["--path", "src/app/thing.ts"], 5);
+        assert.equal(opened.ok, true, opened.stderr);
+        const run = runJson(r.runDir), fix = run.slices.at(-1);
+        assert.deepEqual([opened.out.slice, fix.status, fix.depends_on, fix.test_plan, fix.paths, opened.out.next],
+          ["remediation-1", "pending", ["be-thing"], [PASSING_TEST_COMMAND], ["src/app/thing.ts"], "dispatch-slice:remediation-1"]);
+        assert.deepEqual([run.remediations.length, run.remediations[0].finding_ref, run.remediations[0].slice_id], [1, finding, "remediation-1"]);
+        // The fix is an ordinary slice: built, observed with the repository verify, reviewed, merged. Nothing merged
+        // while it was in flight, so its merge reuses that verify rather than running the suite twice.
+        git(r.repo, "checkout", "-q", "-b", "fix", "feature");
+        writeFileSync(join(r.repo, "src", "app", "thing.ts"), "fixed\n");
+        git(r.repo, "commit", "-q", "-am", "remediation-1");
+        const fixHead = git(r.repo, "rev-parse", "HEAD");
+        const active = factory(r.repo, ["slice", RUN, "remediation-1", "running", "--worktree", ".", "--branch", "fix", "--now", NOW(6)]);
+        assert.equal(active.ok, true, active.stderr);
+        assert.equal(factory(r.repo, ["observe", RUN, "remediation-1", "--worktree", ".", "--base", active.out.base_ref,
+          "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(6)]).out.review_ready, true);
+        assert.equal(factory(r.repo, ["slice", RUN, "remediation-1", "review", "--review-ref", writeReview(r.runDir, "remediation-1", fixHead),
+          "--evidence-ref", "evidence/remediation-1.json", "--now", NOW(6)]).ok, true);
+        git(r.repo, "checkout", "-q", "feature");
+        git(r.repo, "merge", "-q", "--no-ff", "fix", "-m", "merge remediation-1");
+        const fixMerge = git(r.repo, "rev-parse", "HEAD");
+        const merged = factory(r.repo, ["slice", RUN, "remediation-1", "merged", "--merge-commit", fixMerge, "--now", NOW(7)]);
+        assert.equal(merged.ok, true, merged.stderr);
+        assert.equal(readFileSync(count(r.operator), "utf8"), "xx", "one verify per slice observation; both merges reuse it");
+        assert.equal(JSON.parse(readFileSync(join(r.runDir, "evidence", "test-verifier.json"), "utf8")).reused_from, fixHead);
+        // An operator may open one on a parked run: the park and its reason stand, and resume stays separate.
+        assert.equal(factory(r.repo, ["terminal", RUN, "needs-human", "--reason", "second integrated finding", "--now", NOW(8)]).ok, true);
+        const parkedOpen = remediate(["--path", "src/app/thing.ts"], 9);
+        assert.equal(parkedOpen.ok, true, parkedOpen.stderr);
+        assert.deepEqual([parkedOpen.out.status, runJson(r.runDir).terminal_result.reason, parkedOpen.out.slice],
+          ["needs-human", "second integrated finding", "remediation-2"]);
+        // Bounded: past the limit the run parks for an operator.
+        const third = remediate(["--path", "src/app/thing.ts"], 10);
+        assert.match(third.stderr ?? "", /remediation limit \(2\); park for an operator/u);
+        // Enforcement at the family contract: after seeding, only a remediation may add a slice.
+        const slicesContract = FAMILY_CONTRACTS.find((entry) => entry.id === "slices"), rows = runJson(r.runDir).slices;
+        assert.throws(() => slicesContract.validateTransition({ mode: "merge", before: rows.slice(0, -1), after: rows,
+          current: runJson(r.runDir), candidate: runJson(r.runDir) }), /may be added only by seeding or remediation/u);
+        // A record that no longer matches its slice is an invalid manifest, not a quiet amendment.
+        const tampered = runJson(r.runDir);
+        tampered.remediations[0].paths = ["src/"];
+        writeFileSync(join(r.runDir, "run.json"), `${JSON.stringify(tampered, null, 2)}\n`);
+        assert.match(factory(r.repo, ["status", RUN]).out.error ?? "", /does not match its trailing remediation slice/u);
+      } finally { cleanupProject(r); }
+    }
     // Evidence is checked before the review, so this supplies review_ready evidence
     // and withholds only the review — otherwise the evidence refusal fires and the
     // review requirement goes untested.

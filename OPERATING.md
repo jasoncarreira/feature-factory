@@ -685,6 +685,12 @@ on the host and could not reach the run.
 
 ### A production defect found after every slice has merged
 
+Most such findings now have an in-band route: `factory remediate` opens a reviewed fix slice inside the
+paths merged slices already own, up to two per run, before Gate 3 opens (see "Remediation slice" in
+`WORKFLOW.md`). An operator can open one on a parked run and then resume it. The manual recipe below is for
+the cases that route refuses: a fix that needs paths no merged slice owns, a run past its remediation limit,
+or a finding raised once Gate 3 is open.
+
 Integrated acceptance runs after the last slice merges, and it can find a defect whose fix touches
 production source. The factory will not fix that itself: post-merge repair is test-only, and a merged
 slice is never dispatched again. Both rules protect one guarantee — every production line reached the

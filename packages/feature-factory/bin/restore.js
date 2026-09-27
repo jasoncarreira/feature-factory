@@ -138,6 +138,8 @@ function assertPlanBinding(runDir, run) {
   if (run.slices.length === 0 && !run.plan_digest) return; assertRegularRecord(runDir, "plan/slices.json", "ratified slice plan");
   const bytes = readFileSync(join(runDir, "plan/slices.json")), plan = JSON.parse(bytes);
   if (`sha256:${createHash("sha256").update(bytes).digest("hex")}` !== run.plan_digest) throw new RestoreError("restored slice plan does not match the Brief-approved digest"); if (run.slices.length === 0) return;
+  // Remediation slices (#344) trail the ratified ones and are bound by their own records in the schema, not the plan.
+  run = { ...run, slices: run.slices.slice(0, run.slices.length - (run.remediations ?? []).length) };
   const project = (slice) => ({ id: slice.id, stack: slice.stack, depends_on: slice.depends_on ?? [], paths: slice.paths, test_plan: slice.test_plan });
   const ratified = Array.isArray(plan.slices) && plan.slices.length === run.slices.length && plan.slices.map((slice, index) => project({ ...slice, paths: [...slice.paths, ...(run.slices[index].path_amendments ?? []).flatMap((item) => item.added_paths)] }));
   if (!ratified || JSON.stringify(ratified) !== JSON.stringify(run.slices.map(project))) throw new RestoreError("restored slices do not match the Brief-ratified plan and amendments");

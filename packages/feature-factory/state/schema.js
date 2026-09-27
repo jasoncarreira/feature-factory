@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 // run.json adds mode, terminal_result, and pr_base to the inherited fifteen-field baseline.
 // pr_base comes from init, is immutable through the envelope, and feeds status and Step 6.
 // mode preserves autonomous intent; terminal_result records why a run stopped.
@@ -30,6 +31,8 @@ export const RUN_KEYS = Object.freeze([
   // later edit of the same filename. See the check in `slices-seed`.
   "plan_digest",
   "bootstrap_command", "bootstrap_exit",
+  // Audited fix slices opened after merges by `factory remediate` (#344). Absent in older manifests.
+  "remediations",
 ]);
 
 export const RUN_STATUSES = Object.freeze(["running", "completed", "blocked", "partial", "needs-human"]);
@@ -70,6 +73,9 @@ export const SLICE_KEYS = Object.freeze([
   "paths", "path_amendments", "test_plan", "base_ref", "evidence_ref", "review_ref", "merge_commit", "extra_attempts",
 ]);
 const PATH_AMENDMENT_KEYS = Object.freeze(["added_paths", "reason", "session", "at"]);
+export const REMEDIATION_KEYS = Object.freeze(["slice_id", "finding_ref", "finding_sha256", "paths", "test_plan", "reason", "session", "at"]);
+// Instruction-level bound, enforced so a fix that finds another defect cannot loop without a human (#344).
+export const REMEDIATION_LIMIT = 2;
 const RETRY_EXTENSION_KEYS = Object.freeze(["scope", "slice_id", "base_ref", "attempt", "previous_limit", "new_limit", "previous_max_retries", "max_retries", "session", "reason", "at", "snapshot_digest", "review_ref", "review_sha256", "evidence_ref", "evidence_sha256"]);
 export const RETRY_EXTENSION_SCOPES = Object.freeze(["slice", "all"]);
 
@@ -152,6 +158,7 @@ export function validateRun(run) {
   }
 
   retryExtensions(errors, run);
+  remediations(errors, run);
   gates(errors, run.gates);
   steps(errors, run.steps);
   slices(errors, run.slices, run);
@@ -160,6 +167,27 @@ export function validateRun(run) {
 
   if (errors.length) throw new SchemaError(errors);
   return run;
+}
+
+// Each remediation names one appended slice whose ratified paths and test plan it recorded; remediation slices
+// follow every Brief-ratified slice, so the ratified prefix is still the plan the Brief approved.
+function remediations(errors, run) {
+  const value = run.remediations;
+  if (value === undefined) return;
+  if (!Array.isArray(value)) return void errors.push({ path: "run.remediations", message: "must be an array" });
+  if (value.length > REMEDIATION_LIMIT) errors.push({ path: "run.remediations", message: `exceeds the remediation limit (${REMEDIATION_LIMIT})` });
+  const slices = Array.isArray(run.slices) ? run.slices : [], first = slices.length - value.length;
+  value.forEach((entry, index) => {
+    const path = `run.remediations[${index}]`;
+    if (!object(errors, entry, path, REMEDIATION_KEYS)) return;
+    for (const key of ["slice_id", "finding_ref", "reason", "session"]) required(errors, entry, key, path);
+    pattern(errors, entry, "finding_sha256", DIGEST, path);
+    pattern(errors, entry, "at", ISO, path);
+    const slice = slices[first + index];
+    if (!slice || slice.id !== entry.slice_id || !isDeepStrictEqual(slice.paths, entry.paths) || !isDeepStrictEqual(slice.test_plan, entry.test_plan)) {
+      errors.push({ path, message: "does not match its trailing remediation slice" });
+    }
+  });
 }
 
 function retryExtensions(errors, run) {
