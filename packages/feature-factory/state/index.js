@@ -26,12 +26,14 @@ export function readRunUnchecked(runDir) {
   }
 }
 
-function nextSliceAction(slices) {
+function nextSliceAction(slices, remediationIds = new Set()) {
   const blockedSlice = slices.find((slice) => slice.status === "blocked");
   if (blockedSlice) return { kind: "blocked-slice", subject: blockedSlice.id };
   const activeSlice = slices.find((slice) => ["running", "review"].includes(slice.status));
   if (activeSlice) return { kind: "observe-slice", subject: activeSlice.id };
-  const pendingSlice = slices.find((slice) => slice.status === "pending");
+  // A remediation (#344) fixes merged work, so it dispatches before any ordinary pending slice.
+  const pendingSlice = slices.find((slice) => slice.status === "pending" && remediationIds.has(slice.id))
+    ?? slices.find((slice) => slice.status === "pending");
   return pendingSlice ? { kind: "dispatch-slice", subject: pendingSlice.id } : undefined;
 }
 
@@ -48,7 +50,7 @@ export function nextActionRecord(run) {
   if (["completed", "partial", "blocked"].includes(run.status)) return { kind: "terminal", subject: run.status };
   const openStep = run.steps.find((step) => step.status !== "accepted");
   const stepAction = openStep ? { kind: "step", subject: openStep.agent } : null;
-  const sliceAction = nextSliceAction(run.slices);
+  const sliceAction = nextSliceAction(run.slices, new Set((run.remediations ?? []).map((entry) => entry.slice_id)));
   for (const name of GATE_NAMES) {
     const gate = run.gates[name];
     // `pending` waits on a human; absent means the phase has not been reached, which is

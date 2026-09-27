@@ -93,6 +93,16 @@ function safeReview(runDir, ref) { assertRegularRecord(runDir, ref, "review"); r
 function safeEvidence(runDir, ref, runId) { assertRegularRecord(runDir, ref, "evidence"); return readEvidence(runDir, ref, { runId }); }
 const fileDigest = (path) => `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
 
+// Each remediation's archived finding must still be the bytes its record hashed.
+export function assertRemediationBindings(runDir, run) {
+  for (const entry of run.remediations ?? []) {
+    assertRegularRecord(runDir, entry.finding_archive, "remediation finding archive");
+    if (`sha256:${createHash("sha256").update(readFileSync(join(runDir, entry.finding_archive))).digest("hex")}` !== entry.finding_sha256) {
+      throw new RestoreError(`remediation '${entry.slice_id}' finding archive does not match its recorded digest`);
+    }
+  }
+}
+
 export function assertRetryExtensionBindings(runDir, run) {
   for (const extension of run.retry_extensions ?? []) {
     const slice = run.slices.find((entry) => entry.id === extension.slice_id), priorAttempt = extension.attempt - 1;
@@ -138,7 +148,8 @@ function assertPlanBinding(runDir, run) {
   if (run.slices.length === 0 && !run.plan_digest) return; assertRegularRecord(runDir, "plan/slices.json", "ratified slice plan");
   const bytes = readFileSync(join(runDir, "plan/slices.json")), plan = JSON.parse(bytes);
   if (`sha256:${createHash("sha256").update(bytes).digest("hex")}` !== run.plan_digest) throw new RestoreError("restored slice plan does not match the Brief-approved digest"); if (run.slices.length === 0) return;
-  // Remediation slices (#344) trail the ratified ones and are bound by their own records in the schema, not the plan.
+  // Remediation slices (#344) trail the ratified ones and are bound by their own records, not the plan.
+  assertRemediationBindings(runDir, run);
   run = { ...run, slices: run.slices.slice(0, run.slices.length - (run.remediations ?? []).length) };
   const project = (slice) => ({ id: slice.id, stack: slice.stack, depends_on: slice.depends_on ?? [], paths: slice.paths, test_plan: slice.test_plan });
   const ratified = Array.isArray(plan.slices) && plan.slices.length === run.slices.length && plan.slices.map((slice, index) => project({ ...slice, paths: [...slice.paths, ...(run.slices[index].path_amendments ?? []).flatMap((item) => item.added_paths)] }));

@@ -133,17 +133,22 @@ function parse(command, args) {
 
 const key = (flag) => flag.slice(2).replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
 
-// A remediation must answer a recorded integrated failure: the test-verifier's REJECT, a failed post-merge
-// verify, or the validator's NO-GO report. Anything else would let `remediate` open scope with no finding.
-function qualifyFinding(runDir, run, ref) {
-  if (ref.startsWith("/") || ref.split(/[\\/]/u).includes("..")) throw new CliError(`--finding '${ref}' must be run-local without traversal`);
-  let bytes, record;
-  try { bytes = readFileSync(join(runDir, ref)); record = JSON.parse(bytes); } catch { throw new CliError(`--finding '${ref}' could not be read as a JSON record`); }
-  const rejected = ref.startsWith("reviews/") && record?.subject === "test-verifier" && record.verdict === "REJECT";
-  const failedVerify = ref === "evidence/test-verifier.json" && record?.subject === "test-verifier" && record.tests?.observed === true && record.tests.exit !== 0;
-  const noGo = run.validator?.verdict === "NO-GO" && run.validator.report === ref;
-  if (!rejected && !failedVerify && !noGo) throw new CliError(`--finding '${ref}' is not a test-verifier REJECT, a failed post-merge verify, or the recorded validator NO-GO report`);
-  return planDigest(bytes);
+// A remediation must answer a recorded integrated failure about the current head (#344 review): the canonical
+// test-verifier REJECT, the canonical failed post-merge verify, or the recorded validator NO-GO. Read through the
+// same readers every other consumer uses, so a hand-shaped file or a stale finding cannot open scope.
+function qualifyFinding(runDir, run, ref, head) {
+  let bound;
+  try {
+    if (ref === "reviews/test-verifier.json") {
+      const review = readReview(runDir, ref);
+      bound = review.subject === "test-verifier" && review.verdict === "REJECT" && review.reviewed_commit === head;
+    } else if (ref === evidenceRef("test-verifier")) {
+      const evidence = readEvidence(runDir, ref, { runId: run.run_id });
+      bound = evidence.tests.observed === true && evidence.tests.exit !== 0 && evidence.commit === head;
+    } else bound = run.validator?.verdict === "NO-GO" && run.validator.report === ref && run.validator.reviewed_head === head;
+  } catch (error) { throw new CliError(`--finding '${ref}' is not a valid record: ${error.message}`); }
+  if (!bound) throw new CliError(`--finding '${ref}' is not a test-verifier REJECT, a failed post-merge verify, or the recorded validator NO-GO about the current integration head ${head}`);
+  return readFileSync(join(runDir, ref));
 }
 
 function planDigest(bytes) {
@@ -857,7 +862,11 @@ const HANDLERS = {
     const runDir = runDirFor(flags, runId), current = readRun(runDir);
     if (!["running", "needs-human"].includes(current.status)) throw new CliError(`factory remediate requires status running or needs-human; found '${current.status}'`);
     assertFreshSessionOwner(runDir, runId, flags.session, "remediate");
-    const findingDigest = qualifyFinding(runDir, current, flags.finding), at = stamp(flags);
+    const head = requireIntegrationWorktree(resolve(flags.repo ?? process.cwd()), current, current.worktree).head;
+    const findingBytes = qualifyFinding(runDir, current, flags.finding, head), at = stamp(flags);
+    // The canonical finding is overwritten by the fresh Step 5 after the fix, so its exact bytes are archived here.
+    const archive = `artifacts/remediation-${(current.remediations ?? []).length + 1}-finding.json`;
+    await writeProtectedFileAtomic(runDir, archive, findingBytes);
     const next = await transition(runDir, {
       participants: [{ familyId: "envelope", mode: "remediate" }, { familyId: "slices", mode: "remediate" }, { familyId: "steps", mode: "remediate" }],
       apply: (state) => {
@@ -873,7 +882,7 @@ const HANDLERS = {
         const owners = merged.filter((slice) => unownedPaths(flags.path, slice.paths).length < flags.path.length);
         const test_plan = [...new Set(owners.flatMap((slice) => slice.test_plan))], id = `remediation-${(state.remediations ?? []).length + 1}`;
         if (state.slices.some((slice) => slice.id === id)) throw new CliError(`slice id '${id}' already exists`);
-        const record = { slice_id: id, finding_ref: flags.finding, finding_sha256: findingDigest, paths: [...flags.path], test_plan,
+        const record = { slice_id: id, finding_ref: flags.finding, finding_archive: archive, finding_sha256: planDigest(findingBytes), paths: [...flags.path], test_plan,
           reason: flags.reason.trim(), session: flags.session, at };
         const slice = { id, stack: owners[0].stack, depends_on: merged.map((entry) => entry.id), status: "pending", worktree: null,
           branch: null, attempts: 1, extra_attempts: 0, paths: [...flags.path], path_amendments: [], test_plan,

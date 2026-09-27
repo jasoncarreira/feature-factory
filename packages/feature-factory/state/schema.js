@@ -73,7 +73,7 @@ export const SLICE_KEYS = Object.freeze([
   "paths", "path_amendments", "test_plan", "base_ref", "evidence_ref", "review_ref", "merge_commit", "extra_attempts",
 ]);
 const PATH_AMENDMENT_KEYS = Object.freeze(["added_paths", "reason", "session", "at"]);
-export const REMEDIATION_KEYS = Object.freeze(["slice_id", "finding_ref", "finding_sha256", "paths", "test_plan", "reason", "session", "at"]);
+export const REMEDIATION_KEYS = Object.freeze(["slice_id", "finding_ref", "finding_archive", "finding_sha256", "paths", "test_plan", "reason", "session", "at"]);
 // Instruction-level bound, enforced so a fix that finds another defect cannot loop without a human (#344).
 export const REMEDIATION_LIMIT = 2;
 const RETRY_EXTENSION_KEYS = Object.freeze(["scope", "slice_id", "base_ref", "attempt", "previous_limit", "new_limit", "previous_max_retries", "max_retries", "session", "reason", "at", "snapshot_digest", "review_ref", "review_sha256", "evidence_ref", "evidence_sha256"]);
@@ -181,6 +181,7 @@ function remediations(errors, run) {
     const path = `run.remediations[${index}]`;
     if (!object(errors, entry, path, REMEDIATION_KEYS)) return;
     for (const key of ["slice_id", "finding_ref", "reason", "session"]) required(errors, entry, key, path);
+    if (entry.finding_archive !== `artifacts/remediation-${index + 1}-finding.json`) errors.push({ path: `${path}.finding_archive`, message: "must name its own archived finding" });
     pattern(errors, entry, "finding_sha256", DIGEST, path);
     pattern(errors, entry, "at", ISO, path);
     const slice = slices[first + index];
