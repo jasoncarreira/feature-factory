@@ -1718,7 +1718,37 @@ Gate 3 remains a fresh independent observation.
 
 ### Post-merge finding routing and repair journal
 
-Route a known post-merge failure before any next-wave action. A production defect parks top-level needs-human. There is no in-band resume for it: production source is never repaired on the integration branch, and a configured command reruns only after a test-only repair. Say so in the reason, and name preserving the feature branch and starting a fresh run as the recovery; do not tell the operator to resume.
+Route a known post-merge failure before any next-wave action. A production defect that qualifies for a remediation slice (below) opens one; any other production defect parks top-level needs-human. There is no in-band resume for it: production source is never repaired on the integration branch, and a configured command reruns only after a test-only repair. Say so in the reason, and name preserving the feature branch and starting a fresh run as the recovery; do not tell the operator to resume.
+
+#### Remediation slice
+
+A production finding from an independent reviewer at an integrated stage is fixed by a new reviewed slice,
+not by editing the integration branch. It qualifies when Gate 3 is not yet open, the run is under its
+remediation limit (2), every slice is merged or pending, and the fix lies inside paths merged slices
+already own. The finding is one of: a `test-verifier` REJECT review whose required fix touches production,
+a failed post-merge repository verify (`evidence/test-verifier.json`), or the validator's NO-GO review
+(`reviews/implementation-validator.json`), each about the current integration head. Anything else, including a fix that needs paths no merged slice owns, is new scope and parks.
+
+In `autonomous` or `headless` mode open it directly. In `interactive` mode present the finding and the
+proposed paths and open it only on the operator's approval. Name the narrowest paths that own the fix:
+
+```sh
+factory remediate "$R" --finding "$FINDING_REF" --path "$FIX_PATH" [--path "$FIX_PATH_2"] --reason "$REMEDIATION_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"
+```
+
+The CLI appends one pending slice, `remediation-N`, that depends on every merged slice and takes the
+ratified `test_plan` entries of the merged slices that own its paths. It records an immutable remediation
+entry and revises an accepted `test-verifier` step, so the integrated stage re-runs instead of being reused;
+each remediation adds that one attempt to the `test-verifier` budget.
+Dispatch it before any other pending slice. Brief the builder with the finding verbatim and require a
+regression test that would have caught it. It then follows the ordinary slice lifecycle, including
+independent review, and a reviewer rejects any change beyond the finding. Its merge normally reuses the
+slice's own green repository verify, because nothing merges while it is in flight. After it merges, re-run
+Step 5 fresh at the new head: observe and review `test-verifier` again and re-record the validator. Nothing
+from before the fix is carried over.
+
+An operator may open one on a parked run the same way and then resume it explicitly. Past the limit, or
+outside ratified paths, the run parks as described above.
 Production source is never repaired on the integration branch. Unclassifiable,
 interrupted-unknown, invalid-config, unsafe dirty or moved replay, unobservable, journal-invalid, or
 repair-exhausted outcomes also terminalize. Clean unchanged repository-verification exhaustion follows
@@ -1971,10 +2001,9 @@ HEAD, a branch name, or an unpersisted variable.
    is no waiver: the stage exists to run the tests, so the evidence must record an observed run that
    exited zero, against the integration head as it stands. Then `work-reviewer` confirms each criterion
    maps to a real assertion, judging the whole integrated diff rather than any one slice's.
-   On a single-slice run this is the last review before publication, and its production findings have no
-   in-band repair: post-merge repair is test-only and a merged slice is never dispatched again, so a
-   production defect parks the run for an operator instead of returning to a builder. Review it as the
-   final reading it is.
+   On a single-slice run this is the last review before publication. A merged slice is never dispatched
+   again, so a production defect it finds goes to a remediation slice when it qualifies and otherwise
+   parks the run for an operator. Review it as the final reading it is.
    This Gate 3 observation is always fresh and independent in the ordinary path. It uses the existing
    argv-tokenized `--test-cmd` path and overwrites canonical evidence at the current head. The sole
    substitution is a qualifying explicit repair re-verification pass at current HEAD under Gate 3's
@@ -2004,11 +2033,12 @@ HEAD, a branch name, or an unpersisted variable.
 
 On NO-GO, classify each finding against the prior round and find its design-level root cause before
 spending a retry. A **test-only** finding is fixed in the integration branch under the rules below. A
-finding in production source has no legal path at this point and must **park top-level needs-human**
-naming the finding and its root cause: every slice is merged, a merged slice cannot reopen or redispatch,
-seeding is one-time, and the integration fix is test-only by construction — so "route it to the owning
-builder in a fresh slice worktree" is an instruction the contract cannot carry out. Parking is the honest
-outcome and leaves the work recoverable; improvising a reopen is not. A test-only fix there touches test files only — never production
+finding in production source goes to a **remediation slice** when it qualifies (see "Remediation slice"),
+with `--finding reviews/implementation-validator.json`; a merged slice still never reopens or redispatches,
+so the fix is a new reviewed slice. Otherwise it must **park top-level needs-human** naming the finding
+and its root cause: a fix outside paths merged slices own, a run past its remediation limit, or Gate 3
+already open has no in-band route. Parking is the honest outcome and leaves the work recoverable;
+improvising a reopen is not. A test-only fix there touches test files only — never production
 source, never a privileged control-plane path — preserves the property under test or records why it
 cannot, lands as its own commit rather than folded into a merge, and is disclosed in the PR body naming
 the file and the cause. Respect `max_retries`.

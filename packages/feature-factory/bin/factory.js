@@ -27,7 +27,7 @@ import { resolveSpawnExecutable } from "../core/executable.js";
 import { dispatchInitPublication } from "./init-publication.js";
 import { assertRetryExtensionBindings, dispatchRestore, readRestoreRecord } from "./restore.js";
 import { dispatchSnapshot } from "./snapshot.js";
-import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, RETRY_EXTENSION_SCOPES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, effectiveRetryLimit, repositoryRelativePath, validateRun } from "../state/schema.js";
+import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, REMEDIATION_LIMIT, RETRY_EXTENSION_SCOPES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, effectiveRetryLimit, repositoryRelativePath, validateRun } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SESSION_LOCK_FILE, SessionLockHeldError,
 } from "../state/session-lock.js";
@@ -62,6 +62,7 @@ export const COMMANDS = Object.freeze({
   "reverify-repair": Object.freeze(["--repo", "--now", "--json"]),
   "effective-push": Object.freeze([]),
   identity: Object.freeze(["--repo", "--json"]),
+  remediate: Object.freeze(["--repo", "--finding", "--path", "--reason", "--session", "--now", "--json"]),
 });
 
 const BOOLEAN_FLAGS = new Set(["--json", "--repository-verify"]);
@@ -123,7 +124,7 @@ function parse(command, args) {
     const value = args[index + 1];
     if (value === undefined || value.startsWith("--")) throw new CliError(`${arg} requires a value`);
     const flagKey = key(arg);
-    if (arg === "--add") flags[flagKey] = [...(flags[flagKey] ?? []), value];
+    if (arg === "--add" || arg === "--path") flags[flagKey] = [...(flags[flagKey] ?? []), value];
     else flags[flagKey] = value;
     index += 1;
   }
@@ -131,6 +132,29 @@ function parse(command, args) {
 }
 
 const key = (flag) => flag.slice(2).replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
+
+// A remediation must answer a recorded integrated failure about the current head (#344 review): the canonical
+// test-verifier REJECT, the canonical failed post-merge verify, or the canonical validator NO-GO. Read through the
+// same readers every other consumer uses, so a hand-shaped file or a stale finding cannot open scope.
+function qualifyFinding(runDir, run, ref, integration) {
+  const head = integration.head;
+  let bound;
+  try {
+    if (ref === "reviews/test-verifier.json") {
+      const review = readReview(runDir, ref);
+      bound = review.subject === "test-verifier" && review.verdict === "REJECT" && review.reviewed_commit === head;
+    } else if (ref === evidenceRef("test-verifier")) {
+      // Only the canonical repository-verify failure, not any test-verifier observation that happened to fail.
+      const verify = readRepositoryConfig(integration.worktree, { optional: true });
+      bound = verify !== null && classifyRepositoryVerifyEvidence(runDir, { runId: run.run_id, run, integration, verifyCommand: verify.command }).kind === "failed";
+    } else if (ref === "reviews/implementation-validator.json") {
+      // The canonical validator review, never the free-form `run.validator.report` path, which is not run-local.
+      bound = readValidatorReview(runDir, head).verdict === "NO-GO";
+    } else bound = false;
+  } catch (error) { throw new CliError(`--finding '${ref}' is not a valid record: ${error.message}`); }
+  if (!bound) throw new CliError(`--finding '${ref}' is not a test-verifier REJECT, a failed post-merge verify, or a validator NO-GO about the current integration head ${head}`);
+  return readFileSync(join(runDir, ref));
+}
 
 function planDigest(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -828,6 +852,53 @@ const HANDLERS = {
     const row = next.slices.find((slice) => slice.id === sliceId);
     return emit(flags, { run_id: runId, slice: sliceId, status: next.status,
       terminal_result: next.terminal_result, amendment: row.path_amendments.at(-1) });
+  },
+
+  // #344: a production finding at an integrated stage opens one reviewed fix slice instead of parking the run.
+  // Enforcement: every production line still reaches the branch through a reviewed slice, and the fix stays
+  // inside what Gate 2 ratified -- paths merged slices owned, test commands they ran -- or it is new scope.
+  async remediate(positional, flags) {
+    if (positional.length !== 1) throw new CliError("factory remediate requires exactly <run-id>");
+    const [runId] = positional;
+    if (!Array.isArray(flags.path) || flags.path.length === 0) throw new CliError("factory remediate requires at least one --path <path>");
+    for (const key of ["finding", "reason", "session"]) {
+      if (typeof flags[key] !== "string" || !flags[key].trim()) throw new CliError(`factory remediate requires nonblank --${key} <value>`);
+    }
+    const runDir = runDirFor(flags, runId), current = readRun(runDir);
+    if (!["running", "needs-human"].includes(current.status)) throw new CliError(`factory remediate requires status running or needs-human; found '${current.status}'`);
+    assertFreshSessionOwner(runDir, runId, flags.session, "remediate");
+    const integration = requireIntegrationWorktree(resolve(flags.repo ?? process.cwd()), current, current.worktree);
+    const findingBytes = qualifyFinding(runDir, current, flags.finding, integration), at = stamp(flags);
+    // The canonical finding is overwritten by the fresh Step 5 after the fix, so its exact bytes are archived here.
+    const archive = `artifacts/remediation-${(current.remediations ?? []).length + 1}-finding.json`;
+    await writeProtectedFileAtomic(runDir, archive, findingBytes);
+    const next = await transition(runDir, {
+      participants: [{ familyId: "envelope", mode: "remediate" }, { familyId: "slices", mode: "remediate" }, { familyId: "steps", mode: "remediate" }],
+      apply: (state) => {
+        if (!isDeepStrictEqual(state, current)) throw new CliError("factory remediate refused because run state changed after qualification");
+        if (state.gates.pre_pr) throw new CliError("factory remediate refuses once Gate 3 is open; a finding raised there is the operator's decision at that gate");
+        if ((state.remediations ?? []).length >= REMEDIATION_LIMIT) throw new CliError(`factory remediate reached the run's remediation limit (${REMEDIATION_LIMIT}); park for an operator`);
+        const merged = state.slices.filter((slice) => slice.status === "merged");
+        if (merged.length === 0 || state.slices.some((slice) => !["merged", "pending"].includes(slice.status))) {
+          throw new CliError("factory remediate requires at least one merged slice and every other slice pending");
+        }
+        const outside = unownedPaths(flags.path, merged.flatMap((slice) => slice.paths));
+        if (outside.length) throw new CliError(`factory remediate --path is outside every merged slice's ratified paths: ${outside.join(", ")}; that is new scope, so park for an operator`);
+        const owners = merged.filter((slice) => unownedPaths(flags.path, slice.paths).length < flags.path.length);
+        const test_plan = [...new Set(owners.flatMap((slice) => slice.test_plan))], id = `remediation-${(state.remediations ?? []).length + 1}`;
+        if (state.slices.some((slice) => slice.id === id)) throw new CliError(`slice id '${id}' already exists`);
+        const record = { slice_id: id, finding_ref: flags.finding, finding_archive: archive, finding_sha256: planDigest(findingBytes), paths: [...flags.path], test_plan,
+          reason: flags.reason.trim(), session: flags.session, at };
+        const slice = { id, stack: owners[0].stack, depends_on: merged.map((entry) => entry.id), status: "pending", worktree: null,
+          branch: null, attempts: 1, extra_attempts: 0, paths: [...flags.path], path_amendments: [], test_plan,
+          base_ref: null, evidence_ref: null, review_ref: null, merge_commit: null };
+        // The integrated stage re-runs fresh after the fix merges: an accepted test-verifier is revised, never reused.
+        const steps = state.steps.map((step) => (step.agent === "test-verifier" && step.status === "accepted"
+          ? { ...step, status: "running", attempts: step.attempts + 1, review_ref: null, evidence_ref: null } : step));
+        return { ...state, updated_at: at, remediations: [...(state.remediations ?? []), record], slices: [...state.slices, slice], steps };
+      },
+    });
+    return emit(flags, { run_id: runId, slice: next.slices.at(-1).id, status: next.status, remediation: next.remediations.at(-1), next: nextAction(next) });
   },
 
   async ["grant-retry"](positional, flags) {
@@ -1934,6 +2005,7 @@ function usage() {
   factory restore <run-id> --repo OPERATOR --from refs/remotes/REMOTE/BRANCH [--now ISO]
   factory snapshot <run-id> --repo OPERATOR
   factory identity <run-id> [--repo PATH] [--json]
+  factory remediate <run-id> --finding REF --path PATH [--path PATH ...] --reason TEXT --session ID [--now ISO]
   factory reverify-repair <run-id> <repair-record-id> [--repo PATH] [--now ISO] [--json]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID

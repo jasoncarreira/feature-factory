@@ -20,6 +20,8 @@ import { GATE_NAMES, nextAction, validateRun } from "../state/index.js";
 import { GATE_KEYS, VALIDATOR_KEYS } from "../state/schema.js";
 import { assertPublicationReady, REVIEW_KEYS } from "../observe/review.js";
 import { parseRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
+import { FAMILY_CONTRACTS } from "../core/contracts.js";
+import { assertRemediationBindings } from "../bin/restore.js";
 import { resolveSpawnExecutable } from "../core/executable.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
@@ -2708,6 +2710,175 @@ describe("end to end — a merge is refused through the real CLI", () => {
   });
 
   it("refuses a merge with evidence but no review", () => {
+    // #344: a production finding at the integrated stage opens one reviewed fix slice instead of parking the run.
+    {
+      const count = (operator) => join(operator, "remediation-verify-count");
+      const r = upToReview("remediation", undefined, { sliceVerify: true,
+        verify: (operator) => `node -e "require('fs').appendFileSync('${count(operator)}','x')"` });
+      try {
+        const mergeCommit = mergeIntoFeature(r.repo);
+        assert.equal(factory(r.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
+        const finding = writeReview(r.runDir, "test-verifier", mergeCommit, { verdict: "REJECT", findings: ["production defect in src/app/thing.ts"] });
+        assert.equal(factory(r.repo, ["lock", RUN, "claim", "--session", "driver", "--branch", "feature"]).ok, true);
+        const remediate = (extra, t) => factory(r.repo, ["remediate", RUN, "--finding", finding, "--reason", "fix the integrated finding",
+          "--session", "driver", "--now", NOW(t), ...extra]);
+        // A test-verifier observation that failed is not the post-merge repository verify: only the canonical
+        // repository-verify failure qualifies, so an ordinary failing --test-cmd cannot open scope.
+        assert.equal(factory(r.repo, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", runJson(r.runDir).slices[0].base_ref,
+          "--test-cmd", "false", "--now", NOW(5)]).out.tests, "exit 1");
+        assert.match(factory(r.repo, ["remediate", RUN, "--finding", "evidence/test-verifier.json", "--path", "src/app/thing.ts", "--reason", "r",
+          "--session", "driver", "--now", NOW(5)]).stderr ?? "", /is not a test-verifier REJECT, a failed post-merge verify/u);
+        const unchanged = readFileSync(join(r.runDir, "run.json"), "utf8");
+        for (const [extra, pattern] of [
+          [["--path", "src/other/x.ts"], /outside every merged slice's ratified paths: src\/other\/x\.ts/u],
+          [["--path", "src/app/thing.ts", "--finding", "reviews/be-thing.json"], /is not a test-verifier REJECT/u],
+          // A hand-shaped file is not a finding: only the canonical records, read by their own readers, qualify.
+          [["--path", "src/app/thing.ts", "--finding", (writeFileSync(join(r.runDir, "reviews", "fake.json"),
+            JSON.stringify({ subject: "test-verifier", verdict: "REJECT" })), "reviews/fake.json")], /is not a test-verifier REJECT/u],
+        ]) {
+          const refused = remediate(extra, 5);
+          assert.equal(refused.ok, false); assert.match(refused.stderr, pattern);
+          assert.equal(readFileSync(join(r.runDir, "run.json"), "utf8"), unchanged, "a refused remediation changes nothing");
+        }
+        const opened = remediate(["--path", "src/app/thing.ts"], 5);
+        assert.equal(opened.ok, true, opened.stderr);
+        const run = runJson(r.runDir), fix = run.slices.at(-1);
+        assert.deepEqual([opened.out.slice, fix.status, fix.depends_on, fix.test_plan, fix.paths, opened.out.next],
+          ["remediation-1", "pending", ["be-thing"], [PASSING_TEST_COMMAND], ["src/app/thing.ts"], "dispatch-slice:remediation-1"]);
+        assert.deepEqual([run.remediations.length, run.remediations[0].finding_ref, run.remediations[0].slice_id], [1, finding, "remediation-1"]);
+        const archived = readFileSync(join(r.runDir, run.remediations[0].finding_archive));
+        assert.deepEqual(archived, readFileSync(join(r.runDir, finding)), "the finding's exact bytes are archived with the remediation");
+        // The fix is an ordinary slice: built, observed with the repository verify, reviewed, merged. Nothing merged
+        // while it was in flight, so its merge reuses that verify rather than running the suite twice.
+        git(r.repo, "checkout", "-q", "-b", "fix", "feature");
+        writeFileSync(join(r.repo, "src", "app", "thing.ts"), "fixed\n");
+        git(r.repo, "commit", "-q", "-am", "remediation-1");
+        const fixHead = git(r.repo, "rev-parse", "HEAD");
+        const active = factory(r.repo, ["slice", RUN, "remediation-1", "running", "--worktree", ".", "--branch", "fix", "--now", NOW(6)]);
+        assert.equal(active.ok, true, active.stderr);
+        assert.equal(factory(r.repo, ["observe", RUN, "remediation-1", "--worktree", ".", "--base", active.out.base_ref,
+          "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(6)]).out.review_ready, true);
+        assert.equal(factory(r.repo, ["slice", RUN, "remediation-1", "review", "--review-ref", writeReview(r.runDir, "remediation-1", fixHead),
+          "--evidence-ref", "evidence/remediation-1.json", "--now", NOW(6)]).ok, true);
+        git(r.repo, "checkout", "-q", "feature");
+        git(r.repo, "merge", "-q", "--no-ff", "fix", "-m", "merge remediation-1");
+        const fixMerge = git(r.repo, "rev-parse", "HEAD");
+        const merged = factory(r.repo, ["slice", RUN, "remediation-1", "merged", "--merge-commit", fixMerge, "--now", NOW(7)]);
+        assert.equal(merged.ok, true, merged.stderr);
+        assert.equal(readFileSync(count(r.operator), "utf8"), "xx", "one verify per slice observation; both merges reuse it");
+        assert.equal(JSON.parse(readFileSync(join(r.runDir, "evidence", "test-verifier.json"), "utf8")).reused_from, fixHead);
+        // A finding binds to the head it judged: the first REJECT is about the pre-fix head, so it cannot open a
+        // second remediation. Step 5 re-ran after the fix and found something new at the fix's merge head.
+        assert.match(remediate(["--path", "src/app/thing.ts"], 8).stderr ?? "", /about the current integration head/u);
+        writeReview(r.runDir, "test-verifier", fixMerge, { verdict: "REJECT", findings: ["a second production defect"] });
+        // An operator may open one on a parked run: the park and its reason stand, and resume stays separate.
+        assert.equal(factory(r.repo, ["terminal", RUN, "needs-human", "--reason", "second integrated finding", "--now", NOW(8)]).ok, true);
+        const parkedOpen = remediate(["--path", "src/app/thing.ts"], 9);
+        assert.equal(parkedOpen.ok, true, parkedOpen.stderr);
+        assert.deepEqual([parkedOpen.out.status, runJson(r.runDir).terminal_result.reason, parkedOpen.out.slice],
+          ["needs-human", "second integrated finding", "remediation-2"]);
+        // Bounded: past the limit the run parks for an operator.
+        const third = remediate(["--path", "src/app/thing.ts"], 10);
+        assert.match(third.stderr ?? "", /remediation limit \(2\); park for an operator/u);
+        // Enforcement at the family contract: after seeding, only a remediation may add a slice.
+        const slicesContract = FAMILY_CONTRACTS.find((entry) => entry.id === "slices"), rows = runJson(r.runDir).slices;
+        assert.throws(() => slicesContract.validateTransition({ mode: "merge", before: rows.slice(0, -1), after: rows,
+          current: runJson(r.runDir), candidate: runJson(r.runDir) }), /may be added only by seeding or remediation/u);
+        assert.deepEqual(readFileSync(join(r.runDir, "artifacts", "remediation-1-finding.json")), archived,
+          "the archived finding outlives the canonical review the fresh Step 5 overwrote");
+        // Restore and snapshot qualification refuse an archive that is no longer the hashed finding.
+        assert.doesNotThrow(() => assertRemediationBindings(r.runDir, runJson(r.runDir)));
+        writeFileSync(join(r.runDir, "artifacts", "remediation-1-finding.json"), "{}");
+        assert.throws(() => assertRemediationBindings(r.runDir, runJson(r.runDir)), /finding archive does not match its recorded digest/u);
+        // A record that no longer matches its slice is an invalid manifest, not a quiet amendment.
+        const tampered = runJson(r.runDir);
+        tampered.remediations[0].paths = ["src/"];
+        writeFileSync(join(r.runDir, "run.json"), `${JSON.stringify(tampered, null, 2)}\n`);
+        assert.match(factory(r.repo, ["status", RUN]).out.error ?? "", /does not match its trailing remediation slice/u);
+      } finally { cleanupProject(r); }
+    }
+    // Review of #378: with merged and ordinary pending slices together, the remediation dispatches first -- it fixes
+    // work already merged, which the pending slices build on.
+    {
+      const m = upToReview("remediation-order", undefined, { additionalSlices: [{
+        id: "later", stack: "backend", paths: ["src/later/"], depends_on: ["be-thing"], acceptance: ["AC2"], test_plan: [],
+      }] });
+      try {
+        const mergeCommit = mergeIntoFeature(m.repo);
+        assert.equal(factory(m.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
+        assert.equal(factory(m.repo, ["status", RUN]).out.next, "dispatch-slice:later");
+        writeReview(m.runDir, "test-verifier", mergeCommit, { verdict: "REJECT" });
+        writeReview(m.runDir, "implementation-validator", mergeCommit, { verdict: "NO-GO" });
+        assert.equal(factory(m.repo, ["lock", RUN, "claim", "--session", "driver", "--branch", "feature"]).ok, true);
+        // A validator finding is the canonical review only; a free-form or traversal path is never read.
+        const outside = factory(m.repo, ["remediate", RUN, "--finding", "../../../etc/hosts", "--path", "src/app/thing.ts",
+          "--reason", "r", "--session", "driver", "--now", NOW(5)]);
+        assert.match(outside.stderr ?? "", /is not a test-verifier REJECT, a failed post-merge verify, or a validator NO-GO/u);
+        // Review of #378: two overlapping remediations are serialized by the run.json lock every command on an
+        // existing run holds, so each claims its own number and each archive is the bytes its record hashed.
+        // Real clock rather than fixed stamps: either process may commit first, and each must move updated_at forwards.
+        const args = (finding, t) => [CLI, "remediate", RUN, "--finding", finding, "--path", "src/app/thing.ts", "--reason", `overlap ${t}`,
+          "--session", "driver", "--repo", m.repo, "--json"].map((arg) => `'${arg}'`).join(" ");
+        const exits = execFileSync("/bin/sh", ["-c", `(node ${args("reviews/test-verifier.json", 1)} >/dev/null; echo "a=$?") & (node ${args("reviews/implementation-validator.json", 2)} >/dev/null; echo "b=$?") & wait`],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        assert.deepEqual(exits.trim().split(/\s+/u).sort(), ["a=0", "b=0"], "both overlapping remediations succeed, one after the other");
+        const both = runJson(m.runDir);
+        assert.deepEqual([both.remediations.map((entry) => entry.slice_id).sort(), both.slices.map((slice) => slice.id).slice(0, 2)],
+          [["remediation-1", "remediation-2"], ["be-thing", "later"]]);
+        assert.doesNotThrow(() => assertRemediationBindings(m.runDir, both), "each archive is the finding its record hashed");
+        assert.deepEqual(new Set(both.remediations.map((entry) => entry.finding_ref)),
+          new Set(["reviews/test-verifier.json", "reviews/implementation-validator.json"]));
+        assert.equal(factory(m.repo, ["status", RUN]).out.next, "dispatch-slice:remediation-1", "the remediation outranks an earlier pending slice");
+      } finally { cleanupProject(m); }
+    }
+    // Review of #378: the canonical post-merge repository-verify failure is a finding. A sibling merge makes the
+    // merged tree differ from the verified slice commit, so the verify executes (#374) and fails.
+    {
+      const f = upToReview("remediation-verify-failure", undefined, { verify: "node -e \"process.exit(3)\"" });
+      try {
+        const mergeCommit = mergeIntoFeature(f.repo, { sibling: true });
+        assert.match(factory(f.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).stderr ?? "",
+          /factory config entry 'verify' failed after recorded merge/u);
+        assert.equal(factory(f.repo, ["lock", RUN, "claim", "--session", "driver", "--branch", "feature"]).ok, true);
+        const opened = factory(f.repo, ["remediate", RUN, "--finding", "evidence/test-verifier.json", "--path", "src/app/thing.ts",
+          "--reason", "fix the verify failure", "--session", "driver", "--now", NOW(5)]);
+        assert.equal(opened.ok, true, opened.stderr);
+        assert.equal(opened.out.slice, "remediation-1");
+      } finally { cleanupProject(f); }
+    }
+    // Review of #378: the validator route on a parked run. test-verifier is already accepted when the validator
+    // returns NO-GO; remediating the parked run re-opens it, the park stands, and an explicit resume continues.
+    {
+      const v = upToReview("remediation-parked-validator");
+      try {
+        const mergeCommit = mergeIntoFeature(v.repo);
+        assert.equal(factory(v.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
+        // The accepted verifier sits at its ceiling (attempt 3 of max_retries 3), the dead end review found.
+        for (const [status, attempts] of [["accepted", 1], ["running", 2], ["running", 3], ["accepted", 3]]) {
+          const approval = status === "accepted" ? ["--review-ref", writeReview(v.runDir, "test-verifier", mergeCommit, { attempt: attempts })] : [];
+          const stepped = factory(v.repo, ["step", RUN, "test-verifier", status, "--attempts", String(attempts), ...approval, "--now", NOW(5)]);
+          assert.equal(stepped.ok, true, `${status}@${attempts}: ${stepped.stderr}`);
+        }
+        writeReview(v.runDir, "implementation-validator", mergeCommit, { verdict: "NO-GO" });
+        assert.equal(factory(v.repo, ["lock", RUN, "claim", "--session", "operator", "--branch", "feature"]).ok, true);
+        assert.equal(factory(v.repo, ["terminal", RUN, "needs-human", "--reason", "validator NO-GO in production source", "--now", NOW(6)]).ok, true);
+        const opened = factory(v.repo, ["remediate", RUN, "--finding", "reviews/implementation-validator.json", "--path", "src/app/thing.ts",
+          "--reason", "fix the validator finding", "--session", "operator", "--now", NOW(7)]);
+        assert.equal(opened.ok, true, opened.stderr);
+        const parked = runJson(v.runDir), verifier = parked.steps.find((step) => step.agent === "test-verifier");
+        assert.deepEqual([parked.status, parked.terminal_result.reason, verifier.status, verifier.attempts],
+          ["needs-human", "validator NO-GO in production source", "running", 4]);
+        // Snapshot publication qualifies the remediation archive, so a tampered one is never reported as recovery evidence.
+        const archive = join(v.runDir, parked.remediations[0].finding_archive), bytes = readFileSync(archive);
+        writeFileSync(archive, "{}");
+        const tampered = factory(v.operator, ["snapshot", RUN]);
+        assert.equal(tampered.ok, false); assert.match(tampered.stderr, /finding archive does not match its recorded digest/u);
+        writeFileSync(archive, bytes);
+        const resumed = factory(v.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]);
+        assert.equal(resumed.ok, true, resumed.stderr);
+        assert.deepEqual([runJson(v.runDir).status, factory(v.repo, ["status", RUN]).out.next], ["running", "dispatch-slice:remediation-1"]);
+      } finally { cleanupProject(v); }
+    }
     // Evidence is checked before the review, so this supplies review_ready evidence
     // and withholds only the review — otherwise the evidence refusal fires and the
     // review requirement goes untested.

@@ -29,13 +29,15 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
   "init", "status", "amend-paths", "resume", "grant-retry", "restore", "snapshot", "decide", "lock", "heartbeat", "gate", "step", "terminal",
-  "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push", "identity",
+  "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push", "identity", "remediate",
 ];
 
 const RUN_JSON_KEYS = [
   // the inherited fifteen
   "version", "run_id", "issue_key", "branch", "worktree", "pr_base", "pr_draft", "created_at", "updated_at",
   "status", "max_parallel_slices", "max_retries", "retry_extensions", "gates", "steps", "slices", "validator", "pr_url",
+  // #344: audited fix slices opened after merges, bound by their own records rather than the plan.
+  "remediations",
   // The operator's answer to a parked run: the one channel into a park, since resume carries no message
   // and every other write is refused there.
   "operator_decision",
@@ -179,7 +181,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // the only pass that catches them.
       "**Skipping it does not mean the integrated diff goes unread**, and nothing here should be read as",
       "defects in it, both real and both confirmed. What the skip removes is a duplicate *verdict* on a",
-      "production defect parks the run for an operator instead of returning to a builder. Review it as the",
+      "again, so a production defect it finds goes to a remediation slice when it qualifies and otherwise",
 
       // Instruction only: reassess substantive progress, not category counts, before another retry.
       "a bounded, achievable remediation target for the next attempt, even when the design is fully decided.",
@@ -349,6 +351,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.ok(markdown.includes("There is no in-band resume for it: production source is never repaired on the integration branch"),
       "a post-merge production defect must not promise an in-band resume");
     assert.ok(!markdown.includes("after the external fix, explicitly resume the intact run"), "the old resume promise must be gone");
+    // #344, instruction half: when a driver may open a remediation, and that its reviewer bounds it to the finding.
+    assert.ok(markdown.includes("In `autonomous` or `headless` mode open it directly. In `interactive` mode present the finding and the"),
+      "the workflow must say which modes open a remediation without asking");
+    assert.ok(readFileSync(join(pkg, "agents", "work-reviewer.md"), "utf8").includes("any change beyond the finding is unapproved scope and a BLOCKER"),
+      "the reviewer must bound a remediation slice to its finding");
     assert.ok(markdown.includes("post-merge verify reuses that result instead of running again, and its evidence names the slice commit"),
       "the workflow must describe when post-merge verify is reused (#374)");
     // The workflow must not construct `--publishing-identity`. It has no value to supply, so the flag would
@@ -537,7 +544,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       ...["backend-builder", "frontend-builder", "work-reviewer"].map((name) => (
         { name, label: "control-failure exclusions remain explicit", fragment: "syntax, import, discovery, or unrelated" })),
       // Instruction only: no later round exists to carry a withheld finding into.
-      { name: "work-reviewer", label: "final integrated reading is exhaustive", fragment: "make its findings exhaustive in one pass: a production defect recorded here parks the run" },
+      { name: "work-reviewer", label: "final integrated reading is exhaustive", fragment: "make its findings exhaustive in one pass: a production defect recorded here is fixed by at most a bounded remediation slice or parks the run" },
       { name: "work-reviewer", label: "behavioral boundary mapping", fragment: "invokes the relevant production boundary and asserts its required effect or exclusion." },
       { name: "work-reviewer", label: "enumeration is not behavioral proof", fragment: "AST references and test names prove enumeration, not behavior." },
       { name: "work-reviewer", label: "attestation is self-report", fragment: "Treat the builder's negative-control report as self-reported diagnostic information," },
@@ -714,7 +721,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 25, "twenty-five: retry extension history is the operator-auditable twenty-fifth field");
+    assert.equal(RUN_KEYS.length, 26, "twenty-six: remediation history (#344) is the operator-auditable twenty-sixth field");
   });
 
   it("registers exactly the declared families", () => {
@@ -1296,7 +1303,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // repository verify passed reuses that result instead of running the suite again, recorded as `reused_from`
     // and re-checked on replay. Sound only because both runs now see the same bootstrapped tree and environment
     // (#376). Inside the 6150 tripwire; nothing was trimmed.
-    assert.equal(total, 6105, "an identical merged tree reuses the slice's repository verify: 6105 production lines");
+    // 6105 -> 6255 for issue #344 (review of #378 bound findings to the head, archived them, and made remediation dispatch first): `factory remediate` opens one audited, reviewed fix slice for a production finding at
+    // an integrated stage, inside paths merged slices already own and under a limit of two, instead of parking the
+    // run and discarding its merged work (baleyg #26 threw away 13 merged slices on one Gate 3 finding). The issue
+    // records the operator's authorization to raise the tripwire 6150 -> 6300.
+    assert.equal(total, 6255, "a production finding opens a reviewed remediation slice: 6255 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1336,9 +1347,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // publishing-identity guard runs in the CLI rather than depending on the host's shell tool; issue #367
     // authorizes 6000 for a committed max_retries default, landed inside #365's cap; issue #372 authorizes 6100
     // so slice observation runs the repository verify; issue #376 authorizes 6150 so verify runs on a freshly
-    // bootstrapped tree, and for the rework of #374 on top of it.
+    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice.
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 6150, `production source is ${total} lines; the issue #376 tripwire is 6150`);
+    assert.ok(total <= 6300, `production source is ${total} lines; the issue #344 tripwire is 6300`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
