@@ -1303,11 +1303,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // repository verify passed reuses that result instead of running the suite again, recorded as `reused_from`
     // and re-checked on replay. Sound only because both runs now see the same bootstrapped tree and environment
     // (#376). Inside the 6150 tripwire; nothing was trimmed.
-    // 6105 -> 6247 for issue #344 (review of #378 bound findings to the head, archived them, and made remediation dispatch first): `factory remediate` opens one audited, reviewed fix slice for a production finding at
+    // 6105 -> 6255 for issue #344 (review of #378 bound findings to the head, archived them, and made remediation dispatch first): `factory remediate` opens one audited, reviewed fix slice for a production finding at
     // an integrated stage, inside paths merged slices already own and under a limit of two, instead of parking the
     // run and discarding its merged work (baleyg #26 threw away 13 merged slices on one Gate 3 finding). The issue
     // records the operator's authorization to raise the tripwire 6150 -> 6300.
-    assert.equal(total, 6247, "a production finding opens a reviewed remediation slice: 6247 production lines");
+    assert.equal(total, 6255, "a production finding opens a reviewed remediation slice: 6255 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

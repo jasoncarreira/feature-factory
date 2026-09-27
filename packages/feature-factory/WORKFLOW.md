@@ -1738,7 +1738,8 @@ factory remediate "$R" --finding "$FINDING_REF" --path "$FIX_PATH" [--path "$FIX
 
 The CLI appends one pending slice, `remediation-N`, that depends on every merged slice and takes the
 ratified `test_plan` entries of the merged slices that own its paths. It records an immutable remediation
-entry and revises an accepted `test-verifier` step, so the integrated stage re-runs instead of being reused.
+entry and revises an accepted `test-verifier` step, so the integrated stage re-runs instead of being reused;
+each remediation adds that one attempt to the `test-verifier` budget.
 Dispatch it before any other pending slice. Brief the builder with the finding verbatim and require a
 regression test that would have caught it. It then follows the ordinary slice lifecycle, including
 independent review, and a reviewer rejects any change beyond the finding. Its merge normally reuses the

@@ -104,6 +104,9 @@ export function assertRemediationBindings(runDir, run) {
 }
 
 export function assertRetryExtensionBindings(runDir, run) {
+  // Every caller that qualifies a manifest as recovery evidence (snapshot publication, parked-snapshot recognition,
+  // restore) also qualifies its remediation archives (#344 review).
+  assertRemediationBindings(runDir, run);
   for (const extension of run.retry_extensions ?? []) {
     const slice = run.slices.find((entry) => entry.id === extension.slice_id), priorAttempt = extension.attempt - 1;
     const review = safeReview(runDir, extension.review_ref), evidence = safeEvidence(runDir, extension.evidence_ref, run.run_id);

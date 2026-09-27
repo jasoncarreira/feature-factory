@@ -280,7 +280,10 @@ const steps = contract({
     }
     // Bounded loops: the inherited max_retries limit is enforced rather than instructed.
     for (const step of after) {
-      if (step.attempts > candidate.max_retries && step.status !== "blocked") {
+      // Each remediation (#344) re-opens test-verifier once, so it adds one attempt to that step's budget -- bounded
+      // by the remediation limit -- rather than stranding a verifier already at its ceiling.
+      const limit = candidate.max_retries + (step.agent === "test-verifier" ? (candidate.remediations?.length ?? 0) : 0);
+      if (step.attempts > limit && step.status !== "blocked") {
         throw new Error(`step '${step.agent}' exhausted max_retries and must be blocked`);
       }
     }

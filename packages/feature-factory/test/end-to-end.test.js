@@ -2722,6 +2722,12 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.equal(factory(r.repo, ["lock", RUN, "claim", "--session", "driver", "--branch", "feature"]).ok, true);
         const remediate = (extra, t) => factory(r.repo, ["remediate", RUN, "--finding", finding, "--reason", "fix the integrated finding",
           "--session", "driver", "--now", NOW(t), ...extra]);
+        // A test-verifier observation that failed is not the post-merge repository verify: only the canonical
+        // repository-verify failure qualifies, so an ordinary failing --test-cmd cannot open scope.
+        assert.equal(factory(r.repo, ["observe", RUN, "test-verifier", "--worktree", ".", "--base", runJson(r.runDir).slices[0].base_ref,
+          "--test-cmd", "false", "--now", NOW(5)]).out.tests, "exit 1");
+        assert.match(factory(r.repo, ["remediate", RUN, "--finding", "evidence/test-verifier.json", "--path", "src/app/thing.ts", "--reason", "r",
+          "--session", "driver", "--now", NOW(5)]).stderr ?? "", /is not a test-verifier REJECT, a failed post-merge verify/u);
         const unchanged = readFileSync(join(r.runDir, "run.json"), "utf8");
         for (const [extra, pattern] of [
           [["--path", "src/other/x.ts"], /outside every merged slice's ratified paths: src\/other\/x\.ts/u],
@@ -2825,6 +2831,21 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.equal(factory(m.repo, ["status", RUN]).out.next, "dispatch-slice:remediation-1", "the remediation outranks an earlier pending slice");
       } finally { cleanupProject(m); }
     }
+    // Review of #378: the canonical post-merge repository-verify failure is a finding. A sibling merge makes the
+    // merged tree differ from the verified slice commit, so the verify executes (#374) and fails.
+    {
+      const f = upToReview("remediation-verify-failure", undefined, { verify: "node -e \"process.exit(3)\"" });
+      try {
+        const mergeCommit = mergeIntoFeature(f.repo, { sibling: true });
+        assert.match(factory(f.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).stderr ?? "",
+          /factory config entry 'verify' failed after recorded merge/u);
+        assert.equal(factory(f.repo, ["lock", RUN, "claim", "--session", "driver", "--branch", "feature"]).ok, true);
+        const opened = factory(f.repo, ["remediate", RUN, "--finding", "evidence/test-verifier.json", "--path", "src/app/thing.ts",
+          "--reason", "fix the verify failure", "--session", "driver", "--now", NOW(5)]);
+        assert.equal(opened.ok, true, opened.stderr);
+        assert.equal(opened.out.slice, "remediation-1");
+      } finally { cleanupProject(f); }
+    }
     // Review of #378: the validator route on a parked run. test-verifier is already accepted when the validator
     // returns NO-GO; remediating the parked run re-opens it, the park stands, and an explicit resume continues.
     {
@@ -2832,7 +2853,12 @@ describe("end to end — a merge is refused through the real CLI", () => {
       try {
         const mergeCommit = mergeIntoFeature(v.repo);
         assert.equal(factory(v.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
-        assert.equal(factory(v.repo, ["step", RUN, "test-verifier", "accepted", "--review-ref", writeReview(v.runDir, "test-verifier", mergeCommit), "--now", NOW(5)]).ok, true);
+        // The accepted verifier sits at its ceiling (attempt 3 of max_retries 3), the dead end review found.
+        for (const [status, attempts] of [["accepted", 1], ["running", 2], ["running", 3], ["accepted", 3]]) {
+          const approval = status === "accepted" ? ["--review-ref", writeReview(v.runDir, "test-verifier", mergeCommit, { attempt: attempts })] : [];
+          const stepped = factory(v.repo, ["step", RUN, "test-verifier", status, "--attempts", String(attempts), ...approval, "--now", NOW(5)]);
+          assert.equal(stepped.ok, true, `${status}@${attempts}: ${stepped.stderr}`);
+        }
         writeReview(v.runDir, "implementation-validator", mergeCommit, { verdict: "NO-GO" });
         assert.equal(factory(v.repo, ["lock", RUN, "claim", "--session", "operator", "--branch", "feature"]).ok, true);
         assert.equal(factory(v.repo, ["terminal", RUN, "needs-human", "--reason", "validator NO-GO in production source", "--now", NOW(6)]).ok, true);
@@ -2841,7 +2867,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.equal(opened.ok, true, opened.stderr);
         const parked = runJson(v.runDir), verifier = parked.steps.find((step) => step.agent === "test-verifier");
         assert.deepEqual([parked.status, parked.terminal_result.reason, verifier.status, verifier.attempts],
-          ["needs-human", "validator NO-GO in production source", "running", 2]);
+          ["needs-human", "validator NO-GO in production source", "running", 4]);
+        // Snapshot publication qualifies the remediation archive, so a tampered one is never reported as recovery evidence.
+        const archive = join(v.runDir, parked.remediations[0].finding_archive), bytes = readFileSync(archive);
+        writeFileSync(archive, "{}");
+        const tampered = factory(v.operator, ["snapshot", RUN]);
+        assert.equal(tampered.ok, false); assert.match(tampered.stderr, /finding archive does not match its recorded digest/u);
+        writeFileSync(archive, bytes);
         const resumed = factory(v.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]);
         assert.equal(resumed.ok, true, resumed.stderr);
         assert.deepEqual([runJson(v.runDir).status, factory(v.repo, ["status", RUN]).out.next], ["running", "dispatch-slice:remediation-1"]);

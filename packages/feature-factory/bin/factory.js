@@ -136,15 +136,17 @@ const key = (flag) => flag.slice(2).replace(/-([a-z])/gu, (_match, letter) => le
 // A remediation must answer a recorded integrated failure about the current head (#344 review): the canonical
 // test-verifier REJECT, the canonical failed post-merge verify, or the canonical validator NO-GO. Read through the
 // same readers every other consumer uses, so a hand-shaped file or a stale finding cannot open scope.
-function qualifyFinding(runDir, run, ref, head) {
+function qualifyFinding(runDir, run, ref, integration) {
+  const head = integration.head;
   let bound;
   try {
     if (ref === "reviews/test-verifier.json") {
       const review = readReview(runDir, ref);
       bound = review.subject === "test-verifier" && review.verdict === "REJECT" && review.reviewed_commit === head;
     } else if (ref === evidenceRef("test-verifier")) {
-      const evidence = readEvidence(runDir, ref, { runId: run.run_id });
-      bound = evidence.tests.observed === true && evidence.tests.exit !== 0 && evidence.commit === head;
+      // Only the canonical repository-verify failure, not any test-verifier observation that happened to fail.
+      const verify = readRepositoryConfig(integration.worktree, { optional: true });
+      bound = verify !== null && classifyRepositoryVerifyEvidence(runDir, { runId: run.run_id, run, integration, verifyCommand: verify.command }).kind === "failed";
     } else if (ref === "reviews/implementation-validator.json") {
       // The canonical validator review, never the free-form `run.validator.report` path, which is not run-local.
       bound = readValidatorReview(runDir, head).verdict === "NO-GO";
@@ -865,8 +867,8 @@ const HANDLERS = {
     const runDir = runDirFor(flags, runId), current = readRun(runDir);
     if (!["running", "needs-human"].includes(current.status)) throw new CliError(`factory remediate requires status running or needs-human; found '${current.status}'`);
     assertFreshSessionOwner(runDir, runId, flags.session, "remediate");
-    const head = requireIntegrationWorktree(resolve(flags.repo ?? process.cwd()), current, current.worktree).head;
-    const findingBytes = qualifyFinding(runDir, current, flags.finding, head), at = stamp(flags);
+    const integration = requireIntegrationWorktree(resolve(flags.repo ?? process.cwd()), current, current.worktree);
+    const findingBytes = qualifyFinding(runDir, current, flags.finding, integration), at = stamp(flags);
     // The canonical finding is overwritten by the fresh Step 5 after the fix, so its exact bytes are archived here.
     const archive = `artifacts/remediation-${(current.remediations ?? []).length + 1}-finding.json`;
     await writeProtectedFileAtomic(runDir, archive, findingBytes);
