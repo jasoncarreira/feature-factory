@@ -2810,10 +2810,12 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.match(outside.stderr ?? "", /is not a test-verifier REJECT, a failed post-merge verify, or a validator NO-GO/u);
         // Review of #378: two overlapping remediations are serialized by the run.json lock every command on an
         // existing run holds, so each claims its own number and each archive is the bytes its record hashed.
+        // Real clock rather than fixed stamps: either process may commit first, and each must move updated_at forwards.
         const args = (finding, t) => [CLI, "remediate", RUN, "--finding", finding, "--path", "src/app/thing.ts", "--reason", `overlap ${t}`,
-          "--session", "driver", "--now", NOW(t), "--repo", m.repo, "--json"].map((arg) => `'${arg}'`).join(" ");
-        execFileSync("/bin/sh", ["-c", `node ${args("reviews/test-verifier.json", 5)} >/dev/null & node ${args("reviews/implementation-validator.json", 6)} >/dev/null & wait`],
-          { stdio: ["ignore", "ignore", "pipe"] });
+          "--session", "driver", "--repo", m.repo, "--json"].map((arg) => `'${arg}'`).join(" ");
+        const exits = execFileSync("/bin/sh", ["-c", `(node ${args("reviews/test-verifier.json", 1)} >/dev/null; echo "a=$?") & (node ${args("reviews/implementation-validator.json", 2)} >/dev/null; echo "b=$?") & wait`],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        assert.deepEqual(exits.trim().split(/\s+/u).sort(), ["a=0", "b=0"], "both overlapping remediations succeed, one after the other");
         const both = runJson(m.runDir);
         assert.deepEqual([both.remediations.map((entry) => entry.slice_id).sort(), both.slices.map((slice) => slice.id).slice(0, 2)],
           [["remediation-1", "remediation-2"], ["be-thing", "later"]]);
@@ -2822,6 +2824,28 @@ describe("end to end — a merge is refused through the real CLI", () => {
           new Set(["reviews/test-verifier.json", "reviews/implementation-validator.json"]));
         assert.equal(factory(m.repo, ["status", RUN]).out.next, "dispatch-slice:remediation-1", "the remediation outranks an earlier pending slice");
       } finally { cleanupProject(m); }
+    }
+    // Review of #378: the validator route on a parked run. test-verifier is already accepted when the validator
+    // returns NO-GO; remediating the parked run re-opens it, the park stands, and an explicit resume continues.
+    {
+      const v = upToReview("remediation-parked-validator");
+      try {
+        const mergeCommit = mergeIntoFeature(v.repo);
+        assert.equal(factory(v.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
+        assert.equal(factory(v.repo, ["step", RUN, "test-verifier", "accepted", "--review-ref", writeReview(v.runDir, "test-verifier", mergeCommit), "--now", NOW(5)]).ok, true);
+        writeReview(v.runDir, "implementation-validator", mergeCommit, { verdict: "NO-GO" });
+        assert.equal(factory(v.repo, ["lock", RUN, "claim", "--session", "operator", "--branch", "feature"]).ok, true);
+        assert.equal(factory(v.repo, ["terminal", RUN, "needs-human", "--reason", "validator NO-GO in production source", "--now", NOW(6)]).ok, true);
+        const opened = factory(v.repo, ["remediate", RUN, "--finding", "reviews/implementation-validator.json", "--path", "src/app/thing.ts",
+          "--reason", "fix the validator finding", "--session", "operator", "--now", NOW(7)]);
+        assert.equal(opened.ok, true, opened.stderr);
+        const parked = runJson(v.runDir), verifier = parked.steps.find((step) => step.agent === "test-verifier");
+        assert.deepEqual([parked.status, parked.terminal_result.reason, verifier.status, verifier.attempts],
+          ["needs-human", "validator NO-GO in production source", "running", 2]);
+        const resumed = factory(v.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]);
+        assert.equal(resumed.ok, true, resumed.stderr);
+        assert.deepEqual([runJson(v.runDir).status, factory(v.repo, ["status", RUN]).out.next], ["running", "dispatch-slice:remediation-1"]);
+      } finally { cleanupProject(v); }
     }
     // Evidence is checked before the review, so this supplies review_ready evidence
     // and withholds only the review — otherwise the evidence refusal fires and the

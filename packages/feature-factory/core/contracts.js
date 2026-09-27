@@ -238,7 +238,7 @@ const gates = contract({
 const steps = contract({
   id: "steps",
   project: (state) => (state.steps ?? []).map((step) => ({ ...step })),
-  validateTransition: ({ before, after, candidate }) => {
+  validateTransition: ({ mode, before, after, candidate }) => {
     const priorByAgent = new Map(before.map((step) => [step.agent, step]));
     for (const step of after) {
       const prior = priorByAgent.get(step.agent);
@@ -263,7 +263,10 @@ const steps = contract({
         if (step.status !== "accepted" && step.attempts === prior.attempts) {
           throw new Error(`step '${step.agent}' is already accepted; a revision must raise --attempts`);
         }
-        if (TERMINAL_STATUSES.includes(candidate.status)) {
+        // The one exception (#344): a remediation on a parked run re-opens the accepted test-verifier so the
+        // integrated stage re-runs after the fix; the park itself stands until an explicit resume.
+        const remediating = mode === "remediate" && step.agent === "test-verifier" && candidate.status === "needs-human";
+        if (TERMINAL_STATUSES.includes(candidate.status) && !remediating) {
           throw new Error(`step '${step.agent}' cannot reopen on a ${candidate.status} run`);
         }
         // A planning revision belongs before the plan is acted on. Once slices are seeded, the decomposition
