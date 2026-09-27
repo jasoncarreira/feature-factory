@@ -2802,12 +2802,25 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.equal(factory(m.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(4)]).ok, true);
         assert.equal(factory(m.repo, ["status", RUN]).out.next, "dispatch-slice:later");
         writeReview(m.runDir, "test-verifier", mergeCommit, { verdict: "REJECT" });
+        writeReview(m.runDir, "implementation-validator", mergeCommit, { verdict: "NO-GO" });
         assert.equal(factory(m.repo, ["lock", RUN, "claim", "--session", "driver", "--branch", "feature"]).ok, true);
-        const opened = factory(m.repo, ["remediate", RUN, "--finding", "reviews/test-verifier.json", "--path", "src/app/thing.ts",
-          "--reason", "fix before the next wave", "--session", "driver", "--now", NOW(5)]);
-        assert.equal(opened.ok, true, opened.stderr);
-        assert.deepEqual([runJson(m.runDir).slices.map((slice) => slice.id), opened.out.next],
-          [["be-thing", "later", "remediation-1"], "dispatch-slice:remediation-1"], "the remediation outranks an earlier pending slice");
+        // A validator finding is the canonical review only; a free-form or traversal path is never read.
+        const outside = factory(m.repo, ["remediate", RUN, "--finding", "../../../etc/hosts", "--path", "src/app/thing.ts",
+          "--reason", "r", "--session", "driver", "--now", NOW(5)]);
+        assert.match(outside.stderr ?? "", /is not a test-verifier REJECT, a failed post-merge verify, or a validator NO-GO/u);
+        // Review of #378: two overlapping remediations are serialized by the run.json lock every command on an
+        // existing run holds, so each claims its own number and each archive is the bytes its record hashed.
+        const args = (finding, t) => [CLI, "remediate", RUN, "--finding", finding, "--path", "src/app/thing.ts", "--reason", `overlap ${t}`,
+          "--session", "driver", "--now", NOW(t), "--repo", m.repo, "--json"].map((arg) => `'${arg}'`).join(" ");
+        execFileSync("/bin/sh", ["-c", `node ${args("reviews/test-verifier.json", 5)} >/dev/null & node ${args("reviews/implementation-validator.json", 6)} >/dev/null & wait`],
+          { stdio: ["ignore", "ignore", "pipe"] });
+        const both = runJson(m.runDir);
+        assert.deepEqual([both.remediations.map((entry) => entry.slice_id).sort(), both.slices.map((slice) => slice.id).slice(0, 2)],
+          [["remediation-1", "remediation-2"], ["be-thing", "later"]]);
+        assert.doesNotThrow(() => assertRemediationBindings(m.runDir, both), "each archive is the finding its record hashed");
+        assert.deepEqual(new Set(both.remediations.map((entry) => entry.finding_ref)),
+          new Set(["reviews/test-verifier.json", "reviews/implementation-validator.json"]));
+        assert.equal(factory(m.repo, ["status", RUN]).out.next, "dispatch-slice:remediation-1", "the remediation outranks an earlier pending slice");
       } finally { cleanupProject(m); }
     }
     // Evidence is checked before the review, so this supplies review_ready evidence

@@ -134,7 +134,7 @@ function parse(command, args) {
 const key = (flag) => flag.slice(2).replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
 
 // A remediation must answer a recorded integrated failure about the current head (#344 review): the canonical
-// test-verifier REJECT, the canonical failed post-merge verify, or the recorded validator NO-GO. Read through the
+// test-verifier REJECT, the canonical failed post-merge verify, or the canonical validator NO-GO. Read through the
 // same readers every other consumer uses, so a hand-shaped file or a stale finding cannot open scope.
 function qualifyFinding(runDir, run, ref, head) {
   let bound;
@@ -145,9 +145,12 @@ function qualifyFinding(runDir, run, ref, head) {
     } else if (ref === evidenceRef("test-verifier")) {
       const evidence = readEvidence(runDir, ref, { runId: run.run_id });
       bound = evidence.tests.observed === true && evidence.tests.exit !== 0 && evidence.commit === head;
-    } else bound = run.validator?.verdict === "NO-GO" && run.validator.report === ref && run.validator.reviewed_head === head;
+    } else if (ref === "reviews/implementation-validator.json") {
+      // The canonical validator review, never the free-form `run.validator.report` path, which is not run-local.
+      bound = readValidatorReview(runDir, head).verdict === "NO-GO";
+    } else bound = false;
   } catch (error) { throw new CliError(`--finding '${ref}' is not a valid record: ${error.message}`); }
-  if (!bound) throw new CliError(`--finding '${ref}' is not a test-verifier REJECT, a failed post-merge verify, or the recorded validator NO-GO about the current integration head ${head}`);
+  if (!bound) throw new CliError(`--finding '${ref}' is not a test-verifier REJECT, a failed post-merge verify, or a validator NO-GO about the current integration head ${head}`);
   return readFileSync(join(runDir, ref));
 }
 
