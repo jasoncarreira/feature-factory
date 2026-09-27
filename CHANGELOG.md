@@ -3,6 +3,30 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.9
+
+A patch release adding an in-band route for a production finding at the integrated stage (#344).
+
+- `factory remediate <run> --finding REF --path P... --reason TEXT --session ID` opens one reviewed fix slice,
+  `remediation-N`, instead of parking the run. baleyg #26 discarded 13 merged slices on a single Gate 3 finding,
+  and #55 did the same twice.
+- The finding must be a canonical integrated failure about the current integration head: the `test-verifier`
+  REJECT review, the canonical post-merge repository-verify failure, or the implementation-validator NO-GO
+  review. Its exact bytes are archived to `artifacts/remediation-N-finding.json` and re-checked by snapshot and
+  restore.
+- The fix stays inside what Gate 2 ratified: paths that merged slices own, and those slices' test commands.
+  Anything else is new scope and parks. The fix slice depends on every merged slice, dispatches before any
+  ordinary pending slice, and goes through the ordinary slice lifecycle, including independent review. It is
+  serial, so its merge reuses its own green repository verify.
+- It re-opens an accepted `test-verifier`, so the integrated stage re-runs fresh. Each remediation adds one
+  attempt to that step's budget.
+- At most 2 per run, and refused once Gate 3 is open. An operator may open one on a parked run and then resume
+  explicitly.
+- After seeding, a slice can now be added only by a remediation; before this, nothing prevented a non-seed
+  transition from adding one.
+
+All three package manifests and both exact adapter pins move together to 0.10.9.
+
 ## 0.10.8
 
 A patch release fixing a 0.10.7 regression: the slice-level repository verify ran in worktrees that never
