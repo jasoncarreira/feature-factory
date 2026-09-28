@@ -354,6 +354,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // #344, instruction half: when a driver may open a remediation, and that its reviewer bounds it to the finding.
     assert.ok(markdown.includes("In `autonomous` or `headless` mode open it directly. In `interactive` mode present the finding and the"),
       "the workflow must say which modes open a remediation without asking");
+    // Instruction: the test-only repair journal needs a failing verify, so a review-found test gap with a green
+    // verify had no route (baleyg #64: a vector test that never called the production ID function).
+    assert.ok(markdown.includes("no failing result to record there; it comes here, as a remediation slice whose paths are test files."),
+      "a review-found test-only gap must route to a remediation slice");
     assert.ok(readFileSync(join(pkg, "agents", "work-reviewer.md"), "utf8").includes("any change beyond the finding is unapproved scope and a BLOCKER"),
       "the reviewer must bound a remediation slice to its finding");
     assert.ok(markdown.includes("post-merge verify reuses that result instead of running again, and its evidence names the slice commit"),
