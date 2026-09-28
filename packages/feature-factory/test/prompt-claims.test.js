@@ -111,7 +111,7 @@ const NEEDS_HUMAN_PROSE = [
   // A NO-GO finding in production source: a merged slice cannot reopen or redispatch, so the contract used
   // to instruct an action it cannot carry out. Since #344 the route is a new reviewed remediation slice, and
   // parking remains for what that route refuses; the forbidden claim is still the implied reopen.
-  ["nogo-production", "finding in production source goes to a **remediation slice** when it qualifies (see \"Remediation slice\"),", "reopen the merged slice"],
+  ["nogo-production", "tests, goes to a **remediation slice** when it qualifies (see \"Remediation slice\"),", "reopen the merged slice"],
   ["gate-restart", "After an autonomous needs-human gate stop, explicitly resume only after the existing pre-lock and ownership checks pass.", "start a replacement run"],
   ["bootstrap-resume-parked", "For configured order 7, the CLI binds the exact raw `run.json` bytes, the validated parked manifest, a forward `updated_at`, and the exact fresh owner before running bootstrap while durable status remains `needs-human`.", "bootstrap changes durable status before execution"],
   ["bootstrap-resume-failure", "An ordinary failure with intact bindings records the exact command and integer or `null` result, advances `updated_at`, remains `needs-human`, preserves progress and the historical result, and refuses; a later explicit resume reruns bootstrap.", "discards the historical result"],

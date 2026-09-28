@@ -1722,12 +1722,15 @@ Route a known post-merge failure before any next-wave action. A production defec
 
 #### Remediation slice
 
-A production finding from an independent reviewer at an integrated stage is fixed by a new reviewed slice,
-not by editing the integration branch. It qualifies when Gate 3 is not yet open, the run is under its
+A finding from an independent reviewer at an integrated stage that needs a code change, in production
+source or only in tests, is fixed by a new reviewed slice, not by editing the integration branch. It qualifies when Gate 3 is not yet open, the run is under its
 remediation limit (2), every slice is merged or pending, and the fix lies inside paths merged slices
-already own. The finding is one of: a `test-verifier` REJECT review whose required fix touches production,
+already own. The finding is one of: a `test-verifier` REJECT review, whatever files its required fix touches,
 a failed post-merge repository verify (`evidence/test-verifier.json`), or the validator's NO-GO review
 (`reviews/implementation-validator.json`), each about the current integration head. Anything else, including a fix that needs paths no merged slice owns, is new scope and parks.
+The post-merge test-only repair journal below applies only to a failing repository verify. A gap found by
+review while verify is green, such as a test that never calls the production path it claims to cover, has
+no failing result to record there; it comes here, as a remediation slice whose paths are test files.
 
 In `autonomous` or `headless` mode open it directly. In `interactive` mode present the finding and the
 proposed paths and open it only on the operator's approval. Name the narrowest paths that own the fix:
@@ -2032,8 +2035,9 @@ HEAD, a branch name, or an unpersisted variable.
    **before** presenting Gate 3: the gate cannot be approved without it.
 
 On NO-GO, classify each finding against the prior round and find its design-level root cause before
-spending a retry. A **test-only** finding is fixed in the integration branch under the rules below. A
-finding in production source goes to a **remediation slice** when it qualifies (see "Remediation slice"),
+spending a retry. A **test-only** finding backed by a failing repository verify is fixed in the integration
+branch under the rules below. Any other finding that needs a code change, in production source or only in
+tests, goes to a **remediation slice** when it qualifies (see "Remediation slice"),
 with `--finding reviews/implementation-validator.json`; a merged slice still never reopens or redispatches,
 so the fix is a new reviewed slice. Otherwise it must **park top-level needs-human** naming the finding
 and its root cause: a fix outside paths merged slices own, a run past its remediation limit, or Gate 3
