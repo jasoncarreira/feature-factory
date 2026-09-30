@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -88,6 +88,28 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       assert.deepEqual([edge.log_bytes, kept.length, kept.subarray(-6).toString()], [LOG_CAP_BYTES, LOG_CAP_BYTES, "******"], "the straddling secret is masked up to the cut");
       assert.equal(edge.tail.includes(secret.slice(-5)), false, "the tail's first bytes are no fragment of the secret");
       assert.equal(Buffer.byteLength(edge.tail) <= 64 * 1024, true, "the tail stays within its byte bound after masking");
+      // Review of #382: overlapping values -- one secret's suffix another's prefix, and a value overlapping itself -- are all
+      // masked whatever the environment order; malformed or incomplete UTF-8 cannot push the tail past its byte bound.
+      for (const order of [["FIRST_TOKEN", "SECOND_TOKEN"], ["SECOND_TOKEN", "FIRST_TOKEN"]]) {
+        const values = { FIRST_TOKEN: "abcdefghij", SECOND_TOKEN: "ghijklmnop", SELF_TOKEN: "zzzzzzzz" }, env = { ...process.env };
+        for (const key of [...order, "SELF_TOKEN"]) env[key] = values[key];
+        const overlap = runTests(f.root, ["node", "-e", "process.stdout.write('<abcdefghijklmnop|zzzzzzzzzzz>')"], { env, log: log(`overlap-${order[0]}`) });
+        assert.deepEqual([readFileSync(join(runDir, overlap.log_path), "utf8"), overlap.tail], [`<${"*".repeat(16)}|${"*".repeat(11)}>`, `<${"*".repeat(16)}|${"*".repeat(11)}>`], order.join(" then "));
+      }
+      const malformed = runTests(f.root, ["node", "-e", "process.stdout.write(Buffer.concat([Buffer.alloc(70000, 0xff), Buffer.from([0xe2, 0x82])]))"], { log: log("malformed") });
+      assert.equal(Buffer.byteLength(malformed.tail) <= 64 * 1024, true, "malformed output cannot expand the tail past its bound");
+      // Review of #382: a repeat observation gets a fresh log, leaving the first one's bytes and digest intact, and a linked
+      // log directory is refused rather than written through.
+      const first = runTests(f.root, ["node", "-e", "console.log('first')"], { log: log("repeat") });
+      const second = runTests(f.root, ["node", "-e", "console.log('second')"], { log: log("repeat") });
+      assert.deepEqual([first.log_path, second.log_path, readFileSync(join(runDir, first.log_path), "utf8")],
+        ["evidence/logs/repeat.log", "evidence/logs/repeat.2.log", "first\n"], "an earlier log is never overwritten");
+      assert.equal(first.log_sha256, `sha256:${createHash("sha256").update(readFileSync(join(runDir, first.log_path))).digest("hex")}`);
+      const linkedRun = mkdtempSync(join(tmpdir(), "ff-linked-logs-")), elsewhere = mkdtempSync(join(tmpdir(), "ff-elsewhere-"));
+      mkdirSync(join(linkedRun, "evidence"));
+      symlinkSync(elsewhere, join(linkedRun, "evidence", "logs"));
+      assert.throws(() => runTests(f.root, ["true"], { log: { runDir: linkedRun, ref: "evidence/logs/x.log" } }), /is a link/u);
+      assert.deepEqual(readdirSync(elsewhere), [], "nothing is written through the link");
       // The raw scratch output is removed even when the run itself throws.
       const before = readdirSync(tmpdir()).filter((name) => name.startsWith("factory-output-")).length;
       assert.throws(() => runTests(f.root, ["x"], { runner: () => { throw new Error("spawn failed"); }, log: log("throws") }), /spawn failed/u);

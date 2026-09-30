@@ -15,11 +15,15 @@ remediation slice.
   is capped at 50 MB, applied when the log is written; output is fully drained and exit semantics are unchanged.
   Values of secret environment variables (`GH_TOKEN`, `GITHUB_TOKEN`, `*_TOKEN`, `*_API_KEY`, `*_SECRET`,
   `*_PASSWORD`, `*_ACCESS_KEY`) are masked byte-for-byte with `*` in both the log and the tail, including a value
-  straddling the log cap or the tail's start; limits bound exactly the bytes kept. A failing run's tail is copied to
+  straddling the log cap or the tail's start, and overlapping values in any order; limits bound exactly the bytes
+  kept, and the decoded tail stays within 64 KiB even for malformed UTF-8. A log is created exclusively and never
+  through a link: a repeat observation writes a fresh suffixed log, so an earlier record keeps its bytes and
+  digest. While a command runs, its raw output goes to a private scratch file under the OS temp directory; per the
+  owner decision on #381, that filesystem is the bound during the run, as the unbounded stderr stream was before. A failing run's tail is copied to
   stderr, so `--json` stdout stays one object. Logs survive archival and rejected attempts, and a reused post-merge
   verify (#374) carries the slice run's own log. Reviewers and the test-verifier are told to read `tail` or
   `log_path` when `exit` is not 0. Pass/fail, `deriveReviewReady` and the clean-tree checks are unchanged,
-  with one intended fix: a ratified argv test that printed more than 1 MB used to exceed `spawnSync`'s default
+  with one owner-approved fix (#381): a ratified argv test that printed more than 1 MB used to exceed `spawnSync`'s default
   `maxBuffer`, get killed, and be recorded as `exit: null` / `observed: false` (unobservable) regardless of its
   result; its real exit code is now recorded.
 - The workflow sends a review-found gap that needs a code change, in production or only in tests, to a remediation

@@ -3,7 +3,7 @@
 // `factory observe` mechanizes that rule because an autonomous run has no human to
 // check whether the orchestrator actually observed anything.
 import { spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, rmSync, statSync, writeSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -118,6 +118,10 @@ export const LOG_FIELDS = Object.freeze(["log_path", "log_bytes", "log_sha256", 
 const TAIL_LINES = 200, TAIL_BYTES = 64 * 1024;
 const SECRET_ENV = /^(?:GH_TOKEN|GITHUB_TOKEN)$|(?:_TOKEN|_API_KEY|_SECRET|_PASSWORD|_ACCESS_KEY)$/u;
 
+function isLink(path) {
+  try { return lstatSync(path).isSymbolicLink(); } catch { return false; }
+}
+
 function readRange(fd, position, length) {
   const buffer = Buffer.alloc(length);
   return buffer.subarray(0, readSync(fd, buffer, 0, length, position));
@@ -134,8 +138,11 @@ function captureOutput(log, env, spawn) {
   const margin = Math.max(0, ...secrets.map((secret) => secret.length));
   // Masking is byte-for-byte, so nothing shifts: limits bound exactly the bytes kept, and reading a secret's length past
   // each cut before masking catches a value straddling it.
+  // Every occurrence is found in the original bytes, overlaps included, and their union masked, so masking one value
+  // can never hide another -- independent of environment order.
   const mask = (bytes) => {
-    for (const secret of secrets) for (let at = bytes.indexOf(secret); at !== -1; at = bytes.indexOf(secret, at + secret.length)) bytes.fill(0x2a, at, at + secret.length);
+    const original = Buffer.from(bytes);
+    for (const secret of secrets) for (let at = original.indexOf(secret); at !== -1; at = original.indexOf(secret, at + 1)) bytes.fill(0x2a, at, at + secret.length);
     return bytes;
   };
   const scratch = join(tmpdir(), `factory-output-${randomUUID()}`);
@@ -151,14 +158,23 @@ function captureOutput(log, env, spawn) {
       tailBytes = mask(readRange(input, start, size - start)).subarray(-TAIL_BYTES);
     } finally { closeSync(input); }
   } finally { rmSync(scratch, { force: true }); }
+  // Decoding arbitrary output can expand it (a malformed byte becomes a 3-byte U+FFFD), so the decoded text is bounded
+  // again in UTF-8 bytes, starting on a character boundary.
+  const bounded = Buffer.from(tailBytes.toString("utf8")).subarray(-TAIL_BYTES);
   let from = 0;
-  while (from < tailBytes.length && (tailBytes[from] & 0xc0) === 0x80) from += 1;
-  const tail = tailBytes.subarray(from).toString("utf8").split("\n").slice(-TAIL_LINES).join("\n");
+  while (from < bounded.length && (bounded[from] & 0xc0) === 0x80) from += 1;
+  const tail = bounded.subarray(from).toString("utf8").split("\n").slice(-TAIL_LINES).join("\n");
+  // Review of #382: a log is never replaced and never written through a link. A repeat observation of the same attempt
+  // and commit gets a fresh suffixed ref, so any record naming the earlier log keeps its bytes and digest.
   mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, head, { mode: 0o600 }); chmodSync(target, 0o600);
+  for (const dir of [join(log.runDir, "evidence"), logRoot]) if (lstatSync(dir).isSymbolicLink()) throw new Error(`${dir} is a link; logs are written only into the run's own directory`);
+  let ref = log.ref;
+  for (let n = 2; existsSync(join(log.runDir, ref)) || isLink(join(log.runDir, ref)); n += 1) ref = log.ref.replace(/\.log$/u, `.${n}.log`);
+  const fd = openSync(join(log.runDir, ref), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try { writeSync(fd, head); } finally { closeSync(fd); }
   const timedOut = result?.error?.code === "ETIMEDOUT";
   if (result?.status !== 0 && tail) process.stderr.write(`${tail}${tail.endsWith("\n") ? "" : "\n"}`);
-  return { result, fields: { log_path: log.ref, log_bytes: head.length, log_sha256: `sha256:${createHash("sha256").update(head).digest("hex")}`,
+  return { result, fields: { log_path: ref, log_bytes: head.length, log_sha256: `sha256:${createHash("sha256").update(head).digest("hex")}`,
     log_truncated: size > LOG_CAP_BYTES, tail, ...(Number.isInteger(result?.status) ? {} : { signal: result?.signal ?? null, timed_out: timedOut }) } };
 }
 
