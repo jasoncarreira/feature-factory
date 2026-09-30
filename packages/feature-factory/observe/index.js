@@ -118,6 +118,16 @@ export const LOG_FIELDS = Object.freeze(["log_path", "log_bytes", "log_sha256", 
 const TAIL_LINES = 200, TAIL_BYTES = 64 * 1024;
 const SECRET_ENV = /^(?:GH_TOKEN|GITHUB_TOKEN)$|(?:_TOKEN|_API_KEY|_SECRET|_PASSWORD|_ACCESS_KEY)$/u;
 
+// A short write would leave a log whose bytes disagree with its recorded size and digest (review of #382), so the
+// write continues until every byte lands and fails closed when a write makes no progress.
+export function writeFully(fd, bytes, write = writeSync) {
+  for (let written = 0; written < bytes.length;) {
+    const count = write(fd, bytes, written, bytes.length - written);
+    if (!(count > 0)) throw new Error(`log write made no progress after ${written} of ${bytes.length} bytes`);
+    written += count;
+  }
+}
+
 function isLink(path) {
   try { return lstatSync(path).isSymbolicLink(); } catch { return false; }
 }
@@ -175,7 +185,7 @@ function captureOutput(log, env, spawn) {
   let ref = log.ref;
   for (let n = 2; existsSync(join(log.runDir, ref)) || isLink(join(log.runDir, ref)); n += 1) ref = log.ref.replace(/\.log$/u, `.${n}.log`);
   const fd = openSync(join(log.runDir, ref), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { writeSync(fd, head); } finally { closeSync(fd); }
+  try { writeFully(fd, head); } finally { closeSync(fd); }
   const timedOut = result?.error?.code === "ETIMEDOUT";
   if (result?.status !== 0 && tail) process.stderr.write(`${tail}${tail.endsWith("\n") ? "" : "\n"}`);
   return { result, fields: { log_path: ref, log_bytes: head.length, log_sha256: `sha256:${createHash("sha256").update(head).digest("hex")}`,

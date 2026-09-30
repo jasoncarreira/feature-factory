@@ -13,7 +13,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readEvidence } from "../observe/review.js";
 import {
-  buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, LOG_CAP_BYTES, observeAncestry,
+  buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, LOG_CAP_BYTES, observeAncestry, writeFully,
   observeWorktree, privilegedPaths, reconcileClaim, runTests, unownedPaths,
 } from "../observe/index.js";
 
@@ -117,6 +117,12 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       assert.deepEqual(readdirSync(outside), [], "no directory is created through a linked parent");
       assert.throws(() => runTests(f.root, ["true"], { log: { runDir, ref: "evidence/logs/nested/x.log" } }), /must name a file directly in evidence\/logs/u);
       assert.equal(existsSync(join(runDir, "evidence", "logs", "nested")), false, "a refused nested ref creates nothing");
+      // A short write is completed, not ignored, and a write that makes no progress fails closed rather than
+      // publishing a size and digest the file does not have.
+      const chunks = [], shortWrites = (fd, bytes, offset, length) => { const n = Math.min(3, length); chunks.push(bytes.subarray(offset, offset + n)); return n; };
+      writeFully(0, Buffer.from("0123456789"), shortWrites);
+      assert.equal(Buffer.concat(chunks).toString(), "0123456789", "partial writes are resumed until every byte lands");
+      assert.throws(() => writeFully(0, Buffer.from("abc"), () => 0), /made no progress after 0 of 3 bytes/u);
       // The raw scratch output is removed even when the run itself throws.
       const before = readdirSync(tmpdir()).filter((name) => name.startsWith("factory-output-")).length;
       assert.throws(() => runTests(f.root, ["x"], { runner: () => { throw new Error("spawn failed"); }, log: log("throws") }), /spawn failed/u);
