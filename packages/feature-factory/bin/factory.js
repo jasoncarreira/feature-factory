@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { nextAction, nextActionRecord, readRun, readRunUnchecked } from "../state/index.js";
 import { transition } from "../state/transition.js";
 import { RUN_JSON_LOCK_DIR, withRunJsonLock } from "../core/run-lock.js";
-import { buildEvidence, deriveReviewReady, EVIDENCE_KEYS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
+import { buildEvidence, deriveReviewReady, EVIDENCE_KEYS, LOG_FIELDS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
 import { identityReason, observeIdentity } from "../observe/identity.js";
 import { assertPublicationReady, assertReviewBinding, isApproving, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
 import { readRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
@@ -435,6 +435,7 @@ async function writeObservedEvidence({ repo, runDir, runId, subject, attempt, br
   const evidence = buildEvidence({
     subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, runId,
     testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify, reused,
+    logs: { runDir, prefix: `evidence/logs/${subject}.attempt-${attempt}` },
   });
   const ancestry = observeAncestry(worktree, baseRef, "HEAD");
   if (ancestry !== "ancestor") {
@@ -465,7 +466,8 @@ function canonicalRepositoryVerifyEvidence(evidence, { runId, run, integration, 
       && command.cmd === commandNames[index] && command.exit === 0 && typeof command.summary === "string");
   const tests = evidence.tests;
   const testsAreCanonical = tests && typeof tests === "object" && !Array.isArray(tests)
-    && JSON.stringify(Object.keys(tests).sort()) === JSON.stringify(["cmd", "exit", "observed", "skipped_reason"])
+    && ["cmd", "exit", "observed", "skipped_reason"].every((key) => Object.hasOwn(tests, key))
+    && Object.keys(tests).every((key) => ["cmd", "exit", "observed", "skipped_reason", ...LOG_FIELDS].includes(key))
     && tests.cmd === verifyCommand && typeof tests.observed === "boolean" && tests.skipped_reason === null
     && ((tests.observed === true && Number.isInteger(tests.exit))
       || (tests.observed === false && tests.exit === null));
@@ -570,7 +572,9 @@ function reusableSliceVerify({ runDir, runId, ref, worktree, mergeCommit, comman
   const verified = evidence.repository_verify;
   if (!verified || verified.observed !== true || verified.exit !== 0 || verified.cmd !== command) return null;
   if (!sameTree(worktree, evidence.commit, mergeCommit)) return null;
-  return { commit: evidence.commit, tests: { cmd: command, exit: 0, observed: true, skipped_reason: null } };
+  // A reuse carries the slice run's own log reference (#381), never a fresh empty one.
+  const { cmd: _cmd, exit: _exit, observed: _observed, ...log } = verified;
+  return { commit: evidence.commit, tests: { cmd: command, exit: 0, observed: true, skipped_reason: null, ...log } };
 }
 
 async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration, reused = null }) {

@@ -6,13 +6,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readEvidence } from "../observe/review.js";
 import {
-  buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, observeAncestry,
+  buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, LOG_CAP_BYTES, observeAncestry, writeFully,
   observeWorktree, privilegedPaths, reconcileClaim, runTests, unownedPaths,
 } from "../observe/index.js";
 
@@ -57,6 +58,76 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       assert.equal(evidence.review_ready, false, "a failing observed test cannot be review-ready");
       const fields = evidence.claim_reconciliation.mismatches.map((entry) => entry.field);
       assert.ok(fields.includes("tests.exit"), `the claim/observation disagreement must be recorded, got ${JSON.stringify(fields)}`);
+
+      // #381: output is persisted, not only streamed. Both streams, in order, a matching digest, and a tail in the
+      // evidence -- on pass as well as fail -- with secrets redacted, a timeout distinguished from a command that never ran,
+      // and a persisted log capped at LOG_CAP_BYTES. Pass/fail is decided exactly as before.
+      const runDir = mkdtempSync(join(tmpdir(), "ff-run-logs-")), log = (name) => ({ runDir, ref: `evidence/logs/${name}.log` });
+      const secretEnv = { ...process.env, GH_TOKEN: "ghp_notARealTokenButLong123" };
+      const captured = runTests(f.root, "echo out-line; echo err-line >&2; echo \"tok=$GH_TOKEN\"; exit 7",
+        { shellCommand: true, stdio: ["inherit", 2, 2], env: secretEnv, log: log("fail") });
+      const bytes = readFileSync(join(runDir, captured.log_path));
+      assert.deepEqual([captured.exit, bytes.toString(), captured.tail, captured.log_bytes, captured.log_truncated],
+        [7, `out-line\nerr-line\ntok=${"*".repeat(27)}\n`, `out-line\nerr-line\ntok=${"*".repeat(27)}\n`, bytes.length, false]);
+      assert.equal(captured.log_sha256, `sha256:${createHash("sha256").update(bytes).digest("hex")}`);
+      assert.equal((statSync(join(runDir, captured.log_path)).mode & 0o777), 0o600, "logs are private to the operator");
+      assert.equal(bytes.includes("ghp_notARealTokenButLong123"), false, "a secret environment value is never persisted");
+      const passed = runTests(f.root, ["node", "-e", "console.log('pass-output')"], { log: log("pass") });
+      assert.deepEqual([passed.exit, readFileSync(join(runDir, passed.log_path), "utf8")], [0, "pass-output\n"], "a passing run still logs");
+      const slow = runTests(f.root, "sleep 5", { shellCommand: true, timeoutMs: 200, log: log("timeout") });
+      assert.deepEqual([slow.exit, slow.observed, slow.timed_out, typeof slow.signal], [null, false, true, "string"], "a timeout is not 'could not run'");
+      const flood = runTests(f.root, ["node", "-e", `process.stdout.write(Buffer.alloc(${LOG_CAP_BYTES + 1024}, 97)); process.stdout.write("END")`], { log: log("flood") });
+      assert.deepEqual([flood.exit, flood.log_truncated, flood.log_bytes, flood.tail.endsWith("END")], [0, true, LOG_CAP_BYTES, true],
+        "past the cap the log stops but the output is drained and the tail still shows the end");
+      // Review of #382: a secret straddling the log cap or the tail's start is still masked -- no fragment survives the
+      // cut -- and masking is byte-for-byte, so the cap bounds exactly the bytes kept.
+      const secret = "sk_straddlingSecretValue1234", straddle = { ...process.env, PROVIDER_API_KEY: secret };
+      const edge = runTests(f.root, ["node", "-e", `process.stdout.write("a".repeat(${LOG_CAP_BYTES - 6}) + process.env.PROVIDER_API_KEY + "b".repeat(${64 * 1024 - 5}) + process.env.PROVIDER_API_KEY.slice(0, 0))`],
+        { env: straddle, log: log("edge") });
+      const kept = readFileSync(join(runDir, edge.log_path));
+      assert.deepEqual([edge.log_bytes, kept.length, kept.subarray(-6).toString()], [LOG_CAP_BYTES, LOG_CAP_BYTES, "******"], "the straddling secret is masked up to the cut");
+      assert.equal(edge.tail.includes(secret.slice(-5)), false, "the tail's first bytes are no fragment of the secret");
+      assert.equal(Buffer.byteLength(edge.tail) <= 64 * 1024, true, "the tail stays within its byte bound after masking");
+      // Review of #382: overlapping values -- one secret's suffix another's prefix, and a value overlapping itself -- are all
+      // masked whatever the environment order; malformed or incomplete UTF-8 cannot push the tail past its byte bound.
+      for (const order of [["FIRST_TOKEN", "SECOND_TOKEN"], ["SECOND_TOKEN", "FIRST_TOKEN"]]) {
+        const values = { FIRST_TOKEN: "abcdefghij", SECOND_TOKEN: "ghijklmnop", SELF_TOKEN: "zzzzzzzz" }, env = { ...process.env };
+        for (const key of [...order, "SELF_TOKEN"]) env[key] = values[key];
+        const overlap = runTests(f.root, ["node", "-e", "process.stdout.write('<abcdefghijklmnop|zzzzzzzzzzz>')"], { env, log: log(`overlap-${order[0]}`) });
+        assert.deepEqual([readFileSync(join(runDir, overlap.log_path), "utf8"), overlap.tail], [`<${"*".repeat(16)}|${"*".repeat(11)}>`, `<${"*".repeat(16)}|${"*".repeat(11)}>`], order.join(" then "));
+      }
+      const malformed = runTests(f.root, ["node", "-e", "process.stdout.write(Buffer.concat([Buffer.alloc(70000, 0xff), Buffer.from([0xe2, 0x82])]))"], { log: log("malformed") });
+      assert.equal(Buffer.byteLength(malformed.tail) <= 64 * 1024, true, "malformed output cannot expand the tail past its bound");
+      // Review of #382: a repeat observation gets a fresh log, leaving the first one's bytes and digest intact, and a linked
+      // log directory is refused rather than written through.
+      const first = runTests(f.root, ["node", "-e", "console.log('first')"], { log: log("repeat") });
+      const second = runTests(f.root, ["node", "-e", "console.log('second')"], { log: log("repeat") });
+      assert.deepEqual([first.log_path, second.log_path, readFileSync(join(runDir, first.log_path), "utf8")],
+        ["evidence/logs/repeat.log", "evidence/logs/repeat.2.log", "first\n"], "an earlier log is never overwritten");
+      assert.equal(first.log_sha256, `sha256:${createHash("sha256").update(readFileSync(join(runDir, first.log_path))).digest("hex")}`);
+      const linkedRun = mkdtempSync(join(tmpdir(), "ff-linked-logs-")), elsewhere = mkdtempSync(join(tmpdir(), "ff-elsewhere-"));
+      mkdirSync(join(linkedRun, "evidence"));
+      symlinkSync(elsewhere, join(linkedRun, "evidence", "logs"));
+      assert.throws(() => runTests(f.root, ["true"], { log: { runDir: linkedRun, ref: "evidence/logs/x.log" } }), /is a link/u);
+      assert.deepEqual(readdirSync(elsewhere), [], "nothing is written through the link");
+      // A linked `evidence` parent is refused before anything is created through it, and a ref must be a flat file name.
+      const linkedParent = mkdtempSync(join(tmpdir(), "ff-linked-parent-")), outside = mkdtempSync(join(tmpdir(), "ff-outside-"));
+      symlinkSync(outside, join(linkedParent, "evidence"));
+      assert.throws(() => runTests(f.root, ["true"], { log: { runDir: linkedParent, ref: "evidence/logs/x.log" } }), /is a link/u);
+      assert.deepEqual(readdirSync(outside), [], "no directory is created through a linked parent");
+      assert.throws(() => runTests(f.root, ["true"], { log: { runDir, ref: "evidence/logs/nested/x.log" } }), /must name a file directly in evidence\/logs/u);
+      assert.equal(existsSync(join(runDir, "evidence", "logs", "nested")), false, "a refused nested ref creates nothing");
+      // A short write is completed, not ignored, and a write that makes no progress fails closed rather than
+      // publishing a size and digest the file does not have.
+      const chunks = [], shortWrites = (fd, bytes, offset, length) => { const n = Math.min(3, length); chunks.push(bytes.subarray(offset, offset + n)); return n; };
+      writeFully(0, Buffer.from("0123456789"), shortWrites);
+      assert.equal(Buffer.concat(chunks).toString(), "0123456789", "partial writes are resumed until every byte lands");
+      assert.throws(() => writeFully(0, Buffer.from("abc"), () => 0), /made no progress after 0 of 3 bytes/u);
+      // The raw scratch output is removed even when the run itself throws.
+      const before = readdirSync(tmpdir()).filter((name) => name.startsWith("factory-output-")).length;
+      assert.throws(() => runTests(f.root, ["x"], { runner: () => { throw new Error("spawn failed"); }, log: log("throws") }), /spawn failed/u);
+      assert.equal(readdirSync(tmpdir()).filter((name) => name.startsWith("factory-output-")).length, before, "no raw scratch output is left behind");
+      assert.throws(() => runTests(f.root, ["true"], { log: { runDir, ref: "evidence/logs/../../escape.log" } }), /escapes evidence\/logs/u);
 
       const shellCommand = "FACTORY_VALUE='two words' && test \"$FACTORY_VALUE\" = 'two words' && test -f src/app/thing.ts && exit 23";
       const shellCalls = [];

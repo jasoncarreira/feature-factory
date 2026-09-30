@@ -20,6 +20,7 @@ Prove the story actually works by testing its acceptance criteria — not by re-
 - **You are given the integrated feature worktree `$WT`** (all build slices already merged) and the branch. All edits/runs target `$WT`. Never touch the caller's checkout. If no `$WT`, stop and report.
 - **Edit test files only:** the repo's backend test tree, its frontend unit-spec files, and its end-to-end spec directory. The research map names them. Never edit production code — a failing test is a finding, not something to make green by changing the code under test.
 - Do not modify production code — if a criterion can't pass because of a product-code gap, that's a finding for the validator, not a fix you make here.
+- When an observed run's `exit` is not 0, read its evidence `tail` or the log at `log_path` to find the failing test before changing anything; a later passing run does not explain an observed failure.
 - Test **acceptance criteria**, not implementation details. Each criterion from the story should map to at least one assertion.
 
 ## How to test

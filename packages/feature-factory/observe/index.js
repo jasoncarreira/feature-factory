@@ -3,7 +3,9 @@
 // `factory observe` mechanizes that rule because an autonomous run has no human to
 // check whether the orchestrator actually observed anything.
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, rmSync, statSync, writeSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { CONTROL_PLANE } from "../state/schema.js";
 
@@ -109,18 +111,100 @@ export function observeAncestry(worktree, ancestor, descendant, options = {}) {
 // Attack 1: the test command is run here, by us, and its exit code is recorded
 // from the process rather than from anybody's report. `observed: false` means we
 // could not run it, which is not the same as a pass.
-export function runTests(worktree, command, { runner = spawnSync, skipReason = null, shellCommand = false, timeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, stdio = "inherit", env = process.env } = {}) {
+// #381: a failing run's output was only streamed to stderr, so the evidence recorded an exit code and nothing about
+// why. Instruction-level evidence, not a gate: pass and fail are decided exactly as before.
+export const LOG_CAP_BYTES = 50 * 1024 * 1024;
+export const LOG_FIELDS = Object.freeze(["log_path", "log_bytes", "log_sha256", "log_truncated", "tail", "signal", "timed_out"]);
+const TAIL_LINES = 200, TAIL_BYTES = 64 * 1024;
+const SECRET_ENV = /^(?:GH_TOKEN|GITHUB_TOKEN)$|(?:_TOKEN|_API_KEY|_SECRET|_PASSWORD|_ACCESS_KEY)$/u;
+
+// A short write would leave a log whose bytes disagree with its recorded size and digest (review of #382), so the
+// write continues until every byte lands and fails closed when a write makes no progress.
+export function writeFully(fd, bytes, write = writeSync) {
+  for (let written = 0; written < bytes.length;) {
+    const count = write(fd, bytes, written, bytes.length - written);
+    if (!(count > 0)) throw new Error(`log write made no progress after ${written} of ${bytes.length} bytes`);
+    written += count;
+  }
+}
+
+function isLink(path) {
+  try { return lstatSync(path).isSymbolicLink(); } catch { return false; }
+}
+
+function readRange(fd, position, length) {
+  const buffer = Buffer.alloc(length);
+  return buffer.subarray(0, readSync(fd, buffer, 0, length, position));
+}
+
+// The child writes both streams, interleaved, to a private scratch file; only the capped, redacted bytes reach the
+// run-local log, and a bounded tail goes to stderr on failure so `--json` stdout stays one object.
+function captureOutput(log, env, spawn) {
+  // The ref is built from the observed subject, so it must stay inside the run's own log directory.
+  const target = resolve(log.runDir, log.ref), logRoot = resolve(log.runDir, "evidence", "logs");
+  if (!target.startsWith(`${logRoot}${sep}`)) throw new Error(`log path '${log.ref}' escapes evidence/logs`);
+  if (dirname(target) !== logRoot) throw new Error(`log path '${log.ref}' must name a file directly in evidence/logs`);
+  const secrets = Object.entries(env).filter(([key, value]) => SECRET_ENV.test(key) && typeof value === "string" && value.length >= 8)
+    .map(([, value]) => Buffer.from(value));
+  const margin = Math.max(0, ...secrets.map((secret) => secret.length));
+  // Masking is byte-for-byte, so nothing shifts: limits bound exactly the bytes kept, and reading a secret's length past
+  // each cut before masking catches a value straddling it.
+  // Every occurrence is found in the original bytes, overlaps included, and their union masked, so masking one value
+  // can never hide another -- independent of environment order.
+  const mask = (bytes) => {
+    const original = Buffer.from(bytes);
+    for (const secret of secrets) for (let at = original.indexOf(secret); at !== -1; at = original.indexOf(secret, at + 1)) bytes.fill(0x2a, at, at + secret.length);
+    return bytes;
+  };
+  const scratch = join(tmpdir(), `factory-output-${randomUUID()}`);
+  let result, size, head, tailBytes;
+  try {
+    const out = openSync(scratch, "w", 0o600);
+    try { result = spawn(out); } finally { closeSync(out); }
+    size = statSync(scratch).size;
+    const input = openSync(scratch, "r");
+    try {
+      head = mask(readRange(input, 0, Math.min(size, LOG_CAP_BYTES + margin))).subarray(0, LOG_CAP_BYTES);
+      const start = Math.max(0, size - TAIL_BYTES - margin);
+      tailBytes = mask(readRange(input, start, size - start)).subarray(-TAIL_BYTES);
+    } finally { closeSync(input); }
+  } finally { rmSync(scratch, { force: true }); }
+  // Decoding arbitrary output can expand it (a malformed byte becomes a 3-byte U+FFFD), so the decoded text is bounded
+  // again in UTF-8 bytes, starting on a character boundary.
+  const bounded = Buffer.from(tailBytes.toString("utf8")).subarray(-TAIL_BYTES);
+  let from = 0;
+  while (from < bounded.length && (bounded[from] & 0xc0) === 0x80) from += 1;
+  const tail = bounded.subarray(from).toString("utf8").split("\n").slice(-TAIL_LINES).join("\n");
+  // Review of #382: a log is never replaced and never written through a link. A repeat observation of the same attempt
+  // and commit gets a fresh suffixed ref, so any record naming the earlier log keeps its bytes and digest.
+  // Each parent is checked for a link before anything is created in it (review of #382), so a refusal mutates nothing.
+  for (const dir of [join(log.runDir, "evidence"), logRoot]) {
+    if (isLink(dir)) throw new Error(`${dir} is a link; logs are written only into the run's own directory`);
+    if (!existsSync(dir)) mkdirSync(dir);
+  }
+  let ref = log.ref;
+  for (let n = 2; existsSync(join(log.runDir, ref)) || isLink(join(log.runDir, ref)); n += 1) ref = log.ref.replace(/\.log$/u, `.${n}.log`);
+  const fd = openSync(join(log.runDir, ref), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try { writeFully(fd, head); } finally { closeSync(fd); }
+  const timedOut = result?.error?.code === "ETIMEDOUT";
+  if (result?.status !== 0 && tail) process.stderr.write(`${tail}${tail.endsWith("\n") ? "" : "\n"}`);
+  return { result, fields: { log_path: ref, log_bytes: head.length, log_sha256: `sha256:${createHash("sha256").update(head).digest("hex")}`,
+    log_truncated: size > LOG_CAP_BYTES, tail, ...(Number.isInteger(result?.status) ? {} : { signal: result?.signal ?? null, timed_out: timedOut }) } };
+}
+
+export function runTests(worktree, command, { runner = spawnSync, skipReason = null, shellCommand = false, timeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, stdio = "inherit", env = process.env, log = null } = {}) {
   if (!command) {
     // Finding 1: defaulting a skip reason let omission manufacture review readiness.
     // Tests must be observed green or explicitly skipped with a caller-declared reason;
     // omission alone is neither.
     return { cmd: null, exit: null, observed: false, skipped_reason: skipReason };
   }
-  const result = shellCommand
-    ? runner(command, [], { cwd: worktree, shell: true, stdio, env, timeout: timeoutMs })
-    : runner(command[0], command.slice(1), { cwd: worktree, encoding: "utf8", shell: false });
+  const spawn = (fd) => (shellCommand
+    ? runner(command, [], { cwd: worktree, shell: true, stdio: fd === undefined ? stdio : [Array.isArray(stdio) ? stdio[0] : stdio, fd, fd], env, timeout: timeoutMs })
+    : runner(command[0], command.slice(1), fd === undefined ? { cwd: worktree, encoding: "utf8", shell: false } : { cwd: worktree, shell: false, stdio: ["ignore", fd, fd], env }));
+  const { result, fields } = log ? captureOutput(log, env, spawn) : { result: spawn(), fields: {} };
   const exit = Number.isInteger(result?.status) ? result.status : null;
-  return { cmd: shellCommand ? command : command.join(" "), exit, observed: exit !== null, skipped_reason: null };
+  return { cmd: shellCommand ? command : command.join(" "), exit, observed: exit !== null, skipped_reason: null, ...fields };
 }
 
 // Readiness requires completed, clean, changed, observed-diff evidence, no disagreement between
@@ -204,7 +288,7 @@ export function privilegedPaths(filesChanged) {
     || PRIVILEGED_EXACT.includes(file));
 }
 
-export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, testTimeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, repositoryVerify = null, reused = null, options = {} }) {
+export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, testTimeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, repositoryVerify = null, reused = null, logs = null, options = {} }) {
   // Cleanliness is established before anything else is observed, because every later
   // fact - the diff, the commit, and above all the test result - is only about the
   // recorded commit if the tree has nothing uncommitted in it.
@@ -213,8 +297,10 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   // Tests are not run at all against a dirty tree: running them would produce a
   // result about bytes that are not going to merge.
   // `reused` carries a slice's green repository verify for a merge whose tree is byte-identical (#374).
+  // Run-local logs, named by commit as well as attempt: the post-merge test-verifier restarts attempts per merge.
+  const logFor = (kind) => (logs && observation.commit ? { runDir: logs.runDir, ref: `${logs.prefix}.${observation.commit.slice(0, 12)}.${kind}.log` } : null);
   const tests = cleanliness.clean && reused ? reused.tests : cleanliness.clean
-    ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand, timeoutMs: testTimeoutMs,
+    ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand, timeoutMs: testTimeoutMs, log: logFor("test"),
       // Output to stderr, stdin inherited: `slice merged --json` and `observe --json` stay one JSON object.
       ...(shellCommand ? { stdio: ["inherit", 2, 2] } : {}) })
     : { cmd: testCommand ? (shellCommand ? testCommand : testCommand.join(" ")) : null, exit: null, observed: false, skipped_reason: null };
@@ -230,8 +316,8 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   const bootstrapRefusal = eligible ? repositoryVerify.prepare?.() ?? null : null;
   const verifyRuns = eligible && !bootstrapRefusal;
   const verified = !repositoryVerify ? null : verifyRuns
-    ? (({ cmd, exit, observed }) => ({ cmd, exit, observed }))(runTests(worktree, repositoryVerify.command,
-      { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs, stdio: ["ignore", 2, 2] }))
+    ? (({ skipped_reason, ...verify }) => verify)(runTests(worktree, repositoryVerify.command,
+      { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs, stdio: ["ignore", 2, 2], log: logFor("verify") }))
     : { cmd: repositoryVerify.command, exit: null, observed: false };
 
   // Third round, finding 1: cleanliness was a pre-test snapshot, so a test that wrote

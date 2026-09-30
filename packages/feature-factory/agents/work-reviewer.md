@@ -35,6 +35,10 @@ Do not delegate, and do not open a fresh repo-wide survey. Keep verification sco
 
 ## Reconcile claim vs. observation (the core rule)
 
+When the observed `tests.exit` or `repository_verify.exit` is not 0, read its `tail`, or the log at its
+`log_path`, before judging: name the failing check in `required_fixes` from that output, not from the exit
+code alone. A null exit with `timed_out: true` is a timeout, not a missing run.
+
 The producer returns a **claim** (its JSON summary / report). The orchestrator's observed evidence is the **truth**. Your first job is to reconcile them:
 - Claim says files changed / tests passed but the observed evidence disagrees → **REJECT**
   (`claim_mismatch`) — reconciled **against the claim's own subject**. For a build slice the observation
