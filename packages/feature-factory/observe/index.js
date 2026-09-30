@@ -3,7 +3,9 @@
 // `factory observe` mechanizes that rule because an autonomous run has no human to
 // check whether the orchestrator actually observed anything.
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { CONTROL_PLANE } from "../state/schema.js";
 
@@ -109,18 +111,53 @@ export function observeAncestry(worktree, ancestor, descendant, options = {}) {
 // Attack 1: the test command is run here, by us, and its exit code is recorded
 // from the process rather than from anybody's report. `observed: false` means we
 // could not run it, which is not the same as a pass.
-export function runTests(worktree, command, { runner = spawnSync, skipReason = null, shellCommand = false, timeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, stdio = "inherit", env = process.env } = {}) {
+// #381: a failing run's output was only streamed to stderr, so the evidence recorded an exit code and nothing about
+// why. Instruction-level evidence, not a gate: pass and fail are decided exactly as before.
+export const LOG_CAP_BYTES = 50 * 1024 * 1024;
+export const LOG_FIELDS = Object.freeze(["log_path", "log_bytes", "log_sha256", "log_truncated", "tail", "signal", "timed_out"]);
+const TAIL_LINES = 200, TAIL_BYTES = 64 * 1024;
+const SECRET_ENV = /^(?:GH_TOKEN|GITHUB_TOKEN)$|(?:_TOKEN|_API_KEY|_SECRET|_PASSWORD|_ACCESS_KEY)$/u;
+
+function readRange(fd, position, length) {
+  const buffer = Buffer.alloc(length);
+  return buffer.subarray(0, readSync(fd, buffer, 0, length, position));
+}
+
+// The child writes both streams, interleaved, to a private scratch file; only the capped, redacted bytes reach the
+// run-local log, and a bounded tail goes to stderr on failure so `--json` stdout stays one object.
+function captureOutput(log, env, spawn) {
+  const scratch = join(tmpdir(), `factory-output-${randomUUID()}`), out = openSync(scratch, "w", 0o600);
+  let result;
+  try { result = spawn(out); } finally { closeSync(out); }
+  const size = statSync(scratch).size, input = openSync(scratch, "r");
+  let head, tailBytes;
+  try { head = readRange(input, 0, Math.min(size, LOG_CAP_BYTES)); tailBytes = readRange(input, Math.max(0, size - TAIL_BYTES), Math.min(size, TAIL_BYTES)); }
+  finally { closeSync(input); unlinkSync(scratch); }
+  const secrets = Object.entries(env).filter(([key, value]) => SECRET_ENV.test(key) && typeof value === "string" && value.length >= 8).map(([, value]) => value);
+  const redact = (text) => secrets.reduce((current, secret) => current.split(secret).join("[REDACTED]"), text);
+  const body = Buffer.from(redact(head.toString("utf8"))), tail = redact(tailBytes.toString("utf8")).split("\n").slice(-TAIL_LINES).join("\n");
+  const path = join(log.runDir, log.ref);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, body, { mode: 0o600 }); chmodSync(path, 0o600);
+  const timedOut = result?.error?.code === "ETIMEDOUT";
+  if (result?.status !== 0 && tail) process.stderr.write(`${tail}${tail.endsWith("\n") ? "" : "\n"}`);
+  return { result, fields: { log_path: log.ref, log_bytes: body.length, log_sha256: `sha256:${createHash("sha256").update(body).digest("hex")}`,
+    log_truncated: size > LOG_CAP_BYTES, tail, ...(Number.isInteger(result?.status) ? {} : { signal: result?.signal ?? null, timed_out: timedOut }) } };
+}
+
+export function runTests(worktree, command, { runner = spawnSync, skipReason = null, shellCommand = false, timeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, stdio = "inherit", env = process.env, log = null } = {}) {
   if (!command) {
     // Finding 1: defaulting a skip reason let omission manufacture review readiness.
     // Tests must be observed green or explicitly skipped with a caller-declared reason;
     // omission alone is neither.
     return { cmd: null, exit: null, observed: false, skipped_reason: skipReason };
   }
-  const result = shellCommand
-    ? runner(command, [], { cwd: worktree, shell: true, stdio, env, timeout: timeoutMs })
-    : runner(command[0], command.slice(1), { cwd: worktree, encoding: "utf8", shell: false });
+  const spawn = (fd) => (shellCommand
+    ? runner(command, [], { cwd: worktree, shell: true, stdio: fd === undefined ? stdio : [Array.isArray(stdio) ? stdio[0] : stdio, fd, fd], env, timeout: timeoutMs })
+    : runner(command[0], command.slice(1), fd === undefined ? { cwd: worktree, encoding: "utf8", shell: false } : { cwd: worktree, shell: false, stdio: ["ignore", fd, fd] }));
+  const { result, fields } = log ? captureOutput(log, env, spawn) : { result: spawn(), fields: {} };
   const exit = Number.isInteger(result?.status) ? result.status : null;
-  return { cmd: shellCommand ? command : command.join(" "), exit, observed: exit !== null, skipped_reason: null };
+  return { cmd: shellCommand ? command : command.join(" "), exit, observed: exit !== null, skipped_reason: null, ...fields };
 }
 
 // Readiness requires completed, clean, changed, observed-diff evidence, no disagreement between
@@ -204,7 +241,7 @@ export function privilegedPaths(filesChanged) {
     || PRIVILEGED_EXACT.includes(file));
 }
 
-export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, testTimeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, repositoryVerify = null, reused = null, options = {} }) {
+export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, testTimeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, repositoryVerify = null, reused = null, logs = null, options = {} }) {
   // Cleanliness is established before anything else is observed, because every later
   // fact - the diff, the commit, and above all the test result - is only about the
   // recorded commit if the tree has nothing uncommitted in it.
@@ -213,8 +250,10 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   // Tests are not run at all against a dirty tree: running them would produce a
   // result about bytes that are not going to merge.
   // `reused` carries a slice's green repository verify for a merge whose tree is byte-identical (#374).
+  // Run-local logs, named by commit as well as attempt: the post-merge test-verifier restarts attempts per merge.
+  const logFor = (kind) => (logs && observation.commit ? { runDir: logs.runDir, ref: `${logs.prefix}.${observation.commit.slice(0, 12)}.${kind}.log` } : null);
   const tests = cleanliness.clean && reused ? reused.tests : cleanliness.clean
-    ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand, timeoutMs: testTimeoutMs,
+    ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand, timeoutMs: testTimeoutMs, log: logFor("test"),
       // Output to stderr, stdin inherited: `slice merged --json` and `observe --json` stay one JSON object.
       ...(shellCommand ? { stdio: ["inherit", 2, 2] } : {}) })
     : { cmd: testCommand ? (shellCommand ? testCommand : testCommand.join(" ")) : null, exit: null, observed: false, skipped_reason: null };
@@ -230,8 +269,8 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   const bootstrapRefusal = eligible ? repositoryVerify.prepare?.() ?? null : null;
   const verifyRuns = eligible && !bootstrapRefusal;
   const verified = !repositoryVerify ? null : verifyRuns
-    ? (({ cmd, exit, observed }) => ({ cmd, exit, observed }))(runTests(worktree, repositoryVerify.command,
-      { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs, stdio: ["ignore", 2, 2] }))
+    ? (({ skipped_reason, ...verify }) => verify)(runTests(worktree, repositoryVerify.command,
+      { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs, stdio: ["ignore", 2, 2], log: logFor("verify") }))
     : { cmd: repositoryVerify.command, exit: null, observed: false };
 
   // Third round, finding 1: cleanliness was a pre-test snapshot, so a test that wrote

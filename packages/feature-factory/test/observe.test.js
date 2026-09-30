@@ -6,13 +6,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readEvidence } from "../observe/review.js";
 import {
-  buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, observeAncestry,
+  buildEvidence, DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, deriveReviewReady, LOG_CAP_BYTES, observeAncestry,
   observeWorktree, privilegedPaths, reconcileClaim, runTests, unownedPaths,
 } from "../observe/index.js";
 
@@ -57,6 +58,27 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       assert.equal(evidence.review_ready, false, "a failing observed test cannot be review-ready");
       const fields = evidence.claim_reconciliation.mismatches.map((entry) => entry.field);
       assert.ok(fields.includes("tests.exit"), `the claim/observation disagreement must be recorded, got ${JSON.stringify(fields)}`);
+
+      // #381: output is persisted, not only streamed. Both streams, in order, a matching digest, and a tail in the
+      // evidence -- on pass as well as fail -- with secrets redacted, a timeout distinguished from a command that never ran,
+      // and a persisted log capped at LOG_CAP_BYTES. Pass/fail is decided exactly as before.
+      const runDir = mkdtempSync(join(tmpdir(), "ff-run-logs-")), log = (name) => ({ runDir, ref: `evidence/logs/${name}.log` });
+      const secretEnv = { ...process.env, GH_TOKEN: "ghp_notARealTokenButLong123" };
+      const captured = runTests(f.root, "echo out-line; echo err-line >&2; echo \"tok=$GH_TOKEN\"; exit 7",
+        { shellCommand: true, stdio: ["inherit", 2, 2], env: secretEnv, log: log("fail") });
+      const bytes = readFileSync(join(runDir, captured.log_path));
+      assert.deepEqual([captured.exit, bytes.toString(), captured.tail, captured.log_bytes, captured.log_truncated],
+        [7, "out-line\nerr-line\ntok=[REDACTED]\n", "out-line\nerr-line\ntok=[REDACTED]\n", bytes.length, false]);
+      assert.equal(captured.log_sha256, `sha256:${createHash("sha256").update(bytes).digest("hex")}`);
+      assert.equal((statSync(join(runDir, captured.log_path)).mode & 0o777), 0o600, "logs are private to the operator");
+      assert.equal(bytes.includes("ghp_notARealTokenButLong123"), false, "a secret environment value is never persisted");
+      const passed = runTests(f.root, ["node", "-e", "console.log('pass-output')"], { log: log("pass") });
+      assert.deepEqual([passed.exit, readFileSync(join(runDir, passed.log_path), "utf8")], [0, "pass-output\n"], "a passing run still logs");
+      const slow = runTests(f.root, "sleep 5", { shellCommand: true, timeoutMs: 200, log: log("timeout") });
+      assert.deepEqual([slow.exit, slow.observed, slow.timed_out, typeof slow.signal], [null, false, true, "string"], "a timeout is not 'could not run'");
+      const flood = runTests(f.root, ["node", "-e", `process.stdout.write(Buffer.alloc(${LOG_CAP_BYTES + 1024}, 97)); process.stdout.write("END")`], { log: log("flood") });
+      assert.deepEqual([flood.exit, flood.log_truncated, flood.log_bytes, flood.tail.endsWith("END")], [0, true, LOG_CAP_BYTES, true],
+        "past the cap the log stops but the output is drained and the tail still shows the end");
 
       const shellCommand = "FACTORY_VALUE='two words' && test \"$FACTORY_VALUE\" = 'two words' && test -f src/app/thing.ts && exit 23";
       const shellCalls = [];

@@ -495,6 +495,15 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.deepEqual([observed.out.review_ready, observed.out.repository_verify], [ready, exit === null ? null : `exit ${exit}`]);
         const recorded = JSON.parse(readFileSync(join(sv.runDir, "evidence", "be-thing.json"), "utf8")).repository_verify;
         assert.deepEqual(recorded && [recorded.exit, recorded.observed], exit === null ? null : [exit, true]);
+        // #381: the ratified test and the repository verify each keep their own durable log; the helper parsing
+        // stdout proves `--json` stayed one object while both ran.
+        const sliceTests = JSON.parse(readFileSync(join(sv.runDir, "evidence", "be-thing.json"), "utf8")).tests;
+        assert.equal(existsSync(join(sv.runDir, sliceTests.log_path)), true, "the ratified test's output is persisted");
+        if (exit !== null) {
+          assert.notEqual(recorded.log_path, sliceTests.log_path, "the repository verify is captured separately");
+          assert.equal(readFileSync(join(sv.runDir, recorded.log_path), "utf8"), "verify-noise\n");
+          assert.equal(recorded.tail, "verify-noise\n");
+        }
         if (exit !== null) assert.equal(readFileSync(scope(sv.operator), "utf8"), "x");
         if (exit === 0) {
           // #374: a serial merge's tree is byte-identical to the verified slice commit, so the post-merge verify
@@ -508,6 +517,8 @@ describe("end to end — a merge is refused through the real CLI", () => {
           assert.equal(readFileSync(join(sv.repo, ".factory", "boot"), "utf8"), "x", "a reused verify executes nothing, so it bootstraps nothing");
           const post = join(sv.runDir, "evidence", "test-verifier.json"), reusedEvidence = JSON.parse(readFileSync(post, "utf8"));
           assert.deepEqual([reusedEvidence.reused_from, reusedEvidence.commit, reusedEvidence.review_ready], [recorded && git(sv.repo, "rev-parse", "slice"), mergeCommit, true]);
+          assert.deepEqual([reusedEvidence.tests.log_path, reusedEvidence.tests.log_sha256], [recorded.log_path, recorded.log_sha256],
+            "a reused verify carries the slice run's own log, never a fresh empty one");
           // Replay trusts a reuse only while the trees still match; a record pointing at other bytes is unknown.
           writeFileSync(post, JSON.stringify({ ...reusedEvidence, reused_from: git(sv.repo, "rev-parse", "HEAD~1") }));
           const replay = factory(sv.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(5)]);
@@ -2680,6 +2691,11 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const retryObserved = factory(p.repo, ["observe", RUN, "be-two", "--worktree", ".", "--base", waveBase,
         "--attempt", "2", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(12)]);
       assert.equal(retryObserved.ok, true, `observe retry: ${retryObserved.stderr}`);
+      // #381: a rejected attempt's output survives its retry and archival; the retry writes its own log.
+      const rejectedLog = JSON.parse(rejectedEvidence).tests.log_path;
+      const retryLog = JSON.parse(readFileSync(join(p.runDir, "evidence", "be-two.json"), "utf8")).tests.log_path;
+      assert.deepEqual([existsSync(join(p.runDir, rejectedLog)), rejectedLog.includes(".attempt-1."), retryLog.includes(".attempt-2."), rejectedLog === retryLog],
+        [true, true, true, false], "the rejected attempt keeps its log");
       writeReview(p.runDir, "be-two", retryHead, { attempt: 2 });
       const retryReviewed = factory(p.repo, ["slice", RUN, "be-two", "review", "--attempts", "2",
         "--review-ref", "reviews/be-two.json", "--evidence-ref", "evidence/be-two.json", "--now", NOW(13)]);

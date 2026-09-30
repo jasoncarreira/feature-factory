@@ -347,7 +347,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.ok(keyBinding >= 0 && keyBinding < markdown.indexOf('INIT_RESPONSE="$(factory init'), "the workflow must bind KEY before init");
     // #372, instruction half: the driver must hand the verify failure to the builder, and a post-merge production
     // defect must not promise a resume the workflow cannot perform.
-    assert.ok(markdown.includes("give the failing part of it (the lint, format, or test"), "the driver must pass slice verify output to the builder");
+    assert.ok(markdown.includes("test failure) to the builder with the rejection, because otherwise the retry cannot see what to fix."), "the driver must pass slice verify output to the builder");
     assert.ok(markdown.includes("There is no in-band resume for it: production source is never repaired on the integration branch"),
       "a post-merge production defect must not promise an in-band resume");
     assert.ok(!markdown.includes("after the external fix, explicitly resume the intact run"), "the old resume promise must be gone");
@@ -358,6 +358,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // verify had no route (baleyg #64: a vector test that never called the production ID function).
     assert.ok(markdown.includes("no failing result to record there; it comes here, as a remediation slice whose paths are test files."),
       "a review-found test-only gap must route to a remediation slice");
+    // #381, instruction half: the persisted output is only useful if the reviewer and test-verifier read it.
+    assert.ok(markdown.includes("`exit` is not 0, read `tail` or the log at `log_path` and give the failing part (the lint, format, or"),
+      "the driver must hand the persisted failure output to the builder");
+    for (const [agent, fragment] of [["work-reviewer", "When the observed `tests.exit` or `repository_verify.exit` is not 0, read its `tail`, or the log at its"],
+      ["test-verifier", "When an observed run's `exit` is not 0, read its evidence `tail` or the log at `log_path`"]]) {
+      assert.ok(readFileSync(join(pkg, "agents", `${agent}.md`), "utf8").includes(fragment), `${agent} must read the persisted output on failure`);
+    }
     assert.ok(readFileSync(join(pkg, "agents", "work-reviewer.md"), "utf8").includes("any change beyond the finding is unapproved scope and a BLOCKER"),
       "the reviewer must bound a remediation slice to its finding");
     assert.ok(markdown.includes("post-merge verify reuses that result instead of running again, and its evidence names the slice commit"),
@@ -1311,7 +1318,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // an integrated stage, inside paths merged slices already own and under a limit of two, instead of parking the
     // run and discarding its merged work (baleyg #26 threw away 13 merged slices on one Gate 3 finding). The issue
     // records the operator's authorization to raise the tripwire 6150 -> 6300.
-    assert.equal(total, 6255, "a production finding opens a reviewed remediation slice: 6255 production lines");
+    // 6255 -> 6298 for issue #381: the ratified test and the repository verify persist their output to a run-local
+    // log with a digest, a redacted tail, truncation and timeout facts, instead of only streaming it to stderr, so
+    // a failing attempt (baleyg #67, exit 101) can be diagnosed afterwards. The issue records the operator's
+    // authorization to raise the tripwire 6300 -> 6450.
+    assert.equal(total, 6298, "test and verify output is persisted with its evidence: 6298 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1351,9 +1362,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // publishing-identity guard runs in the CLI rather than depending on the host's shell tool; issue #367
     // authorizes 6000 for a committed max_retries default, landed inside #365's cap; issue #372 authorizes 6100
     // so slice observation runs the repository verify; issue #376 authorizes 6150 so verify runs on a freshly
-    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice.
+    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice; issue #381 authorizes 6450 to persist test output.
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 6300, `production source is ${total} lines; the issue #344 tripwire is 6300`);
+    assert.ok(total <= 6450, `production source is ${total} lines; the issue #381 tripwire is 6450`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

@@ -1532,8 +1532,12 @@ Per slice:
    the slice worktree, which never received init's bootstrap output, immediately before that verify and
    only when it will run; a bootstrap refusal is the evidence's blocked reason and the verify does not run. A failing repository verify makes the slice not `review_ready`, the
    same as a failing test, so the review rejects and the slice retries; an empty `test_plan` does not
-   waive it. Its output appears on stderr: give the failing part of it (the lint, format, or test
-   failure) to the builder with the rejection, because otherwise the retry cannot see what to fix. This
+   waive it. Its output is persisted, as is the ratified test's: both `tests` and `repository_verify`
+   record `log_path` (a run-local log of stdout and stderr in order, under `evidence/logs/`), `log_bytes`,
+   `log_sha256`, `log_truncated` (the log is capped near 50 MB), and `tail` (the last 200 lines, redacted
+   of secret environment values); a run with no exit code also records `signal` and `timed_out`. When
+   `exit` is not 0, read `tail` or the log at `log_path` and give the failing part (the lint, format, or
+   test failure) to the builder with the rejection, because otherwise the retry cannot see what to fix. This
    is what keeps a one-line lint failure from surfacing only after merge, where it cannot be repaired.
    When a merge's tree is byte-identical to the slice commit whose repository verify passed, the
    post-merge verify reuses that result instead of running again, and its evidence names the slice commit

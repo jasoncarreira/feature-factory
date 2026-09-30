@@ -3,6 +3,27 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.10
+
+A patch release that persists test and verify output with the evidence, and routes review-found test-only gaps to a
+remediation slice.
+
+- The ratified slice test and the repository verify now capture stdout and stderr, interleaved in order, to a
+  run-local log (`evidence/logs/<subject>.attempt-<n>.<commit12>.<test|verify>.log`, mode 0600), on pass and fail
+  (#381). `tests` and `repository_verify` gain `log_path`, `log_bytes`, `log_sha256`, `log_truncated`, and `tail`
+  (the last 200 lines, max 64 KiB); a run with no exit code also records `signal` and `timed_out`. The persisted log
+  is capped at 50 MB, applied when the log is written; output is fully drained and exit semantics are unchanged.
+  Values of secret environment variables (`GH_TOKEN`, `GITHUB_TOKEN`, `*_TOKEN`, `*_API_KEY`, `*_SECRET`,
+  `*_PASSWORD`, `*_ACCESS_KEY`) are redacted from both the log and the tail. A failing run's tail is copied to
+  stderr, so `--json` stdout stays one object. Logs survive archival and rejected attempts, and a reused post-merge
+  verify (#374) carries the slice run's own log. Reviewers and the test-verifier are told to read `tail` or
+  `log_path` when `exit` is not 0. Pass/fail, `deriveReviewReady` and the clean-tree checks are unchanged.
+- The workflow sends a review-found gap that needs a code change, in production or only in tests, to a remediation
+  slice; the post-merge test-only repair journal applies only to a failing repository verify (#380). baleyg #64
+  parked because its reviewer found a test that never called the production ID function while verify was green.
+
+All three package manifests and both exact adapter pins move together to 0.10.10.
+
 ## 0.10.9
 
 A patch release adding an in-band route for a production finding at the integrated stage (#344).
