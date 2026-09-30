@@ -3,7 +3,7 @@
 // `factory observe` mechanizes that rule because an autonomous run has no human to
 // check whether the orchestrator actually observed anything.
 import { spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -126,22 +126,39 @@ function readRange(fd, position, length) {
 // The child writes both streams, interleaved, to a private scratch file; only the capped, redacted bytes reach the
 // run-local log, and a bounded tail goes to stderr on failure so `--json` stdout stays one object.
 function captureOutput(log, env, spawn) {
-  const scratch = join(tmpdir(), `factory-output-${randomUUID()}`), out = openSync(scratch, "w", 0o600);
-  let result;
-  try { result = spawn(out); } finally { closeSync(out); }
-  const size = statSync(scratch).size, input = openSync(scratch, "r");
-  let head, tailBytes;
-  try { head = readRange(input, 0, Math.min(size, LOG_CAP_BYTES)); tailBytes = readRange(input, Math.max(0, size - TAIL_BYTES), Math.min(size, TAIL_BYTES)); }
-  finally { closeSync(input); unlinkSync(scratch); }
-  const secrets = Object.entries(env).filter(([key, value]) => SECRET_ENV.test(key) && typeof value === "string" && value.length >= 8).map(([, value]) => value);
-  const redact = (text) => secrets.reduce((current, secret) => current.split(secret).join("[REDACTED]"), text);
-  const body = Buffer.from(redact(head.toString("utf8"))), tail = redact(tailBytes.toString("utf8")).split("\n").slice(-TAIL_LINES).join("\n");
-  const path = join(log.runDir, log.ref);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, body, { mode: 0o600 }); chmodSync(path, 0o600);
+  // The ref is built from the observed subject, so it must stay inside the run's own log directory.
+  const target = resolve(log.runDir, log.ref), logRoot = resolve(log.runDir, "evidence", "logs");
+  if (!target.startsWith(`${logRoot}${sep}`)) throw new Error(`log path '${log.ref}' escapes evidence/logs`);
+  const secrets = Object.entries(env).filter(([key, value]) => SECRET_ENV.test(key) && typeof value === "string" && value.length >= 8)
+    .map(([, value]) => Buffer.from(value));
+  const margin = Math.max(0, ...secrets.map((secret) => secret.length));
+  // Masking is byte-for-byte, so nothing shifts: limits bound exactly the bytes kept, and reading a secret's length past
+  // each cut before masking catches a value straddling it.
+  const mask = (bytes) => {
+    for (const secret of secrets) for (let at = bytes.indexOf(secret); at !== -1; at = bytes.indexOf(secret, at + secret.length)) bytes.fill(0x2a, at, at + secret.length);
+    return bytes;
+  };
+  const scratch = join(tmpdir(), `factory-output-${randomUUID()}`);
+  let result, size, head, tailBytes;
+  try {
+    const out = openSync(scratch, "w", 0o600);
+    try { result = spawn(out); } finally { closeSync(out); }
+    size = statSync(scratch).size;
+    const input = openSync(scratch, "r");
+    try {
+      head = mask(readRange(input, 0, Math.min(size, LOG_CAP_BYTES + margin))).subarray(0, LOG_CAP_BYTES);
+      const start = Math.max(0, size - TAIL_BYTES - margin);
+      tailBytes = mask(readRange(input, start, size - start)).subarray(-TAIL_BYTES);
+    } finally { closeSync(input); }
+  } finally { rmSync(scratch, { force: true }); }
+  let from = 0;
+  while (from < tailBytes.length && (tailBytes[from] & 0xc0) === 0x80) from += 1;
+  const tail = tailBytes.subarray(from).toString("utf8").split("\n").slice(-TAIL_LINES).join("\n");
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, head, { mode: 0o600 }); chmodSync(target, 0o600);
   const timedOut = result?.error?.code === "ETIMEDOUT";
   if (result?.status !== 0 && tail) process.stderr.write(`${tail}${tail.endsWith("\n") ? "" : "\n"}`);
-  return { result, fields: { log_path: log.ref, log_bytes: body.length, log_sha256: `sha256:${createHash("sha256").update(body).digest("hex")}`,
+  return { result, fields: { log_path: log.ref, log_bytes: head.length, log_sha256: `sha256:${createHash("sha256").update(head).digest("hex")}`,
     log_truncated: size > LOG_CAP_BYTES, tail, ...(Number.isInteger(result?.status) ? {} : { signal: result?.signal ?? null, timed_out: timedOut }) } };
 }
 
@@ -154,7 +171,7 @@ export function runTests(worktree, command, { runner = spawnSync, skipReason = n
   }
   const spawn = (fd) => (shellCommand
     ? runner(command, [], { cwd: worktree, shell: true, stdio: fd === undefined ? stdio : [Array.isArray(stdio) ? stdio[0] : stdio, fd, fd], env, timeout: timeoutMs })
-    : runner(command[0], command.slice(1), fd === undefined ? { cwd: worktree, encoding: "utf8", shell: false } : { cwd: worktree, shell: false, stdio: ["ignore", fd, fd] }));
+    : runner(command[0], command.slice(1), fd === undefined ? { cwd: worktree, encoding: "utf8", shell: false } : { cwd: worktree, shell: false, stdio: ["ignore", fd, fd], env }));
   const { result, fields } = log ? captureOutput(log, env, spawn) : { result: spawn(), fields: {} };
   const exit = Number.isInteger(result?.status) ? result.status : null;
   return { cmd: shellCommand ? command : command.join(" "), exit, observed: exit !== null, skipped_reason: null, ...fields };

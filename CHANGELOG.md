@@ -14,10 +14,14 @@ remediation slice.
   (the last 200 lines, max 64 KiB); a run with no exit code also records `signal` and `timed_out`. The persisted log
   is capped at 50 MB, applied when the log is written; output is fully drained and exit semantics are unchanged.
   Values of secret environment variables (`GH_TOKEN`, `GITHUB_TOKEN`, `*_TOKEN`, `*_API_KEY`, `*_SECRET`,
-  `*_PASSWORD`, `*_ACCESS_KEY`) are redacted from both the log and the tail. A failing run's tail is copied to
+  `*_PASSWORD`, `*_ACCESS_KEY`) are masked byte-for-byte with `*` in both the log and the tail, including a value
+  straddling the log cap or the tail's start; limits bound exactly the bytes kept. A failing run's tail is copied to
   stderr, so `--json` stdout stays one object. Logs survive archival and rejected attempts, and a reused post-merge
   verify (#374) carries the slice run's own log. Reviewers and the test-verifier are told to read `tail` or
-  `log_path` when `exit` is not 0. Pass/fail, `deriveReviewReady` and the clean-tree checks are unchanged.
+  `log_path` when `exit` is not 0. Pass/fail, `deriveReviewReady` and the clean-tree checks are unchanged,
+  with one intended fix: a ratified argv test that printed more than 1 MB used to exceed `spawnSync`'s default
+  `maxBuffer`, get killed, and be recorded as `exit: null` / `observed: false` (unobservable) regardless of its
+  result; its real exit code is now recorded.
 - The workflow sends a review-found gap that needs a code change, in production or only in tests, to a remediation
   slice; the post-merge test-only repair journal applies only to a failing repository verify (#380). baleyg #64
   parked because its reviewer found a test that never called the production ID function while verify was green.

@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -68,7 +68,7 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
         { shellCommand: true, stdio: ["inherit", 2, 2], env: secretEnv, log: log("fail") });
       const bytes = readFileSync(join(runDir, captured.log_path));
       assert.deepEqual([captured.exit, bytes.toString(), captured.tail, captured.log_bytes, captured.log_truncated],
-        [7, "out-line\nerr-line\ntok=[REDACTED]\n", "out-line\nerr-line\ntok=[REDACTED]\n", bytes.length, false]);
+        [7, `out-line\nerr-line\ntok=${"*".repeat(27)}\n`, `out-line\nerr-line\ntok=${"*".repeat(27)}\n`, bytes.length, false]);
       assert.equal(captured.log_sha256, `sha256:${createHash("sha256").update(bytes).digest("hex")}`);
       assert.equal((statSync(join(runDir, captured.log_path)).mode & 0o777), 0o600, "logs are private to the operator");
       assert.equal(bytes.includes("ghp_notARealTokenButLong123"), false, "a secret environment value is never persisted");
@@ -79,6 +79,20 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       const flood = runTests(f.root, ["node", "-e", `process.stdout.write(Buffer.alloc(${LOG_CAP_BYTES + 1024}, 97)); process.stdout.write("END")`], { log: log("flood") });
       assert.deepEqual([flood.exit, flood.log_truncated, flood.log_bytes, flood.tail.endsWith("END")], [0, true, LOG_CAP_BYTES, true],
         "past the cap the log stops but the output is drained and the tail still shows the end");
+      // Review of #382: a secret straddling the log cap or the tail's start is still masked -- no fragment survives the
+      // cut -- and masking is byte-for-byte, so the cap bounds exactly the bytes kept.
+      const secret = "sk_straddlingSecretValue1234", straddle = { ...process.env, PROVIDER_API_KEY: secret };
+      const edge = runTests(f.root, ["node", "-e", `process.stdout.write("a".repeat(${LOG_CAP_BYTES - 6}) + process.env.PROVIDER_API_KEY + "b".repeat(${64 * 1024 - 5}) + process.env.PROVIDER_API_KEY.slice(0, 0))`],
+        { env: straddle, log: log("edge") });
+      const kept = readFileSync(join(runDir, edge.log_path));
+      assert.deepEqual([edge.log_bytes, kept.length, kept.subarray(-6).toString()], [LOG_CAP_BYTES, LOG_CAP_BYTES, "******"], "the straddling secret is masked up to the cut");
+      assert.equal(edge.tail.includes(secret.slice(-5)), false, "the tail's first bytes are no fragment of the secret");
+      assert.equal(Buffer.byteLength(edge.tail) <= 64 * 1024, true, "the tail stays within its byte bound after masking");
+      // The raw scratch output is removed even when the run itself throws.
+      const before = readdirSync(tmpdir()).filter((name) => name.startsWith("factory-output-")).length;
+      assert.throws(() => runTests(f.root, ["x"], { runner: () => { throw new Error("spawn failed"); }, log: log("throws") }), /spawn failed/u);
+      assert.equal(readdirSync(tmpdir()).filter((name) => name.startsWith("factory-output-")).length, before, "no raw scratch output is left behind");
+      assert.throws(() => runTests(f.root, ["true"], { log: { runDir, ref: "evidence/logs/../../escape.log" } }), /escapes evidence\/logs/u);
 
       const shellCommand = "FACTORY_VALUE='two words' && test \"$FACTORY_VALUE\" = 'two words' && test -f src/app/thing.ts && exit 23";
       const shellCalls = [];
