@@ -133,6 +133,7 @@ function captureOutput(log, env, spawn) {
   // The ref is built from the observed subject, so it must stay inside the run's own log directory.
   const target = resolve(log.runDir, log.ref), logRoot = resolve(log.runDir, "evidence", "logs");
   if (!target.startsWith(`${logRoot}${sep}`)) throw new Error(`log path '${log.ref}' escapes evidence/logs`);
+  if (dirname(target) !== logRoot) throw new Error(`log path '${log.ref}' must name a file directly in evidence/logs`);
   const secrets = Object.entries(env).filter(([key, value]) => SECRET_ENV.test(key) && typeof value === "string" && value.length >= 8)
     .map(([, value]) => Buffer.from(value));
   const margin = Math.max(0, ...secrets.map((secret) => secret.length));
@@ -166,8 +167,11 @@ function captureOutput(log, env, spawn) {
   const tail = bounded.subarray(from).toString("utf8").split("\n").slice(-TAIL_LINES).join("\n");
   // Review of #382: a log is never replaced and never written through a link. A repeat observation of the same attempt
   // and commit gets a fresh suffixed ref, so any record naming the earlier log keeps its bytes and digest.
-  mkdirSync(dirname(target), { recursive: true });
-  for (const dir of [join(log.runDir, "evidence"), logRoot]) if (lstatSync(dir).isSymbolicLink()) throw new Error(`${dir} is a link; logs are written only into the run's own directory`);
+  // Each parent is checked for a link before anything is created in it (review of #382), so a refusal mutates nothing.
+  for (const dir of [join(log.runDir, "evidence"), logRoot]) {
+    if (isLink(dir)) throw new Error(`${dir} is a link; logs are written only into the run's own directory`);
+    if (!existsSync(dir)) mkdirSync(dir);
+  }
   let ref = log.ref;
   for (let n = 2; existsSync(join(log.runDir, ref)) || isLink(join(log.runDir, ref)); n += 1) ref = log.ref.replace(/\.log$/u, `.${n}.log`);
   const fd = openSync(join(log.runDir, ref), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);

@@ -1318,11 +1318,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // an integrated stage, inside paths merged slices already own and under a limit of two, instead of parking the
     // run and discarding its merged work (baleyg #26 threw away 13 merged slices on one Gate 3 finding). The issue
     // records the operator's authorization to raise the tripwire 6150 -> 6300.
-    // 6255 -> 6331 for issue #381: the ratified test and the repository verify persist their output to a run-local
+    // 6255 -> 6335 for issue #381: the ratified test and the repository verify persist their output to a run-local
     // log with a digest, a redacted tail, truncation and timeout facts, instead of only streaming it to stderr, so
     // a failing attempt (baleyg #67, exit 101) can be diagnosed afterwards. The issue records the operator's
     // authorization to raise the tripwire 6300 -> 6450.
-    assert.equal(total, 6331, "test and verify output is persisted with its evidence: 6331 production lines");
+    assert.equal(total, 6335, "test and verify output is persisted with its evidence: 6335 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -110,6 +110,13 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       symlinkSync(elsewhere, join(linkedRun, "evidence", "logs"));
       assert.throws(() => runTests(f.root, ["true"], { log: { runDir: linkedRun, ref: "evidence/logs/x.log" } }), /is a link/u);
       assert.deepEqual(readdirSync(elsewhere), [], "nothing is written through the link");
+      // A linked `evidence` parent is refused before anything is created through it, and a ref must be a flat file name.
+      const linkedParent = mkdtempSync(join(tmpdir(), "ff-linked-parent-")), outside = mkdtempSync(join(tmpdir(), "ff-outside-"));
+      symlinkSync(outside, join(linkedParent, "evidence"));
+      assert.throws(() => runTests(f.root, ["true"], { log: { runDir: linkedParent, ref: "evidence/logs/x.log" } }), /is a link/u);
+      assert.deepEqual(readdirSync(outside), [], "no directory is created through a linked parent");
+      assert.throws(() => runTests(f.root, ["true"], { log: { runDir, ref: "evidence/logs/nested/x.log" } }), /must name a file directly in evidence\/logs/u);
+      assert.equal(existsSync(join(runDir, "evidence", "logs", "nested")), false, "a refused nested ref creates nothing");
       // The raw scratch output is removed even when the run itself throws.
       const before = readdirSync(tmpdir()).filter((name) => name.startsWith("factory-output-")).length;
       assert.throws(() => runTests(f.root, ["x"], { runner: () => { throw new Error("spawn failed"); }, log: log("throws") }), /spawn failed/u);
