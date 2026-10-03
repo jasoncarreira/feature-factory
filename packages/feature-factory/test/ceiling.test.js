@@ -364,6 +364,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // Instruction half of in-band amendment: when the driver may approve its own, and when it must wait or park.
     assert.ok(markdown.includes("lock. The CLI refuses only if another slice in `running` or `review` already owns a requested path,"),
       "the workflow must say when an in-band path amendment is refused");
+    assert.ok(markdown.includes("defer this slice until those rows merge and create nothing for it"),
+      "the driver must defer an overlapping pending slice before creating its worktree (review of #383)");
     for (const [agent, fragment] of [["work-reviewer", "When the observed `tests.exit` or `repository_verify.exit` is not 0, read its `tail`, or the log at its"],
       ["test-verifier", "When an observed run's `exit` is not 0, read its evidence `tail` or the log at `log_path`"]]) {
       assert.ok(readFileSync(join(pkg, "agents", `${agent}.md`), "utf8").includes(fragment), `${agent} must read the persisted output on failure`);

@@ -1458,7 +1458,14 @@ For a fresh pending slice, set the exact names, require both `refs/heads/$SLICE_
 `SLICE_WORKTREE` path to be absent, and create the worktree from the current feature branch before
 activation:
 
-Before creating a pending slice worktree, reload its exact manifest row. Bind `ACTIVATION_START` to
+Before creating a pending slice worktree, reload its exact manifest row and compare its `paths` with the
+`paths` of every row in `running` or `review`. If any pair overlaps (either path equals or contains the
+other), defer this slice until those rows merge and create nothing for it: no two active slices own the
+same path, and activation refuses an overlapping slice. If activation refuses for an active owner anyway
+(an in-band amendment landed in between), remove the worktree and branch this step just created for the
+still-pending slice, which nothing recorded, and defer it; that is the one removal allowed here.
+
+Bind `ACTIVATION_START` to
 `FEATURE_BRANCH` when `base_ref` is null. When a restored retry-extension row preserves non-null `base_ref`,
 require its latest audit to name the same base and start the replacement slice branch at that exact historical
 base. This recreates the original retry branch without importing later sibling changes into its owned diff.
