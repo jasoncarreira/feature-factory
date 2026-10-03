@@ -1327,10 +1327,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // log with a digest, a redacted tail, truncation and timeout facts, instead of only streaming it to stderr, so
     // a failing attempt (baleyg #67, exit 101) can be diagnosed afterwards. The issue records the operator's
     // authorization to raise the tripwire 6300 -> 6450.
-    // 6345 -> 6364: a running run amends slice paths in-band, refused only when another active slice already owns
+    // 6345 -> 6365: a running run amends slice paths in-band, refused only when another active slice already owns
     // a requested path, and no slice activates onto a path an active slice owns. Path additions were the most
     // common park in baleyg (#67 needed 11, 14 and 8 amendments). Inside #381's 6450 tripwire; nothing trimmed.
-    assert.equal(total, 6364, "a running run amends paths in-band: 6364 production lines");
+    assert.equal(total, 6365, "a running run amends paths in-band: 6365 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

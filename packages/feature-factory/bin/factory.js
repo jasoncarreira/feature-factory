@@ -855,10 +855,11 @@ const HANDLERS = {
         if (!existing) throw new CliError(`unknown slice '${sliceId}'`);
         if (existing.status === "merged") throw new CliError(`slice '${sliceId}' is already merged`);
         validatePathAdditions(existing, flags.add);
-        // On a running run the driver approves its own amendment unless another active slice already owns a
-        // requested path, seeded or amended; then it waits for that slice to merge or parks for an operator.
-        const clash = state.status === "running" ? activeOwners(state, sliceId, flags.add) : [];
-        if (clash.length) throw new CliError(`requested paths are already owned by active slice(s) ${clash.join(", ")}; wait for them to merge or park for an operator amendment`);
+        // Any amendment, in-band or parked, is refused when another active slice already owns a requested path, seeded or
+        // amended, so recovery cannot leave two active slices sharing one (review of #383). In-band, the driver waits
+        // for that slice to merge or parks; parked, the operator amends after it merges.
+        const clash = activeOwners(state, sliceId, flags.add);
+        if (clash.length) throw new CliError(`requested paths are already owned by active slice(s) ${clash.join(", ")}; wait for them to merge${state.status === "running" ? " or park for an operator amendment" : ""}`);
         const amendment = { added_paths: [...flags.add], reason: flags.reason, session: flags.session, at };
         const row = { ...existing, paths: [...existing.paths, ...flags.add], path_amendments: [...(existing.path_amendments ?? []), amendment] };
         return { ...state, updated_at: at, slices: state.slices.map((slice) => (slice.id === sliceId ? row : slice)) };

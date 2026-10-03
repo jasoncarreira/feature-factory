@@ -816,8 +816,9 @@ factory amend-paths "$R" "$SLICE_ID" --add "$PATH" [--add "$PATH" ...] \
 ```
 
 Use the concrete disclosed repository-relative paths in request order. The command refuses blank,
-absolute, traversing, privileged, duplicate, or already-owned paths; it does not normalize paths,
-require them to exist, or refuse because another slice owns one. It keeps the run parked and the
+absolute, traversing, privileged, duplicate, or already-owned paths, and a path another slice in `running` or
+`review` already owns; it does not normalize paths, require them to exist, or refuse because a pending or
+merged slice owns one. It keeps the run parked and the
 terminal result unchanged, appends the additions to the slice's existing paths, and appends the exact
 reason, session, additions, and timestamp to `path_amendments`. Re-read the manifest and qualified
 status immediately: require the same fresh owner, unchanged parked status and result, the original paths

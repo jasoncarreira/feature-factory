@@ -2752,24 +2752,32 @@ describe("end to end — a merge is refused through the real CLI", () => {
         const run = runJson(a.runDir), owner = run.slices.find((slice) => slice.id === "be-thing");
         assert.deepEqual([run.status, owner.paths.at(-1), owner.path_amendments.at(-1).added_paths], ["running", "docs/notes.md", ["docs/notes.md"]],
           "allowed while a sibling is active, because no active slice owns it");
+        // Review of #383: recovery keeps the invariant. On a parked run with the sibling still active, an operator
+        // amendment onto the sibling's path is refused too, so resume can never leave two active owners.
+        assert.equal(factory(a.repo, ["terminal", RUN, "needs-human", "--reason", "operator scope check", "--now", NOW(3)]).ok, true);
+        const parkedBefore = readFileSync(join(a.runDir, "run.json"), "utf8");
+        const parkedTaken = amend("src/sibling/parked.ts", 4);
+        assert.match(parkedTaken.stderr ?? "", /already owned by active slice\(s\) sibling; wait for them to merge/u);
+        assert.equal(readFileSync(join(a.runDir, "run.json"), "utf8"), parkedBefore, "a refused parked amendment changes nothing");
+        assert.equal(factory(a.repo, ["resume", RUN, "--session", "driver", "--now", NOW(4)]).ok, true);
         // Review of #383, the driver flow: a worktree created before a refused activation is removed (nothing recorded
         // it), and once the owner merges the slice activates normally.
         const laterBranch = `factory/${RUN}/docs-later`, laterTree = join(a.repo, ".factory", "worktrees", "docs-later");
         const activateLater = (t) => factory(a.repo, ["slice", RUN, "docs-later", "running", "--worktree", laterTree, "--branch", laterBranch, "--now", NOW(t)]);
         git(a.repo, "worktree", "add", "-q", "-b", laterBranch, laterTree, "feature");
-        const blocked = activateLater(4);
+        const blocked = activateLater(5);
         assert.match(blocked.stderr ?? "", /shares paths with active slice\(s\) be-thing; activate it after they merge/u);
         assert.equal(runJson(a.runDir).slices.find((slice) => slice.id === "docs-later").status, "pending");
         git(a.repo, "worktree", "remove", "--force", laterTree);
         git(a.repo, "branch", "-q", "-D", laterBranch);
         const ownerBase = runJson(a.runDir).slices.find((slice) => slice.id === "be-thing").base_ref;
         assert.equal(factory(a.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", ownerBase, "--attempt", "1",
-          "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(5)]).ok, true);
+          "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(6)]).ok, true);
         assert.equal(factory(a.repo, ["slice", RUN, "be-thing", "review", "--review-ref", writeReview(a.runDir, "be-thing", git(a.repo, "rev-parse", "slice")),
-          "--evidence-ref", "evidence/be-thing.json", "--now", NOW(5)]).ok, true);
-        assert.equal(factory(a.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeIntoFeature(a.repo), "--now", NOW(6)]).ok, true);
+          "--evidence-ref", "evidence/be-thing.json", "--now", NOW(6)]).ok, true);
+        assert.equal(factory(a.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeIntoFeature(a.repo), "--now", NOW(7)]).ok, true);
         git(a.repo, "worktree", "add", "-q", "-b", laterBranch, laterTree, "feature");
-        const activated = activateLater(7);
+        const activated = activateLater(8);
         assert.equal(activated.ok, true, activated.stderr);
       } finally { cleanupProject(a); }
     }
