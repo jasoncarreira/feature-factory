@@ -624,8 +624,18 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       assert.deepEqual(next.terminal_result, result);
     } finally { rmSync(direct.root, { recursive: true, force: true }); }
 
-    for (const status of ["running", "completed", "partial", "blocked"]) {
-      const terminalResult = status === "running" ? null : { status, reason: "final" };
+    // A running run accepts an in-band amendment (the CLI decides whether another active slice blocks it); a
+    // terminal run still refuses one.
+    const runningRun = fixture("amend-from-running", { status: "running", terminal_result: null, slices: [slice()] });
+    try {
+      const next = await transition(runningRun.runDir, {
+        participants: [{ familyId: "envelope", mode: "amend-paths" }, { familyId: "slices", mode: "amend-paths" }],
+        reobservers: authorized(), apply: append,
+      });
+      assert.deepEqual([next.status, next.slices[0].paths], ["running", ["be/", "docs/api.md"]]);
+    } finally { rmSync(runningRun.root, { recursive: true, force: true }); }
+    for (const status of ["completed", "partial", "blocked"]) {
+      const terminalResult = { status, reason: "final" };
       const notParked = fixture(`amend-from-${status}`, { status, terminal_result: terminalResult, slices: [slice()] });
       try {
         const before = bytes(notParked.runDir);

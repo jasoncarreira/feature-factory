@@ -371,7 +371,9 @@ bootstrap, resume changes only `status` and `updated_at`; with it, resume also r
 clean-head and retry-safety checks before progression, and unresolved repair-journal records remain
 publication blockers. An unfixed cause may park the run again with the same reason.
 
-`amend-paths` is the one optional parked mutation. It requires the exact fresh owning session and an
+On a running run, `amend-paths` is also the driver's in-band route: it applies without parking unless another
+slice in `running` or `review` already owns a requested path, and no slice activates onto a path an active slice
+owns. `amend-paths` is the one optional parked mutation. It requires the exact fresh owning session and an
 existing unmerged slice, keeps status and terminal result unchanged, and appends nonempty lexical
 repository-relative paths plus a durable record containing the ordered additions, verbatim reason,
 session, and timestamp. It does not normalize or require path existence, and another slice may own the

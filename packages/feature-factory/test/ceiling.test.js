@@ -361,6 +361,11 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // #381, instruction half: the persisted output is only useful if the reviewer and test-verifier read it.
     assert.ok(markdown.includes("`exit` is not 0, read `tail` or the log at `log_path` and give the failing part (the lint, format, or"),
       "the driver must hand the persisted failure output to the builder");
+    // Instruction half of in-band amendment: when the driver may approve its own, and when it must wait or park.
+    assert.ok(markdown.includes("lock. The CLI refuses only if another slice in `running` or `review` already owns a requested path,"),
+      "the workflow must say when an in-band path amendment is refused");
+    assert.ok(markdown.includes("defer this slice until those rows merge and create nothing for it"),
+      "the driver must defer an overlapping pending slice before creating its worktree (review of #383)");
     for (const [agent, fragment] of [["work-reviewer", "When the observed `tests.exit` or `repository_verify.exit` is not 0, read its `tail`, or the log at its"],
       ["test-verifier", "When an observed run's `exit` is not 0, read its evidence `tail` or the log at `log_path`"]]) {
       assert.ok(readFileSync(join(pkg, "agents", `${agent}.md`), "utf8").includes(fragment), `${agent} must read the persisted output on failure`);
@@ -1322,7 +1327,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // log with a digest, a redacted tail, truncation and timeout facts, instead of only streaming it to stderr, so
     // a failing attempt (baleyg #67, exit 101) can be diagnosed afterwards. The issue records the operator's
     // authorization to raise the tripwire 6300 -> 6450.
-    assert.equal(total, 6345, "test and verify output is persisted with its evidence: 6345 production lines");
+    // 6345 -> 6365: a running run amends slice paths in-band, refused only when another active slice already owns
+    // a requested path, and no slice activates onto a path an active slice owns. Path additions were the most
+    // common park in baleyg (#67 needed 11, 14 and 8 amendments). Inside #381's 6450 tripwire; nothing trimmed.
+    assert.equal(total, 6365, "a running run amends paths in-band: 6365 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

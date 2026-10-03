@@ -136,7 +136,13 @@ const envelope = contract({
       }
       return;
     }
-    if (mode === "amend-paths") throw new Error(`amend-paths requires current status needs-human; found '${before.status}'`);
+    // In-band on a running run (issue below): the amendment changes only slice ownership and updated_at.
+    if (mode === "amend-paths") {
+      if (before.status !== "running") throw new Error(`amend-paths requires current status needs-human; found '${before.status}'`);
+      if (Date.parse(after.updated_at) <= Date.parse(before.updated_at)) throw new Error("amend-paths must move updated_at forwards");
+      for (const key of Object.keys(before).filter((key) => key !== "updated_at")) if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`amend-paths cannot change envelope.${key}`);
+      return;
+    }
     if (mode === "decide") throw new Error(`decide requires current status needs-human; found '${before.status}'`);
     if (["resume-needs-human", "record-bootstrap"].includes(mode)) throw new Error(`${mode} requires current status needs-human; found '${before.status}'`);
     // Identity is immutable for the life of a run. Nothing legitimate renames a
