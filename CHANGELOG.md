@@ -3,6 +3,23 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.11
+
+A patch release that lets a running run amend slice paths in-band (#383).
+
+- `factory amend-paths` now works on a running run as well as a parked one. A driver holding the fresh session lock
+  approves its own amendment, so a builder that needs a file outside its slice's paths no longer parks the run.
+  Path additions were the most common park in baleyg (#67's runs needed 11, 14 and 8 amendments).
+- One invariant governs ownership: no two active slices (`running`/`review`) ever own an overlapping path, seeded
+  or amended. Every amendment, parked or running, is refused when another active slice already owns a requested
+  path; the driver waits for it to merge or parks. Pending and merged owners do not block it.
+- Activation refuses a slice whose paths overlap an active slice's, which also enforces the file-disjointness
+  parallel waves were previously only told to keep. The workflow has the driver defer an overlapping pending slice
+  before creating its worktree, and remove only what it just created if activation still refuses.
+- Privileged paths stay refused and every amendment keeps its audit record. Terminal runs still refuse amendments.
+
+All three package manifests and both exact adapter pins move together to 0.10.11.
+
 ## 0.10.10
 
 A patch release that persists test and verify output with the evidence, and routes review-found test-only gaps to a
