@@ -827,6 +827,16 @@ path not disclosed and verified for this recovery. Without a path omission, skip
 In either case order 7 remains the same explicit resume command; the resume command never amends paths,
 changes `test_plan`, or reseeds the plan.
 
+#### In-band path amendment
+
+On a running run the driver approves its own amendment. When a builder needs a file outside its slice's
+paths, run the same `amend-paths` command, with the builder's reason, while holding the fresh session
+lock. The CLI refuses only if another slice in `running` or `review` already owns a requested path,
+whether seeded or amended; then wait for that slice to merge and retry, or park and use the procedure
+above. No two active slices ever own the same path, so a slice also cannot activate onto a path an
+active slice owns; it waits until that slice merges. Privileged paths stay refused either way. The
+reviewer still judges whether each added path serves the slice's acceptance criteria.
+
 When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact
 boundary between completion of resume order 7 and the first operation in resume order 8. Nothing may
 intervene between the verified running/same-owner result and that guard, or between a successful guard
@@ -1225,11 +1235,12 @@ the reviewed plan unseeded until Gate 2 has presented and approved its exact con
 The first successful seed is the **ratification point** for two decisions:
 
 - `paths` — the original ownership prefix every later merge is judged against. Amend the unseeded plan
-  at Gate 2 whenever possible. After seeding, insufficient scope parks the run; only the optional
-  `amend-paths` procedure in Resume order 6 may append ownership to an unmerged slice. The seeded prefix
-  is immutable, amendments are durable history, and resume itself never amends or reseeds anything.
-  An amendment is **audited, not authorized**: it requires a parked run and a freshly verified owning
-  session, but a driver holding that lock can park itself, so the record — added paths, verbatim reason,
+  at Gate 2 whenever possible. After seeding, a slice that needs a file outside its paths amends them
+  in-band (see "In-band path amendment"); only when another active slice already owns that file does it
+  wait for that slice to merge or park and use the `amend-paths` procedure in Resume order 6. The seeded
+  prefix is immutable, amendments are durable history, and resume itself never amends or reseeds anything.
+  An amendment is **audited, not authorized**: it requires a freshly verified owning session, and a driver
+  holding that lock can make one, so the record — added paths, verbatim reason,
   session and timestamp — is what makes growth attributable rather than prevented. What still binds is
   unchanged: every merge is judged against the amended set, proved against its own reviewed commit, and
   followed by repository verification. Another unmerged slice may already own an appended path; the

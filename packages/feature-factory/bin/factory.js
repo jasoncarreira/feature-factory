@@ -338,6 +338,13 @@ function sameSessionOwner(runDir, bound) {
     .every((keyName) => isDeepStrictEqual(held.owner[keyName], bound[keyName]));
 }
 
+// Enforcement: no two active slices own an overlapping path, seeded or amended. It is what makes an in-band,
+// self-approved amendment safe, and it checks the file-disjointness parallel waves were only told to keep.
+function activeOwners(run, sliceId, paths) {
+  const overlaps = (owned) => paths.some((path) => unownedPaths([path], owned).length === 0) || owned.some((path) => unownedPaths([path], paths).length === 0);
+  return run.slices.filter((slice) => slice.id !== sliceId && ["running", "review"].includes(slice.status) && overlaps(slice.paths)).map((slice) => slice.id);
+}
+
 function validatePathAdditions(slice, additions) {
   for (const path of additions) {
     if (!repositoryRelativePath(path)) {
@@ -831,8 +838,8 @@ const HANDLERS = {
     if (typeof flags.session !== "string" || !flags.session.trim()) throw new CliError("factory amend-paths requires nonblank --session <id>");
     const runDir = runDirFor(flags, runId);
     const current = readRun(runDir);
-    if (current.status !== "needs-human") {
-      throw new CliError(`factory amend-paths requires current status needs-human; found '${current.status}'`);
+    if (!["needs-human", "running"].includes(current.status)) {
+      throw new CliError(`factory amend-paths requires status running or needs-human; found '${current.status}'`);
     }
     assertFreshSessionOwner(runDir, runId, flags.session, "amend-paths");
     const at = stamp(flags);
@@ -843,11 +850,15 @@ const HANDLERS = {
       participants: [{ familyId: "envelope", mode: "amend-paths" }, { familyId: "slices", mode: "amend-paths" }],
       reobservers,
       apply: (state) => {
-        if (state.status !== "needs-human") throw new CliError(`factory amend-paths requires current status needs-human; found '${state.status}'`);
+        if (state.status !== current.status) throw new CliError(`factory amend-paths refused because run status changed to '${state.status}'`);
         const existing = state.slices.find((slice) => slice.id === sliceId);
         if (!existing) throw new CliError(`unknown slice '${sliceId}'`);
         if (existing.status === "merged") throw new CliError(`slice '${sliceId}' is already merged`);
         validatePathAdditions(existing, flags.add);
+        // On a running run the driver approves its own amendment unless another active slice already owns a
+        // requested path, seeded or amended; then it waits for that slice to merge or parks for an operator.
+        const clash = state.status === "running" ? activeOwners(state, sliceId, flags.add) : [];
+        if (clash.length) throw new CliError(`requested paths are already owned by active slice(s) ${clash.join(", ")}; wait for them to merge or park for an operator amendment`);
         const amendment = { added_paths: [...flags.add], reason: flags.reason, session: flags.session, at };
         const row = { ...existing, paths: [...existing.paths, ...flags.add], path_amendments: [...(existing.path_amendments ?? []), amendment] };
         return { ...state, updated_at: at, slices: state.slices.map((slice) => (slice.id === sliceId ? row : slice)) };
@@ -1021,6 +1032,8 @@ const HANDLERS = {
       // The base is the historical branch point. Integration HEAD may move after sibling merges,
       // so only a fresh activation observes it; retries preserve the exact recorded value.
       if (existing.status === "pending") {
+        const clash = activeOwners(current, sliceId, existing.paths);
+        if (clash.length) throw new CliError(`slice '${sliceId}' shares paths with active slice(s) ${clash.join(", ")}; activate it after they merge`);
         const head = integrationHead(repo, current);
         if (!head.commit) throw new CliError(`could not observe the head of '${current.branch}' to bind the slice base`);
         observedBase = existing.base_ref ?? head.commit;

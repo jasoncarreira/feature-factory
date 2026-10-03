@@ -1439,7 +1439,8 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const runningRefusal = factory(p.repo, ["amend-paths", RUN, "be-thing", "--add", companionPaths[0],
         "--reason", "not parked", "--session", "session-b", "--now", NOW(5)]);
       assert.equal(runningRefusal.ok, false);
-      assert.match(runningRefusal.stderr, /requires current status needs-human; found 'running'/u);
+      // In-band amendment on a running run is allowed now, but still only for the fresh session owner.
+      assert.match(runningRefusal.stderr, /requires a held session lock/u);
       assert.equal(readFileSync(join(p.runDir, "run.json"), "utf8"), before);
 
       const reason = "  reviewer verified the omitted ownership  ";
@@ -2726,6 +2727,35 @@ describe("end to end — a merge is refused through the real CLI", () => {
   });
 
   it("refuses a merge with evidence but no review", () => {
+    // A running run amends paths in-band: the driver's own amendment is refused only when another active slice
+    // already owns a requested path, and no slice activates onto a path an active slice owns.
+    {
+      const a = project("in-band-amend", { additionalSlices: [
+        { id: "sibling", stack: "backend", paths: ["src/sibling/"], depends_on: [], acceptance: ["AC2"], test_plan: [] },
+        { id: "docs-later", stack: "backend", paths: ["docs/"], depends_on: [], acceptance: ["AC3"], test_plan: [] },
+      ] });
+      try {
+        buildSlice(a.repo);
+        for (const id of ["be-thing", "sibling"]) {
+          const active = factory(a.repo, ["slice", RUN, id, "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]);
+          assert.equal(active.ok, true, `${id}: ${active.stderr}`);
+        }
+        assert.equal(factory(a.repo, ["lock", RUN, "claim", "--session", "driver", "--branch", "feature"]).ok, true);
+        const amend = (path, t) => factory(a.repo, ["amend-paths", RUN, "be-thing", "--add", path, "--reason", "builder needs it",
+          "--session", "driver", "--now", NOW(t)]);
+        const before = readFileSync(join(a.runDir, "run.json"), "utf8");
+        const taken = amend("src/sibling/shared.ts", 3);
+        assert.match(taken.stderr ?? "", /already owned by active slice\(s\) sibling; wait for them to merge or park/u);
+        assert.equal(readFileSync(join(a.runDir, "run.json"), "utf8"), before, "a refused amendment changes nothing");
+        const added = amend("docs/notes.md", 3);
+        assert.equal(added.ok, true, added.stderr);
+        const run = runJson(a.runDir), owner = run.slices.find((slice) => slice.id === "be-thing");
+        assert.deepEqual([run.status, owner.paths.at(-1), owner.path_amendments.at(-1).added_paths], ["running", "docs/notes.md", ["docs/notes.md"]],
+          "allowed while a sibling is active, because no active slice owns it");
+        const blocked = factory(a.repo, ["slice", RUN, "docs-later", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(4)]);
+        assert.match(blocked.stderr ?? "", /shares paths with active slice\(s\) be-thing; activate it after they merge/u);
+      } finally { cleanupProject(a); }
+    }
     // #344: a production finding at the integrated stage opens one reviewed fix slice instead of parking the run.
     {
       const count = (operator) => join(operator, "remediation-verify-count");
