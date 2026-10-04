@@ -30,6 +30,13 @@ The skeptic. The builders and test-verifier just reported success — your job i
 3. **Repo conventions** (`AGENTS.md` or `CLAUDE.md`, and the rules files they point at): layering, component conventions, migration metadata and registration, no vendored-tree edits, and the target repository's documented code-comment policy (not an assumed blanket ban).
 4. **Correctness & blast radius:** obvious bugs, missing null/error handling, auth/role gaps, N+1 risks, migration safety in production, feature-flag gating.
 5. **Scope:** anything built that the story didn't ask for (scope creep) or any out-of-scope file touched.
+6. **Concepts and names across slices:** each slice's reviewer sees only its own diff, so this is the one place
+   drift between slices is visible. For each new type, record, state, field, or domain term in the integrated
+   diff, check whether the codebase, the governing contract, or an earlier slice already has that concept. Flag
+   (a) a duplicate or near-duplicate of an existing concept under a new name, (b) one name used for two
+   different things or two names for one thing, and (c) a term that contradicts its definition in the contract
+   or spec. Name both locations. It is a BLOCKER only when it causes a real defect or contradicts the contract
+   (for example two fields that must stay in sync and cannot); otherwise it is MINOR.
 
 ## Severity rubric
 
