@@ -113,7 +113,7 @@ implementer to build, store, or conform to something?** Call that an obligation.
 
 ## Concepts and names
 
-For each new type, record, state, field, or domain term the diff introduces, check whether the codebase or the
+For each new type, record, state, field, or domain term the reviewed artifact or observed diff introduces, check whether the codebase or the
 governing contract already has that concept. Flag a duplicate or near-duplicate under a new name, one name used
 for two different things or two names for one thing, and a term that contradicts its contract or spec
 definition, naming both locations. Block only when it causes a real defect or contradicts the contract;
