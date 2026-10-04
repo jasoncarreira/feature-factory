@@ -652,6 +652,13 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       ["work-reviewer", "does the content commit an", "one boundary must decide both directions"],
       ["spec-writer", "**Document deliverables:** when the issue's deliverable is a specification, contract, or data artifact", "the brief must not expand a document into a model"],
       ["work-reviewer", "A present `repository_verify` that did not exit zero is a BLOCKER", "a failing slice-level verify must block review (#372)"],
+      // Instruction: concept drift and duplicate concepts across slices (found in quantity on mimir by an ontology
+      // review). Bounded so it cannot become a taste-based rejection loop.
+      ["implementation-validator", "**Concepts and names across slices:** each slice's reviewer sees only its own diff, so this is the one place", "the validator must check cross-slice concept drift"],
+      ["implementation-validator", "or spec. Name both locations. It is a BLOCKER only when it causes a real defect or contradicts the contract", "concept findings block only on a real defect or contract contradiction"],
+      ["work-reviewer", "definition, naming both locations. Block only when it causes a real defect or contradicts the contract;", "the slice reviewer's concept check is bounded"],
+      ["work-reviewer", "Taste in naming or abstraction is never a finding on its own.", "naming taste is never a finding"],
+      ["spec-writer", "**One term per concept:** define each new domain term once in the brief and reuse the codebase's and the", "the brief defines each term once"],
     ]) assert.ok((byName.get(name) ?? "").includes(fragment), `${name}: ${why}`);
     // Review of #371: the first draft called internal schemas a non-blocking note in one bullet and required
     // unrequested schemas removed in another, so one artifact could be approved or rejected. Missing depth is
