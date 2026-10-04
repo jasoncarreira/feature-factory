@@ -3,6 +3,21 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.12
+
+A patch release that adds a bounded concept and name drift check to review (#385).
+
+- The implementation-validator now checks concepts and names across slices. It is the only reviewer that sees the
+  integrated diff, so drift between slices is visible only there. It flags a duplicate of an existing concept under
+  a new name, one name for two things or two names for one thing, and a term that contradicts its contract or spec
+  definition, naming both locations.
+- The work-reviewer applies the same check to the artifact or diff it reviews, and taste in naming is never a
+  finding on its own. The spec-writer defines each new domain term once and reuses existing terms.
+- Instruction only: a concept finding blocks only on a real defect or a contract contradiction; otherwise it is
+  MINOR or a note.
+
+All three package manifests and both exact adapter pins move together to 0.10.12.
+
 ## 0.10.11
 
 A patch release that lets a running run amend slice paths in-band (#383).
