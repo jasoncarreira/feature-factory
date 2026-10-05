@@ -63,6 +63,7 @@ export const COMMANDS = Object.freeze({
   "effective-push": Object.freeze([]),
   identity: Object.freeze(["--repo", "--json"]),
   remediate: Object.freeze(["--repo", "--finding", "--path", "--reason", "--session", "--now", "--json"]),
+  "sync-base": Object.freeze(["--repo", "--merge-commit", "--reason", "--now", "--json"]),
 });
 
 const BOOLEAN_FLAGS = new Set(["--json", "--repository-verify"]);
@@ -432,8 +433,9 @@ function bootstrapBeforeVerify(worktree, config, phase) {
   return config?.bootstrapCommand ? bootstrapOutcome(worktree, config, phase).refusal : null;
 }
 
+// The run's diff base: the latest synced PR base (#387), else the original feature head the root slice recorded.
 function branchPoint(run) {
-  const base = run.slices.find((slice) => Array.isArray(slice.depends_on) && slice.depends_on.length === 0)?.base_ref;
+  const base = run.base_syncs?.at(-1)?.base ?? run.slices.find((slice) => Array.isArray(slice.depends_on) && slice.depends_on.length === 0)?.base_ref;
   if (!/^[0-9a-f]{40}$/u.test(base ?? "")) throw new CliError("first seeded root slice has no immutable 40-character base_ref");
   return base;
 }
@@ -917,6 +919,64 @@ const HANDLERS = {
     return emit(flags, { run_id: runId, slice: next.slices.at(-1).id, status: next.status, remediation: next.remediations.at(-1), next: nextAction(next) });
   },
 
+  // Enforcement (#387): a merge of the PR base is the one commit on the integration branch no slice reviewed, so it
+  // is admitted only as the clean automatic merge of reviewed base commits, and verified fresh before resume.
+  async ["sync-base"](positional, flags) {
+    if (positional.length !== 1) throw new CliError("factory sync-base requires exactly <run-id>");
+    const [runId] = positional, merge = flags.mergeCommit;
+    if (!/^[0-9a-f]{40}$/u.test(merge ?? "")) throw new CliError("factory sync-base requires --merge-commit <40-character sha>");
+    if (typeof flags.reason !== "string" || !flags.reason.trim()) throw new CliError("factory sync-base requires nonblank --reason <text>");
+    const repo = resolve(flags.repo ?? process.cwd()), runDir = runDirFor(flags, runId), current = readRun(runDir);
+    if (current.status !== "needs-human") throw new CliError(`factory sync-base requires a parked run; found '${current.status}'`);
+    const integration = requireIntegrationWorktree(repo, current, current.worktree), wt = integration.worktree;
+    const refuse = (reason) => { throw new CliError(`factory sync-base refused merge ${merge}: ${reason}`); };
+    if (integration.head !== merge) refuse(`it is not the integration head ${integration.head}`);
+    const recorded = (current.base_syncs ?? []).some((entry) => entry.merge_commit === merge);
+    if (!recorded) {
+      if (current.slices.some((slice) => ["running", "review"].includes(slice.status))) refuse("a slice is active; sync between slices");
+      const merged = current.slices.filter((slice) => slice.status === "merged").map((slice) => slice.merge_commit);
+      if (merged.length === 0) refuse("no slice is merged yet");
+      if (current.gates.pre_pr || current.steps.some((step) => step.agent === "test-verifier")) refuse("integration testing has started");
+      const [, previous, base, ...extra] = git(wt, ["rev-list", "--parents", "-n", "1", merge]).stdout.trim().split(" ");
+      if (!base || extra.length) refuse("it must have exactly two parents: the recorded tip, then the PR base");
+      const tips = [...merged, current.base_syncs?.at(-1)?.merge_commit].filter(Boolean), previousBase = branchPoint(current);
+      if (!tips.includes(previous) || merged.some((sha) => observeAncestry(wt, sha, previous) !== "ancestor")) refuse(`first parent ${previous} is not the recorded integration tip`);
+      // A base that does not strictly advance, or a merge that changes no bytes, would only re-run unchanged bytes.
+      if (base === previousBase || observeAncestry(wt, previousBase, base) !== "ancestor") refuse(`second parent ${base} does not advance the branch point ${previousBase}`);
+      if (![`refs/remotes/origin/${current.pr_base}`, `refs/heads/${current.pr_base}`].some((ref) => observeAncestry(wt, base, ref) === "ancestor")) refuse(`second parent ${base} is not on PR base '${current.pr_base}'`);
+      const automatic = git(wt, ["merge-tree", "--write-tree", previous, base]), tree = git(wt, ["rev-parse", `${merge}^{tree}`]).stdout.trim();
+      if (!automatic.ok || automatic.stdout.split("\n")[0] !== tree) refuse("its tree is not the clean automatic merge of its parents; resolve conflicts in a slice");
+      if (git(wt, ["rev-parse", `${previous}^{tree}`]).stdout.trim() === tree) refuse("it changes no bytes");
+      const at = stamp(flags), record = { merge_commit: merge, previous_head: previous, base, previous_base: previousBase, reason: flags.reason.trim(), at };
+      await transition(runDir, {
+        participants: [{ familyId: "envelope", mode: "sync-base" }],
+        apply: (state) => {
+          if (!isDeepStrictEqual(state, current)) throw new CliError("factory sync-base refused because run state changed after qualification");
+          return { ...state, updated_at: at, base_syncs: [...(state.base_syncs ?? []), record] };
+        },
+      });
+    }
+    const run = readRun(runDir);
+    let verify;
+    try { verify = readRepositoryConfig(wt, { optional: true }); } catch (error) {
+      if (error instanceof RepositoryConfigError) refuse(`factory config entry 'verify' unavailable: ${error.message}`);
+      throw error;
+    }
+    let classified = verify && classifyRepositoryVerifyEvidence(runDir, { runId, run, integration, verifyCommand: verify.command });
+    // A crash between the record and the verify leaves evidence for an earlier head, which never judged this merge.
+    if (classified?.kind === "unknown" && classified.evidence?.commit !== merge) classified = { kind: "unavailable" };
+    if (classified?.kind === "failed") throw new CliError(repositoryVerifyRefusal(merge, classified.evidence));
+    if (classified?.kind === "unknown") throw new CliError(repositoryVerifyUnknownRefusal(merge));
+    if (classified?.kind === "unavailable") {
+      await runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit: merge, verify, integration: repositoryVerifyRetrySafety(repo, run, merge) });
+    }
+    // Instruction, not enforcement: upstream files a slice also owns are reported for the operator and the validator.
+    const sync = run.base_syncs.find((entry) => entry.merge_commit === merge);
+    const overlap = git(wt, ["diff", "--name-only", "-z", sync.previous_base, sync.base]).stdout.split("\0").filter(Boolean)
+      .filter((path) => run.slices.some((slice) => unownedPaths([path], slice.paths).length === 0));
+    return emit(flags, { run_id: runId, status: run.status, base_sync: sync, branch_point: branchPoint(run), overlap, next_action: "resume explicitly" });
+  },
+
   async ["grant-retry"](positional, flags) {
     if (positional.length !== 2) throw new CliError("factory grant-retry requires exactly <run-id> <slice-id>");
     const [runId, sliceId] = positional;
@@ -1239,7 +1299,7 @@ const HANDLERS = {
     let repositoryVerify = null;
     if (flags.repositoryVerify) {
       const expectedBase = branchPoint(run);
-      if (flags.base !== expectedBase) throw new CliError(`--base must equal the first seeded root slice base_ref ${expectedBase}`);
+      if (flags.base !== expectedBase) throw new CliError(`--base must equal the run's branch point ${expectedBase}`);
       try {
         repositoryVerify = readRepositoryConfig(worktree);
       } catch (error) {

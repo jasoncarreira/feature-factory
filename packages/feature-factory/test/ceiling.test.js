@@ -29,7 +29,7 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // one parked amendment command that changes only an unmerged slice's ownership and history.
 const CLI_COMMANDS = [
   "init", "status", "amend-paths", "resume", "grant-retry", "restore", "snapshot", "decide", "lock", "heartbeat", "gate", "step", "terminal",
-  "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push", "identity", "remediate",
+  "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push", "identity", "remediate", "sync-base",
 ];
 
 const RUN_JSON_KEYS = [
@@ -38,6 +38,8 @@ const RUN_JSON_KEYS = [
   "status", "max_parallel_slices", "max_retries", "retry_extensions", "gates", "steps", "slices", "validator", "pr_url",
   // #344: audited fix slices opened after merges, bound by their own records rather than the plan.
   "remediations",
+  // #387: audited merges of the PR base into the integration branch; the latest base is the run's branch point.
+  "base_syncs",
   // The operator's answer to a parked run: the one channel into a park, since resume carries no message
   // and every other write is refused there.
   "operator_decision",
@@ -744,7 +746,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 26, "twenty-six: remediation history (#344) is the operator-auditable twenty-sixth field");
+    assert.equal(RUN_KEYS.length, 27, "twenty-seven: base sync history (#387) is the operator-auditable twenty-seventh field");
   });
 
   it("registers exactly the declared families", () => {
@@ -1337,7 +1339,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // 6345 -> 6365: a running run amends slice paths in-band, refused only when another active slice already owns
     // a requested path, and no slice activates onto a path an active slice owns. Path additions were the most
     // common park in baleyg (#67 needed 11, 14 and 8 amendments). Inside #381's 6450 tripwire; nothing trimmed.
-    assert.equal(total, 6365, "a running run amends paths in-band: 6365 production lines");
+    // 6365 -> 6455 for issue #387: `factory sync-base` admits a merge of the PR base into a parked run's integration
+    // branch only as the clean automatic merge of the recorded tip and a commit on the base that strictly advances
+    // the branch point, then moves the branch point and verifies fresh, so a fix that lands on main (baleyg #16's
+    // bootstrap gap) continues the run instead of rebuilding six merged slices. The issue records the operator's
+    // authorization to raise the tripwire 6450 -> 6550.
+    assert.equal(total, 6455, "a parked run syncs its PR base: 6455 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1377,9 +1384,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // publishing-identity guard runs in the CLI rather than depending on the host's shell tool; issue #367
     // authorizes 6000 for a committed max_retries default, landed inside #365's cap; issue #372 authorizes 6100
     // so slice observation runs the repository verify; issue #376 authorizes 6150 so verify runs on a freshly
-    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice; issue #381 authorizes 6450 to persist test output.
+    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice; issue #381 authorizes 6450 to persist test output; issue #387 authorizes 6550 for base sync.
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 6450, `production source is ${total} lines; the issue #381 tripwire is 6450`);
+    assert.ok(total <= 6550, `production source is ${total} lines; the issue #387 tripwire is 6550`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

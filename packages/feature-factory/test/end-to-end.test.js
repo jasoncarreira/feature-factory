@@ -2723,6 +2723,61 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(replay.ok, false);
       assert.equal(replay.stderr.trim(), second.stderr.trim(), "known failure replay must reproduce the refusal without re-execution");
       assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "x", "failed replay must reuse canonical evidence");
+
+      // #387: the fix lands on the PR base and is merged in; the run continues instead of rebuilding its slices.
+      const sync = (t) => factory(p.repo, ["sync-base", RUN, "--merge-commit", git(p.repo, "rev-parse", "HEAD"), "--reason", "verify fix on main", "--now", NOW(t)]);
+      git(p.repo, "checkout", "-q", "main");
+      const fixed = { ...JSON.parse(readFileSync(join(p.repo, ".factory.json"), "utf8")), verify: `node -e "require('fs').appendFileSync('${join(p.operator, "wave-count")}','y')"` };
+      writeFileSync(join(p.repo, ".factory.json"), `${JSON.stringify(fixed, null, 2)}\n`);
+      mkdirSync(join(p.repo, "src", "app", "dependent"), { recursive: true });
+      writeFileSync(join(p.repo, "src", "app", "dependent", "upstream.ts"), "upstream\n");
+      git(p.repo, "add", "-A");
+      git(p.repo, "commit", "-q", "-m", "fix verify on main");
+      const mainTip = git(p.repo, "rev-parse", "HEAD");
+      git(p.repo, "checkout", "-q", "feature");
+      git(p.repo, "merge", "-q", "--no-ff", "--no-edit", "main");
+      const syncMerge = git(p.repo, "rev-parse", "HEAD");
+      const unparked = sync(16);
+      assert.equal(unparked.ok, false, "a base sync is an operator action on a parked run");
+      assert.match(unparked.stderr, /requires a parked run; found 'running'/u);
+      assert.equal(factory(p.repo, ["terminal", RUN, "needs-human", "--reason", "post-merge verify needs a fix from main", "--now", NOW(17)]).ok, true);
+      // Each refused shape moves the branch tip to a merge the sync must not admit, then restores it.
+      const hostile = [
+        [git(p.repo, "commit-tree", `${secondMerge}^{tree}`, "-p", secondMerge, "-p", mainTip, "-m", "hand-edited"), /not the clean automatic merge/u],
+        [git(p.repo, "commit-tree", `${syncMerge}^{tree}`, "-p", syncMerge, "-p", mainTip, "-m", "no-op"), /first parent .* is not the recorded integration tip/u],
+        [git(p.repo, "commit-tree", `${syncMerge}^{tree}`, "-p", secondMerge, "-p", waveBase, "-m", "stale base"), /does not advance the branch point/u],
+        [git(p.repo, "commit-tree", `${syncMerge}^{tree}`, "-p", secondMerge, "-m", "one parent"), /exactly two parents/u],
+        [git(p.repo, "commit-tree", `${syncMerge}^{tree}`, "-p", secondMerge, "-p", git(p.repo, "commit-tree", `${mainTip}^{tree}`, "-p", mainTip, "-m", "off main"), "-m", "off base"), /is not on PR base 'main'/u],
+      ];
+      for (const [commit, pattern] of hostile) {
+        git(p.repo, "update-ref", "refs/heads/feature", commit);
+        git(p.repo, "reset", "-q", "--hard", commit);
+        const refused = sync(18);
+        assert.equal(refused.ok, false, `refused: ${pattern}`);
+        assert.match(refused.stderr, pattern);
+      }
+      // A base commit that only re-applies bytes the branch already has would re-run the failed tree unchanged.
+      const reapplied = git(p.repo, "commit-tree", `${secondMerge}^{tree}`, "-p", mainTip, "-m", "already applied");
+      git(p.repo, "update-ref", "refs/heads/main", reapplied);
+      const sameBytes = git(p.repo, "commit-tree", `${secondMerge}^{tree}`, "-p", secondMerge, "-p", reapplied, "-m", "same bytes");
+      git(p.repo, "update-ref", "refs/heads/feature", sameBytes);
+      git(p.repo, "reset", "-q", "--hard", sameBytes);
+      assert.match(sync(18).stderr, /it changes no bytes/u);
+      git(p.repo, "update-ref", "refs/heads/main", mainTip);
+      git(p.repo, "update-ref", "refs/heads/feature", syncMerge);
+      git(p.repo, "reset", "-q", "--hard", syncMerge);
+      assert.equal(runJson(p.runDir).base_syncs, undefined, "no refused sync is recorded");
+      const synced = sync(19);
+      assert.equal(synced.ok, true, `sync-base: ${synced.stderr}`);
+      assert.deepEqual([synced.out.base_sync.base, synced.out.base_sync.previous_head, synced.out.branch_point, synced.out.overlap],
+        [mainTip, secondMerge, mainTip, ["src/app/dependent/upstream.ts"]]);
+      const syncedEvidence = JSON.parse(readFileSync(join(p.runDir, "evidence", "test-verifier.json"), "utf8"));
+      assert.deepEqual([syncedEvidence.commit, syncedEvidence.base_ref, syncedEvidence.tests.exit, syncedEvidence.review_ready, syncedEvidence.files_changed.includes(".factory.json")],
+        [syncMerge, mainTip, 0, true, false], "verify ran fresh on the merge, and the run's own diff excludes the base's changes");
+      assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "xy", "the merge is verified fresh, once");
+      assert.equal(sync(20).ok, true, "a replay of a green sync succeeds");
+      assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "xy", "a green replay executes nothing");
+      assert.equal(runJson(p.runDir).status, "needs-human", "the park stands until an explicit resume");
     } finally { cleanupProject(p); }
   });
 

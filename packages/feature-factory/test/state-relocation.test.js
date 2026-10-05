@@ -88,7 +88,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "never substitute stale intake branch intent",
     "activate the first seeded slice whose `depends_on` is empty before any other slice\ncan merge",
     "ROOT_SLICE = first parsedRun.slices row whose depends_on is empty",
-    "BRANCH_POINT = ROOT_SLICE.base_ref",
+    "BRANCH_POINT = last parsedRun.base_syncs entry's base, else ROOT_SLICE.base_ref",
     "Neither value comes from status, current\nHEAD, a branch name, or an unpersisted variable",
     "validates it and returns its exact\n`sandbox_path`",
     "status reports `dead_lock: true` only for\na stale lock on a current `running` run",
@@ -264,7 +264,7 @@ test("AC2/AC3/AC8/AC11/AC13/AC14 relocate state and slices while preserving proo
     "recorded feature branch verification must immediately precede each slice operation");
 
   const stepFive = skill.slice(skill.indexOf("## Step 5 — Integrate"), skill.indexOf("## Step 6 — Draft PR"));
-  const rootBaseDefinition = stepFive.indexOf("BRANCH_POINT = ROOT_SLICE.base_ref");
+  const rootBaseDefinition = stepFive.indexOf("BRANCH_POINT = last parsedRun.base_syncs entry's base, else ROOT_SLICE.base_ref");
   const integratedObservation = stepFive.indexOf('factory observe "$R" test-verifier');
   assert.ok(rootBaseDefinition >= 0 && rootBaseDefinition < integratedObservation, "root base_ref must define branch point before integration observation");
   const integrationProbes = [...stepFive.matchAll(/CHECKED_OUT_FEATURE_BRANCH="\$\(git -C "\$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD\)"/gu)]

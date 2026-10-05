@@ -247,6 +247,30 @@ slice at `running@(N+1)`. Only then run the ordinary explicit
 the staged workflow before its final snapshot check. A grant never invokes a specialist, unlocks, resumes,
 approves, merges, or publishes.
 
+### Operator base sync
+
+When a parked run needs a fix that has landed on the PR base, an operator can merge the base into the
+integration branch instead of discarding merged work. One example is a bootstrap gap in `.factory.json`
+that failed a post-merge verify. Use it only between slices and before integration testing starts, and
+only when the incoming range does not change what the story asks for. A range that changes the issue's
+requirements, contracts or decisions is new scope: start a fresh run so the gates read it. In the
+integration worktree, fetch the base and merge it without editing the result:
+
+```sh
+git -C "$INTEGRATION_WORKTREE" fetch origin "$PR_BASE"
+git -C "$INTEGRATION_WORKTREE" merge --no-ff --no-edit "origin/$PR_BASE"
+factory sync-base "$R" --merge-commit "$(git -C "$INTEGRATION_WORKTREE" rev-parse HEAD)" --reason "$SYNC_REASON" --repo "$RUN_REPO"
+```
+
+The CLI refuses a merge that is not the clean automatic merge of the recorded tip and a commit on the PR base
+that strictly advances the branch point, a merge that changes no bytes, and a conflicted or hand-edited
+merge. Resolve a conflict in a slice instead. On success it appends `base_syncs`, moves the run's branch
+point to the synced base, and runs bootstrap and verify fresh on the merge. A failed verify stays recorded
+and refuses, like a post-merge verify. A later sync or a remediation is the way forward. Running the same
+command again replays it. The output's `overlap` lists upstream files that a slice also owns. Give that
+list to the drivers of the pending slices, and to the implementation-validator, because a merged slice was
+reviewed against the old base. Then publish the park snapshot and resume explicitly.
+
 ## The chain
 
 ```
@@ -1378,7 +1402,7 @@ FEATURE_BRANCH = parsedRun.branch
 RECORDED_RUN_WORKTREE = parsedRun.worktree
 INTEGRATION_WORKTREE = physical normalized resolution of RECORDED_RUN_WORKTREE under RUN_REPO
 ROOT_SLICE = first parsedRun.slices row whose depends_on is empty
-BRANCH_POINT = ROOT_SLICE.base_ref
+BRANCH_POINT = last parsedRun.base_syncs entry's base, else ROOT_SLICE.base_ref
 ```
 
 For a relative recorded value, resolve it from `RUN_REPO`; for an absolute value, use it unchanged.
@@ -1386,7 +1410,7 @@ Require the result to exist and remain physically contained by `RUN_REPO`, exact
 does. Refuse a missing, escaping, or symlink-redirected path.
 
 As soon as the deterministic root slice has been activated, require `BRANCH_POINT` to be its immutable
-40-character `base_ref`. Neither value comes from status, current HEAD, a branch name, or an
+40-character `base_ref`, or the `base` of the last `base_syncs` entry once a base sync is recorded. Neither value comes from status, current HEAD, a branch name, or an
 unpersisted variable. Require it before every post-merge or repair observation.
 
 ### Pre-wave post-merge reconciliation
@@ -1443,7 +1467,7 @@ a base-movement-only guard.
 A crash before the canonical evidence write leaves absent or stale evidence and is unknown. A crash
 after the atomic evidence write, whether before or after the command response, reuses the classified
 evidence. Apart from the safe matching-unavailable replay above, a configured command may run again
-only after a committed test-only repair changes HEAD.
+only after a committed test-only repair or a recorded base sync changes HEAD.
 
 Immediately before every pending-slice activation, observation, or merge, verify the selected
 integration worktree is still checked out on the recorded feature branch with the probe shown at each
@@ -2009,14 +2033,14 @@ its immutable `base_ref` to be a 40-character commit SHA, then bind the integrat
 
 ```text
 ROOT_SLICE = first parsedRun.slices row whose depends_on is empty
-BRANCH_POINT = ROOT_SLICE.base_ref
+BRANCH_POINT = last parsedRun.base_syncs entry's base, else ROOT_SLICE.base_ref
 ```
 
 Refuse integration if no such recorded root or base exists. Neither value comes from status, current
 HEAD, a branch name, or an unpersisted variable.
 
 1. `test-verifier` writes and runs acceptance tests for the story's criteria. Observe its result on the
-   **integrated** worktree, with the run's original branch point as `--base`:
+   **integrated** worktree, with the run's branch point as `--base`:
    ```sh
    CHECKED_OUT_FEATURE_BRANCH="$(git -C "$INTEGRATION_WORKTREE" symbolic-ref --quiet --short HEAD)"
    factory observe "$R" test-verifier --worktree "$INTEGRATION_WORKTREE" --base "$BRANCH_POINT" \

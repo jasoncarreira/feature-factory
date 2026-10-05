@@ -444,6 +444,8 @@ describe("attack 11 — a concurrent writer changes run.json mid-transition", ()
   });
 });
 
+const BASE_SYNC = { merge_commit: "a".repeat(40), previous_head: "b".repeat(40), base: "c".repeat(40), previous_base: "d".repeat(40), reason: "fix on main", at: LATER };
+
 describe("family contracts refuse transitions the schema alone would allow", () => {
   const cases = [
     ["run identity is immutable", (state) => ({ ...state, run_id: "app-2", updated_at: LATER }), /run_id is immutable/u],
@@ -463,6 +465,8 @@ describe("family contracts refuse transitions the schema alone would allow", () 
     // same command — it makes the recorded intent durable.
     ["mode cannot change after init", (state) => ({ ...state, mode: "autonomous", updated_at: LATER }), /envelope\.mode is immutable/u],
     ["bootstrap evidence changes only during bootstrap resume", (state) => ({ ...state, bootstrap_exit: 0, updated_at: LATER }), /may change only during bootstrap resume/u, { bootstrap_command: "npm ci", bootstrap_exit: 7 }],
+    // #387: a base sync moves the run's branch point, so only the parked-run sync-base transition may append one.
+    ["base syncs change only by sync-base on a parked run", (state) => ({ ...state, updated_at: LATER, base_syncs: [BASE_SYNC] }), /base_syncs changes only by sync-base on a parked run/u],
     ["updated_at cannot move backwards", (state) => ({ ...state, updated_at: "2026-07-29T00:00:00.000Z" }), /cannot move backwards/u],
     ["a gate cannot open already approved", (state) => ({ ...state, updated_at: LATER, gates: { ...state.gates, brief: { status: "approved", at: LATER, artifact: null } } }), /must open as pending/u],
     ["a decided gate cannot be re-decided", (state) => ({ ...state, updated_at: LATER, gates: { story: { status: "approved", at: LATER, artifact: "artifacts/story.md" } } }), null],
@@ -523,6 +527,9 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       ["resume changes envelope", "resume-needs-human", (state) => ({ ...state, updated_at: LATER, status: "running", branch: "other" }), /cannot change envelope\.branch/u],
       ["resume changes progress", "resume-needs-human", (state) => ({ ...state, updated_at: LATER, status: "running", gates: {} }), /cannot change run\.gates/u],
       ["resume does not advance time", "resume-needs-human", (state) => ({ ...state, status: "running" }), /must move updated_at forwards/u],
+      ["sync-base changes envelope", "sync-base", (state) => ({ ...state, updated_at: LATER, base_syncs: [BASE_SYNC], max_retries: 9 }), /sync-base cannot change envelope\.max_retries/u],
+      ["sync-base appends nothing", "sync-base", (state) => ({ ...state, updated_at: LATER }), /must append exactly one base sync record/u],
+      ["sync-base changes progress", "sync-base", (state) => ({ ...state, updated_at: LATER, base_syncs: [BASE_SYNC], gates: {} }), /sync-base cannot change run\.gates/u],
     ]) {
       const parked = fixture(`parked-${label.replaceAll(" ", "-")}`, { status: "needs-human", terminal_result: result });
       try {

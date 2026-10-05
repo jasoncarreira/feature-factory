@@ -1641,7 +1641,7 @@ const CLAIMS = [
         "do not replay again from that driver invocation after the CLI has\nexhausted its two attempts",
         "Unsafe verification evidence parks top-level needs-human; explicit resume must replay the existing reconciliation path.",
         "merged-slice evidence and review\nremain preserved",
-        "Apart from the safe matching-unavailable replay above, a configured command may run again\nonly after a committed test-only repair changes HEAD",
+        "Apart from the safe matching-unavailable replay above, a configured command may run again\nonly after a committed test-only repair or a recorded base sync changes HEAD",
         "include every attempt under\n`## Post-merge test-only repairs`",
       ]) assert.ok(prose.includes(postMergeClaim), `post-merge policy is missing: ${postMergeClaim}`);
       const retryExtensionClaims = [
