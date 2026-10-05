@@ -1339,12 +1339,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // 6345 -> 6365: a running run amends slice paths in-band, refused only when another active slice already owns
     // a requested path, and no slice activates onto a path an active slice owns. Path additions were the most
     // common park in baleyg (#67 needed 11, 14 and 8 amendments). Inside #381's 6450 tripwire; nothing trimmed.
-    // 6365 -> 6455 for issue #387: `factory sync-base` admits a merge of the PR base into a parked run's integration
+    // 6365 -> 6459 for issue #387: `factory sync-base` admits a merge of the PR base into a parked run's integration
     // branch only as the clean automatic merge of the recorded tip and a commit on the base that strictly advances
     // the branch point, then moves the branch point and verifies fresh, so a fix that lands on main (baleyg #16's
     // bootstrap gap) continues the run instead of rebuilding six merged slices. The issue records the operator's
     // authorization to raise the tripwire 6450 -> 6550.
-    assert.equal(total, 6455, "a parked run syncs its PR base: 6455 production lines");
+    assert.equal(total, 6459, "a parked run syncs its PR base: 6459 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

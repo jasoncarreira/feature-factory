@@ -2766,7 +2766,11 @@ describe("end to end — a merge is refused through the real CLI", () => {
       git(p.repo, "update-ref", "refs/heads/main", mainTip);
       git(p.repo, "update-ref", "refs/heads/feature", syncMerge);
       git(p.repo, "reset", "-q", "--hard", syncMerge);
+      writeFileSync(join(p.repo, "stray.txt"), "uncommitted\n");
+      assert.match(sync(18).stderr, /worktree has uncommitted changes/u, "a dirty integration worktree is refused before admission");
+      rmSync(join(p.repo, "stray.txt"));
       assert.equal(runJson(p.runDir).base_syncs, undefined, "no refused sync is recorded");
+      const failedBytes = readFileSync(join(p.runDir, "evidence", "test-verifier.json"), "utf8");
       const synced = sync(19);
       assert.equal(synced.ok, true, `sync-base: ${synced.stderr}`);
       assert.deepEqual([synced.out.base_sync.base, synced.out.base_sync.previous_head, synced.out.branch_point, synced.out.overlap],
@@ -2777,6 +2781,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "xy", "the merge is verified fresh, once");
       assert.equal(sync(20).ok, true, "a replay of a green sync succeeds");
       assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "xy", "a green replay executes nothing");
+      // A crash after the record and before the verify leaves the earlier head's evidence; the replay verifies.
+      writeFileSync(join(p.runDir, "evidence", "test-verifier.json"), failedBytes);
+      assert.equal(sync(21).ok, true, "a replay after the crash window verifies the merge");
+      assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "xyy");
+      writeFileSync(join(p.runDir, "evidence", "test-verifier.json"), "{ malformed");
+      assert.match(sync(22).stderr, /outcome is unknown/u, "unreadable evidence is unknown and never re-executes");
+      assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "xyy");
       assert.equal(runJson(p.runDir).status, "needs-human", "the park stands until an explicit resume");
     } finally { cleanupProject(p); }
   });

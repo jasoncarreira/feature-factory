@@ -931,6 +931,8 @@ const HANDLERS = {
     const integration = requireIntegrationWorktree(repo, current, current.worktree), wt = integration.worktree;
     const refuse = (reason) => { throw new CliError(`factory sync-base refused merge ${merge}: ${reason}`); };
     if (integration.head !== merge) refuse(`it is not the integration head ${integration.head}`);
+    const cleanliness = observeCleanliness(wt);
+    if (!cleanliness.clean) refuse(cleanliness.reason);
     const recorded = (current.base_syncs ?? []).some((entry) => entry.merge_commit === merge);
     if (!recorded) {
       if (current.slices.some((slice) => ["running", "review"].includes(slice.status))) refuse("a slice is active; sync between slices");
@@ -963,8 +965,10 @@ const HANDLERS = {
       throw error;
     }
     let classified = verify && classifyRepositoryVerifyEvidence(runDir, { runId, run, integration, verifyCommand: verify.command });
-    // A crash between the record and the verify leaves evidence for an earlier head, which never judged this merge.
-    if (classified?.kind === "unknown" && classified.evidence?.commit !== merge) classified = { kind: "unavailable" };
+    // A crash between the record and the verify leaves no evidence, or readable evidence for an earlier head; neither
+    // judged this merge. Unreadable evidence stays unknown and never re-executes.
+    const stale = classified?.evidence ? classified.evidence.commit !== merge : !existsSync(join(runDir, evidenceRef("test-verifier")));
+    if (classified?.kind === "unknown" && stale) classified = { kind: "unavailable" };
     if (classified?.kind === "failed") throw new CliError(repositoryVerifyRefusal(merge, classified.evidence));
     if (classified?.kind === "unknown") throw new CliError(repositoryVerifyUnknownRefusal(merge));
     if (classified?.kind === "unavailable") {
