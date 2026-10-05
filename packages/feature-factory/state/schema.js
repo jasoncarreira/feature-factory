@@ -33,6 +33,8 @@ export const RUN_KEYS = Object.freeze([
   "bootstrap_command", "bootstrap_exit",
   // Audited fix slices opened after merges by `factory remediate` (#344). Absent in older manifests.
   "remediations",
+  // Audited merges of the PR base into the integration branch by `factory sync-base` (#387). Absent in older manifests.
+  "base_syncs",
 ]);
 
 export const RUN_STATUSES = Object.freeze(["running", "completed", "blocked", "partial", "needs-human"]);
@@ -73,6 +75,7 @@ export const SLICE_KEYS = Object.freeze([
   "paths", "path_amendments", "test_plan", "base_ref", "evidence_ref", "review_ref", "merge_commit", "extra_attempts",
 ]);
 const PATH_AMENDMENT_KEYS = Object.freeze(["added_paths", "reason", "session", "at"]);
+export const BASE_SYNC_KEYS = Object.freeze(["merge_commit", "previous_head", "base", "previous_base", "reason", "at"]);
 export const REMEDIATION_KEYS = Object.freeze(["slice_id", "finding_ref", "finding_archive", "finding_sha256", "paths", "test_plan", "reason", "session", "at"]);
 // Instruction-level bound, enforced so a fix that finds another defect cannot loop without a human (#344).
 export const REMEDIATION_LIMIT = 2;
@@ -159,6 +162,7 @@ export function validateRun(run) {
 
   retryExtensions(errors, run);
   remediations(errors, run);
+  baseSyncs(errors, run);
   gates(errors, run.gates);
   steps(errors, run.steps);
   slices(errors, run.slices, run);
@@ -188,6 +192,21 @@ function remediations(errors, run) {
     if (!slice || slice.id !== entry.slice_id || !isDeepStrictEqual(slice.paths, entry.paths) || !isDeepStrictEqual(slice.test_plan, entry.test_plan)) {
       errors.push({ path, message: "does not match its trailing remediation slice" });
     }
+  });
+}
+
+// Each sync moves the branch point forward from the one before it, so the chain is the run's base history.
+function baseSyncs(errors, run) {
+  const value = run.base_syncs;
+  if (value === undefined) return;
+  if (!Array.isArray(value)) return void errors.push({ path: "run.base_syncs", message: "must be an array" });
+  value.forEach((entry, index) => {
+    const path = `run.base_syncs[${index}]`;
+    if (!object(errors, entry, path, BASE_SYNC_KEYS)) return;
+    for (const key of ["merge_commit", "previous_head", "base", "previous_base"]) pattern(errors, entry, key, SHA, path);
+    required(errors, entry, "reason", path);
+    pattern(errors, entry, "at", ISO, path);
+    if (index > 0 && entry.previous_base !== value[index - 1].base) errors.push({ path: `${path}.previous_base`, message: "must be the prior sync's base" });
   });
 }
 

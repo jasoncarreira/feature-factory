@@ -3,6 +3,26 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.13
+
+A patch release that lets a parked run take in a fix from its PR base and continue (#387).
+
+- New `factory sync-base <run> --merge-commit <sha> --reason <text>`. The operator merges the PR base into the
+  integration branch of a parked run, between slices and before integration testing starts. The command admits
+  that merge only when it has exactly two parents, the recorded integration tip and a commit on the PR base that
+  strictly advances the run's branch point. Its tree must equal the clean automatic `git merge-tree` result, and
+  it must change some bytes. A hand-edited merge, a conflict resolution, a stale or off-base second parent and a
+  no-op merge are all refused.
+- On success the command appends an audit record to the new `base_syncs`, and the run's branch point becomes the
+  synced base, so the run's own diff and the PR diff exclude the base's changes. It then runs bootstrap and verify
+  fresh on the merge. A failed verify stays recorded and refuses. Running the same command again replays it, and
+  a crash between the record and the verify reruns the verify. The output's `overlap` lists upstream files that
+  a slice also owns, for the pending slices and the validator.
+- baleyg #16 is the motivating case: a bootstrap gap in `.factory.json` failed a post-merge verify after six
+  merged slices, and the fix belongs on main.
+
+All three package manifests and both exact adapter pins move together to 0.10.13.
+
 ## 0.10.12
 
 A patch release that adds a bounded concept and name drift check to review (#385).

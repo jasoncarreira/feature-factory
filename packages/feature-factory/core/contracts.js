@@ -58,6 +58,7 @@ const envelope = contract({
     max_retries: state.max_retries,
     retry_extensions: state.retry_extensions ?? [],
     remediations: state.remediations ?? [],
+    base_syncs: state.base_syncs ?? [],
     bootstrap_command: state.bootstrap_command,
     bootstrap_exit: state.bootstrap_exit,
   }),
@@ -119,6 +120,15 @@ const envelope = contract({
         if (!appendsOneRemediation(before, after)) throw new Error("remediate must append exactly one remediation record");
         return;
       }
+      // Enforcement (#387): a base sync on a parked run appends one audit record; the park stands until resume.
+      if (mode === "sync-base") {
+        if (after.status !== "needs-human" || !isDeepStrictEqual(after.terminal_result, before.terminal_result)) throw new Error("sync-base must preserve the parked envelope and terminal_result");
+        if (Date.parse(after.updated_at) <= Date.parse(before.updated_at)) throw new Error("sync-base must move updated_at forwards");
+        for (const key of Object.keys(before).filter((key) => !["updated_at", "base_syncs"].includes(key))) if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`sync-base cannot change envelope.${key}`);
+        if (after.base_syncs.length !== before.base_syncs.length + 1 || !isDeepStrictEqual(after.base_syncs.slice(0, -1), before.base_syncs)) throw new Error("sync-base must append exactly one base sync record");
+        for (const key of Object.keys(current).filter((key) => !Object.hasOwn(before, key))) if (!isDeepStrictEqual(current[key], candidate[key])) throw new Error(`sync-base cannot change run.${key}`);
+        return;
+      }
       if (!["resume-needs-human", "record-bootstrap"].includes(mode)) throw new Error("a needs-human run must be resumed before any transition");
       const targetStatus = mode === "resume-needs-human" ? "running" : "needs-human";
       if (after.status !== targetStatus) throw new Error(`${mode} must change status to ${targetStatus}`);
@@ -151,6 +161,7 @@ const envelope = contract({
       if (before[key] !== after[key]) throw new Error(`envelope.${key} is immutable`);
     }
     if (!isDeepStrictEqual(before.retry_extensions, after.retry_extensions)) throw new Error("envelope.retry_extensions is immutable outside grant-retry");
+    if (!isDeepStrictEqual(before.base_syncs, after.base_syncs)) throw new Error("envelope.base_syncs changes only by sync-base on a parked run");
     if (mode === "remediate" ? !appendsOneRemediation(before, after) : !isDeepStrictEqual(before.remediations, after.remediations)) {
       throw new Error("envelope.remediations changes only by one remediate append");
     }
