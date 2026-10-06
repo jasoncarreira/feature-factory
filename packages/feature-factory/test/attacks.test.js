@@ -115,6 +115,15 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
       mutate(run);
       assert.throws(() => validateRun(run), pattern);
     }
+    // A malformed amendment history on a remediation slice is a path-qualified SchemaError, never a raw TypeError.
+    const record = { slice_id: "remediation-1", finding_ref: "reviews/test-verifier.json", finding_archive: "artifacts/remediation-1-finding.json",
+      finding_sha256: `sha256:${"a".repeat(64)}`, paths: ["src/"], test_plan: ["t"], reason: "r", session: "s", at: LATER };
+    for (const history of [{}, [null]]) {
+      const fix = { id: "remediation-1", stack: "backend", depends_on: [], status: "pending", worktree: null, branch: null, attempts: 1,
+        extra_attempts: 0, paths: ["src/"], path_amendments: history, test_plan: ["t"], base_ref: null, evidence_ref: null, review_ref: null, merge_commit: null };
+      assert.throws(() => validateRun(baseRun({ slices: [fix], remediations: [record] })),
+        (error) => error.name === "SchemaError" && /path_amendments/u.test(error.message), JSON.stringify(history));
+    }
   });
 
   it("requires a slice base_ref from the moment it leaves pending", () => {
