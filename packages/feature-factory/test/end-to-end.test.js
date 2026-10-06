@@ -2884,6 +2884,12 @@ describe("end to end — a merge is refused through the real CLI", () => {
           ["remediation-1", "pending", ["be-thing"], [PASSING_TEST_COMMAND], ["src/app/thing.ts"], "dispatch-slice:remediation-1"]);
         assert.deepEqual([run.remediations.length, run.remediations[0].finding_ref, run.remediations[0].slice_id], [1, finding, "remediation-1"]);
         const archived = readFileSync(join(r.runDir, run.remediations[0].finding_archive));
+        // A remediation slice is amended like any other; its record keeps the paths it opened with.
+        const amended = factory(r.repo, ["amend-paths", RUN, "remediation-1", "--add", "src/app/extra.ts", "--reason", "fix needs a helper",
+          "--session", "driver", "--now", "2026-07-30T12:05:30Z"]);
+        assert.equal(amended.ok, true, amended.stderr);
+        assert.deepEqual([runJson(r.runDir).slices.at(-1).paths, runJson(r.runDir).remediations[0].paths, factory(r.repo, ["status", RUN]).out.valid],
+          [["src/app/thing.ts", "src/app/extra.ts"], ["src/app/thing.ts"], true]);
         assert.deepEqual(archived, readFileSync(join(r.runDir, finding)), "the finding's exact bytes are archived with the remediation");
         // The fix is an ordinary slice: built, observed with the repository verify, reviewed, merged. Nothing merged
         // while it was in flight, so its merge reuses that verify rather than running the suite twice.
@@ -2929,9 +2935,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
         assert.throws(() => assertRemediationBindings(r.runDir, runJson(r.runDir)), /finding archive does not match its recorded digest/u);
         // A record that no longer matches its slice is an invalid manifest, not a quiet amendment.
         const tampered = runJson(r.runDir);
-        tampered.remediations[0].paths = ["src/"];
-        writeFileSync(join(r.runDir, "run.json"), `${JSON.stringify(tampered, null, 2)}\n`);
-        assert.match(factory(r.repo, ["status", RUN]).out.error ?? "", /does not match its trailing remediation slice/u);
+        for (const tamper of [(run) => { run.remediations[0].paths = ["src/"]; },
+          (run) => { run.slices.find((slice) => slice.id === "remediation-1").paths.push("src/unaudited.ts"); }]) {
+          const forged = structuredClone(tampered);
+          tamper(forged);
+          writeFileSync(join(r.runDir, "run.json"), `${JSON.stringify(forged, null, 2)}\n`);
+          assert.match(factory(r.repo, ["status", RUN]).out.error ?? "", /does not match its trailing remediation slice/u);
+        }
       } finally { cleanupProject(r); }
     }
     // Review of #378: with merged and ordinary pending slices together, the remediation dispatches first -- it fixes

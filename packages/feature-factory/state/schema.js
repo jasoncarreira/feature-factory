@@ -188,8 +188,9 @@ function remediations(errors, run) {
     if (entry.finding_archive !== `artifacts/remediation-${index + 1}-finding.json`) errors.push({ path: `${path}.finding_archive`, message: "must name its own archived finding" });
     pattern(errors, entry, "finding_sha256", DIGEST, path);
     pattern(errors, entry, "at", ISO, path);
-    const slice = slices[first + index];
-    if (!slice || slice.id !== entry.slice_id || !isDeepStrictEqual(slice.paths, entry.paths) || !isDeepStrictEqual(slice.test_plan, entry.test_plan)) {
+    // The record keeps the paths the remediation opened with; the slice may grow only by its audited amendments.
+    const slice = slices[first + index], amended = [...(entry.paths ?? []), ...(slice?.path_amendments ?? []).flatMap((item) => item.added_paths ?? [])];
+    if (!slice || slice.id !== entry.slice_id || !isDeepStrictEqual(slice.paths, amended) || !isDeepStrictEqual(slice.test_plan, entry.test_plan)) {
       errors.push({ path, message: "does not match its trailing remediation slice" });
     }
   });
