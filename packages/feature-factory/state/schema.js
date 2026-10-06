@@ -191,7 +191,8 @@ function remediations(errors, run) {
     // The record keeps the paths the remediation opened with; the slice may grow only by its audited amendments.
     // Shapes are guarded here because this runs before slices() reports a malformed amendment history.
     const slice = slices[first + index], history = Array.isArray(slice?.path_amendments) ? slice.path_amendments : [];
-    const amended = [...(entry.paths ?? []), ...history.flatMap((item) => (Array.isArray(item?.added_paths) ? item.added_paths : []))];
+    if (!Array.isArray(entry.paths)) return void errors.push({ path: `${path}.paths`, message: "must be an array" });
+    const amended = [...entry.paths, ...history.flatMap((item) => (Array.isArray(item?.added_paths) ? item.added_paths : []))];
     if (!slice || slice.id !== entry.slice_id || !isDeepStrictEqual(slice.paths, amended) || !isDeepStrictEqual(slice.test_plan, entry.test_plan)) {
       errors.push({ path, message: "does not match its trailing remediation slice" });
     }
