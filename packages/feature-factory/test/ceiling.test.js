@@ -1344,7 +1344,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // the branch point, then moves the branch point and verifies fresh, so a fix that lands on main (baleyg #16's
     // bootstrap gap) continues the run instead of rebuilding six merged slices. The issue records the operator's
     // authorization to raise the tripwire 6450 -> 6550.
-    assert.equal(total, 6459, "a parked run syncs its PR base: 6459 production lines");
+    // 6459 -> 6463: a remediation slice validates as its record's paths plus its audited amendments, so
+    // amend-paths can extend one (baleyg #16's remediation-1). Inside #387's 6550 tripwire; nothing trimmed.
+    assert.equal(total, 6463, "a remediation slice can be amended: 6463 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

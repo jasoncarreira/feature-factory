@@ -3,6 +3,18 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.14
+
+A patch release that lets `factory amend-paths` amend a remediation slice.
+
+- Before this release, adding a path to a remediation slice always failed validation with "does not match its
+  trailing remediation slice", because the schema required the slice's paths to equal the paths in the
+  remediation record exactly. The record now keeps the paths the remediation opened with, and the slice must equal
+  those paths plus its audited amendments. A path added to the slice without an amendment record, or a rewritten
+  record, is still an invalid manifest. Found by baleyg run 16 (remediation-1).
+
+All three package manifests and both exact adapter pins move together to 0.10.14.
+
 ## 0.10.13
 
 A patch release that lets a parked run take in a fix from its PR base and continue (#387).
