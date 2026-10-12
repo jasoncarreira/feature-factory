@@ -8,7 +8,7 @@ version across the workspace, with each adapter pinning the exact factory versio
 A patch release that tells autonomous drivers there is no per-invocation budget (#390).
 
 - Autonomous mode now states that there is no per-invocation budget, and tells the driver never to park for
-  self-assessed capacity, context or elapsed time. Run state lives in `run.json`, so compaction loses nothing, and
+  self-assessed capacity, context or elapsed time. The run's recorded state survives compaction, and
   a capacity park costs a full relaunch. A driver had parked mimir's chainlink-1947 run for "orchestration
   invocation capacity" after every few merged slices, across nine launches, without hitting any limit.
   Instruction only.
