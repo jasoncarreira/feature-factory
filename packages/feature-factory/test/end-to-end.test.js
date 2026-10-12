@@ -2788,6 +2788,37 @@ describe("end to end — a merge is refused through the real CLI", () => {
       writeFileSync(join(p.runDir, "evidence", "test-verifier.json"), "{ malformed");
       assert.match(sync(22).stderr, /outcome is unknown/u, "unreadable evidence is unknown and never re-executes");
       assert.equal(readFileSync(join(p.operator, "wave-count"), "utf8"), "xyy");
+
+      // A conflicted sync is admitted only with an approving review of its resolution, bound to the merge commit.
+      git(p.repo, "checkout", "-q", "main");
+      mkdirSync(join(p.repo, "src", "app", "one"), { recursive: true });
+      writeFileSync(join(p.repo, "src", "app", "one", "work.ts"), "main's one\n");
+      git(p.repo, "add", "-A");
+      git(p.repo, "commit", "-q", "-m", "main edits one");
+      git(p.repo, "checkout", "-q", "feature");
+      spawnSync("git", ["merge", "-q", "--no-ff", "--no-edit", "main"], { cwd: p.repo });
+      writeFileSync(join(p.repo, "src", "app", "one", "work.ts"), "be-one, reconciled with main\n");
+      git(p.repo, "add", "-A");
+      git(p.repo, "commit", "-q", "--no-edit");
+      const resolvedMerge = git(p.repo, "rev-parse", "HEAD");
+      const reviewed = (t, ref) => factory(p.repo, ["sync-base", RUN, "--merge-commit", resolvedMerge, "--reason", "conflicted fix on main",
+        ...(ref ? ["--review-ref", ref] : []), "--now", NOW(t)]);
+      assert.match(reviewed(23).stderr, /not the clean automatic merge of its parents; review its resolution and pass --review-ref/u);
+      assert.match(reviewed(23, writeReview(p.runDir, "base-sync-1", resolvedMerge)).stderr, /approved 'base-sync-1', not 'base-sync-2'/u);
+      assert.match(reviewed(23, writeReview(p.runDir, "base-sync-2", resolvedMerge, { verdict: "REJECT" })).stderr, /verdict is REJECT, not an approval/u);
+      assert.match(reviewed(23, writeReview(p.runDir, "base-sync-2", secondMerge)).stderr, /approved .* but the head is/u);
+      // A resolution may not touch the control plane, even with a review.
+      writeFileSync(join(p.repo, ".factory.json"), readFileSync(join(p.repo, ".factory.json"), "utf8").replace("\n}", ',\n  "pr_draft": true\n}'));
+      git(p.repo, "commit", "-q", "-a", "--amend", "--no-edit");
+      const privilegedMerge = git(p.repo, "rev-parse", "HEAD");
+      assert.match(factory(p.repo, ["sync-base", RUN, "--merge-commit", privilegedMerge, "--reason", "r", "--review-ref",
+        writeReview(p.runDir, "base-sync-2", privilegedMerge), "--now", NOW(23)]).stderr, /resolution changes privileged control-plane paths: \.factory\.json/u);
+      git(p.repo, "reset", "-q", "--hard", resolvedMerge);
+      assert.equal(runJson(p.runDir).base_syncs.length, 1, "no refused conflicted sync is recorded");
+      const admitted = reviewed(24, writeReview(p.runDir, "base-sync-2", resolvedMerge));
+      assert.equal(admitted.ok, true, `reviewed conflicted sync: ${admitted.stderr}`);
+      assert.deepEqual([admitted.out.base_sync.review_ref, readFileSync(join(p.operator, "wave-count"), "utf8")],
+        ["reviews/base-sync-2.json", "xyyy"], "the resolution is recorded with its review and verified fresh");
       assert.equal(runJson(p.runDir).status, "needs-human", "the park stands until an explicit resume");
     } finally { cleanupProject(p); }
   });

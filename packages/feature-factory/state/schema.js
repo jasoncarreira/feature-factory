@@ -75,7 +75,7 @@ export const SLICE_KEYS = Object.freeze([
   "paths", "path_amendments", "test_plan", "base_ref", "evidence_ref", "review_ref", "merge_commit", "extra_attempts",
 ]);
 const PATH_AMENDMENT_KEYS = Object.freeze(["added_paths", "reason", "session", "at"]);
-export const BASE_SYNC_KEYS = Object.freeze(["merge_commit", "previous_head", "base", "previous_base", "reason", "at"]);
+export const BASE_SYNC_KEYS = Object.freeze(["merge_commit", "previous_head", "base", "previous_base", "review_ref", "reason", "at"]);
 export const REMEDIATION_KEYS = Object.freeze(["slice_id", "finding_ref", "finding_archive", "finding_sha256", "paths", "test_plan", "reason", "session", "at"]);
 // Instruction-level bound, enforced so a fix that finds another defect cannot loop without a human (#344).
 export const REMEDIATION_LIMIT = 2;
@@ -210,6 +210,7 @@ function baseSyncs(errors, run) {
     for (const key of ["merge_commit", "previous_head", "base", "previous_base"]) pattern(errors, entry, key, SHA, path);
     required(errors, entry, "reason", path);
     pattern(errors, entry, "at", ISO, path);
+    if (entry.review_ref !== undefined && entry.review_ref !== null && (typeof entry.review_ref !== "string" || !entry.review_ref)) errors.push({ path: `${path}.review_ref`, message: "must be null or a non-empty string" });
     if (index > 0 && entry.previous_base !== value[index - 1].base) errors.push({ path: `${path}.previous_base`, message: "must be the prior sync's base" });
   });
 }
