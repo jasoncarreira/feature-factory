@@ -953,7 +953,10 @@ const HANDLERS = {
       // approving review of that resolution (its remerge-diff) bound to this merge commit.
       if (!automatic.ok || automaticTree !== tree) {
         if (!flags.reviewRef) refuse("its tree is not the clean automatic merge of its parents; review its resolution and pass --review-ref");
-        const privileged = privilegedPaths(git(wt, ["diff", "--name-only", "-z", automaticTree, tree]).stdout.split("\0").filter(Boolean));
+        // --no-renames: a detected rename reports only its destination, which would hide a moved control-plane file.
+        const resolution = git(wt, ["diff", "--no-renames", "--name-only", "-z", automaticTree, tree]);
+        if (!resolution.ok) refuse("its resolution could not be observed");
+        const privileged = privilegedPaths(resolution.stdout.split("\0").filter(Boolean));
         if (privileged.length) refuse(`its resolution changes privileged control-plane paths: ${privileged.join(", ")}`);
         try {
           assertReviewBinding({ review: readReview(runDir, flags.reviewRef), ref: flags.reviewRef, observedHead: merge,

@@ -2813,6 +2813,13 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const privilegedMerge = git(p.repo, "rev-parse", "HEAD");
       assert.match(factory(p.repo, ["sync-base", RUN, "--merge-commit", privilegedMerge, "--reason", "r", "--review-ref",
         writeReview(p.runDir, "base-sync-2", privilegedMerge), "--now", NOW(23)]).stderr, /resolution changes privileged control-plane paths: \.factory\.json/u);
+      // Moving a control-plane file away is a change to it too, though rename detection would name only the destination.
+      git(p.repo, "reset", "-q", "--hard", resolvedMerge);
+      git(p.repo, "mv", ".factory.json", "factory-config.json");
+      git(p.repo, "commit", "-q", "--amend", "--no-edit");
+      const renamedMerge = git(p.repo, "rev-parse", "HEAD");
+      assert.match(factory(p.repo, ["sync-base", RUN, "--merge-commit", renamedMerge, "--reason", "r", "--review-ref",
+        writeReview(p.runDir, "base-sync-2", renamedMerge), "--now", NOW(23)]).stderr, /resolution changes privileged control-plane paths: \.factory\.json/u);
       git(p.repo, "reset", "-q", "--hard", resolvedMerge);
       assert.equal(runJson(p.runDir).base_syncs.length, 1, "no refused conflicted sync is recorded");
       const admitted = reviewed(24, writeReview(p.runDir, "base-sync-2", resolvedMerge));

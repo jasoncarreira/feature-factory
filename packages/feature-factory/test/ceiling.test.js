@@ -1352,10 +1352,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // authorization to raise the tripwire 6450 -> 6550.
     // 6459 -> 6463: a remediation slice validates as its record's paths plus its audited amendments, so
     // amend-paths can extend one (baleyg #16's remediation-1). Inside #387's 6550 tripwire; nothing trimmed.
-    // 6463 -> 6477: a conflicted base sync is admitted with an approving review of its resolution (the remerge-diff),
+    // 6463 -> 6480: a conflicted base sync is admitted with an approving review of its resolution (the remerge-diff),
     // bound to the merge commit, and never when the resolution touches the control plane (trellis #122: eleven
     // conflicts with main's test-reliability fixes). Inside #387's 6550 tripwire; nothing trimmed.
-    assert.equal(total, 6477, "a conflicted base sync is admitted with a reviewed resolution: 6477 production lines");
+    assert.equal(total, 6480, "a conflicted base sync is admitted with a reviewed resolution: 6480 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
