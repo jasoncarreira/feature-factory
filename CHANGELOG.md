@@ -3,6 +3,18 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.15
+
+A patch release that tells autonomous drivers there is no per-invocation budget (#390).
+
+- Autonomous mode now states that there is no per-invocation budget, and tells the driver never to park for
+  self-assessed capacity, context or elapsed time. Run state lives in `run.json`, so compaction loses nothing, and
+  a capacity park costs a full relaunch. A driver had parked mimir's chainlink-1947 run for "orchestration
+  invocation capacity" after every few merged slices, across nine launches, without hitting any limit.
+  Instruction only.
+
+All three package manifests and both exact adapter pins move together to 0.10.15.
+
 ## 0.10.14
 
 A patch release that lets `factory amend-paths` amend a remediation slice.
