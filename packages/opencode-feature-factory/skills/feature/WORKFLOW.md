@@ -517,6 +517,10 @@ fresh run; an existing run follows these rules solely because its manifest alrea
 - An autonomous failed gate parks top-level needs-human; fix the durable gate cause before explicit factory resume.
 - After an autonomous needs-human gate stop, explicitly resume only after the existing pre-lock and ownership checks pass.
   Do not approve to keep moving.
+- **There is no per-invocation budget.** Continue until the run completes or a condition this workflow names stops it.
+  Never park for self-assessed capacity, context, or elapsed time: the run's state lives in `run.json` and its
+  records, so a context compaction or a long session loses nothing. A park for capacity costs a full relaunch
+  that must re-qualify the run before it can continue, which is slower than continuing.
 - **Gate 1 (story)**: approve only if the story has clear acceptance criteria and scope, with no
   unresolved product, UX, security, or external-policy decision.
 - **Gate 2 (brief + plan)**: approve only after `work-reviewer` approves both spec and decomposition,
