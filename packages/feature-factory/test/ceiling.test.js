@@ -159,6 +159,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // merged slices (mimir chainlink-1947, nine launches); nothing had limited it.
       "- **There is no per-invocation budget.** Continue until the run completes or a condition this workflow names stops it.",
       "Never park for self-assessed capacity, context, or elapsed time: the run's state lives in `run.json` and its",
+      "from those records, not from memory. A park for capacity costs a full relaunch that must re-qualify the run",
 
       // Instruction only: which command publishes is an environment property, like the identity beside it.
       // Each selection branch is pinned separately, because review caught the first attempt stating
