@@ -3,6 +3,22 @@
 Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.10.16
+
+A patch release that lets a base sync with conflicts proceed once its resolution is reviewed (#392).
+
+- `factory sync-base --review-ref <ref>` admits a merge of the PR base that departs from git's automatic merge,
+  conflicted or hand-edited, only with an approving review whose subject is `base-sync-<n>` and which is bound to
+  the merge commit. The reviewer reads `git show --remerge-diff <merge>`, which is the resolution and nothing else.
+  A resolution that changes or renames a control-plane path such as `.factory.json` is refused even with a
+  review. Every existing sync check still applies, and a conflicted merge without a review is refused as
+  before. Found on trellis #122: eleven conflicts with main's test-reliability fixes.
+- A fresh sync now always verifies, even when the prior test-verifier evidence is unreadable.
+- Autonomous-mode wording (#391): the run's recorded state survives a context compaction, and the driver
+  reconstructs context from those records.
+
+All three package manifests and both exact adapter pins move together to 0.10.16.
+
 ## 0.10.15
 
 A patch release that tells autonomous drivers there is no per-invocation budget (#390).

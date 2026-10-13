@@ -63,7 +63,7 @@ export const COMMANDS = Object.freeze({
   "effective-push": Object.freeze([]),
   identity: Object.freeze(["--repo", "--json"]),
   remediate: Object.freeze(["--repo", "--finding", "--path", "--reason", "--session", "--now", "--json"]),
-  "sync-base": Object.freeze(["--repo", "--merge-commit", "--reason", "--now", "--json"]),
+  "sync-base": Object.freeze(["--repo", "--merge-commit", "--review-ref", "--reason", "--now", "--json"]),
 });
 
 const BOOLEAN_FLAGS = new Set(["--json", "--repository-verify"]);
@@ -947,9 +947,25 @@ const HANDLERS = {
       if (base === previousBase || observeAncestry(wt, previousBase, base) !== "ancestor") refuse(`second parent ${base} does not advance the branch point ${previousBase}`);
       if (![`refs/remotes/origin/${current.pr_base}`, `refs/heads/${current.pr_base}`].some((ref) => observeAncestry(wt, base, ref) === "ancestor")) refuse(`second parent ${base} is not on PR base '${current.pr_base}'`);
       const automatic = git(wt, ["merge-tree", "--write-tree", previous, base]), tree = git(wt, ["rev-parse", `${merge}^{tree}`]).stdout.trim();
-      if (!automatic.ok || automatic.stdout.split("\n")[0] !== tree) refuse("its tree is not the clean automatic merge of its parents; resolve conflicts in a slice");
+      const automaticTree = automatic.stdout.split("\n")[0].trim();
+      if (!/^[0-9a-f]{40}$/u.test(automaticTree)) refuse("git could not compute the automatic merge of its parents");
+      // Enforcement: a resolution that departs from the automatic merge is the one code nobody reviewed, so it needs an
+      // approving review of that resolution (its remerge-diff) bound to this merge commit.
+      if (!automatic.ok || automaticTree !== tree) {
+        if (!flags.reviewRef) refuse("its tree is not the clean automatic merge of its parents; review its resolution and pass --review-ref");
+        // --no-renames: a detected rename reports only its destination, which would hide a moved control-plane file.
+        const resolution = git(wt, ["diff", "--no-renames", "--name-only", "-z", automaticTree, tree]);
+        if (!resolution.ok) refuse("its resolution could not be observed");
+        const privileged = privilegedPaths(resolution.stdout.split("\0").filter(Boolean));
+        if (privileged.length) refuse(`its resolution changes privileged control-plane paths: ${privileged.join(", ")}`);
+        try {
+          assertReviewBinding({ review: readReview(runDir, flags.reviewRef), ref: flags.reviewRef, observedHead: merge,
+            subject: `base-sync-${(current.base_syncs ?? []).length + 1}`, attempt: 1 });
+        } catch (error) { refuse(error.message); }
+      }
       if (git(wt, ["rev-parse", `${previous}^{tree}`]).stdout.trim() === tree) refuse("it changes no bytes");
-      const at = stamp(flags), record = { merge_commit: merge, previous_head: previous, base, previous_base: previousBase, reason: flags.reason.trim(), at };
+      const at = stamp(flags), record = { merge_commit: merge, previous_head: previous, base, previous_base: previousBase,
+        review_ref: flags.reviewRef ?? null, reason: flags.reason.trim(), at };
       await transition(runDir, {
         participants: [{ familyId: "envelope", mode: "sync-base" }],
         apply: (state) => {
@@ -968,7 +984,7 @@ const HANDLERS = {
     // A crash between the record and the verify leaves no evidence, or readable evidence for an earlier head; neither
     // judged this merge. Unreadable evidence stays unknown and never re-executes.
     const stale = classified?.evidence ? classified.evidence.commit !== merge : !existsSync(join(runDir, evidenceRef("test-verifier")));
-    if (classified?.kind === "unknown" && stale) classified = { kind: "unavailable" };
+    if (classified?.kind === "unknown" && (stale || !recorded)) classified = { kind: "unavailable" };
     if (classified?.kind === "failed") throw new CliError(repositoryVerifyRefusal(merge, classified.evidence));
     if (classified?.kind === "unknown") throw new CliError(repositoryVerifyUnknownRefusal(merge));
     if (classified?.kind === "unavailable") {

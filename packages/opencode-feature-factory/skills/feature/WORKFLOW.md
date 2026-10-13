@@ -262,9 +262,18 @@ git -C "$INTEGRATION_WORKTREE" merge --no-ff --no-edit "origin/$PR_BASE"
 factory sync-base "$R" --merge-commit "$(git -C "$INTEGRATION_WORKTREE" rev-parse HEAD)" --reason "$SYNC_REASON" --repo "$RUN_REPO"
 ```
 
-The CLI refuses a merge that is not the clean automatic merge of the recorded tip and a commit on the PR base
-that strictly advances the branch point, a merge that changes no bytes, and a conflicted or hand-edited
-merge. Resolve a conflict in a slice instead. On success it appends `base_syncs`, moves the run's branch
+The CLI refuses a merge whose parents are not the recorded tip and a commit on the PR base that strictly
+advances the branch point, and a merge that changes no bytes.
+
+When the merge conflicts, resolve it in the integration worktree and commit the merge. The resolution is the
+one change nobody has reviewed: the base's commits were reviewed upstream and the slices in this run. Dispatch
+`work-reviewer` on `git show --remerge-diff <merge>`, which shows only how the resolution departs from the
+automatic merge, as subject `base-sync-<n>` (`n` is the number of recorded syncs plus one) at attempt 1, bound
+to the merge commit. Write its record to `reviews/base-sync-<n>.json` and pass `--review-ref` to `sync-base`.
+The CLI admits a conflicted or hand-edited merge only with that approving review, and never when the
+resolution changes control-plane paths. On REJECT, fix the resolution, recommit, and review again.
+
+On success it appends `base_syncs`, moves the run's branch
 point to the synced base, and runs bootstrap and verify fresh on the merge. A failed verify stays recorded
 and refuses, like a post-merge verify. A later sync or a remediation is the way forward. Running the same
 command again replays it. The output's `overlap` lists upstream files that a slice also owns. Give that

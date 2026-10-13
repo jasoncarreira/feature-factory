@@ -160,6 +160,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "- **There is no per-invocation budget.** Continue until the run completes or a condition this workflow names stops it.",
       "Never park for self-assessed capacity, context, or elapsed time: the run's state lives in `run.json` and its",
       "from those records, not from memory. A park for capacity costs a full relaunch that must re-qualify the run",
+      // Instruction: a conflicted base sync's resolution is what the reviewer reads.
+      "`work-reviewer` on `git show --remerge-diff <merge>`, which shows only how the resolution departs from the",
 
       // Instruction only: which command publishes is an environment property, like the identity beside it.
       // Each selection branch is pinned separately, because review caught the first attempt stating
@@ -1351,7 +1353,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // authorization to raise the tripwire 6450 -> 6550.
     // 6459 -> 6463: a remediation slice validates as its record's paths plus its audited amendments, so
     // amend-paths can extend one (baleyg #16's remediation-1). Inside #387's 6550 tripwire; nothing trimmed.
-    assert.equal(total, 6463, "a remediation slice can be amended: 6463 production lines");
+    // 6463 -> 6480: a conflicted base sync is admitted with an approving review of its resolution (the remerge-diff),
+    // bound to the merge commit, and never when the resolution touches the control plane (trellis #122: eleven
+    // conflicts with main's test-reliability fixes). Inside #387's 6550 tripwire; nothing trimmed.
+    assert.equal(total, 6480, "a conflicted base sync is admitted with a reviewed resolution: 6480 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
