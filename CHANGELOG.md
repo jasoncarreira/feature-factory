@@ -1,7 +1,23 @@
 # Changelog
 
-Repository-only change record. All three packages are pre-1.0 and, from 0.7.0, release in lockstep: one
+Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
+
+## Unreleased
+
+- New package `opencode2-feature-factory`, the OpenCode 2.0 adapter (#393). V1 plugins don't run in 2.0, so
+  it's separate from `opencode-feature-factory`, which is unchanged. It contains:
+  - a server plugin that registers in memory the `/feature` command, the `feature` skill, the orchestrator,
+    the run-orchestrator, the eleven specialists, a `feature_factory_context` tool (the session id source,
+    replacing V1's `FACTORY_SESSION_ID` shell export), and the `feature_background` tool;
+  - a CLI plugin for the session sidebar and per-run palette jumps;
+  - a V2 skill.
+- In 2.0 the drivers' closed list of eleven dispatch targets is enforced through `subagent` permissions,
+  instead of being prompt policy as in 1.x. The adapter was verified against a live 2.0.28 host:
+  - agents are created through `update`, since the agent editor has no `add`;
+  - the command, skill and tools all register;
+  - a dispatched agent calls the context tool;
+  - the sidebar renders and repaints in the real TUI.
 
 ## 0.10.16
 

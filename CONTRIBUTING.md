@@ -17,6 +17,7 @@ npm test                    # all packages and pack checks
 npm run test:factory        # packages/feature-factory alone
 npm run test:opencode       # packages/opencode-feature-factory alone
 npm run test:prime          # packages/prime-agent-feature-factory alone
+npm run test:opencode2      # packages/opencode2-feature-factory alone
 ```
 
 No lint or typecheck script. `feature-factory` is not bundled or transpiled at all.
