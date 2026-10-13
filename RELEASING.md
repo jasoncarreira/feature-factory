@@ -2,23 +2,30 @@
 
 Repository-only guide. The GitHub publish workflow is the source of automation behaviour.
 
-## Three packages, one version
+## Four packages, one version
 
 The workspace root is private and publishes nothing. `packages/feature-factory`,
-`packages/opencode-feature-factory`, and `packages/prime-agent-feature-factory` publish separately, but from
-0.7.0 they carry **the same version** and move together. Each still needs its own tag, because a tag selects
+`packages/opencode-feature-factory`, `packages/prime-agent-feature-factory`, and
+`packages/opencode2-feature-factory` publish separately, but they carry **the same version** and move
+together. Each still needs its own tag, because a tag selects
 which package the workflow publishes:
 
 ```
 feature-factory-v0.7.0
 opencode-feature-factory-v0.7.0
 prime-agent-feature-factory-v0.7.0
+opencode2-feature-factory-v0.10.16
 ```
+
+A package's **first** version can't publish through the workflow. npm trusted publishing is configured per
+package on npmjs.com, and a package that doesn't exist yet has nothing to configure. Publish its first
+version by hand (`npm login`, then `npm publish --workspace <package>` after the factory version it pins is
+on the registry), then add the trusted publisher for it.
 
 A bare `v1.2.3` tag no longer starts the workflow. It used to read the root manifest's version,
 which no longer exists.
 
-**Tag the factory first and let it publish before tagging either adapter.** Both adapters pin
+**Tag the factory first and let it publish before tagging any adapter.** Every adapter pins
 `feature-factory` at an exact version, so an adapter that reaches the registry first is unresolvable until the
 factory follows. `test/pack.test.js` enforces the version agreement in CI; the ordering is on whoever releases.
 

@@ -7,12 +7,14 @@ name: Publish Package
 #   feature-factory-v0.1.0
 #   opencode-feature-factory-v0.3.0
 #   prime-agent-feature-factory-v0.1.0
+#   opencode2-feature-factory-v0.10.17
 on:
   push:
     tags:
       - "feature-factory-v*"
       - "opencode-feature-factory-v*"
       - "prime-agent-feature-factory-v*"
+      - "opencode2-feature-factory-v*"
 
 permissions:
   contents: read
@@ -36,7 +38,7 @@ jobs:
         # so testing the shorter name first would publish the wrong package under the right tag.
         run: |
           tag="$GITHUB_REF_NAME"
-          for name in prime-agent-feature-factory opencode-feature-factory feature-factory; do
+          for name in opencode2-feature-factory prime-agent-feature-factory opencode-feature-factory feature-factory; do
             case "$tag" in
               "$name"-v*)
                 echo "name=$name" >> "$GITHUB_OUTPUT"

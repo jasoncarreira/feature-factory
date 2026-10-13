@@ -30,7 +30,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const PACKAGES = ["feature-factory", "opencode-feature-factory", "prime-agent-feature-factory"];
+const PACKAGES = ["feature-factory", "opencode-feature-factory", "prime-agent-feature-factory", "opencode2-feature-factory"];
+// The OpenCode 1.x and 2.0 adapters cannot share one consumer: their `@opentui/solid` peer ranges do not
+// overlap. The 2.0 adapter is installed into its own consumer below.
+const INSTALLED = PACKAGES.filter((name) => name !== "opencode2-feature-factory");
 const PACKED_BOOTSTRAP_COMMAND = "node -e \"const f=require('fs');f.writeFileSync('packed-bootstrap-cwd',process.cwd());console.log('packed-bootstrap-out');console.error('packed-bootstrap-err')\"";
 const CONFIG_SCHEMA = `{
   "resolve": "<non-empty shell command>",
@@ -253,14 +256,15 @@ function pack(name, destination) {
 
 // A consumer with both tarballs really installed. Both go on one command line so npm can satisfy the
 // inter-package dependency locally instead of reaching for the registry.
-function installConsumer(dir) {
-  const packed = Object.fromEntries(PACKAGES.map((name) => [name, pack(name, dir)]));
+function installConsumer(dir, names = INSTALLED) {
+  mkdirSync(dir, { recursive: true });
+  const packed = Object.fromEntries(names.map((name) => [name, pack(name, dir)]));
   const consumer = join(dir, "consumer");
   mkdirSync(consumer, { recursive: true });
   writeFileSync(join(consumer, "package.json"),
     JSON.stringify({ name: "pack-consumer", type: "module", private: true }));
   execFileSync("npm", ["install", "--silent", "--no-audit", "--no-fund",
-    ...PACKAGES.map((name) => packed[name].tarball)], { cwd: consumer, encoding: "utf8" });
+    ...names.map((name) => packed[name].tarball)], { cwd: consumer, encoding: "utf8" });
   return { consumer, packed };
 }
 
@@ -292,6 +296,7 @@ describe("what actually ships", () => {
       const factory = pack("feature-factory", dir);
       const opencode = pack("opencode-feature-factory", dir);
       const prime = pack("prime-agent-feature-factory", dir);
+      const opencode2 = pack("opencode2-feature-factory", dir);
 
       // The three packages release in lockstep from 0.7.0. Before that they drifted — 0.3.6, 0.5.6 and
       // 0.1.0 — and an adapter pinning an exact factory version means a half-applied bump publishes an
@@ -300,8 +305,8 @@ describe("what actually ships", () => {
       const manifests = Object.fromEntries(PACKAGES.map((name) =>
         [name, JSON.parse(readFileSync(join(root, "packages", name, "package.json"), "utf8"))]));
       const versions = PACKAGES.map((name) => manifests[name].version);
-      assert.equal(new Set(versions).size, 1, `all three packages must ship one version; found ${versions.join(", ")}`);
-      for (const name of ["opencode-feature-factory", "prime-agent-feature-factory"]) {
+      assert.equal(new Set(versions).size, 1, `every package must ship one version; found ${versions.join(", ")}`);
+      for (const name of ["opencode-feature-factory", "prime-agent-feature-factory", "opencode2-feature-factory"]) {
         assert.equal(manifests[name].dependencies["feature-factory"], manifests["feature-factory"].version,
           `${name} must pin the factory version it ships beside`);
       }
@@ -314,7 +319,7 @@ describe("what actually ships", () => {
         "the host-neutral factory must not ship a platform skill");
       const agents = factory.files.filter((file) => file.startsWith("agents/"));
       assert.equal(agents.length, 11, `feature-factory must ship all eleven agents, packed ${agents.length}`);
-      for (const [name, { files }] of [["feature-factory", factory], ["opencode-feature-factory", opencode], ["prime-agent-feature-factory", prime]]) {
+      for (const [name, { files }] of [["feature-factory", factory], ["opencode-feature-factory", opencode], ["prime-agent-feature-factory", prime], ["opencode2-feature-factory", opencode2]]) {
         assert.deepEqual(files.filter((file) => file.startsWith(".factory/")), [],
           `${name} must not package operator-owned .factory content`);
         const repositoryCommandAssets = files.filter((file) => /(^|\/)(?:(?:factory[-_.]|generated[-_.])?(?:config|resolver)|config-resolver)(?:[./_-]|$)/u.test(file));
@@ -349,7 +354,11 @@ describe("what actually ships", () => {
       for (const required of ["plugin/index.js", "tui/dist/index.js", "observe/runs.js", "README.md", "LICENSE"]) {
         assert.ok(opencode.files.includes(required), `opencode-feature-factory must ship ${required}`);
       }
-      for (const [name, packed] of [["opencode-feature-factory", opencode], ["prime-agent-feature-factory", prime]]) {
+      for (const required of ["plugin/index.js", "plugin/agents.js", "plugin/background.js", "tui/dist/index.js", "observe/runs.js"]) {
+        assert.ok(opencode2.files.includes(required), `opencode2-feature-factory must ship ${required}`);
+      }
+      assert.deepEqual(opencode2.files.filter((file) => file.endsWith(".jsx")), [], "raw JSX must not ship; the host cannot transform it");
+      for (const [name, packed] of [["opencode-feature-factory", opencode], ["prime-agent-feature-factory", prime], ["opencode2-feature-factory", opencode2]]) {
         for (const required of ["skills/feature/SKILL.md", "skills/feature/WORKFLOW.md", "README.md", "LICENSE"]) {
           assert.ok(packed.files.includes(required), `${name} must ship ${required}`);
         }
@@ -362,7 +371,7 @@ describe("what actually ships", () => {
 
       // Tests are not a release artifact. Shipping them doubles the tarball and invites a consumer to
       // run a suite against their own repository.
-      for (const { files } of [factory, opencode, prime]) {
+      for (const { files } of [factory, opencode, prime, opencode2]) {
         assert.deepEqual(files.filter((file) => file.includes("test/")), []);
       }
 
@@ -448,6 +457,20 @@ describe("what actually ships", () => {
         console.log("ok");
       `);
       assert.match(output, /^ok$/mu);
+
+      // The OpenCode 2.0 adapter, in its own consumer: a 2.0 plugin and CLI plugin each default-export
+      // `{ id, setup }`, and the server plugin depends on nothing but the factory.
+      const { consumer: consumer2 } = installConsumer(join(dir, "opencode2"), ["feature-factory", "opencode2-feature-factory"]);
+      const manifest2 = JSON.parse(readFileSync(join(consumer2, "node_modules", "opencode2-feature-factory", "package.json"), "utf8"));
+      assert.deepEqual(Object.keys(manifest2.dependencies), ["feature-factory"], "the 2.0 adapter depends on the factory alone");
+      assert.match(importInConsumer(consumer2, `
+        const plugin = await import("opencode2-feature-factory");
+        const tui = await import("opencode2-feature-factory/tui");
+        for (const [name, entry] of [["plugin", plugin.default], ["tui", tui.default]]) {
+          if (entry?.id !== "feature-factory" || typeof entry.setup !== "function") throw new Error(name + " must default-export { id, setup }");
+        }
+        console.log("ok");
+      `), /^ok$/mu);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 

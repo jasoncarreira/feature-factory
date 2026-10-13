@@ -3,13 +3,14 @@
 A durable, observed control plane for running a feature from idea to pull request through a chain of
 focused agents, with human approval gates.
 
-Three packages:
+Four packages:
 
 | Package | What it is |
 | --- | --- |
 | [`packages/feature-factory`](packages/feature-factory) | The host-agnostic factory: the `factory` CLI, the canonical `WORKFLOW.md`, and the agent definitions. Zero dependencies. |
 | [`packages/opencode-feature-factory`](packages/opencode-feature-factory) | The OpenCode adapter: its platform `SKILL.md`, server plugin, and sidebar. Reads run state; never writes it. |
 | [`packages/prime-agent-feature-factory`](packages/prime-agent-feature-factory) | The Prime Agent adapter: its platform `SKILL.md` and `/feature` extension. Currently foreground-only. |
+| [`packages/opencode2-feature-factory`](packages/opencode2-feature-factory) | The OpenCode 2.0 adapter: its platform `SKILL.md`, server plugin, and CLI sidebar. V1 plugins don't run in 2.0, so it's a separate package. |
 
 The factory owns the workflow contract. Each adapter owns its host-specific `SKILL.md` and ships an
 exact build-time copy of the factory's `WORKFLOW.md` beside it. This repository is a workspace root and
