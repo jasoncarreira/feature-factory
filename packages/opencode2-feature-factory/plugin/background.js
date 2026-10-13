@@ -6,9 +6,12 @@
 //
 //   * The association is recorded only after the session is switched to `run-orchestrator`, so it never
 //     names a session without its driver. A switch failure leaves nothing recorded and removes the session.
-//   * `started` turns true only once the request is admitted. A start that finds an unstarted association
-//     re-admits the request to that same session instead of reporting it `existing` and leaving it inert,
-//     and an answer is never delivered to a session that has no request.
+//   * `started` turns true only once the request is admitted. An association that is not marked started is
+//     reconciled with the host before anything else happens: if the session already holds a user message,
+//     the request was admitted (the acknowledgement write is what failed) and it is never sent again;
+//     otherwise a start re-admits the request to that same session rather than reporting an inert
+//     `existing`, and an answer is refused, because no request reached it. This instance also remembers
+//     every admission it made, so a failed acknowledgement can never make it replay one.
 //   * A recorded session is treated as gone only when the host says so (`Session.NotFoundError`). Any other
 //     lookup failure is `unknown` and has no effect, so a transient outage can never replace a live driver.
 //
@@ -33,11 +36,19 @@ export function rejection(operation, args, context) {
 
 const describe = (error) => String(error?.message || error?._tag || error);
 const notFound = (error) => error?._tag === "Session.NotFoundError";
+const rows = (value) => (Array.isArray(value) ? value : Array.isArray(value?.data) ? value.data : []);
 
 export function createBackgroundTool(ctx) {
   const directory = ctx.location?.directory;
   const key = (runId) => `background/${Buffer.from(String(directory), "utf8").toString("base64url")}/${runId}`;
   const inFlight = new Map();
+  const admitted = new Set();
+
+  // Whether the association's request reached its session: recorded, remembered, or visible in the host.
+  async function wasAdmitted(association) {
+    if (association.started || admitted.has(association.sessionID)) return true;
+    return rows(await ctx.session.context({ sessionID: association.sessionID })).some((message) => message?.type === "user");
+  }
 
   // { association } when the recorded session exists, { association: null } when nothing usable is
   // recorded, and { error } when the host could not say.
@@ -62,9 +73,20 @@ export function createBackgroundTool(ctx) {
     }
     if (found.error) return unknown("lookup", found.error);
     let association = found.association;
-    if (operation === "answer") {
-      if (!association) return { status: "not_backgrounded", operation, runId };
-      if (!association.started) return { status: "rejected", operation, runId, reason: "not_started", sessionID: association.sessionID };
+    if (operation === "answer" && !association) return { status: "not_backgrounded", operation, runId };
+    if (association && !association.started) {
+      let reached;
+      try {
+        reached = await wasAdmitted(association);
+      } catch (error) {
+        return unknown("reconcile", error, association.sessionID);
+      }
+      if (reached) {
+        association = { sessionID: association.sessionID, started: true };
+        await ctx.storage.set(key(runId), association).catch(() => {});
+      } else if (operation === "answer") {
+        return { status: "rejected", operation, runId, reason: "not_started", sessionID: association.sessionID };
+      }
     }
     if (operation === "start" && association?.started) return { status: "existing", operation, runId, sessionID: association.sessionID };
     if (operation === "start" && !association) {
@@ -95,12 +117,12 @@ export function createBackgroundTool(ctx) {
     } catch (error) {
       return unknown("prompt", error, sessionID);
     }
+    if (operation === "start") admitted.add(sessionID);
     if (operation === "start") {
-      try {
-        await ctx.storage.set(key(runId), { sessionID, started: true });
-      } catch (error) {
-        return unknown("record", error, sessionID);
-      }
+      // The request was admitted whatever happens here; a failed acknowledgement only means the next
+      // lookup reconciles with the host instead of reading `started`.
+      const recorded = await ctx.storage.set(key(runId), { sessionID, started: true }).then(() => true, () => false);
+      if (!recorded) return { status: "dispatched", operation, runId, sessionID, recorded: false };
     }
     return { status: "dispatched", operation, runId, sessionID };
   }

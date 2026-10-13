@@ -8,7 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import plugin, { commandText, factoryResources } from "../plugin/index.js";
 import { SPECIALISTS, agentDefinitions, modelRef, resolvedModel } from "../plugin/agents.js";
-import { rejection } from "../plugin/background.js";
+import { createBackgroundTool, rejection } from "../plugin/background.js";
 import { runCommands } from "../tui/commands.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -59,6 +59,7 @@ function fakeHost({ createsOnUpdate = true, existing = {} } = {}) {
       },
       remove: async ({ sessionID }) => { state.sessions.delete(sessionID); state.removed = [...(state.removed ?? []), sessionID]; },
       switchAgent: async (input) => { state.switched.push(input); },
+      context: async ({ sessionID }) => ({ data: state.prompts.filter((entry) => entry.sessionID === sessionID).map(() => ({ type: "user" })) }),
       prompt: async (input) => { state.prompts.push(input); return { id: "msg_1" }; },
     },
   };
@@ -214,6 +215,24 @@ describe("OpenCode 2.0 plugin", () => {
       { status: "dispatched", operation: "start", runId: "44", sessionID: "ses_4" });
     assert.deepEqual(await call(state, "feature_background", { operation: "start", runId: "44", request: "y" }, caller),
       { status: "existing", operation: "start", runId: "44", sessionID: "ses_4" });
+
+    // An admitted start whose acknowledgement write fails is never admitted again, by this instance or by a
+    // tool recreated from the retained storage: both reconcile it as started, so a start is `existing` and
+    // an answer is delivered.
+    const set = ctx.storage.set;
+    ctx.storage.set = async (key, value) => { if (value?.started) throw new Error("disk full"); return set(key, value); };
+    assert.deepEqual(await call(state, "feature_background", { operation: "start", runId: "45", request: "z" }, caller),
+      { status: "dispatched", operation: "start", runId: "45", sessionID: "ses_5", recorded: false });
+    const admissions = () => state.prompts.filter((entry) => entry.sessionID === "ses_5").length;
+    assert.equal(admissions(), 1);
+    for (const fresh of [false, true]) {
+      if (fresh) { state.tools = state.tools.filter((entry) => entry.name !== "feature_background"); state.tools.push(createBackgroundTool(ctx)); }
+      assert.deepEqual(await call(state, "feature_background", { operation: "start", runId: "45", request: "z" }, caller),
+        { status: "existing", operation: "start", runId: "45", sessionID: "ses_5" }, fresh ? "a recreated tool" : "the same instance");
+      assert.equal(admissions(), 1, "the start request is never sent twice");
+    }
+    ctx.storage.set = set;
+    assert.equal((await call(state, "feature_background", { operation: "answer", runId: "45", decision: "approve" }, caller)).status, "dispatched");
   });
 
   it("offers a palette jump only for runs that hold a session", () => {
