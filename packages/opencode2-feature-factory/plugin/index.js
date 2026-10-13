@@ -51,12 +51,15 @@ export default {
   id: "feature-factory",
   async setup(ctx) {
     const { root, cli } = factoryResources();
-    const definitions = agentDefinitions({ root, cli, options: ctx.options ?? {} });
+    // The host's models, so an agent's effort attaches to a model that offers it.
+    const models = rows(await ctx.model.list());
+    const defaultModel = (await ctx.model.default())?.data;
+    const definitions = agentDefinitions({ root, cli, options: ctx.options ?? {}, models, defaultModel });
 
     // `update` on an id the host does not hold creates the agent. That is how 2.0 registers an agent from
     // a plugin, since the editor has no `add`; it is verified below rather than trusted.
     await ctx.agent.transform((editor) => {
-      for (const [id, definition] of agentDefinitions({ root, cli, options: ctx.options ?? {}, existing: (name) => editor.get(name) })) {
+      for (const [id, definition] of agentDefinitions({ root, cli, options: ctx.options ?? {}, models, defaultModel, existing: (name) => editor.get(name) })) {
         editor.update(id, (draft) => Object.assign(draft, definition));
       }
     });

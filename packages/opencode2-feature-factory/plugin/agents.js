@@ -117,11 +117,29 @@ const RUN_ORCHESTRATOR_PROMPT = [
   "Persisted `run.json.mode` is the sole gate authority. In `interactive`, perform the skill's orderly pending-gate park and end the turn; in `headless`, preserve parked `needs-human`; in `autonomous`, decide only under the skill's preconditions.",
 ].join("\n\n");
 
+// The model an agent runs on, with its effort as a V2 variant. Precedence, most specific first, for the model:
+// the project's own agent model, the profile's, then the host default; and for the variant: the project
+// model's own variant, the profile's, then the agent's declared effort. A variant needs a model to attach
+// to, so an effort-only profile or a bare declared effort pins the host default model. A variant that the
+// chosen model is known not to offer is dropped rather than sent, since the host would refuse it.
+export function resolvedModel({ existing, profile, effort, models = [], defaultModel }) {
+  const base = existing?.model ?? modelRef(profile?.model) ?? (defaultModel?.providerID && defaultModel?.id
+    ? { providerID: defaultModel.providerID, id: defaultModel.id } : undefined);
+  if (!base) return undefined;
+  const variant = existing?.model?.variant ?? profile?.variant ?? effort;
+  const info = models.find((model) => model.providerID === base.providerID && model.id === base.id);
+  const offered = !info || !Array.isArray(info.variants) || info.variants.some((entry) => entry?.id === variant);
+  const { variant: _ignored, ...ref } = base;
+  if (variant && offered) return { ...ref, variant };
+  // With no variant to apply, an agent on the host default stays unpinned so it follows the default.
+  return existing?.model || profile?.model ? ref : undefined;
+}
+
 // Agents a project or profile may tune. Model and effort are preferences; permissions are not, so they
 // are always this module's. A project `system` override is honoured, with the CLI binding re-appended.
-function composed(base, existing, profile, cli) {
+function composed(base, existing, profile, cli, models, defaultModel) {
   const system = typeof existing?.system === "string" && existing.system !== base.system ? existing.system : base.system;
-  const model = existing?.model ?? modelRef(profile?.model, profile?.variant ?? base.variant);
+  const model = resolvedModel({ existing, profile, effort: base.variant, models, defaultModel });
   return {
     description: existing?.description ?? base.description,
     mode: base.mode,
@@ -133,7 +151,7 @@ function composed(base, existing, profile, cli) {
 
 // Everything the plugin registers, as plain data: one entry per agent id. Pure, so it is testable without
 // a host. `existing` is what the host already holds for an id (a project's own definition, or nothing).
-export function agentDefinitions({ root, cli, options = {}, existing = () => undefined }) {
+export function agentDefinitions({ root, cli, options = {}, existing = () => undefined, models = [], defaultModel }) {
   const agents = new Map();
   const drivers = [
     ["feature-factory", { description: "Primary orchestrator for the durable feature-factory workflow. Drives a feature from idea to draft PR through the /feature skill.", mode: "primary", system: ORCHESTRATOR_PROMPT }],
@@ -141,7 +159,7 @@ export function agentDefinitions({ root, cli, options = {}, existing = () => und
   ];
   for (const [id, base] of drivers) {
     const profile = profileFor(id, "planning", options);
-    agents.set(id, composed({ ...base, variant: "xhigh", permissions: driverPermissions() }, existing(id), profile, cli));
+    agents.set(id, composed({ ...base, variant: "xhigh", permissions: driverPermissions() }, existing(id), profile, cli, models, defaultModel));
   }
   for (const file of readdirSync(join(root, "agents")).filter((entry) => entry.endsWith(".md")).sort()) {
     const id = file.replace(/\.md$/u, "");
@@ -154,7 +172,7 @@ export function agentDefinitions({ root, cli, options = {}, existing = () => und
       variant: meta.effort || undefined,
       permissions: specialistPermissions(meta.tools),
     };
-    agents.set(id, composed(base, existing(id), profileFor(id, meta.role, options), cli));
+    agents.set(id, composed(base, existing(id), profileFor(id, meta.role, options), cli, models, defaultModel));
   }
   return agents;
 }

@@ -7,13 +7,19 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import plugin, { commandText, factoryResources } from "../plugin/index.js";
-import { SPECIALISTS, agentDefinitions, modelRef } from "../plugin/agents.js";
+import { SPECIALISTS, agentDefinitions, modelRef, resolvedModel } from "../plugin/agents.js";
 import { rejection } from "../plugin/background.js";
 import { runCommands } from "../tui/commands.js";
 
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { root, cli } = factoryResources();
 const BUILTIN = ["build", "general", "explore", "plan"];
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"].map((id) => ({ id }));
+const MODELS = [
+  { providerID: "opencode", id: "house", variants: EFFORTS },
+  { providerID: "anthropic", id: "claude-sonnet-5", variants: EFFORTS },
+  { providerID: "acme", id: "big", variants: [{ id: "fast" }] },
+];
 
 function fakeHost({ createsOnUpdate = true, existing = {} } = {}) {
   let created = 0;
@@ -24,6 +30,7 @@ function fakeHost({ createsOnUpdate = true, existing = {} } = {}) {
   const ctx = {
     location: { directory: "/work/repo" },
     options: {},
+    model: { list: async () => ({ data: MODELS }), default: async () => ({ data: MODELS[0] }) },
     agent: {
       transform: async (edit) => edit({
         get: (id) => state.agents.get(id),
@@ -47,9 +54,10 @@ function fakeHost({ createsOnUpdate = true, existing = {} } = {}) {
         return { id, title };
       },
       get: async ({ sessionID }) => {
-        if (!state.sessions.has(sessionID)) throw new Error(`session ${sessionID} not found`);
+        if (!state.sessions.has(sessionID)) throw Object.assign(new Error(""), { _tag: "Session.NotFoundError", sessionID });
         return { data: state.sessions.get(sessionID) };
       },
+      remove: async ({ sessionID }) => { state.sessions.delete(sessionID); state.removed = [...(state.removed ?? []), sessionID]; },
       switchAgent: async (input) => { state.switched.push(input); },
       prompt: async (input) => { state.prompts.push(input); return { id: "msg_1" }; },
     },
@@ -106,7 +114,7 @@ describe("OpenCode 2.0 plugin", () => {
 
     // A project's own definition keeps its model and prompt; permissions stay derived, and the binding is re-appended.
     const project = { id: "work-reviewer", name: "work-reviewer", system: "Project reviewer prompt.", model: { providerID: "acme", id: "big" } };
-    const definitions = agentDefinitions({ root, cli, existing: (id) => (id === "work-reviewer" ? project : undefined),
+    const definitions = agentDefinitions({ root, cli, models: MODELS, existing: (id) => (id === "work-reviewer" ? project : undefined),
       options: { profiles: { builder: { model: "anthropic/claude-sonnet-5", variant: "high" } } } });
     const reviewer = definitions.get("work-reviewer");
     assert.equal(reviewer.system.startsWith("Project reviewer prompt.\n\n"), true);
@@ -115,6 +123,23 @@ describe("OpenCode 2.0 plugin", () => {
     // A profile selects a model by role; a string with no provider selects nothing rather than a wrong model.
     assert.deepEqual(definitions.get("backend-builder").model, { providerID: "anthropic", id: "claude-sonnet-5", variant: "high" });
     assert.deepEqual([modelRef("sonnet"), modelRef("anthropic/"), modelRef("/x")], [undefined, undefined, undefined]);
+
+    // Effort survives without a configured model: it attaches to the host default, which offers it.
+    const house = MODELS[0];
+    assert.deepEqual(resolvedModel({ profile: { variant: "high" }, effort: "medium", models: MODELS, defaultModel: house }),
+      { providerID: "opencode", id: "house", variant: "high" }, "an effort-only profile applies its variant");
+    assert.deepEqual(resolvedModel({ effort: "xhigh", models: MODELS, defaultModel: house }),
+      { providerID: "opencode", id: "house", variant: "xhigh" }, "the declared effort applies with no profile at all");
+    assert.equal(resolvedModel({ models: MODELS, defaultModel: house }), undefined, "nothing to apply leaves the agent on the default, unpinned");
+    // A project's model keeps its own variant first; otherwise the profile's applies to it.
+    assert.deepEqual(resolvedModel({ existing: { model: { providerID: "anthropic", id: "claude-sonnet-5" } }, profile: { variant: "max" }, effort: "low", models: MODELS }),
+      { providerID: "anthropic", id: "claude-sonnet-5", variant: "max" });
+    assert.deepEqual(resolvedModel({ existing: { model: { providerID: "anthropic", id: "claude-sonnet-5", variant: "low" } }, profile: { variant: "max" }, models: MODELS }),
+      { providerID: "anthropic", id: "claude-sonnet-5", variant: "low" });
+    // A variant the chosen model does not offer is dropped rather than sent.
+    assert.deepEqual(resolvedModel({ existing: { model: { providerID: "acme", id: "big" } }, effort: "high", models: MODELS }), { providerID: "acme", id: "big" });
+    const fromDefault = agentDefinitions({ root, cli, models: MODELS, defaultModel: house });
+    assert.deepEqual(fromDefault.get("feature-factory").model, { providerID: "opencode", id: "house", variant: "xhigh" }, "the drivers keep their xhigh effort");
   });
 
   it("starts a background run once, answers its gate, and refuses everything else without effects", async () => {
@@ -148,13 +173,47 @@ describe("OpenCode 2.0 plugin", () => {
       { status: "dispatched", operation: "answer", runId: "42", sessionID: "ses_1" });
     assert.deepEqual(state.prompts.at(-1), { sessionID: "ses_1", text: "changes: tighten AC2" }, "an answer sends the decision and nothing else");
 
-    // A recorded session that no longer exists is absent, so a start creates a fresh one.
+    // A lookup the host cannot answer is unknown and changes nothing: no second session, and the answer
+    // is not mistaken for a run that was never backgrounded.
+    const get = ctx.session.get;
+    ctx.session.get = async () => { throw new Error("service restarting"); };
+    const prompts = state.prompts.length;
+    for (const input of [{ operation: "start", runId: "42", request: "x" }, { operation: "answer", runId: "42", decision: "approve" }]) {
+      assert.deepEqual(await call(state, "feature_background", input, caller),
+        { status: "unknown", operation: input.operation, runId: "42", stage: "lookup", outcome: "service restarting" });
+    }
+    assert.deepEqual([state.sessions.size, state.prompts.length], [1, prompts], "a transient lookup failure creates and prompts nothing");
+    ctx.session.get = get;
+    assert.equal((await call(state, "feature_background", { operation: "answer", runId: "42", decision: "approve" }, caller)).sessionID, "ses_1", "the original association is kept");
+
+    // Only the host's own not-found removes an association, so a start then creates a fresh session.
     state.sessions.delete("ses_1");
     assert.equal((await call(state, "feature_background", { operation: "start", runId: "42", request: "x" }, caller)).sessionID, "ses_2");
-    // A host failure is reported, not retried.
+
+    // A session whose driver could not be selected is never associated: it is removed, and the next start
+    // creates a working one rather than reporting an inert `existing`.
+    const switchAgent = ctx.session.switchAgent;
+    ctx.session.switchAgent = async () => { throw new Error("agent unavailable"); };
+    assert.deepEqual(await call(state, "feature_background", { operation: "start", runId: "43", request: "x" }, caller),
+      { status: "unknown", operation: "start", runId: "43", stage: "switch", sessionID: "ses_3", outcome: "agent unavailable" });
+    assert.deepEqual([state.removed, state.sessions.has("ses_3")], [["ses_3"], false]);
+    assert.deepEqual(await call(state, "feature_background", { operation: "answer", runId: "43", decision: "stop" }, caller),
+      { status: "not_backgrounded", operation: "answer", runId: "43" }, "no decision reaches a session without its driver");
+    ctx.session.switchAgent = switchAgent;
+
+    // A start whose request was not admitted stays unstarted: an answer is refused, and the next start
+    // re-admits the request to that same session instead of reporting it `existing`.
+    const prompt = ctx.session.prompt;
     ctx.session.prompt = async () => { throw new Error("host down"); };
-    assert.deepEqual(await call(state, "feature_background", { operation: "answer", runId: "42", decision: "stop" }, caller),
-      { status: "unknown", operation: "answer", runId: "42", stage: "prompt", sessionID: "ses_2", outcome: "host down" });
+    assert.deepEqual(await call(state, "feature_background", { operation: "start", runId: "44", request: "y" }, caller),
+      { status: "unknown", operation: "start", runId: "44", stage: "prompt", sessionID: "ses_4", outcome: "host down" });
+    ctx.session.prompt = prompt;
+    assert.deepEqual(await call(state, "feature_background", { operation: "answer", runId: "44", decision: "approve" }, caller),
+      { status: "rejected", operation: "answer", runId: "44", reason: "not_started", sessionID: "ses_4" });
+    assert.deepEqual(await call(state, "feature_background", { operation: "start", runId: "44", request: "y" }, caller),
+      { status: "dispatched", operation: "start", runId: "44", sessionID: "ses_4" });
+    assert.deepEqual(await call(state, "feature_background", { operation: "start", runId: "44", request: "y" }, caller),
+      { status: "existing", operation: "start", runId: "44", sessionID: "ses_4" });
   });
 
   it("offers a palette jump only for runs that hold a session", () => {

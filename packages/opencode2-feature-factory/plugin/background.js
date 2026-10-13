@@ -1,11 +1,19 @@
 // `feature_background`: start a run in its own background session, or answer that session's pending gate.
 //
-// Ported from the V1 tool. V2's plugin session domain has no `list`, so the run -> session association
-// the V1 tool found by session title is kept in plugin storage instead, keyed by the run id and the
-// directory the plugin loaded in. A recorded session that no longer exists is treated as absent.
+// Ported from the V1 tool. V2's plugin session domain has no `list`, so the run -> session association the
+// V1 tool found by session title is kept in plugin storage instead, keyed by the run id and the directory
+// the plugin loaded in, as `{ sessionID, started }`:
 //
-// Every outcome is reported, never retried: `dispatched` means the prompt was admitted to the session,
-// not that the run did anything.
+//   * The association is recorded only after the session is switched to `run-orchestrator`, so it never
+//     names a session without its driver. A switch failure leaves nothing recorded and removes the session.
+//   * `started` turns true only once the request is admitted. A start that finds an unstarted association
+//     re-admits the request to that same session instead of reporting it `existing` and leaving it inert,
+//     and an answer is never delivered to a session that has no request.
+//   * A recorded session is treated as gone only when the host says so (`Session.NotFoundError`). Any other
+//     lookup failure is `unknown` and has no effect, so a transient outage can never replace a live driver.
+//
+// Every outcome is reported, never retried: `dispatched` means the prompt was admitted, not that the run did
+// anything.
 const RUN_ID = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u;
 const CALLERS = Object.freeze(["build", "feature-factory"]);
 
@@ -23,45 +31,62 @@ export function rejection(operation, args, context) {
   return null;
 }
 
-const describe = (error) => String(error?.message ?? error);
+const describe = (error) => String(error?.message || error?._tag || error);
+const notFound = (error) => error?._tag === "Session.NotFoundError";
 
 export function createBackgroundTool(ctx) {
   const directory = ctx.location?.directory;
   const key = (runId) => `background/${Buffer.from(String(directory), "utf8").toString("base64url")}/${runId}`;
   const inFlight = new Map();
 
-  async function recorded(runId) {
-    const sessionID = await ctx.storage.get(key(runId));
-    if (typeof sessionID !== "string" || !sessionID) return null;
+  // { association } when the recorded session exists, { association: null } when nothing usable is
+  // recorded, and { error } when the host could not say.
+  async function lookup(runId) {
+    const recorded = await ctx.storage.get(key(runId));
+    if (!recorded || typeof recorded.sessionID !== "string") return { association: null };
     try {
-      await ctx.session.get({ sessionID });
-      return sessionID;
-    } catch {
-      return null;
+      await ctx.session.get({ sessionID: recorded.sessionID });
+      return { association: recorded };
+    } catch (error) {
+      return notFound(error) ? { association: null } : { error };
     }
   }
 
   async function operate({ operation, runId, request, decision }) {
     const unknown = (stage, error, sessionID) => ({ status: "unknown", operation, runId, stage, ...(sessionID ? { sessionID } : {}), outcome: describe(error) });
-    let sessionID;
+    let found;
     try {
-      sessionID = await recorded(runId);
+      found = await lookup(runId);
     } catch (error) {
       return unknown("lookup", error);
     }
-    if (operation === "start" && sessionID) return { status: "existing", operation, runId, sessionID };
-    if (operation === "answer" && !sessionID) return { status: "not_backgrounded", operation, runId };
-    if (operation === "start") {
+    if (found.error) return unknown("lookup", found.error);
+    let association = found.association;
+    if (operation === "answer") {
+      if (!association) return { status: "not_backgrounded", operation, runId };
+      if (!association.started) return { status: "rejected", operation, runId, reason: "not_started", sessionID: association.sessionID };
+    }
+    if (operation === "start" && association?.started) return { status: "existing", operation, runId, sessionID: association.sessionID };
+    if (operation === "start" && !association) {
+      let sessionID;
       try {
         const created = await ctx.session.create({ title: `feature-factory:${runId}` });
         sessionID = created?.id ?? created?.data?.id;
         if (typeof sessionID !== "string" || !sessionID) return unknown("create", "the host returned no session id");
-        await ctx.storage.set(key(runId), sessionID);
         await ctx.session.switchAgent({ sessionID, agent: "run-orchestrator" });
       } catch (error) {
-        return unknown("create", error, sessionID);
+        // Nothing was recorded, so the session is an orphan: remove it, best effort, and report.
+        if (sessionID) await ctx.session.remove?.({ sessionID }).catch(() => {});
+        return unknown(sessionID ? "switch" : "create", error, sessionID);
+      }
+      association = { sessionID, started: false };
+      try {
+        await ctx.storage.set(key(runId), association);
+      } catch (error) {
+        return unknown("record", error, sessionID);
       }
     }
+    const { sessionID } = association;
     const text = operation === "start"
       ? `Drive exactly one feature-factory run as the bounded run-orchestrator. Load and follow the feature skill. The expected canonical run ID is "${runId}". The plugin's directory is "${directory}". Independently derive the same run ID before any factory command, then enter Step 0. The request follows unchanged:\n\n${request}`
       : decision;
@@ -69,6 +94,13 @@ export function createBackgroundTool(ctx) {
       await ctx.session.prompt({ sessionID, text });
     } catch (error) {
       return unknown("prompt", error, sessionID);
+    }
+    if (operation === "start") {
+      try {
+        await ctx.storage.set(key(runId), { sessionID, started: true });
+      } catch (error) {
+        return unknown("record", error, sessionID);
+      }
     }
     return { status: "dispatched", operation, runId, sessionID };
   }
