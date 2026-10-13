@@ -233,6 +233,31 @@ describe("OpenCode 2.0 plugin", () => {
     }
     ctx.storage.set = set;
     assert.equal((await call(state, "feature_background", { operation: "answer", runId: "45", decision: "approve" }, caller)).status, "dispatched");
+
+    // An ambiguous prompt failure, the message recorded by the host and then an error, is reconciled as
+    // admitted by a recreated tool: `existing`, and the request is not sent again.
+    ctx.session.prompt = async (input) => { state.prompts.push(input); throw new Error("timed out after admission"); };
+    assert.deepEqual(await call(state, "feature_background", { operation: "start", runId: "46", request: "w" }, caller),
+      { status: "unknown", operation: "start", runId: "46", stage: "prompt", sessionID: "ses_6", outcome: "timed out after admission" });
+    ctx.session.prompt = prompt;
+    state.tools = state.tools.filter((entry) => entry.name !== "feature_background");
+    state.tools.push(createBackgroundTool(ctx));
+    assert.deepEqual(await call(state, "feature_background", { operation: "start", runId: "46", request: "w" }, caller),
+      { status: "existing", operation: "start", runId: "46", sessionID: "ses_6" });
+    assert.equal(state.prompts.filter((entry) => entry.sessionID === "ses_6").length, 1);
+
+    // A reconciliation the host cannot answer is unknown: no prompt, and the association is unchanged.
+    ctx.session.prompt = async () => { throw new Error("host down"); };
+    await call(state, "feature_background", { operation: "start", runId: "47", request: "v" }, caller);
+    ctx.session.prompt = prompt;
+    const context = ctx.session.context;
+    ctx.session.context = async () => { throw new Error("context unavailable"); };
+    const before = [...state.storage.entries()].find(([key]) => key.endsWith("/47"))[1];
+    const sent = state.prompts.length;
+    assert.deepEqual(await call(state, "feature_background", { operation: "start", runId: "47", request: "v" }, caller),
+      { status: "unknown", operation: "start", runId: "47", stage: "reconcile", sessionID: "ses_7", outcome: "context unavailable" });
+    assert.deepEqual([state.prompts.length, [...state.storage.entries()].find(([key]) => key.endsWith("/47"))[1]], [sent, before]);
+    ctx.session.context = context;
   });
 
   it("offers a palette jump only for runs that hold a session", () => {

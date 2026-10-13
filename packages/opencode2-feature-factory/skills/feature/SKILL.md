@@ -403,8 +403,8 @@ only that the host accepted the prompt; it does not prove execution or completio
 immediately so its conversation remains usable. The association lives only in plugin storage: do not
 write any new manifest key or run state file for it.
 
-The dedicated background session receives a bounded control part followed by the unchanged inner
-request produced by outer admission as a separate text part.
+The dedicated background session receives one text message: the bounded control text, a blank line,
+and then the unchanged inner request produced by outer admission, which runs to the end of the message.
 The `run-orchestrator` applies only the inner maximal mode/base/retry-prefix
 admission and shared derivation before its first `factory` command. It never repeats outer background
 placement admission on the forwarded inner request, so an inner second `--background` remains request
@@ -552,13 +552,14 @@ the next interactive gate parks through the same verified sequence or the run re
 terminal/completed path.
 
 Gate answers never use delivery, steer, queue, wait, or a starter-conversation dependency. Never treat
-`admittedSeq`, prompt response data, or title existence as proof that execution occurred. A returned or
-thrown unknown list, create, or `prompt_async` outcome is reported verbatim through the tool's unknown
-result and stops that operation. Do not automatically retry, re-list, create, prompt, or recover it.
-Closure uncertainty is not durable: plugin reload performs no client call and proves nothing. Only a
-later explicit human request starts a new checked operation. A later start first title-deduplicates a
-possibly successful create; title lookup still cannot prove a prompt ran. A later answer rechecks the
-persisted pending gate and mode before mutation.
+a prompt's response data or an association's existence as proof that execution occurred. A returned or
+thrown unknown lookup, create, switch, record, reconcile, or prompt outcome is reported verbatim through
+the tool's unknown result and stops that operation. Do not automatically retry, create, prompt, or
+recover it. Only a later explicit human request starts a new checked operation. That later start reads
+the association from plugin storage: an association whose request was admitted, according to the
+storage record or a user message the host shows in that session, is reported as `existing` and never
+admitted again, and one whose request never arrived is re-admitted to the same session. A later answer
+rechecks the persisted pending gate and mode before mutation.
 
 Terminal reporting follows persisted state. Headless retains its selected sandbox and exact
 `needs-human` result. Autonomous continues only while the existing gate preconditions hold, then uses
