@@ -294,6 +294,49 @@ describe("attack 2 — the merge must contribute exactly what was reviewed", () 
       assert.equal(proof.proven, true, proof.reason ?? "");
       assert.deepEqual(proof.reviewed_paths, ["src/slice.ts"],
         "only the slice's own path was reviewed, and only it may be contributed");
+
+      // Folded in: a sibling that already merged the identical change on a shared path. The
+      // merge then leaves that reviewed path untouched, and its bytes are still exactly the
+      // reviewed bytes. mimirbot epic 3 stranded an approved slice here, because the proof
+      // required every reviewed path to appear in the merge's own diff.
+      const same = fixture("proof-convergent");
+      try {
+        for (const branch of ["sibling", "slice"]) {
+          run(same.root, "checkout", "-q", ...(branch === "sibling" ? ["-b", branch, same.featureBase] : [branch]));
+          writeFileSync(join(same.root, "src", "version.ts"), "0.9.10\n");
+          run(same.root, "add", "-A");
+          run(same.root, "commit", "-q", "-m", `${branch} bumps the version`);
+        }
+        const convergentReviewed = run(same.root, "rev-parse", "HEAD");
+        run(same.root, "checkout", "-q", "feature");
+        run(same.root, "merge", "-q", "--no-ff", "sibling", "-m", "merge sibling");
+        const convergentMerge = mergeSlice(same.root);
+
+        const convergent = observeMergeProof(same.root, {
+          baseRef: same.featureBase, reviewedCommit: convergentReviewed, mergeCommit: convergentMerge,
+        });
+        assert.equal(convergent.proven, true, convergent.reason ?? "");
+        assert.deepEqual(convergent.reviewed_paths, ["src/slice.ts", "src/version.ts"]);
+
+        // The same shape with the sibling's bytes different is a conflict the merge resolved
+        // one way, and the proof must still see it: here the merge keeps the sibling's bytes.
+        run(same.root, "checkout", "-q", "-b", "sibling-other", same.featureBase);
+        writeFileSync(join(same.root, "src", "version.ts"), "0.9.11\n");
+        run(same.root, "add", "-A");
+        run(same.root, "commit", "-q", "-m", "a different bump");
+        run(same.root, "checkout", "-q", "-B", "feature-other", same.featureBase);
+        run(same.root, "merge", "-q", "--no-ff", "sibling-other", "-m", "merge other sibling");
+        // The slice's own file is carried with its reviewed bytes, so only the shared path diverges.
+        writeFileSync(join(same.root, "src", "slice.ts"), run(same.root, "show", "slice:src/slice.ts") + "\n");
+        run(same.root, "add", "-A");
+        run(same.root, "commit", "-q", "-m", "carry the slice's own file");
+        run(same.root, "merge", "-q", "--no-ff", "-s", "ours", "slice", "-m", "merge slice keeping ours");
+        const divergent = observeMergeProof(same.root, {
+          baseRef: same.featureBase, reviewedCommit: convergentReviewed, mergeCommit: run(same.root, "rev-parse", "HEAD"),
+        });
+        assert.equal(divergent.proven, false);
+        assert.match(divergent.reason, /differs from the reviewed commit's: src\/version\.ts$/u);
+      } finally { rmSync(same.root, { recursive: true, force: true }); }
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
@@ -355,7 +398,8 @@ describe("attack 2 — the merge must contribute exactly what was reviewed", () 
         baseRef: f.featureBase, reviewedCommit, mergeCommit,
       });
       assert.equal(proof.proven, false);
-      assert.match(proof.reason, /did not contribute reviewed paths: src\/second\.ts/u);
+      assert.match(proof.reason, /differs from the reviewed commit's: src\/second\.ts/u,
+        "a dropped reviewed file is a content difference on a reviewed path");
 
       // Folded in: altered content must be caught whatever the filename's bytes are.
       //

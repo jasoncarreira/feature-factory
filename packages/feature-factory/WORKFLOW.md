@@ -2027,9 +2027,10 @@ the path. Privileged control-plane paths are never amendable or disclosable and 
 
 **A moved base is fine.** A wave's second merge lands on a base containing its sibling, and a direct
 commit to the feature branch — the test-only repair Step 5's NO-GO permits — moves it too. The merge proof
-tolerates both: it checks that the merge contributed exactly the reviewed paths and that the merge's
-content on those paths matches what was reviewed, so unreviewed content inside *the merge* is refused
-while movement around it is not. What guards the branch as a whole is the integration pass: the
+tolerates both: it checks that the merge contributed no path outside the reviewed ones and that the
+merge's content on every reviewed path matches what was reviewed, so unreviewed content inside *the merge*
+is refused while movement around it is not. A reviewed path a sibling already changed identically is
+proven by those bytes, though the merge itself leaves it untouched. What guards the branch as a whole is the integration pass: the
 validator judges the whole diff and Gate 3 will not approve unless the head it judged is still the head.
 
 Advance waves until all slices are `merged`, or a slice is `blocked`. A blocked slice stops the wave and

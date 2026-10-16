@@ -359,7 +359,7 @@ Almost all of this system is prose. Code exists only where prose cannot enforce 
   writes the manifest.
 - **Verification exists only where its absence produces a false green.** With a human at the gate,
   someone sees the diff. In an autonomous run nobody does, so a review must name the commit it
-  judged, a merge must prove it contributed exactly what was reviewed, and a test result must have
+  judged, a merge must prove it contributed only what was reviewed, and a test result must have
   been observed rather than reported.
 
 Run state lives at `<repo>/.factory/<run-id>/run.json`, which must be gitignored: a tracked

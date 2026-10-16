@@ -1360,7 +1360,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // 6463 -> 6480: a conflicted base sync is admitted with an approving review of its resolution (the remerge-diff),
     // bound to the merge commit, and never when the resolution touches the control plane (trellis #122: eleven
     // conflicts with main's test-reliability fixes). Inside #387's 6550 tripwire; nothing trimmed.
-    assert.equal(total, 6480, "a conflicted base sync is admitted with a reviewed resolution: 6480 production lines");
+    // 6480 -> 6484: the merge proof no longer requires every reviewed path to appear in the merge's own diff; the
+    // content check already binds those bytes (mimirbot epic 3: an identical version bump stranded `repo`). Four
+    // lines removed, eight comment lines added to say why. Inside #387's 6550 tripwire; nothing trimmed.
+    assert.equal(total, 6484, "a reviewed path a sibling already converged on is proven by its bytes: 6484 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
