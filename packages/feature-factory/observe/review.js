@@ -115,8 +115,8 @@ export function readValidatorReview(runDir, observedHead) {
   return review;
 }
 
-// Attack 2: the merge proof. What the merge contributed must be exactly what was
-// reviewed.
+// Attack 2: the merge proof. The merge may contribute nothing that was not reviewed,
+// and every reviewed path must carry exactly the reviewed bytes.
 //
 // This was tree equality — reviewed_tree === merged_tree — which is wrong for the
 // design's central case. A wave's slices all branch from the same integration head and
@@ -128,9 +128,17 @@ export function readValidatorReview(runDir, observedHead) {
 // Diff equality instead, expressed as changed-path sets rather than by comparing patch
 // text (patch context can differ legitimately once the surrounding base has moved):
 //
-//   * the paths the merge touched, relative to its first parent, are exactly the paths
+//   * the paths the merge touched, relative to its first parent, are among the paths
 //     the slice changed relative to its own base; and
 //   * the reviewed commit and the merge differ on none of those paths.
+//
+// A reviewed path the merge left unchanged is not refused. The second check already makes
+// its bytes the reviewed bytes, so the only way to reach it is an integration branch that
+// already held them: two slices making the same change. Requiring the merge to touch it
+// too refused mimirbot epic 3's `repo` after `retained` had merged the identical version
+// bump, stranding an approved slice whose merged tree was exactly what was reviewed. A
+// merge that drops or reverts a reviewed change differs from the reviewed commit on that
+// path and still fails below.
 //
 // A moved base is then normal and passes. Unreviewed content inside the merge shows up
 // either as an extra path or as a differing blob, and fails. Tree equality is the
@@ -169,10 +177,6 @@ export function observeMergeProof(worktree, { baseRef, reviewedCommit, mergeComm
   const extra = contributedPaths.filter((path) => !reviewedPaths.includes(path));
   if (extra.length > 0) {
     return fail(`the merge contributed paths that were not reviewed: ${extra.join(", ")}`);
-  }
-  const missing = reviewedPaths.filter((path) => !contributedPaths.includes(path));
-  if (missing.length > 0) {
-    return fail(`the merge did not contribute reviewed paths: ${missing.join(", ")}`);
   }
 
   // Do not add a check that the base moved only by *recorded* slice merges. It was built

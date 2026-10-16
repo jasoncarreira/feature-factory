@@ -3,7 +3,18 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
-## 0.10.17
+## 0.10.18
+
+- A slice's merge is no longer refused when the integration branch already holds the slice's exact change on one
+  of its reviewed paths. The merge proof required every reviewed path to appear in the merge's own diff. When two
+  slices made the same change, the second merge left that path untouched, and the factory refused it with "the
+  merge did not contribute reviewed paths", stranding an approved slice. That hit mimirbot's epic 3: `retained` had
+  already merged the 0.9.10 version bump, so `repo`'s identical bump changed nothing.
+
+  The proof still refuses a merge that changes a path nobody reviewed, or leaves a reviewed path with different
+  bytes, which includes a merge that drops or reverts a reviewed change. A run parked on this refusal resumes and
+  records the same merge commit, as long as that commit is still the integration branch's tip.
+
 
 - A provider outage no longer parks a run after one immediate retry. Two changes to the specialist
   infrastructure-failure rules:

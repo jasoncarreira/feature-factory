@@ -26,7 +26,7 @@ prose cannot enforce. The dividing line is deliberate:
   rename` — and nothing else writes the manifest.
 - **Verification exists only where its absence produces a false green.** In an interactive run a
   human sees the diff. In an autonomous run nobody does, so a review must name the commit it
-  judged, a merge must prove it contributed exactly what was reviewed, and a test result must have
+  judged, a merge must prove it contributed only what was reviewed, and a test result must have
   been observed rather than reported.
 
 Everything else is instructions. The rule is: *enforce what can produce a false green, instruct the
@@ -402,8 +402,8 @@ intent but does not query the forge to verify the PR's actual base.
 Enforced, not suggested. Each is a mechanism with a test that fails when the mechanism is removed:
 
 - A review must record the 40-character commit it judged, and is refused against any other head.
-- A merge must be a two-parent merge that contributed exactly the reviewed paths, with content on
-  those paths identical to the reviewed commit.
+- A merge must be a two-parent merge that contributed no unreviewed path, with content on every
+  reviewed path identical to the reviewed commit.
 - A slice may only change its seeded paths plus durable audited amendments, and never an unamended or
   privileged control-plane path. An amendment is audited, not authorized: it requires a parked run and a
   freshly verified owning session, both of which the owning driver can create, so the record of what was
