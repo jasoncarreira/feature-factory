@@ -326,12 +326,16 @@ describe("attack 2 — the merge must contribute exactly what was reviewed", () 
         run(same.root, "commit", "-q", "-m", "a different bump");
         run(same.root, "checkout", "-q", "-B", "feature-other", same.featureBase);
         run(same.root, "merge", "-q", "--no-ff", "sibling-other", "-m", "merge other sibling");
+        // The slice's own file is carried with its reviewed bytes, so only the shared path diverges.
+        writeFileSync(join(same.root, "src", "slice.ts"), run(same.root, "show", "slice:src/slice.ts") + "\n");
+        run(same.root, "add", "-A");
+        run(same.root, "commit", "-q", "-m", "carry the slice's own file");
         run(same.root, "merge", "-q", "--no-ff", "-s", "ours", "slice", "-m", "merge slice keeping ours");
         const divergent = observeMergeProof(same.root, {
           baseRef: same.featureBase, reviewedCommit: convergentReviewed, mergeCommit: run(same.root, "rev-parse", "HEAD"),
         });
         assert.equal(divergent.proven, false);
-        assert.match(divergent.reason, /differs from the reviewed commit's: src\/slice\.ts, src\/version\.ts/u);
+        assert.match(divergent.reason, /differs from the reviewed commit's: src\/version\.ts$/u);
       } finally { rmSync(same.root, { recursive: true, force: true }); }
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });

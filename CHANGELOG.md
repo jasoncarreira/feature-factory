@@ -15,6 +15,8 @@ version across the workspace, with each adapter pinning the exact factory versio
   bytes, which includes a merge that drops or reverts a reviewed change. A run parked on this refusal resumes and
   records the same merge commit, as long as that commit is still the integration branch's tip.
 
+## 0.10.17
+
 
 - A provider outage no longer parks a run after one immediate retry. Two changes to the specialist
   infrastructure-failure rules:
