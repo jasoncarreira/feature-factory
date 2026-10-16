@@ -164,6 +164,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "- **There is no per-invocation budget.** Continue until the run completes or a condition this workflow names stops it.",
       "Never park for self-assessed capacity, context, or elapsed time: the run's state lives in `run.json` and its",
       "from those records, not from memory. A park for capacity costs a full relaunch that must re-qualify the run",
+      // Instruction only: an amendment onto a path a merged slice changed after the slice's base strands the
+      // slice at merge (mimirbot epic 3's budget_gate.py); the merge proof already refuses the result.
+      "**Before either kind of amendment, check whether a merged slice changed the path after the amended",
       // Instruction: a conflicted base sync's resolution is what the reviewer reads.
       "`work-reviewer` on `git show --remerge-diff <merge>`, which shows only how the resolution departs from the",
 

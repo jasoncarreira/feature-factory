@@ -3,7 +3,15 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
-## 0.10.18
+## Unreleased
+
+- WORKFLOW.md: before amending a slice's paths, check whether a merged slice changed that path after the
+  amended slice's base. If one did, the two edits combine when the slice merges, nobody has reviewed the
+  result, and the merge proof refuses it. That stranded mimirbot epic 3's approved `repo` slice on
+  `budget_gate.py`. The fix is to have the builder take the integration head's version into the slice first,
+  so the slice's review covers the combined file. If that file depends on other merged work, park instead.
+  This is instruction only, because the merge proof already refuses the unreviewed result.
+
 
 - A slice's merge is no longer refused when the integration branch already holds the slice's exact change on one
   of its reviewed paths. The merge proof required every reviewed path to appear in the merge's own diff. When two
