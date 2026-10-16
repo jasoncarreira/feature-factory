@@ -9,7 +9,8 @@ version across the workspace, with each adapter pinning the exact factory versio
   amended slice's base. If one did, the two edits combine when the slice merges, nobody has reviewed the
   result, and the merge proof refuses it. That stranded mimirbot epic 3's approved `repo` slice on
   `budget_gate.py`. The fix is to have the builder take the integration head's version into the slice first,
-  so the slice's review covers the combined file. If that file depends on other merged work, park instead.
+  so the slice's review covers the combined file, along with any merged files it depends on, as long as
+  that set still passes the slice's tests on its own base. Otherwise, park.
   This is instruction only, because the merge proof already refuses the unreviewed result.
 
 

@@ -889,8 +889,10 @@ slice's base.** Run `git -C "$INTEGRATION_WORKTREE" diff --quiet "$SLICE_BASE_RE
 the merged one combine when the slice merges, so the merged file is something nobody reviewed and the merge
 proof refuses it, stranding an approved slice. In that case have the builder first take the integration
 head's version into the slice (`git checkout <integration head> -- "$PATH"`) and make its change on top,
-so the slice's review covers the combined file. That works only when the file still stands on the slice's
-own base; if it depends on other merged work, do not amend: park and report the dependency instead.
+so the slice's review covers the combined file. When the integrated file depends on other merged work, such
+as a helper it now imports, take those files the same way, amending each one, so long as the set still
+passes the slice's tests on its own base and the slice's review can cover it all. When it does not, do not
+amend: park and report the dependency instead.
 
 When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact
 boundary between completion of resume order 7 and the first operation in resume order 8. Nothing may
