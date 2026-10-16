@@ -40,7 +40,8 @@ server`, `socket hang up`, `service unavailable (503)`, `AI_APICallError: Servic
 `Our servers are currently overloaded. Please try again later.` A qualifying failure keeps the current
 attempt and, after a backoff of 1, 2, 4, 8 and then 16 minutes, permits a safe same-session recovery, or a
 same-input re-dispatch only when the host proves execution never started. A sixth consecutive failure for
-the same canonical role and subject parks the run, about half an hour into an outage. This count is memory-only and resets with the active
+the same canonical role and subject parks the run, about half an hour into an outage. Unbudgeted research
+and design calls keep a single recovery. This count is memory-only and resets with the active
 driver, but the later-driver guard still requires recovery or no-start proof before dispatch. Unknown or
 excluded errors also preserve a budgeted attempt, create none for unbudgeted work, and park immediately;
 never duplicate a possibly started child or classify words found in model output as infrastructure.
