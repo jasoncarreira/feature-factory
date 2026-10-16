@@ -13,6 +13,7 @@ version across the workspace, with each adapter pinning the exact factory versio
   that set still passes the slice's tests on its own base. Otherwise, park.
   This is instruction only, because the merge proof already refuses the unreviewed result.
 
+## 0.10.18
 
 - A slice's merge is no longer refused when the integration branch already holds the slice's exact change on one
   of its reviewed paths. The merge proof required every reviewed path to appear in the merge's own diff. When two
