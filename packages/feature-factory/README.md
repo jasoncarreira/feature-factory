@@ -23,9 +23,9 @@ that loads the complete workflow and drives all durable state changes through th
 ## Infrastructure failures and attempts
 
 A confirmed host-origin availability or transport failure does not spend a specialist attempt. The active
-driver permits one same-attempt recovery for the canonical role and subject only when the host proves
-execution never started or can recover the same child/session. Unbudgeted research and design create no
-attempt. A second consecutive failure parks the run. The count is memory-only and resets with the driver,
+driver permits a same-attempt recovery for the canonical role and subject, after a backoff of 1, 2, 4, 8
+and then 16 minutes, only when the host proves execution never started or can recover the same
+child/session. Unbudgeted research and design create no attempt. A sixth consecutive failure parks the run. The count is memory-only and resets with the driver,
 but resume and reset never prove that prior work did not start: the next driver must recover or prove the
 same prior invocation safe before dispatch. Child text, unknown errors, and excluded auth, quota,
 rate-limit, and configuration failures never trigger a free retry or duplicate possibly-started work.

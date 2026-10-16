@@ -3,8 +3,20 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
-## Unreleased
+## 0.10.17
 
+- A provider outage no longer parks a run after one immediate retry. Two changes to the specialist
+  infrastructure-failure rules:
+  - OpenAI's `Our servers are currently overloaded. Please try again later.` now counts as a retryable
+    failure. A host can deliver it as a bare message with no HTTP status, so it matched nothing in the
+    fixed list, and the driver parked mimirbot's epic 3 as non-retryable.
+  - Before retrying, the driver now waits 1, 2, 4, 8 and then 16 minutes, and parks only on the sixth
+    consecutive failure, about half an hour in. Previously it retried once immediately and parked on the
+    second failure, which an outage longer than the client's own retries always reached.
+
+  The attempt still isn't spent. The `SECOND_FAILURE_REASON` template keeps its wording, so a run parked
+  by an earlier version still matches the later-driver guard. This is instruction only, because a retry
+  can't produce a false green.
 - New package `opencode2-feature-factory`, the OpenCode 2.0 adapter (#393). V1 plugins don't run in 2.0, so
   it's separate from `opencode-feature-factory`, which is unchanged. It contains:
   - a server plugin that registers in memory the `/feature` command, the `feature` skill, the orchestrator,

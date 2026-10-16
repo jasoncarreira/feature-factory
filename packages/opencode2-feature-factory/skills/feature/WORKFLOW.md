@@ -105,8 +105,10 @@ error or its structured cause chain reports one of this closed set:
   `EAI_AGAIN`, `ETIMEDOUT`, `EPIPE`, `ECONNABORTED`, `ERR_STREAM_PREMATURE_CLOSE`,
   `UND_ERR_CONNECT_TIMEOUT`, `UND_ERR_HEADERS_TIMEOUT`, `UND_ERR_BODY_TIMEOUT`, or `UND_ERR_SOCKET`;
 - a host-owned terminal error or cause leaf exactly equal, ignoring ASCII case, to `socket closed
-  unexpectedly`, `connection reset by server`, `socket hang up`, `service unavailable (503)`, or
-  `AI_APICallError: Service Unavailable (503)`.
+  unexpectedly`, `connection reset by server`, `socket hang up`, `service unavailable (503)`,
+  `AI_APICallError: Service Unavailable (503)`, or OpenAI's overload message
+  `Our servers are currently overloaded. Please try again later.`, which a host can deliver with no
+  status.
 
 Inspect only the host/tool invocation-error channel and structured error fields. Do not search partial
 model output, artifact text, logs, review prose, or repository content for these words. If the host does
@@ -178,8 +180,11 @@ key resets it to zero. Activity for another key neither combines with nor resets
 
 On the first confirmed failure for a key, increment only that in-memory count. Keep the control plane
 unchanged: do not issue any step or slice transition with `--attempts N+1`, do not observe or review
-partial output, and do not record `accepted`, `rejected`, or `blocked`. Continue automatically only
-through one of these two safe paths:
+partial output, and do not record `accepted`, `rejected`, or `blocked`. Wait before continuing: 1 minute
+after the first confirmed failure for a key, then 2, 4, 8 and 16 minutes after the second through fifth.
+A provider outage routinely outlasts the host client's own retries, so an immediate retry fails the
+same way and parks a run that half an hour would have saved. Keep heartbeating while you wait. Continue
+automatically only through one of these two safe paths:
 
 1. When trusted host metadata proves execution never started, re-dispatch the exact same role, subject,
    inputs and, when budgeted, the persisted attempt number.
@@ -193,8 +198,10 @@ work, and take the common infrastructure-park sequence with `UNKNOWN_OUTCOME_REA
 research or design call still permits at most one safe same-invocation recovery and creates no durable
 progress record.
 
-On the second consecutive confirmed failure for the same key during that safe re-dispatch or recovery,
-do not invoke it again. Take the common infrastructure-park sequence with `SECOND_FAILURE_REASON`.
+On the sixth consecutive confirmed failure for the same key during those safe re-dispatches or recoveries,
+do not invoke it again. Take the common infrastructure-park sequence with `SECOND_FAILURE_REASON`. Its
+template still says twice: it is kept byte-for-byte so a run parked under an earlier version still matches
+the later-driver guard below.
 
 The failure count remains invocation-local: every new driver, including one entered after explicit resume,
 starts it at zero. That reset is not proof that prior execution did not start. When the preserved historical

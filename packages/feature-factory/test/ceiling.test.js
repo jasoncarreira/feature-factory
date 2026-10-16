@@ -155,6 +155,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "| `UNKNOWN_OUTCOME_REASON` | `specialist infrastructure outcome unknown for <role> on <subject>; prove execution never started or recover the same invocation before continuing` |",
       "| `SECOND_FAILURE_REASON` | `specialist infrastructure failed twice consecutively for <role> on <subject>; after provider or network recovery, prove execution never started or recover the same invocation before continuing` |",
       "resume, `status.next`, provider recovery, the reset count, and an operator assertion alone establish",
+      // Instruction only: OpenAI's overload reached a driver as a bare message, matched nothing, and parked epic 3;
+      // an immediate retry would have failed too, because the outage outlasted the client's own 15 minutes of retries.
+      "  `Our servers are currently overloaded. Please try again later.`, which a host can deliver with no",
+      "after the first confirmed failure for a key, then 2, 4, 8 and 16 minutes after the second through fifth.",
       // Instruction only: an autonomous driver parked itself for "orchestration invocation capacity" after every few
       // merged slices (mimir chainlink-1947, nine launches); nothing had limited it.
       "- **There is no per-invocation budget.** Continue until the run completes or a condition this workflow names stops it.",
