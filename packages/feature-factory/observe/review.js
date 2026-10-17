@@ -14,6 +14,8 @@ export const REVIEW_KEYS = Object.freeze([
   "subject", "reviewer", "verdict", "attempt", "reviewed_commit",
   "findings", "required_fixes", "checked_against",
 ]);
+// Optional, so records written before handoffs existed still read: the `handoff-N` ids this review checked.
+const OPTIONAL_REVIEW_KEYS = Object.freeze(["handoffs_delivered"]);
 
 export const APPROVING_VERDICTS = Object.freeze(["APPROVE", "GO", "GO-WITH-NITS", "PASS"]);
 const SHA = /^[0-9a-f]{40}$/u;
@@ -31,7 +33,7 @@ export function readReview(runDir, ref) {
   // Accumulate, then throw once. Fail-fast costs one dispatch per problem: run 1437's validator record had
   // two unknown keys, no reviewed_commit and no attempt, so correcting the keys would have earned a second
   // refusal and then a third, each after another validator pass over a 27-file change.
-  const unknown = Object.keys(value).filter((key) => !REVIEW_KEYS.includes(key));
+  const unknown = Object.keys(value).filter((key) => !REVIEW_KEYS.includes(key) && !OPTIONAL_REVIEW_KEYS.includes(key));
   const problems = [];
   if (unknown.length > 0) problems.push(`has unknown keys: ${unknown.sort().join(", ")}`);
   if (typeof value.subject !== "string" || !value.subject.trim()) problems.push("has no subject");
@@ -54,8 +56,19 @@ export function readReview(runDir, ref) {
   if (!Array.isArray(value.checked_against) || value.checked_against.length === 0) {
     problems.push("must record checked_against as a non-empty array naming what the review read");
   }
+  if (value.handoffs_delivered !== undefined && (!Array.isArray(value.handoffs_delivered) || value.handoffs_delivered.some((id) => typeof id !== "string"))) {
+    problems.push("must record handoffs_delivered as an array of handoff ids");
+  }
   if (problems.length > 0) throw new Error(`review '${ref}' ${problems.join("; ")}`);
   return value;
+}
+
+// Enforcement: a requirement handed to a later slice is the one item no merge proof or test plan carries, so it
+// could vanish between two green slices. It counts as delivered only when the approving review names it: the
+// receiving slice's reviewer at its merge, and the implementation-validator across the integrated branch.
+export function undeliveredHandoffs(review, ids) {
+  const delivered = review.handoffs_delivered ?? [];
+  return ids.filter((id) => !delivered.includes(id));
 }
 
 export function isApproving(verdict) {

@@ -23,6 +23,7 @@ The gate between a subagent's work and the orchestrator accepting it. You review
 - **the producer's output** — its report / the artifact it wrote.
 - **the observed evidence** (for build/test subjects) — the `evidence/<subject>.json` the orchestrator produced by running `git -C $WT diff` and the named tests **itself**. This, not the producer's prose, is your ground truth.
 - **the upstream inputs** — the story, the technical brief, the slice spec, `$WT` (worktree path). For build slices you also get the slice's `paths` and `acceptance`.
+- **handoffs** (build slices, when there are any) — requirements an earlier slice's review asked for that were moved to this slice with `factory handoff`, each with an id `handoff-N` and its items; and any handed **from** this slice, which you do not block on.
 
 ## Review discipline (stay inside the supplied evidence)
 
@@ -180,6 +181,8 @@ The repository's real trust boundaries stay fully blocking: unauthenticated or a
 
 **Verdict rule:** any BLOCKER → REJECT. Otherwise APPROVE (note MAJOR/MINOR for the record).
 
+**A requirement this slice cannot reach from its base.** When a blocking requirement needs something only a later slice provides — the other side of a move, or a capability a slice depending on this one registers — say so in the finding and name the slice that can meet it, so the orchestrator can hand it on rather than retry against it. It still blocks until it is handed off. A handoff addressed to this slice is part of its acceptance: an undelivered item is a BLOCKER.
+
 ## Output contract
 
 Perform two distinct file writes for every dispatch:
@@ -190,6 +193,8 @@ Perform two distinct file writes for every dispatch:
 Review JSON keys (in required order): subject, reviewer, verdict, attempt, reviewed_commit, findings, required_fixes, checked_against
 
 The review file must contain one JSON object with exactly those eight top-level keys in that order. `attempt` is required and must be a positive integer. `reviewed_commit` is required and must be the 40-character lowercase hexadecimal SHA of the head you judged. Refuse unknown or extra top-level keys outright: `reviewed_head`, `risks`, `narrative`, `prioritized_gaps`, and `risk_notes` are not review-record keys.
+
+The one optional key is `handoffs_delivered`, written last and only when you were given handoffs addressed to this subject: an array of the `handoff-N` ids each of whose items you confirmed in the code you judged. List none you did not confirm. The merge is refused until every handoff addressed to the slice is listed.
 
 Use the supplied subject; set `reviewer` to `work-reviewer`; preserve the APPROVE/REJECT verdict rule; put the structured finding list in `findings`, the blocking remediation list in `required_fixes`, and the applied inputs in `checked_against`.
 

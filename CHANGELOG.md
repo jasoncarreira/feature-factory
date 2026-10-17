@@ -3,8 +3,28 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
-## Unreleased
+## 0.11.0
 
+- New `factory handoff <run> <from-slice> <to-slice> --item TEXT ... --reason TEXT --session ID`. It moves a
+  reviewer's requirement from the slice it was asked of to a later slice that can meet it. Mimirbot epic 3
+  parked five times to do this by operator decision, and `agent` spent all five attempts first. Each time a
+  review asked a slice for something it could not do from its base: a test covering both sides of a move whose
+  other side only lands later, or a capability that a slice depending on it registers.
+  - Each handoff is recorded in `run.json` under `handoffs` as `handoff-N`, and `factory status` lists them.
+  - The CLI refuses a receiver that has already merged.
+  - The receiving slice's merge is refused until its approving review lists the handoff id in the new optional
+    review key `handoffs_delivered`.
+  - An approving implementation-validator verdict is refused until it lists every handoff in the run, so a
+    requirement cannot disappear between two green slices.
+  - No other transition may drop or rewrite a handoff.
+  - In autonomous mode the driver decides handoffs itself, within the WORKFLOW.md conditions: the receiver is
+    pending and will have what the requirement needs, no story criterion changes, and nothing is dropped. In
+    interactive mode it presents the handoff for approval, and in headless mode it parks with the proposal.
+  - The work-reviewer names the slice that can meet a requirement it finds unreachable. The
+    implementation-validator checks each handoff on the integrated branch. The work-decomposer gives a test
+    covering both sides of a move to the first slice that has both sides on its base.
+  - **Breaking:** `run.json` gains a top-level key, so an older CLI refuses a manifest that has recorded a
+    handoff. Review records written before this release still read.
 - WORKFLOW.md: before amending a slice's paths, check whether a merged slice changed that path after the
   amended slice's base. If one did, the two edits combine when the slice merges, nobody has reviewed the
   result, and the merge proof refuses it. That stranded mimirbot epic 3's approved `repo` slice on

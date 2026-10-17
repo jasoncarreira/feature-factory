@@ -296,6 +296,7 @@ an error rather than a silently ignored typo.
 factory init <run-id> [--branch B] [--worktree W] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
 factory status <run-id> [--json]
 factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID
+factory handoff <run-id> <from-slice> <to-slice> --item TEXT [--item TEXT ...] --reason TEXT --session ID
 factory resume <run-id> --session ID [--now ISO]
 factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
 factory heartbeat <run-id> --session ID
@@ -372,6 +373,11 @@ bootstrap, resume changes only `status` and `updated_at`; with it, resume also r
 `bootstrap_command` and `bootstrap_exit` under byte- and owner-bound publication. A resumed recorded merge replays the existing
 clean-head and retry-safety checks before progression, and unresolved repair-journal records remain
 publication blockers. An unfixed cause may park the run again with the same reason.
+
+`handoff` moves a reviewer's requirement that a slice cannot meet from its base to a later, unmerged slice
+that can. It runs on a running or parked run, and an autonomous driver uses it without parking. The receiver's
+merge refuses until its approving review lists the `handoff-N` id in `handoffs_delivered`, and an approving
+implementation-validator verdict refuses until it lists every handoff in the run.
 
 On a running run, `amend-paths` is also the driver's in-band route: it applies without parking unless another
 slice in `running` or `review` already owns a requested path, and no slice activates onto a path an active slice
