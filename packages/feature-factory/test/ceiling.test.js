@@ -30,6 +30,8 @@ const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI_COMMANDS = [
   "init", "status", "amend-paths", "resume", "grant-retry", "restore", "snapshot", "decide", "lock", "heartbeat", "gate", "step", "terminal",
   "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push", "identity", "remediate", "sync-base",
+  // 0.11.0: one audited move of a reviewer's requirement to a later, unmerged slice.
+  "handoff",
 ];
 
 const RUN_JSON_KEYS = [
@@ -40,6 +42,8 @@ const RUN_JSON_KEYS = [
   "remediations",
   // #387: audited merges of the PR base into the integration branch; the latest base is the run's branch point.
   "base_syncs",
+  // 0.11.0: requirements moved to a later slice, each owed by that slice's review and the validator's.
+  "handoffs",
   // The operator's answer to a parked run: the one channel into a park, since resume carries no message
   // and every other write is refused there.
   "operator_decision",
@@ -121,6 +125,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.deepEqual(COMMANDS.restore, ["--repo", "--from", "--now", "--json"]);
     assert.deepEqual(COMMANDS.snapshot, ["--repo", "--json"]);
     assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
+    assert.deepEqual(COMMANDS.handoff, ["--repo", "--item", "--reason", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS["reverify-repair"], ["--repo", "--now", "--json"]);
     assert.deepEqual(COMMANDS["effective-push"], []);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
@@ -167,6 +172,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       // Instruction only: an amendment onto a path a merged slice changed after the slice's base strands the
       // slice at merge (mimirbot epic 3's budget_gate.py); the merge proof already refuses the result.
       "**Before either kind of amendment, check whether a merged slice changed the path after the amended",
+      // Instruction only (0.11.0): when the driver may hand a requirement on by itself. Delivery is enforced in the CLI.
+      "In `autonomous` mode the driver decides this itself, and only when all of these hold:",
+      "- the move changes no story acceptance criterion and drops nothing. Each `--item` is a requirement stated",
       // Instruction: a conflicted base sync's resolution is what the reviewer reads.
       "`work-reviewer` on `git show --remerge-diff <merge>`, which shows only how the resolution departs from the",
 
@@ -385,6 +393,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     for (const [agent, fragment] of [["work-reviewer", "When the observed `tests.exit` or `repository_verify.exit` is not 0, read its `tail`, or the log at its"],
       ["test-verifier", "When an observed run's `exit` is not 0, read its evidence `tail` or the log at `log_path`"]]) {
       assert.ok(readFileSync(join(pkg, "agents", `${agent}.md`), "utf8").includes(fragment), `${agent} must read the persisted output on failure`);
+    }
+    // Instruction only (0.11.0): who names an unreachable requirement, who checks a handoff, and where planning puts both sides of a move.
+    for (const [agent, fragment] of [["work-reviewer", "**A requirement this slice cannot reach from its base.**"],
+      ["implementation-validator", "7. **Handoffs:** for every handoff in the run, confirm on the integrated branch"],
+      ["work-decomposer", "**Proving both sides of a move.** A test that exercises the old location and the new one together"]]) {
+      assert.ok(readFileSync(join(pkg, "agents", `${agent}.md`), "utf8").includes(fragment), `${agent} must carry its handoff rule`);
     }
     assert.ok(readFileSync(join(pkg, "agents", "work-reviewer.md"), "utf8").includes("any change beyond the finding is unapproved scope and a BLOCKER"),
       "the reviewer must bound a remediation slice to its finding");
@@ -760,7 +774,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 27, "twenty-seven: base sync history (#387) is the operator-auditable twenty-seventh field");
+    assert.equal(RUN_KEYS.length, 28, "twenty-eight: handoff history (0.11.0) is the twenty-eighth field");
   });
 
   it("registers exactly the declared families", () => {
@@ -1366,7 +1380,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // 6480 -> 6484: the merge proof no longer requires every reviewed path to appear in the merge's own diff; the
     // content check already binds those bytes (mimirbot epic 3: an identical version bump stranded `repo`). Four
     // lines removed, eight comment lines added to say why. Inside #387's 6550 tripwire; nothing trimmed.
-    assert.equal(total, 6484, "a reviewed path a sibling already converged on is proven by its bytes: 6484 production lines");
+    // 6484 -> 6576 for 0.11.0: `factory handoff` moves a reviewer's requirement from one slice to a later, unmerged one,
+    // and the receiver's merge and an approving validator verdict each refuse until their review names it (mimirbot
+    // epic 3: five parks, and agent's five attempts, spent on requirements no attempt could meet from its base).
+    assert.equal(total, 6576, "a requirement handed to a later slice is owed at that slice's merge: 6576 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1406,9 +1423,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // publishing-identity guard runs in the CLI rather than depending on the host's shell tool; issue #367
     // authorizes 6000 for a committed max_retries default, landed inside #365's cap; issue #372 authorizes 6100
     // so slice observation runs the repository verify; issue #376 authorizes 6150 so verify runs on a freshly
-    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice; issue #381 authorizes 6450 to persist test output; issue #387 authorizes 6550 for base sync.
+    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice; issue #381 authorizes 6450 to persist test output; issue #387 authorizes 6550 for base sync; Jason authorized 6650 for 0.11.0's `factory handoff` (6576 at landing).
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 6550, `production source is ${total} lines; the issue #387 tripwire is 6550`);
+    assert.ok(total <= 6650, `production source is ${total} lines; the 0.11.0 handoff tripwire is 6650`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {

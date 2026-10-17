@@ -89,7 +89,7 @@ a re-read rather than a run.
    runs, is everything it must change in order to pass owned by *this* slice? If not, the plan is wrong,
    whatever the topic suggests. Ownership follows the change, not the subject matter.
 
-   Three forms of this ownership problem:
+   Four forms of this ownership problem:
 
    - **Proving an absence a later slice fills.** Two kinds, and only the first is a contradiction:
      - **Invalidated when the later path lands.** The claim holds only while the thing is absent, so the
@@ -114,6 +114,9 @@ a re-read rather than a run.
      var documented, every tool in an allowlist, every surface in a list, a budget or a limit — fails the
      moment your change adds a member, and passes again only when the inventory is updated. The slice
      adding the member must own the required inventory updates; a merged slice cannot be amended.
+   - **Proving both sides of a move.** A test that exercises the old location and the new one together, or a
+     caller and the capability a later slice registers, can pass only once both exist. Give it to the first
+     slice whose base has both sides, never to the slice that moves only one of them.
 
    **The trigger is invalidation, not change.** A backward-compatible change needs none of this: a
    defaulted optional parameter, or an added field on a returned object, leaves every existing caller,

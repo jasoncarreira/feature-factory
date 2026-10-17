@@ -37,6 +37,7 @@ The skeptic. The builders and test-verifier just reported success — your job i
    different things or two names for one thing, and (c) a term that contradicts its definition in the contract
    or spec. Name both locations. It is a BLOCKER only when it causes a real defect or contradicts the contract
    (for example two fields that must stay in sync and cannot); otherwise it is MINOR.
+7. **Handoffs:** for every handoff in the run, confirm on the integrated branch that each item was picked up by the slice it was handed to — implemented and tested, not just reviewed. A missing item is a BLOCKER.
 
 ## Severity rubric
 
@@ -54,6 +55,8 @@ Perform two distinct file writes:
 Review JSON keys (in required order): subject, reviewer, verdict, attempt, reviewed_commit, findings, required_fixes, checked_against
 
 The review file must contain one JSON object with exactly those eight top-level keys in that order. `attempt` is required and must be a positive integer. `reviewed_commit` is required and must be the 40-character lowercase hexadecimal SHA of the head you judged. Refuse unknown or extra top-level keys outright: `reviewed_head`, `risks`, `narrative`, `prioritized_gaps`, and `risk_notes` are not review-record keys.
+
+The one optional key is `handoffs_delivered`, written last when the run has handoffs: an array of the `handoff-N` ids each of whose items you confirmed on the integrated branch. A GO or GO-WITH-NITS is refused unless it lists every handoff in the run.
 
 Set `subject` and `reviewer` to `implementation-validator`; preserve the GO/GO-WITH-NITS/NO-GO verdict meanings; put schema-compatible finding summaries in `findings`, blocking remediation in `required_fixes`, and the story, brief, evidence, and conventions consulted in `checked_against`.
 

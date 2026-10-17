@@ -35,6 +35,8 @@ export const RUN_KEYS = Object.freeze([
   "remediations",
   // Audited merges of the PR base into the integration branch by `factory sync-base` (#387). Absent in older manifests.
   "base_syncs",
+  // Audited moves of a reviewer's requirement from one slice to a later one by `factory handoff`. Absent in older manifests.
+  "handoffs",
 ]);
 
 export const RUN_STATUSES = Object.freeze(["running", "completed", "blocked", "partial", "needs-human"]);
@@ -76,6 +78,7 @@ export const SLICE_KEYS = Object.freeze([
 ]);
 const PATH_AMENDMENT_KEYS = Object.freeze(["added_paths", "reason", "session", "at"]);
 export const BASE_SYNC_KEYS = Object.freeze(["merge_commit", "previous_head", "base", "previous_base", "review_ref", "reason", "at"]);
+export const HANDOFF_KEYS = Object.freeze(["id", "from", "to", "items", "reason", "session", "at"]);
 export const REMEDIATION_KEYS = Object.freeze(["slice_id", "finding_ref", "finding_archive", "finding_sha256", "paths", "test_plan", "reason", "session", "at"]);
 // Instruction-level bound, enforced so a fix that finds another defect cannot loop without a human (#344).
 export const REMEDIATION_LIMIT = 2;
@@ -163,6 +166,7 @@ export function validateRun(run) {
   retryExtensions(errors, run);
   remediations(errors, run);
   baseSyncs(errors, run);
+  handoffs(errors, run);
   gates(errors, run.gates);
   steps(errors, run.steps);
   slices(errors, run.slices, run);
@@ -196,6 +200,26 @@ function remediations(errors, run) {
     if (!slice || slice.id !== entry.slice_id || !isDeepStrictEqual(slice.paths, amended) || !isDeepStrictEqual(slice.test_plan, entry.test_plan)) {
       errors.push({ path, message: "does not match its trailing remediation slice" });
     }
+  });
+}
+
+// Each handoff is numbered by its position, so a review can name the ones it checked and the list can only grow.
+function handoffs(errors, run) {
+  const value = run.handoffs;
+  if (value === undefined) return;
+  if (!Array.isArray(value)) return void errors.push({ path: "run.handoffs", message: "must be an array" });
+  const sliceIds = new Set((Array.isArray(run.slices) ? run.slices : []).map((slice) => slice?.id));
+  value.forEach((entry, index) => {
+    const path = `run.handoffs[${index}]`;
+    if (!object(errors, entry, path, HANDOFF_KEYS)) return;
+    if (entry.id !== `handoff-${index + 1}`) errors.push({ path: `${path}.id`, message: `must be handoff-${index + 1}` });
+    for (const key of ["from", "to", "reason", "session"]) required(errors, entry, key, path);
+    for (const key of ["from", "to"]) if (!sliceIds.has(entry[key])) errors.push({ path: `${path}.${key}`, message: "must name a slice" });
+    if (entry.from === entry.to) errors.push({ path: `${path}.to`, message: "must name a different slice" });
+    if (!Array.isArray(entry.items) || entry.items.length === 0 || entry.items.some((item) => typeof item !== "string" || !item.trim())) {
+      errors.push({ path: `${path}.items`, message: "must be a non-empty array of non-blank strings" });
+    }
+    pattern(errors, entry, "at", ISO, path);
   });
 }
 

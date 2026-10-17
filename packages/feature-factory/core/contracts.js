@@ -59,6 +59,7 @@ const envelope = contract({
     retry_extensions: state.retry_extensions ?? [],
     remediations: state.remediations ?? [],
     base_syncs: state.base_syncs ?? [],
+    handoffs: state.handoffs ?? [],
     bootstrap_command: state.bootstrap_command,
     bootstrap_exit: state.bootstrap_exit,
   }),
@@ -120,6 +121,7 @@ const envelope = contract({
         if (!appendsOneRemediation(before, after)) throw new Error("remediate must append exactly one remediation record");
         return;
       }
+      if (mode === "handoff") return validateHandoff({ before, after, current, candidate });
       // Enforcement (#387): a base sync on a parked run appends one audit record; the park stands until resume.
       if (mode === "sync-base") {
         if (after.status !== "needs-human" || !isDeepStrictEqual(after.terminal_result, before.terminal_result)) throw new Error("sync-base must preserve the parked envelope and terminal_result");
@@ -153,6 +155,7 @@ const envelope = contract({
       for (const key of Object.keys(before).filter((key) => key !== "updated_at")) if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`amend-paths cannot change envelope.${key}`);
       return;
     }
+    if (mode === "handoff") return validateHandoff({ before, after, current, candidate });
     if (mode === "decide") throw new Error(`decide requires current status needs-human; found '${before.status}'`);
     if (["resume-needs-human", "record-bootstrap"].includes(mode)) throw new Error(`${mode} requires current status needs-human; found '${before.status}'`);
     // Identity is immutable for the life of a run. Nothing legitimate renames a
@@ -162,6 +165,7 @@ const envelope = contract({
     }
     if (!isDeepStrictEqual(before.retry_extensions, after.retry_extensions)) throw new Error("envelope.retry_extensions is immutable outside grant-retry");
     if (!isDeepStrictEqual(before.base_syncs, after.base_syncs)) throw new Error("envelope.base_syncs changes only by sync-base on a parked run");
+    if (!isDeepStrictEqual(before.handoffs, after.handoffs)) throw new Error("envelope.handoffs changes only by one handoff append");
     if (mode === "remediate" ? !appendsOneRemediation(before, after) : !isDeepStrictEqual(before.remediations, after.remediations)) {
       throw new Error("envelope.remediations changes only by one remediate append");
     }
@@ -494,6 +498,15 @@ async function checkPublication({ mode, observe, current, candidate, state, next
   if (mode !== "publish") return;
   if (typeof observe !== "function") throw new Error("publishing a PR requires an observer");
   await observe({ current, candidate, state, nextState });
+}
+
+// Enforcement: a handoff appends one record and changes nothing else, parked or running. A parked run stays parked.
+function validateHandoff({ before, after, current, candidate }) {
+  if (after.status !== before.status || !isDeepStrictEqual(after.terminal_result, before.terminal_result)) throw new Error("handoff must preserve status and terminal_result");
+  if (Date.parse(after.updated_at) <= Date.parse(before.updated_at)) throw new Error("handoff must move updated_at forwards");
+  for (const key of Object.keys(before).filter((key) => !["updated_at", "handoffs"].includes(key))) if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`handoff cannot change envelope.${key}`);
+  if (after.handoffs.length !== before.handoffs.length + 1 || !isDeepStrictEqual(after.handoffs.slice(0, -1), before.handoffs)) throw new Error("handoff must append exactly one handoff record");
+  for (const key of Object.keys(current).filter((key) => !Object.hasOwn(before, key))) if (!isDeepStrictEqual(current[key], candidate[key])) throw new Error(`handoff cannot change run.${key}`);
 }
 
 function appendsOneRemediation(before, after) {

@@ -15,7 +15,7 @@ import { transition } from "../state/transition.js";
 import { RUN_JSON_LOCK_DIR, withRunJsonLock } from "../core/run-lock.js";
 import { buildEvidence, deriveReviewReady, EVIDENCE_KEYS, LOG_FIELDS, evidenceRef, git, observeAncestry, observeCleanliness, observeTrackedCleanliness, observeWorktree, privilegedPaths, proveInitContainment, resolveWorktree, runBootstrap, unownedPaths } from "../observe/index.js";
 import { identityReason, observeIdentity } from "../observe/identity.js";
-import { assertPublicationReady, assertReviewBinding, isApproving, observeMergeProof, readEvidence, readReview, readValidatorReview } from "../observe/review.js";
+import { assertPublicationReady, assertReviewBinding, isApproving, observeMergeProof, readEvidence, readReview, readValidatorReview, undeliveredHandoffs } from "../observe/review.js";
 import { readRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
 import { reverifyRepair } from "../observe/repair-reverification.js";
 import { readRepairState } from "../observe/repair-record.js";
@@ -64,6 +64,7 @@ export const COMMANDS = Object.freeze({
   identity: Object.freeze(["--repo", "--json"]),
   remediate: Object.freeze(["--repo", "--finding", "--path", "--reason", "--session", "--now", "--json"]),
   "sync-base": Object.freeze(["--repo", "--merge-commit", "--review-ref", "--reason", "--now", "--json"]),
+  handoff: Object.freeze(["--repo", "--item", "--reason", "--session", "--now", "--json"]),
 });
 
 const BOOLEAN_FLAGS = new Set(["--json", "--repository-verify"]);
@@ -125,7 +126,7 @@ function parse(command, args) {
     const value = args[index + 1];
     if (value === undefined || value.startsWith("--")) throw new CliError(`${arg} requires a value`);
     const flagKey = key(arg);
-    if (arg === "--add" || arg === "--path") flags[flagKey] = [...(flags[flagKey] ?? []), value];
+    if (arg === "--add" || arg === "--path" || arg === "--item") flags[flagKey] = [...(flags[flagKey] ?? []), value];
     else flags[flagKey] = value;
     index += 1;
   }
@@ -666,6 +667,8 @@ const HANDLERS = {
     // otherwise a report about one commit could be recorded as a verdict on another.
     const head = integrationHead(repo, run);
     const review = readValidatorReview(runDir, head.commit);
+    const owed = isApproving(review.verdict) ? undeliveredHandoffs(review, (run.handoffs ?? []).map((handoff) => handoff.id)) : [];
+    if (owed.length) throw new CliError(`an approving validator verdict must confirm every handoff reached the integrated branch; not listed in handoffs_delivered: ${owed.join(", ")}`);
     const next = await transition(runDir, {
       participants: [{ familyId: "verdict", mode: "record" }],
       apply: (state) => ({
@@ -870,6 +873,41 @@ const HANDLERS = {
     const row = next.slices.find((slice) => slice.id === sliceId);
     return emit(flags, { run_id: runId, slice: sliceId, status: next.status,
       terminal_result: next.terminal_result, amendment: row.path_amendments.at(-1) });
+  },
+
+  // A reviewer's requirement that only a later slice can meet moves to that slice on the record, instead of
+  // costing the sender its attempts against a bar it cannot reach from its base. Enforcement: the receiver must
+  // not have merged, and its merge and the validator's approval each refuse until their review names the handoff.
+  // Which receiver can meet the requirement is the driver's judgement and stays instruction.
+  async handoff(positional, flags) {
+    if (positional.length !== 3) throw new CliError("factory handoff requires exactly <run-id> <from-slice> <to-slice>");
+    const [runId, from, to] = positional;
+    if (!Array.isArray(flags.item) || flags.item.length === 0 || flags.item.some((item) => !item.trim())) throw new CliError("factory handoff requires at least one nonblank --item <requirement>");
+    if (typeof flags.reason !== "string" || !flags.reason.trim()) throw new CliError("factory handoff requires nonblank --reason <text>");
+    if (typeof flags.session !== "string" || !flags.session.trim()) throw new CliError("factory handoff requires nonblank --session <id>");
+    const runDir = runDirFor(flags, runId);
+    const current = readRun(runDir);
+    if (!["needs-human", "running"].includes(current.status)) throw new CliError(`factory handoff requires status running or needs-human; found '${current.status}'`);
+    const owner = assertFreshSessionOwner(runDir, runId, flags.session, "handoff");
+    const at = stamp(flags);
+    const next = await transition(runDir, {
+      participants: [{ familyId: "envelope", mode: "handoff" }],
+      apply: (state) => {
+        if (state.status !== current.status) throw new CliError(`factory handoff refused because run status changed to '${state.status}'`);
+        if (from === to) throw new CliError("factory handoff requires two different slices");
+        if (!state.slices.some((slice) => slice.id === from)) throw new CliError(`unknown slice '${from}'`);
+        const receiver = state.slices.find((slice) => slice.id === to);
+        if (!receiver) throw new CliError(`unknown slice '${to}'`);
+        if (receiver.status === "merged") throw new CliError(`slice '${to}' is already merged and cannot receive a handoff; hand it to a slice that has not merged, or park for an operator`);
+        const existing = state.handoffs ?? [];
+        const record = { id: `handoff-${existing.length + 1}`, from, to, items: [...flags.item], reason: flags.reason, session: flags.session, at };
+        return { ...state, updated_at: at, handoffs: [...existing, record] };
+      },
+      finalGuard: () => {
+        if (!sameSessionOwner(runDir, owner)) throw new CliError("handoff session ownership changed; no handoff was recorded");
+      },
+    });
+    return emit(flags, { run_id: runId, status: next.status, handoff: next.handoffs.at(-1) });
   },
 
   // #344: a production finding at an integrated stage opens one reviewed fix slice instead of parking the run.
@@ -1207,6 +1245,8 @@ const HANDLERS = {
           review, ref: slice.review_ref, observedHead: observation.commit,
           subject: slice.id, attempt: slice.attempts,
         });
+        const owed = undeliveredHandoffs(review, (run.handoffs ?? []).filter((handoff) => handoff.to === slice.id).map((handoff) => handoff.id));
+        if (owed.length) throw new Error(`slice '${slice.id}' received ${owed.join(", ")}; its approving review must check each handed-off item and list the id in handoffs_delivered`);
         if (evidence.commit !== observation.commit) {
           throw new Error(`evidence '${slice.evidence_ref}' observed ${String(evidence.commit).slice(0, 12)} but the slice head is ${String(observation.commit).slice(0, 12)}`);
         }
@@ -1454,6 +1494,7 @@ const HANDLERS = {
       slices: run.slices.map((slice) => ({ id: slice.id, status: slice.status, attempts: slice.attempts,
         extra_attempts: slice.extra_attempts ?? 0, retry_limit: effectiveRetryLimit(run, slice) })),
       retry_extensions: run.retry_extensions ?? [],
+      handoffs: run.handoffs ?? [],
       // Same narrowing: the record carries `report`, `reviewed_head` and `loops`, and only the verdict
       // came out. `loops` says whether validation is converging; `reviewed_head` says what it judged.
       validator: run.validator
@@ -2097,6 +2138,7 @@ function usage() {
   factory init <run-id> [--branch B=feature/<run-id>] [--worktree W=.] [--pr-base TARGET] [--issue KEY] [--mode interactive|headless|autonomous]
   factory status <run-id> [--json]
   factory amend-paths <run-id> <slice-id> --add PATH [--add PATH ...] --reason TEXT --session ID [--now ISO]
+  factory handoff <run-id> <from-slice> <to-slice> --item TEXT [--item TEXT ...] --reason TEXT --session ID [--now ISO]
   factory grant-retry <run-id> <slice-id> --scope slice|all [--max-retries N] --reason TEXT --session ID [--now ISO]
   factory decide <run-id> --text TEXT --session ID [--now ISO]
   factory resume <run-id> --session ID [--now ISO]

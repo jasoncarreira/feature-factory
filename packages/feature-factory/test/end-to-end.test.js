@@ -2828,6 +2828,38 @@ describe("end to end — a merge is refused through the real CLI", () => {
         ["reviews/base-sync-2.json", "xyyy"], "the resolution is recorded with its review and verified fresh");
       assert.equal(runJson(p.runDir).status, "needs-human", "the park stands until an explicit resume");
     } finally { cleanupProject(p); }
+
+    // 0.11.0: a requirement handed to a later slice is owed by that slice's approving review at its merge, and by the
+    // validator's approving verdict across the run. Neither green can be recorded while the handoff goes unnamed.
+    const h = project("handoff", { additionalSlices: [
+      { id: "be-later", stack: "backend", paths: ["src/later/"], depends_on: ["be-thing"], acceptance: ["AC2"], test_plan: [PASSING_TEST_COMMAND] }] });
+    try {
+      assert.equal(factory(h.repo, ["lock", RUN, "claim", "--session", "driver", "--branch", "feature"]).ok, true);
+      const handoff = (from, to, at, session = "driver") => factory(h.repo, ["handoff", RUN, from, to, "--item", "prove both sides of the move",
+        "--reason", "unreachable from the sender's base", "--session", session, "--now", NOW(at)]);
+      assert.match(handoff("be-later", "be-thing", 2, "intruder").stderr, /session|lock|owner/u, "only the fresh owner records a handoff");
+      assert.match(handoff("be-later", "be-later", 2).stderr, /two different slices/u);
+      const recorded = handoff("be-later", "be-thing", 2);
+      assert.equal(recorded.ok, true, recorded.stderr);
+      assert.deepEqual([recorded.out.handoff.id, factory(h.repo, ["status", RUN]).out.handoffs.length], ["handoff-1", 1]);
+      const { head, basePoint } = buildSlice(h.repo);
+      assert.equal(factory(h.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(3)]).ok, true);
+      assert.equal(factory(h.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(4)]).ok, true);
+      assert.equal(factory(h.repo, ["slice", RUN, "be-thing", "review", "--attempts", "1", "--evidence-ref", "evidence/be-thing.json",
+        "--review-ref", writeReview(h.runDir, "be-thing", head), "--now", NOW(5)]).ok, true);
+      const mergeCommit = mergeIntoFeature(h.repo);
+      assert.match(factory(h.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(6)]).stderr,
+        /received handoff-1; its approving review must check each handed-off item/u);
+      writeReview(h.runDir, "be-thing", head, { handoffs_delivered: ["handoff-1"] });
+      const merged = factory(h.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(6)]);
+      assert.equal(merged.ok, true, merged.stderr);
+      assert.match(handoff("be-later", "be-thing", 7).stderr, /already merged and cannot receive a handoff/u);
+      assert.match(recordValidator(h.repo, h.runDir, mergeCommit, "GO", NOW(8)).stderr, /must confirm every handoff.*handoff-1/u);
+      assert.equal(recordValidator(h.repo, h.runDir, mergeCommit, "NO-GO", NOW(8)).ok, true, "a NO-GO owes nothing");
+      writeReview(h.runDir, "implementation-validator", mergeCommit, { verdict: "GO", handoffs_delivered: ["handoff-1"] });
+      assert.equal(factory(h.repo, ["validator", RUN, "--report", "artifacts/validation-report.md", "--now", NOW(9)]).ok, true);
+    } finally { cleanupProject(h); }
   });
 
   it("refuses a merge with evidence but no review", () => {

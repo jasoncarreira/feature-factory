@@ -460,6 +460,10 @@ describe("attack 11 — a concurrent writer changes run.json mid-transition", ()
 });
 
 const BASE_SYNC = { merge_commit: "a".repeat(40), previous_head: "b".repeat(40), base: "c".repeat(40), previous_base: "d".repeat(40), reason: "fix on main", at: LATER };
+const HANDOFF_SLICE = (id) => ({ id, stack: "backend", depends_on: [], status: "pending", worktree: null, branch: null, attempts: 1,
+  paths: [`${id}/`], path_amendments: [], test_plan: ["npm test"], base_ref: null, evidence_ref: null, review_ref: null, merge_commit: null });
+const HANDOFF = { id: "handoff-1", from: "be", to: "fe", items: ["prove both sides"], reason: "r", session: "s", at: "2026-07-29T00:00:00.000Z" };
+const WITH_HANDOFF = { slices: [HANDOFF_SLICE("be"), HANDOFF_SLICE("fe")], handoffs: [HANDOFF] };
 
 describe("family contracts refuse transitions the schema alone would allow", () => {
   const cases = [
@@ -482,6 +486,9 @@ describe("family contracts refuse transitions the schema alone would allow", () 
     ["bootstrap evidence changes only during bootstrap resume", (state) => ({ ...state, bootstrap_exit: 0, updated_at: LATER }), /may change only during bootstrap resume/u, { bootstrap_command: "npm ci", bootstrap_exit: 7 }],
     // #387: a base sync moves the run's branch point, so only the parked-run sync-base transition may append one.
     ["base syncs change only by sync-base on a parked run", (state) => ({ ...state, updated_at: LATER, base_syncs: [BASE_SYNC] }), /base_syncs changes only by sync-base on a parked run/u],
+    // 0.11.0: a handoff is owed at its receiver's merge, so no transition but one handoff append may drop or rewrite one.
+    ["handoffs cannot be dropped", (state) => ({ ...state, updated_at: LATER, handoffs: [] }), /handoffs changes only by one handoff append/u, WITH_HANDOFF],
+    ["handoffs cannot be rewritten", (state) => ({ ...state, updated_at: LATER, handoffs: [{ ...HANDOFF, to: "be", from: "fe" }] }), /handoffs changes only by one handoff append/u, WITH_HANDOFF],
     ["updated_at cannot move backwards", (state) => ({ ...state, updated_at: "2026-07-29T00:00:00.000Z" }), /cannot move backwards/u],
     ["a gate cannot open already approved", (state) => ({ ...state, updated_at: LATER, gates: { ...state.gates, brief: { status: "approved", at: LATER, artifact: null } } }), /must open as pending/u],
     ["a decided gate cannot be re-decided", (state) => ({ ...state, updated_at: LATER, gates: { story: { status: "approved", at: LATER, artifact: "artifacts/story.md" } } }), null],
@@ -544,6 +551,8 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       ["resume does not advance time", "resume-needs-human", (state) => ({ ...state, status: "running" }), /must move updated_at forwards/u],
       ["sync-base changes envelope", "sync-base", (state) => ({ ...state, updated_at: LATER, base_syncs: [BASE_SYNC], max_retries: 9 }), /sync-base cannot change envelope\.max_retries/u],
       ["sync-base appends nothing", "sync-base", (state) => ({ ...state, updated_at: LATER }), /must append exactly one base sync record/u],
+      ["handoff changes envelope", "handoff", (state) => ({ ...state, ...WITH_HANDOFF, updated_at: LATER, max_retries: 9 }), /handoff cannot change envelope\.max_retries/u],
+      ["handoff unparks", "handoff", (state) => ({ ...state, ...WITH_HANDOFF, updated_at: LATER, status: "running" }), /handoff must preserve status/u],
       ["sync-base changes progress", "sync-base", (state) => ({ ...state, updated_at: LATER, base_syncs: [BASE_SYNC], gates: {} }), /sync-base cannot change run\.gates/u],
     ]) {
       const parked = fixture(`parked-${label.replaceAll(" ", "-")}`, { status: "needs-human", terminal_result: result });

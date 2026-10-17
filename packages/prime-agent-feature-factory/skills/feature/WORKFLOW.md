@@ -1286,7 +1286,8 @@ Run `work-decomposer` → `plan/slices.json` (required top-level shape: `{ "slic
 human-readable `plan/plan.md`. Each slice declares `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`.
 
 Review it with `work-reviewer` subject `work-decomposer`: every acceptance criterion maps to a slice,
-same-wave slices are file-disjoint, and integration hotspots are serialized into different waves. Keep
+same-wave slices are file-disjoint, and integration hotspots are serialized into different waves. A
+test that must exercise both sides of a move belongs to the first slice that has both sides on its base. Keep
 the reviewed plan unseeded until Gate 2 has presented and approved its exact contents.
 
 The first successful seed is the **ratification point** for two decisions:
@@ -1659,8 +1660,8 @@ Per slice:
 
    An out-of-lane **production** change is a different thing entirely and follows **Ownership disclosure**
    below, where the reviewer decides whether the plan or the change is wrong.
-4. **Review** — `work-reviewer` with subject `<slice-id>`, the observed evidence, the slice spec, and
-   the brief. Record both refs — the merge requires each:
+4. **Review** — `work-reviewer` with subject `<slice-id>`, the observed evidence, the slice spec,
+   the brief, and every handoff addressed to this slice. Record both refs — the merge requires each:
      ```sh
      $ factory slice "$R" "$SLICE_ID" review --attempts "$SLICE_ATTEMPT" \
        --evidence-ref "evidence/$SLICE_ID.json" --review-ref "reviews/$SLICE_ID.json" --repo "$RUN_REPO"
@@ -1673,6 +1674,8 @@ Per slice:
      If no such target can be identified, park through the existing parked-stop procedure for replanning
      or operator clarification; preserve the work and do not silently change approved acceptance criteria.
      Unchanged finding counts alone are not a stall: progress can occur within a category that remains open.
+     When a blocking finding is one this slice cannot meet from its base and a later slice can, hand it on
+     (see "Handing a requirement to a later slice") rather than retrying against it.
      Only a complete merit REJECT spends an attempt; infrastructure recovery and resume preserve
      `SLICE_ATTEMPT` under the common rules above. Reload `RUN_MANIFEST`, require the recorded review to name
      this slice and `SLICE_ATTEMPT` with exact verdict `REJECT`, and require the row still to be `review`.
@@ -1794,6 +1797,39 @@ reports that exact session as owner. Only then may it perform same-SHA reconcili
 absence followed by a successful new claim proves freshness, so never require session-ID inequality.
 Repeated clean exhaustion follows the same quiesce, owning-release, and qualified-verification contract.
 Gate 3 remains a fresh independent observation.
+
+### Handing a requirement to a later slice
+
+A review sometimes asks a slice for something it cannot deliver from its base: a test that must exercise both
+sides of a move when the other side only exists after a later slice, or a capability that a slice depending on
+this one introduces. Retrying against that bar spends attempts on work no attempt can do. Hand the requirement
+to the slice that can meet it instead:
+
+```sh
+factory handoff "$R" "$FROM_SLICE" "$TO_SLICE" --item "$REQUIREMENT" [--item "$REQUIREMENT" ...] \
+  --reason "$REASON" --session "$SESSION_ID" --repo "$RUN_REPO"
+```
+
+In `autonomous` mode the driver decides this itself, and only when all of these hold:
+
+- the receiver will have on its base what the requirement needs: it depends on the sender, directly or
+  through other slices, or the sender has already merged;
+- the receiver is still `pending`, so its builder and reviewer hear about the requirement before work starts;
+- the move changes no story acceptance criterion and drops nothing. Each `--item` is a requirement stated
+  the way the reviewer stated it, specific enough that a later reviewer can check it on its own.
+
+Otherwise park and report, as before: when the only receiver has already started, when two slices each need
+the other first, when no later slice can meet the requirement, or when meeting it would change the story. In
+`interactive` mode present the handoff and record it only on approval; in `headless` mode park with the proposed
+handoff as the reason, and the operator records it on the parked run.
+
+After recording it, narrow the sender: its retry, or its re-review if its latest review was the one that asked,
+is judged on its own boundary, and its reviewer is told which items moved and to whom so it does not block on
+them. When the receiver activates, give its builder and its reviewer every handoff addressed to it (`factory
+status` lists them under `handoffs`), and amend the paths those items need in-band with the usual checks. **The
+CLI enforces delivery**: a receiver's merge is refused until its approving review lists each handoff id
+(`handoff-N`) in `handoffs_delivered`, and an approving validator verdict is refused until the
+implementation-validator lists every handoff in the run. The CLI refuses a receiver that has already merged.
 
 ### Post-merge finding routing and repair journal
 
@@ -2105,7 +2141,9 @@ HEAD, a branch name, or an unpersisted variable.
    subject that does not exist, not the reading.
 
    When you do run it, it returns GO / GO-WITH-NITS / NO-GO **and writes `reviews/implementation-validator.json`
-   naming the commit it judged**, exactly like any other reviewer. Then:
+   naming the commit it judged**, exactly like any other reviewer. Give it every handoff in the run: it confirms
+   on the integrated branch that each item was picked up by its receiver, and an approving verdict must list
+   every handoff id in `handoffs_delivered`. Then:
    ```sh
    factory validator "$R" --report artifacts/validation-report.md --repo "$RUN_REPO"
    ```

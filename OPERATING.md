@@ -633,6 +633,11 @@ reseeds. Malformed, privileged, duplicate, already-owned, replayed, and merged-s
 without changing the manifest, and merge continues to refuse any unamended or privileged path. The
 original reason stays recorded after the stop is cleared.
 
+When a park asks you to move a reviewer's requirement from one slice to a later one, record it with
+`factory handoff <run-id> <from-slice> <to-slice> --item <requirement> [--item ...] --reason <text> --session "$SESSION_ID" --repo <sandbox>`
+rather than in decision text. The record is what the receiver's merge and the validator are held to. It
+leaves the run parked and refuses a receiver that has already merged.
+
 `decide` leaves the run parked. Read the immutable cumulative artifact named by
 `operator_decision.artifact` in the manifest, not an unreferenced file left by failed publication.
 Its `artifacts/operator-decisions-<sha256hex>.md` name and digest identify recorded bytes, not proof of
