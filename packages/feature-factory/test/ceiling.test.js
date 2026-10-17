@@ -1423,9 +1423,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // publishing-identity guard runs in the CLI rather than depending on the host's shell tool; issue #367
     // authorizes 6000 for a committed max_retries default, landed inside #365's cap; issue #372 authorizes 6100
     // so slice observation runs the repository verify; issue #376 authorizes 6150 so verify runs on a freshly
-    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice; issue #381 authorizes 6450 to persist test output; issue #387 authorizes 6550 for base sync.
+    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice; issue #381 authorizes 6450 to persist test output; issue #387 authorizes 6550 for base sync; Jason authorized 6650 for 0.11.0's `factory handoff` (6576 at landing).
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 6550, `production source is ${total} lines; the issue #387 tripwire is 6550`);
+    assert.ok(total <= 6650, `production source is ${total} lines; the 0.11.0 handoff tripwire is 6650`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
