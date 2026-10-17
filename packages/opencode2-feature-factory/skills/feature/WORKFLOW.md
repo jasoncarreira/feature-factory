@@ -883,6 +883,17 @@ above. No two active slices ever own the same path, so a slice also cannot activ
 active slice owns; it waits until that slice merges. Privileged paths stay refused either way. The
 reviewer still judges whether each added path serves the slice's acceptance criteria.
 
+**Before either kind of amendment, check whether a merged slice changed the path after the amended
+slice's base.** Run `git -C "$INTEGRATION_WORKTREE" diff --quiet "$SLICE_BASE_REF" HEAD -- "$PATH"`, where
+`$SLICE_BASE_REF` is the slice's recorded `base_ref`. If it reports a difference, the slice's edit and
+the merged one combine when the slice merges, so the merged file is something nobody reviewed and the merge
+proof refuses it, stranding an approved slice. In that case have the builder first take the integration
+head's version into the slice (`git checkout <integration head> -- "$PATH"`) and make its change on top,
+so the slice's review covers the combined file. When the integrated file depends on other merged work, such
+as a helper it now imports, take those files the same way, amending each one, so long as the set still
+passes the slice's tests on its own base and the slice's review can cover it all. When it does not, do not
+amend: park and report the dependency instead.
+
 When the run reports a nonempty `publishing_identity`, the mandatory guard below is the exact
 boundary between completion of resume order 7 and the first operation in resume order 8. Nothing may
 intervene between the verified running/same-owner result and that guard, or between a successful guard
