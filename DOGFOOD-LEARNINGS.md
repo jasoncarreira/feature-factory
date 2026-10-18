@@ -248,6 +248,68 @@ launching runs from `origin/main`.
    non-merged branch), timestamps, `debug_snapshot` schema, and `pre_pr` artifact naming —
    to remove the cross-version drift.
 
+## 6. Trellis #172, October 2026 — what to do when main is what's wrong
+
+Two parks on one issue in SquashMerge/trellis, both caused by main, not by the run. Neither park could be
+resolved in-band. The archived runs are under `trellis/.factory/.parked/`.
+
+### The seed was nine commits behind `origin/main`
+
+The first #172 run (retired as `.parked/.retired/172-seed-2ee037c92a65`) was initialized from local `main`
+`2ee037c9`. That commit was nine behind `origin/main` `68d399ec` and lacked #168's declaration-role work,
+which #172 reads. The driver noticed before Gate 1 and parked: `sync-base` needs a merged slice, and a
+fresh run has none, so there was no in-run way to move the base. The only recovery was to retire the run
+id and relaunch from an updated main.
+
+This is the same stale-local-`main` problem §2 and §4a recorded in July. Back then it cost coverage; here
+it cost a run. The sandbox is a `git clone --local` of the operator checkout, so the CLI never sees the
+remote, and a seed is only as fresh as the operator's last pull. **Fix:** the pre-init step "Start from
+the remote's base" in WORKFLOW.md and each adapter's SKILL.md.
+- **Behind:** fetch, then fast-forward the local base.
+- **Ahead:** continue, building on the operator's commits.
+- **Diverged, or dirty where the base is checked out:** stop before init.
+
+It is instruction, not enforcement, because a stale seed can't produce a false green.
+
+### A test the slice doesn't own failed on main
+
+The relaunched run merged `docs-ruling`, then parked inside `native-token`, attempt 1, commit `7da999cc`.
+The slice's ratified test commands passed. The mandatory `./tools/verify` failed 1328/1329, in
+`marker_race_and_durability` in `tests/topology.rs`. No slice owns that file, and it fails on main too
+(filed as trellis #184; a separate hot-journal failure is #183). The driver correctly declined to retry
+unchanged code for a lucky pass.
+
+**Why the obvious in-run routes are closed:**
+- **Retry:** a retry reuses the slice's recorded base.
+- **`sync-base`:** it refuses while any slice is `running` or `review`.
+- **Back to `pending`:** no transition moves a running slice there.
+- **Cherry-picking alone:** a cherry-pick of the fix into the slice changes `tests/topology.rs`, which the
+  slice doesn't own, so the merge refuses it.
+
+**Recommended route (not yet exercised):** carry the main fix into the slice by an operator decision after
+a path amendment. Every step is one the CLI already admits:
+1. Land the fix on main (#184). Cherry-pick the *merged* commit; if the PR changes after you copy it, the
+   two copies conflict at the PR.
+2. While the run is parked, run `factory amend-paths <run> native-token --add tests/topology.rs`, plus any
+   production path the fix touches. The reason names the main commit. `amend-paths` accepts a parked run
+   and a running slice. It refuses only merged slices, control-plane paths and paths an *active* slice
+   owns.
+3. Record the decision in the run, not only in a chat session. Resume admits "recorded operator decisions
+   consistent with the approved scope and ratified plan", and carrying a fix from main changes no
+   requirement.
+4. Resume, then `git cherry-pick -x` the fix onto the slice branch. Re-observe the same attempt (`observe`
+   accepts a new head for the current attempt), then review. Tell the reviewer the commit is main's
+   reviewed fix.
+5. Merge. At the PR the feature branch and main carry the same change, which git normally merges cleanly.
+   Note it for the validator so it doesn't read as scope creep.
+
+This keeps the merged slice and the attempt already spent. The fallback is a fresh run from an updated main,
+with the earlier slices' commits carried as reference work. That costs the gates again.
+
+**Gap, if it recurs:** a parked run cannot abandon a running attempt (back to `pending`, evidence dropped),
+which would let `sync-base` run and the slice rebuild on the new base. It cannot produce a false green,
+because everything is observed fresh. One occurrence doesn't justify it.
+
 ## Operational telemetry
 
 The Honeycomb [`Feature Factory Run Lineage` board](https://ui.honeycomb.io/muninnai/environments/test/board/nfB5emsHh37)

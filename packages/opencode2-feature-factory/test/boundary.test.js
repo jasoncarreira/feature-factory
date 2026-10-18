@@ -40,6 +40,11 @@ describe("OpenCode 2.0 adapter boundary", () => {
       "OpenCode 2.0 enforces this list: each driver's `subagent` permission denies every target and then allows"]) {
       assert.ok(skill.includes(v2), `the skill must say: ${v2}`);
     }
+    // Instruction only: a fresh run brings its base up to the remote before init, and init runs before the workflow is
+    // staged, so the skill must carry the canonical step verbatim (trellis #172 was seeded nine commits behind).
+    const canonical = readFileSync(join(pkg, "..", "feature-factory", "WORKFLOW.md"), "utf8");
+    const startFromRemote = canonical.slice(canonical.indexOf("**Start from the remote's base.**"), canonical.indexOf("An explicit `PR_BASE` wins.")).trim();
+    assert.ok(startFromRemote.length > 1500 && skill.includes(startFromRemote), "SKILL.md must carry the canonical pre-init fast-forward step verbatim");
     assert.equal(readFileSync(join(pkg, "skills", "feature", "WORKFLOW.md"), "utf8"),
       readFileSync(join(pkg, "..", "feature-factory", "WORKFLOW.md"), "utf8"), "the packaged workflow is the canonical one, byte for byte");
   });

@@ -390,6 +390,12 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       "the workflow must say when an in-band path amendment is refused");
     assert.ok(markdown.includes("defer this slice until those rows merge and create nothing for it"),
       "the driver must defer an overlapping pending slice before creating its worktree (review of #383)");
+    // Instruction only: a fresh run fast-forwards a base behind its remote and stops on divergence (trellis #172 parked
+    // at Gate 1, seeded nine commits behind). Each adapter pins its own skill's copy, since init runs before this is staged.
+    assert.ok(markdown.includes("Never `git pull`, rebase or reset the operator's branch: a fast-forward is the one move that cannot"),
+      "a fresh run must fast-forward a stale base before init, and only fast-forward");
+    assert.ok(markdown.includes("- **Diverged, or behind with uncommitted changes where `B` is checked out:** do not init."),
+      "a fresh run must stop before init on a base it cannot fast-forward");
     for (const [agent, fragment] of [["work-reviewer", "When the observed `tests.exit` or `repository_verify.exit` is not 0, read its `tail`, or the log at its"],
       ["test-verifier", "When an observed run's `exit` is not 0, read its evidence `tail` or the log at `log_path`"]]) {
       assert.ok(readFileSync(join(pkg, "agents", `${agent}.md`), "utf8").includes(fragment), `${agent} must read the persisted output on failure`);
