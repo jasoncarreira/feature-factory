@@ -400,7 +400,10 @@ tmux send-keys -t ff-<issue> '/feature --autonomous [--base <branch>] <issue-num
 - **Attach and detach.** `tmux attach -t ff-<issue>` attaches, and Ctrl-b d detaches.
 - **Stopping.** Leaving the TUI (`/exit`, or `tmux kill-session`) closes its client-owned session. The lock then
   goes stale and the run can be resumed.
-- **Several runs.** Each run gets its own tmux session on the same socket.
+- **Several runs.** Each run gets its own tmux session. Runs under one publishing identity can share the
+  socket. The daemon on it is started by the first TUI, with that script's exports. Whether a later script's
+  exports reach a daemon that is already running was not measured on 0.9.8; on 0.10 they do not. So give
+  each publishing identity its own socket name.
 - **`--base <branch>` is required when the operator checkout is on a detached HEAD.** Without it, admission
   refuses before creating anything, because the PR base is otherwise the checkout's symbolic branch.
 - **The `tmux extended-keys is off` warning is harmless.** A plain `send-keys … Enter` submits slash commands.
@@ -471,8 +474,9 @@ On 0.9.8 the launcher's process *is* the run's lifetime: if the TUI's tmux sessi
 Judge progress by `run.json` and the session transcript, but judge whether a driver can still exist by its
 client.
 
-**Redirect stdin from `/dev/null`.** A supervised launch inherits a pipe that never reaches EOF, and the CLI
-reads stdin for piped input, so it blocks before emitting a byte: hangs until killed, exit 124, zero bytes on
+**Redirect stdin from `/dev/null`.** This is for a noninteractive launch (`-p`, or a probe), never for the
+tmux TUI above, which reads its input from `send-keys`. A supervised launch inherits a pipe that never
+reaches EOF, and the CLI reads stdin for piped input, so it blocks before emitting a byte: hangs until killed, exit 124, zero bytes on
 both streams, unaffected by `--verbose`, `--offline`, or disabling extensions, skills and tools.
 
 **Raise every autonomous limit.**

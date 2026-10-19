@@ -171,12 +171,14 @@ at Gate 1 can only park (trellis #172 was seeded nine commits behind `origin/mai
 not enforcement: a stale seed costs a missing prerequisite or a conflict, never a false green. It runs
 only for a fresh run, when neither manifest candidate exists, immediately before init; an existing run
 never moves its base this way. With `B` the explicit `PR_BASE` or else the operator worktree's symbolic
-branch, run `git -C "$O" fetch origin "$B"` and compare `refs/heads/$B` with `refs/remotes/origin/$B`:
+branch, run `git -C "$O" fetch origin "$B"`, then `R=$(git -C "$O" rev-parse FETCH_HEAD)`, and compare
+`refs/heads/$B` with `R`. Use `FETCH_HEAD` because a successful fetch always sets it. `origin/$B` can be
+absent or stale where the remote's fetch mapping is narrowed to other branches:
 
 - **Equal, no `origin` remote, or the fetch fails:** continue from the local base, and say which in the
   first report.
 - **Local strictly behind:** fast-forward it. Where `git -C "$O" worktree list --porcelain` shows `B`
-  checked out, run `git -C "$BASE_WORKTREE" merge --ff-only "origin/$B"` in that worktree, and only when it
+  checked out, run `git -C "$BASE_WORKTREE" merge --ff-only "$R"` in that worktree, and only when it
   has no uncommitted changes. Where `B` is checked out nowhere, run `git -C "$O" fetch origin "$B:$B"`.
   Never `git pull`, rebase or reset the operator's branch: a fast-forward is the one move that cannot
   discard local work.
