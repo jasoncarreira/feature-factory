@@ -85,14 +85,22 @@ function connect(socket) {
         const [entry] = waiting.splice(index, 1);
         entry.ok(message);
       };
+      let closed = false;
       createInterface({ input: stream }).on("line", (line) => {
         try { deliver(JSON.parse(line)); } catch { /* not a protocol line */ }
       });
+      // A dropped connection fails every waiter at once rather than leaving each to its timeout.
+      stream.on("close", () => {
+        closed = true;
+        for (const entry of waiting.splice(0)) entry.fail(new Error(`the daemon closed the connection before ${entry.what}`));
+      });
+      stream.on("error", () => {});
       const next = (match, timeoutMs, what) => new Promise((ok, fail) => {
         const index = backlog.findIndex(match);
         if (index >= 0) return ok(backlog.splice(index, 1)[0]);
+        if (closed) return fail(new Error(`the daemon closed the connection before ${what}`));
         const timer = setTimeout(() => fail(new Error(`timed out waiting for ${what} on ${socket}`)), timeoutMs);
-        waiting.push({ match, ok: (message) => { clearTimeout(timer); ok(message); } });
+        waiting.push({ match, what, ok: (message) => { clearTimeout(timer); ok(message); }, fail: (error) => { clearTimeout(timer); fail(error); } });
       });
       resolveConnection({ stream, next });
     });
@@ -126,14 +134,26 @@ export async function launch(options) {
       const requestId = `feature_${++id}`;
       stream.write(`${JSON.stringify({ type: "command", id: requestId, protocol: hello.protocol, clientId: `feature-launch:${process.pid}`, command: { ...command, id: requestId } })}\n`);
       const response = await next((message) => message.type === "response" && message.id === requestId, 30_000, `the ${command.type} response`);
-      if (response.error || response.ok === false || response.success === false) throw new Error(`${command.type} refused: ${JSON.stringify(response.error ?? response)}`);
+      if (response.error || response.ok === false || response.success === false) {
+        throw Object.assign(new Error(`${command.type} refused: ${JSON.stringify(response.error ?? response)}`), { refused: true });
+      }
       return response;
     };
     const created = await request(createCommand(options));
     const activeSessionId = created.data?.activeSessionId;
     if (typeof activeSessionId !== "string" || !activeSessionId) throw new Error(`create returned no activeSessionId: ${JSON.stringify(created)}`);
-    await request({ type: "prompt", activeSessionId, message: `/skill:feature ${options.request}` });
-    return { socket, activeSessionId, stop: `PRIME_AGENT_DAEMON_SOCKET=${socket} ${options.prime} stop ${activeSessionId}` };
+    const handle = { socket, activeSessionId, stop: `PRIME_AGENT_DAEMON_SOCKET=${socket} ${options.prime} stop ${activeSessionId}` };
+    try {
+      await request({ type: "prompt", activeSessionId, message: `/skill:feature ${options.request}` });
+    } catch (error) {
+      // From here a resident session exists and outlives this client, so every failure carries its handle.
+      // Only an answer that says no is a refusal: a lost or late acknowledgement may follow a prompt the
+      // session accepted, and that run may be working on its full budget. Sending it again could start a
+      // second driver, so this reports and never retries.
+      error.handle = { ...handle, prompt: error.refused ? "refused" : "unconfirmed" };
+      throw error;
+    }
+    return handle;
   } finally {
     stream.end();
   }
@@ -146,6 +166,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   try {
     process.stdout.write(`${JSON.stringify(await launch(parseArgs(process.argv.slice(2))))}\n`);
   } catch (error) {
+    // A session that exists is printed even on failure, with how its prompt ended, so it can be stopped.
+    if (error.handle) process.stdout.write(`${JSON.stringify(error.handle)}\n`);
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;
   }

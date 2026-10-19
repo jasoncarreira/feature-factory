@@ -12,9 +12,9 @@ import { DEFAULT_BUDGET, createCommand, daemonEnv, freshSocketPath, launch, pars
 const LAUNCH = fileURLToPath(new URL("../bin/launch.js", import.meta.url));
 
 // A daemon that speaks the line protocol the way Prime 0.10's does: it greets on connect, and each
-// response echoes the envelope id. `refuse` names a command
-// type answered with an error instead.
-function fakeDaemon(socket, { refuse = null } = {}) {
+// response echoes the envelope id. `refuse` names a command type answered with an error instead, and
+// `drop` one whose acknowledgement is lost: the daemon takes it and closes the connection unanswered.
+function fakeDaemon(socket, { refuse = null, drop = null } = {}) {
   const received = [];
   const server = createServer((stream) => {
     stream.write(`${JSON.stringify({ type: "daemon_hello", protocol: { version: 9 } })}\n`);
@@ -22,6 +22,7 @@ function fakeDaemon(socket, { refuse = null } = {}) {
       const envelope = JSON.parse(line);
       received.push(envelope);
       const { command } = envelope;
+      if (command.type === drop) return stream.destroy();
       const reply = command.type === refuse ? { error: `${refuse} is not allowed` }
         : command.type === "create" ? { data: { activeSessionId: "abc123def456" } } : { data: {} };
       stream.write(`${JSON.stringify({ type: "response", id: envelope.id, ...reply })}\n`);
@@ -61,7 +62,32 @@ describe("Prime unattended launch", () => {
       assert.match(stderr, /create refused: "create is not allowed"/u);
       await assert.rejects(launch(parseArgs(["--socket", join(root, "r.sock"), "--", "x"])), /create refused: "create is not allowed"/u);
       assert.deepEqual(refusing.received.map((envelope) => envelope.command.type).slice(-1), ["create"], "no prompt after a refused create");
-    } finally { await refusing.close(); rmSync(root, { recursive: true, force: true }); }
+    } finally { await refusing.close(); }
+
+    // Once create has succeeded a resident session exists whatever happens next, so a failed prompt still
+    // prints its handle, and says whether the prompt was refused or may be running unconfirmed.
+    const run = async (args) => {
+      const child = spawn(process.execPath, [LAUNCH, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "", stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      return { status: await new Promise((ok) => child.on("close", ok)), stdout, stderr };
+    };
+    for (const [name, behaviour, prompt, message] of [["p.sock", { refuse: "prompt" }, "refused", /prompt refused: "prompt is not allowed"/u],
+      ["l.sock", { drop: "prompt" }, "unconfirmed", /closed the connection before the prompt response/u]]) {
+      const sock = join(root, name);
+      const failing = await fakeDaemon(sock, behaviour);
+      try {
+        const { status, stdout, stderr } = await run(["--socket", sock, "--", "x"]);
+        assert.equal(status, 1, `${prompt}: the launch failed`);
+        assert.deepEqual(JSON.parse(stdout), { socket: sock, activeSessionId: "abc123def456",
+          stop: `PRIME_AGENT_DAEMON_SOCKET=${sock} prime-agent stop abc123def456`, prompt }, `${prompt}: the handle survives the failure`);
+        assert.match(stderr, message);
+        // An unconfirmed prompt may be a running driver, so it is never sent twice.
+        assert.deepEqual(failing.received.map((envelope) => envelope.command.type), ["create", "prompt"], `${prompt}: one prompt, no retry`);
+      } finally { await failing.close(); }
+    }
+    rmSync(root, { recursive: true, force: true });
   });
 
   it("parses only its own options, keeps the request verbatim, and starts its daemon clean", () => {
