@@ -164,6 +164,27 @@ is that key; when `R` was derived from free text, `KEY` is absent and `--issue` 
 `#` or other decoration. `issue_key` is immutable after init, and publication reads it for the title
 prefix and closing reference, so a run whose resolver found issue `25` must record `25`.
 
+**Start from the remote's base.** The sandbox is a local clone of `$O`, so a run is seeded from the local
+base branch, never from the remote. A local base behind its remote builds every slice without the commits
+it is missing, and nothing repairs that in-run: `sync-base` needs a merged slice, so a run that finds out
+at Gate 1 can only park (trellis #172 was seeded nine commits behind `origin/main`). This is instruction,
+not enforcement: a stale seed costs a missing prerequisite or a conflict, never a false green. It runs
+only for a fresh run, when neither manifest candidate exists, immediately before init; an existing run
+never moves its base this way. With `B` the explicit `PR_BASE` or else the operator worktree's symbolic
+branch, run `git -C "$O" fetch origin "$B"` and compare `refs/heads/$B` with `refs/remotes/origin/$B`:
+
+- **Equal, no `origin` remote, or the fetch fails:** continue from the local base, and say which in the
+  first report.
+- **Local strictly behind:** fast-forward it. Where `git -C "$O" worktree list --porcelain` shows `B`
+  checked out, run `git -C "$BASE_WORKTREE" merge --ff-only "origin/$B"` in that worktree, and only when it
+  has no uncommitted changes. Where `B` is checked out nowhere, run `git -C "$O" fetch origin "$B:$B"`.
+  Never `git pull`, rebase or reset the operator's branch: a fast-forward is the one move that cannot
+  discard local work.
+- **Local ahead (it contains the remote):** continue. Those commits are the operator's and the run builds
+  on them.
+- **Diverged, or behind with uncommitted changes where `B` is checked out:** do not init. Stop without
+  effects and report both commits, so the operator chooses the base before a run exists to park.
+
 ```sh
 INIT_RESPONSE="$(factory init "$R" --branch "$FEATURE_BRANCH" [--worktree "$WORKTREE"] [--pr-base "$PR_BASE"] [--issue "$KEY"] [--mode "$MODE"] [--max-retries "$MAX_RETRIES"] --repo "$O" --json)"
 ```

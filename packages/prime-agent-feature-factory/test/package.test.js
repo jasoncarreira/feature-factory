@@ -125,6 +125,10 @@ describe("Prime package contract", () => {
       `the canonical workflow no longer carries a single --json-terminated init block: ${canonicalInit}`);
     assert.ok(skill.includes(canonicalInit),
       "SKILL.md must carry the canonical init invocation verbatim; step 3 runs it before the workflow exists");
+    // Instruction only: a fresh run brings its base up to the remote before init, and init runs before the workflow is
+    // staged, so the skill must carry the canonical step verbatim (trellis #172 was seeded nine commits behind).
+    const startFromRemote = String(canonicalWorkflow).slice(String(canonicalWorkflow).indexOf("**Start from the remote's base.**"), String(canonicalWorkflow).indexOf("An explicit `PR_BASE` wins.")).trim();
+    assert.ok(startFromRemote.length > 1500 && skill.includes(startFromRemote), "SKILL.md must carry the canonical pre-init fast-forward step verbatim");
     assert.match(skill, /`--json` is mandatory\./u,
       "the skill must say --json is mandatory, which is the flag whose absence stranded a run");
     // The shared command must not drag OpenCode's bootstrap rationale with it. Prime loads the canonical

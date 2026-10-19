@@ -48,6 +48,10 @@ describe("OpenCode skill adapter", () => {
     // left `[--issue "$KEY"]` with no binding, and resolver-named runs recorded `issue_key: null`).
     const keyBinding = skill.indexOf("when the configured resolver returned a\npayload, `KEY` is exactly `R`, its `run_id`;");
     assert.ok(keyBinding >= 0 && keyBinding < skill.indexOf('INIT_RESPONSE="$(factory init'), "SKILL.md must bind KEY before init");
+    // Instruction only: a fresh run brings its base up to the remote before init, and init runs before the workflow is
+    // staged, so the skill must carry the canonical step verbatim (trellis #172 was seeded nine commits behind).
+    const startFromRemote = String(canonicalWorkflow).slice(String(canonicalWorkflow).indexOf("**Start from the remote's base.**"), String(canonicalWorkflow).indexOf("An explicit `PR_BASE` wins.")).trim();
+    assert.ok(startFromRemote.length > 1500 && skill.includes(startFromRemote), "SKILL.md must carry the canonical pre-init fast-forward step verbatim");
     assert.throws(() => checkPublishSelection(skill.replace("presence alone never executes this entry", "presence executes this entry")), /publish-selection-candidate/u);
 
     // Ordering is the defect, so pin ordering rather than presence: the restated region must precede the
