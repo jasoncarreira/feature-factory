@@ -42,6 +42,12 @@ prompts it with `/skill:feature <arguments>`, prints one JSON line and exits:
 {"socket":"/tmp/prime-agent-501/feature-….sock","activeSessionId":"e44fd57b15c3","stop":"PRIME_AGENT_DAEMON_SOCKET=… prime-agent stop e44fd57b15c3"}
 ```
 
+**If the launch exits 1 after creating the session, it still prints that line,** with `"prompt"` added:
+`"refused"` means the daemon declined the prompt and the session is idle, so stop it; `"unconfirmed"` means
+the acknowledgement was lost and the run may be working. Check it with `prime-agent list --json` on that
+socket before stopping it or launching again. The launcher never re-sends an unconfirmed prompt, because a
+second one could start a second driver.
+
 The daemon is the launcher's own because a daemon session's environment is the daemon's boot
 environment. The client's is not passed through, so the `GH_TOKEN` and `FACTORY_PUBLISHING_IDENTITY` a run
 needs must be in the launcher's environment when it starts that daemon, and a long-lived interactive daemon

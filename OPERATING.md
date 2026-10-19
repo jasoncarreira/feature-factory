@@ -389,6 +389,12 @@ prints one JSON line with `socket`, `activeSessionId` and a ready `stop` command
 without it. Anything after `--` is the request exactly as `/skill:feature` would receive it, and its leading
 `--autonomous` selects the run mode.
 
+**If the launch exits 1 after creating the session, it still prints that line,** with `"prompt"` added:
+`"refused"` means the daemon declined the prompt and the session is idle, so stop it; `"unconfirmed"` means
+the acknowledgement was lost and the run may be working. Check it with `prime-agent list --json` on that
+socket before stopping it or launching again. The launcher never re-sends an unconfirmed prompt, because a
+second one could start a second driver.
+
 - **A resident session outlives its client.** The default `client_owned` lifecycle dies with the connection,
   which is also why `--mode acp` cannot detach: closing its stdin cancels the turn.
 - **Why its own daemon.** A daemon session's environment is the daemon's boot environment. The client's is
