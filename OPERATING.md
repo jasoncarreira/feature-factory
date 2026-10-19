@@ -363,8 +363,8 @@ Under Prime Agent, this section describes **Prime 0.10 and later** (the Rust hos
 0.10, and 0.12.0 is neither tested nor supported on 0.9. The forms below were run against a v0.10.0 binary in an isolated daemon.
 
 **Still on Prime 0.9.8?** Stay on adapter 0.11.x and launch from a TUI kept alive in tmux, never `-p`, which
-0.9.8 closes when its launcher exits. That recipe, which drove Trellis #136, is in this file as of PR #402
-(`git show 09e36424:OPERATING.md`).
+0.9.8 closes when its launcher exits. That recipe, which drove Trellis #136, is in this file as of PR #403
+(`git show 8ccfd5b7:OPERATING.md`).
 
 **What Prime 0.10 changed, and why the launch is different.**
 - **No extensions.** Prime 0.10 loads no JavaScript extensions, so the `/feature` command and the
