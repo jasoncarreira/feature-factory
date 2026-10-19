@@ -2830,7 +2830,9 @@ describe("end to end — a merge is refused through the real CLI", () => {
     } finally { cleanupProject(p); }
 
     // 0.11.0: a requirement handed to a later slice is owed by that slice's approving review at its merge, and by the
-    // validator's approving verdict across the run. Neither green can be recorded while the handoff goes unnamed.
+    // validator's approving verdict across the run. Neither green can be recorded while any owed handoff goes unnamed:
+    // a list naming some of them is as short as one naming none. handoff-3 runs forward along depends_on, the shape
+    // autonomous mode decides on; the first two run back to a prerequisite that has not merged yet.
     const h = project("handoff", { additionalSlices: [
       { id: "be-later", stack: "backend", paths: ["src/later/"], depends_on: ["be-thing"], acceptance: ["AC2"], test_plan: [PASSING_TEST_COMMAND] }] });
     try {
@@ -2842,23 +2844,51 @@ describe("end to end — a merge is refused through the real CLI", () => {
       const recorded = handoff("be-later", "be-thing", 2);
       assert.equal(recorded.ok, true, recorded.stderr);
       assert.deepEqual([recorded.out.handoff.id, factory(h.repo, ["status", RUN]).out.handoffs.length], ["handoff-1", 1]);
+      for (const [at, from, to] of [[3, "be-later", "be-thing"], [4, "be-thing", "be-later"]]) { const more = handoff(from, to, at); assert.equal(more.ok, true, more.stderr); }
       const { head, basePoint } = buildSlice(h.repo);
-      assert.equal(factory(h.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(3)]).ok, true);
+      assert.equal(factory(h.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(5)]).ok, true);
       assert.equal(factory(h.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
-        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(4)]).ok, true);
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(6)]).ok, true);
       assert.equal(factory(h.repo, ["slice", RUN, "be-thing", "review", "--attempts", "1", "--evidence-ref", "evidence/be-thing.json",
-        "--review-ref", writeReview(h.runDir, "be-thing", head), "--now", NOW(5)]).ok, true);
+        "--review-ref", writeReview(h.runDir, "be-thing", head), "--now", NOW(7)]).ok, true);
       const mergeCommit = mergeIntoFeature(h.repo);
-      assert.match(factory(h.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(6)]).stderr,
-        /received handoff-1; its approving review must check each handed-off item/u);
+      const mergeThing = () => factory(h.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(8)]);
+      assert.match(mergeThing().stderr, /received handoff-1, handoff-2; its approving review must check each handed-off item/u);
       writeReview(h.runDir, "be-thing", head, { handoffs_delivered: ["handoff-1"] });
-      const merged = factory(h.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(6)]);
-      assert.equal(merged.ok, true, merged.stderr);
-      assert.match(handoff("be-later", "be-thing", 7).stderr, /already merged and cannot receive a handoff/u);
-      assert.match(recordValidator(h.repo, h.runDir, mergeCommit, "GO", NOW(8)).stderr, /must confirm every handoff.*handoff-1/u);
-      assert.equal(recordValidator(h.repo, h.runDir, mergeCommit, "NO-GO", NOW(8)).ok, true, "a NO-GO owes nothing");
-      writeReview(h.runDir, "implementation-validator", mergeCommit, { verdict: "GO", handoffs_delivered: ["handoff-1"] });
-      assert.equal(factory(h.repo, ["validator", RUN, "--report", "artifacts/validation-report.md", "--now", NOW(9)]).ok, true);
+      assert.match(mergeThing().stderr, /received handoff-2;/u, "a review naming one of two owed handoffs is short by the other");
+      writeReview(h.runDir, "be-thing", head, { handoffs_delivered: ["handoff-1", "handoff-2"] });
+      const merged = mergeThing();
+      assert.equal(merged.ok, true, `the sender of handoff-3 owes nothing at its own merge: ${merged.stderr}`);
+      assert.match(handoff("be-later", "be-thing", 9).stderr, /already merged and cannot receive a handoff/u);
+      // The forward receiver builds on its merged sender.
+      git(h.repo, "checkout", "-q", "-b", "later");
+      mkdirSync(join(h.repo, "src", "later"), { recursive: true });
+      writeFileSync(join(h.repo, "src", "later", "work.ts"), "be-later, with both sides of the move\n");
+      git(h.repo, "add", "-A");
+      git(h.repo, "commit", "-q", "-m", "be-later work");
+      const laterHead = git(h.repo, "rev-parse", "HEAD");
+      assert.equal(factory(h.repo, ["slice", RUN, "be-later", "running", "--worktree", ".", "--branch", "later", "--now", NOW(10)]).ok, true);
+      const observed = factory(h.repo, ["observe", RUN, "be-later", "--worktree", ".", "--base", mergeCommit,
+        "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(11)]);
+      assert.equal(observed.ok, true, observed.stderr);
+      const reviewed = factory(h.repo, ["slice", RUN, "be-later", "review", "--attempts", "1", "--evidence-ref", "evidence/be-later.json",
+        "--review-ref", writeReview(h.runDir, "be-later", laterHead, { handoffs_delivered: ["handoff-1", "handoff-2"] }), "--now", NOW(12)]);
+      assert.equal(reviewed.ok, true, reviewed.stderr);
+      git(h.repo, "checkout", "-q", "feature");
+      git(h.repo, "merge", "-q", "--no-ff", "later", "-m", "merge later");
+      const finalCommit = git(h.repo, "rev-parse", "HEAD");
+      const mergeLater = () => factory(h.repo, ["slice", RUN, "be-later", "merged", "--merge-commit", finalCommit, "--now", NOW(13)]);
+      assert.match(mergeLater().stderr, /slice 'be-later' received handoff-3;/u, "the ids a slice sent are not the ids it owes");
+      writeReview(h.runDir, "be-later", laterHead, { handoffs_delivered: ["handoff-3"] });
+      const laterMerged = mergeLater();
+      assert.equal(laterMerged.ok, true, laterMerged.stderr);
+      assert.match(recordValidator(h.repo, h.runDir, finalCommit, "GO", NOW(14)).stderr, /must confirm every handoff.*handoff-1, handoff-2, handoff-3/u);
+      writeReview(h.runDir, "implementation-validator", finalCommit, { verdict: "GO", handoffs_delivered: ["handoff-1", "handoff-3"] });
+      assert.match(factory(h.repo, ["validator", RUN, "--report", "artifacts/validation-report.md", "--now", NOW(14)]).stderr,
+        /not listed in handoffs_delivered: handoff-2$/mu, "a verdict naming some handoffs is short by the rest");
+      assert.equal(recordValidator(h.repo, h.runDir, finalCommit, "NO-GO", NOW(14)).ok, true, "a NO-GO owes nothing");
+      writeReview(h.runDir, "implementation-validator", finalCommit, { verdict: "GO", handoffs_delivered: ["handoff-1", "handoff-2", "handoff-3"] });
+      assert.equal(factory(h.repo, ["validator", RUN, "--report", "artifacts/validation-report.md", "--now", NOW(15)]).ok, true);
     } finally { cleanupProject(h); }
   });
 
