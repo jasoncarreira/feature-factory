@@ -12,17 +12,16 @@ describe("Prime package contract", () => {
   it("declares a conventional Prime package with only runtime factory state dependency", () => {
     assert.equal(manifest.name, "prime-agent-feature-factory");
     assert.ok(manifest.keywords.includes("pi-package"));
-    assert.deepEqual(manifest.pi, {
-      extensions: ["./extensions"],
-      skills: ["./skills"],
-    });
+    // Prime 0.10 reads only skills, prompts and themes from this manifest; an `extensions` entry would be
+    // silently ignored and read as if the adapter still registered a command.
+    assert.deepEqual(manifest.pi, { skills: ["./skills"] });
     // Pinned to the factory's own version rather than to a literal. The three packages release in
     // lockstep from 0.7.0, so a literal here would have to be edited on every sync and would fail for
     // being stale rather than for the dependency being wrong — which is what it did at 0.3.6.
     // `boundary.test.js` pins the opencode adapter the same way; the workspace-level check that all
     // three versions actually match lives in `test/pack.test.js`.
     assert.deepEqual(manifest.dependencies, { "feature-factory": factoryManifest.version });
-    assert.ok(manifest.files.includes("extensions"));
+    assert.ok(manifest.files.includes("bin"));
     assert.ok(manifest.files.includes("skills"));
   });
 
@@ -31,7 +30,13 @@ describe("Prime package contract", () => {
     assert.match(skill, /\nlicense: MIT\ncompatibility: [^\n]+\n---\n/u);
     assert.match(skill, /\[WORKFLOW\.md\]\(WORKFLOW\.md\)/u);
     assert.match(skill, /Do not assume the skill loader inlined it/u);
-    assert.match(skill, /feature_factory_context/u);
+    // Prime 0.10 loads no extensions, so no tool can supply the context: the skill must run the script and read
+    // the session's own roster row, and must not mention the tool that no longer exists.
+    assert.doesNotMatch(skill, /feature_factory_context/u);
+    assert.ok(skill.includes('os.path.join(SKILL_DIR, "..", "..", "bin", "context.js")'), "the skill must run the packaged context script");
+    assert.match(skill, /if row\.get\("isCurrent"\) and row\.get\("sessionId"\)\)/u, "SESSION_ID is the durable id of the current roster row");
+    assert.match(skill, /`activeSessionId` does not/u, "the live id must be named as the wrong one");
+    assert.match(skill, /A `prime-agent -p` session is the usual cause/u, "the skill must explain why a -p session cannot run");
     assert.match(skill, /handle = await rlm\.spawn\(prompt, name=NAME, \*\*PROFILE\)/u);
     assert.match(skill, /receiver_role="parent"/u);
     assert.match(skill, /never hand-write `run\.json`/u);
@@ -74,9 +79,9 @@ describe("Prime package contract", () => {
       ["retry-persistence", /persists it\s+numerically as `max_retries` in `run\.json`, so `003` persists as `3`/u],
       ["retry-absent", /retry is absent, omit the entire\s+`--max-retries <n>` argv pair/u],
       ["preflight-order", /closed pre-context order:\s+canonical workflow load; placement rejection; full-prefix mode, base, and retry structural checks;\s+missing request; retry numeric validation; then base syntax and local-ref validation/u],
-      ["refusal-skips-context", /Every admission refusal\s+skips `feature_factory_context` and precedes run-id allocation, configuration, state reads, dispatch, and every\s+factory invocation/u],
-      ["one-context-call", /Only after successful admission, call `feature_factory_context` exactly once/u],
-      ["context-validation-before-effects", /Require its returned\s+`sessionId`, `agents`, and `cli` to be non-empty strings and require the agent directory and CLI path to\s+be readable before resolver or configuration work, state reads, dispatch, or any factory effect/u],
+      ["refusal-skips-context", /Every admission refusal\s+skips the install context and precedes run-id allocation, configuration, state reads, dispatch, and every\s+factory invocation/u],
+      ["one-context-call", /Only after successful admission, read the install context exactly once/u],
+      ["context-validation-before-effects", /Require `agents`, `cli` and `SESSION_ID` to be non-empty strings and the agent\s+directory and CLI path to be readable before resolver or configuration work, state reads, dispatch, or any\s+factory effect/u],
     ];
     const checkRetryGrammar = (text) => {
       for (const [label, contract] of retryGrammar) {
@@ -132,7 +137,7 @@ describe("Prime package contract", () => {
     assert.match(skill, /`--json` is mandatory\./u,
       "the skill must say --json is mandatory, which is the flag whose absence stranded a run");
     // The shared command must not drag OpenCode's bootstrap rationale with it. Prime loads the canonical
-    // workflow BEFORE intake, admission and `feature_factory_context`, so "the workflow is unreadable
+    // workflow BEFORE intake, admission and the install context, so "the workflow is unreadable
     // until init" and "step 3 runs init" are both false here -- Prime's step 3 applies host bindings --
     // and they contradict this file's own preflight. That is the contradictory-instruction defect this
     // change exists to remove, reintroduced by the fix for it, and the byte-equality assertion above

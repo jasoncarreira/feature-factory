@@ -1,62 +1,48 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import featureFactoryExtension, { PROFILE_CONFIG_PATH, dispatchProfiles, factoryResources, primeSessionId, profileFor, readProfileConfig } from "../extensions/index.js";
+import { PROFILE_CONFIG_PATH, context, dispatchProfiles, factoryResources, profileFor, readProfileConfig } from "../bin/context.js";
 
-// `resolveFromOwnPath` walks up from the extension's OWN location, so exercising it means putting a copy
-// of the extension in a real install layout and importing it from there -- injecting a stub proves the
+// `resolveFromOwnPath` walks up from the script's OWN location, so exercising it means putting a copy
+// of the script in a real install layout and importing it from there -- injecting a stub proves the
 // call site and nothing about the traversal or where it starts. Each case gets its own temp root so the
 // copies have distinct URLs and Node does not hand back one cached module for all three.
-const extensionSource = fileURLToPath(new URL("../extensions/index.js", import.meta.url));
-async function extensionInstalledAt(layout) {
+const scriptSource = fileURLToPath(new URL("../bin/context.js", import.meta.url));
+async function scriptInstalledAt(layout) {
   // Through the realpath: `import.meta.url` of the imported copy resolves symlinks, and on macOS the
   // temp dir is /var -> /private/var, so a walk that is correct still reports the other spelling.
   const root = realpathSync(mkdtempSync(join(tmpdir(), "prime-ext-")));
   const pkg = join(root, "node_modules", "prime-agent-feature-factory");
-  mkdirSync(join(pkg, "extensions"), { recursive: true });
-  copyFileSync(extensionSource, join(pkg, "extensions", "index.js"));
+  mkdirSync(join(pkg, "bin"), { recursive: true });
+  copyFileSync(scriptSource, join(pkg, "bin", "context.js"));
   writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "prime-agent-feature-factory", type: "module" }));
   if (layout !== "absent") {
     const host = layout === "nested" ? pkg : root;
     mkdirSync(join(host, "node_modules", "feature-factory"), { recursive: true });
     writeFileSync(join(host, "node_modules", "feature-factory", "package.json"), JSON.stringify({ name: "feature-factory" }));
   }
-  const module = await import(pathToFileURL(join(pkg, "extensions", "index.js")).href);
-  return { root, pkg, module, cleanup: () => rmSync(root, { recursive: true, force: true }) };
-}
-
-function host() {
-  const commands = new Map();
-  const tools = new Map();
-  const messages = [];
-  return {
-    pi: {
-      registerCommand(name, command) { commands.set(name, command); },
-      registerTool(tool) { tools.set(tool.name, tool); },
-      sendUserMessage(parts) { messages.push(parts); },
-    }, commands, tools, messages,
-  };
+  const script = join(pkg, "bin", "context.js");
+  const module = await import(pathToFileURL(script).href);
+  return { root, pkg, script, module, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 const resolveFeatureFactory = () => "/opt/prime/node_modules/feature-factory/state/index.js";
 
-describe("Prime extension", () => {
-  it("derives installed resources and a stable session owner", async () => {
+describe("Prime install context", () => {
+  it("derives the installed agents and CLI, from its own path when bare resolution fails", async () => {
     // A failed resolution used to propagate the resolver's bare "Cannot find module 'feature-factory'",
-    // which the host prints under "Failed to load extension" and which names no remedy. Seen for real on a
-    // global install where the dependency WAS present and the same specifier resolved fine from this
-    // file's own path -- so the message has to point at both possibilities, not just a missing package.
-    // The fix for the Prime Agent regression: bare resolution is the host's to control, the install layout
-    // is not. When the host's resolver cannot see this package's dependency, the walk up from this file
-    // finds it, so the extension loads rather than dying at startup.
+    // which names no remedy. Seen for real under Prime 0.9 on a global install where the dependency WAS
+    // present -- so the message has to point at both possibilities, not just a missing package, and the
+    // walk up from this file finds a dependency that bare resolution cannot see.
     const beside = "/install/node_modules/prime-agent-feature-factory/node_modules/feature-factory";
     assert.deepEqual(
       factoryResources(() => { throw new Error("Cannot find module 'feature-factory'"); }, () => beside),
       { agents: `${beside}/agents`, cli: `${beside}/bin/factory.js` },
-      "a host resolver that cannot see the dependency must not stop the extension loading",
+      "a resolver that cannot see the dependency must not stop the context printing",
     );
     // The traversal itself, against real directories, with `findBeside` left at its default. The injected
     // case above proves dispatch; these prove where the walk starts and how far it goes -- a walk rooted
@@ -64,17 +50,17 @@ describe("Prime extension", () => {
     // every one of these.
     const throwingResolve = () => { throw new Error("Cannot find module 'feature-factory'"); };
     for (const [layout, expected] of [["nested", "pkg"], ["hoisted", "root"]]) {
-      const installed = await extensionInstalledAt(layout);
+      const installed = await scriptInstalledAt(layout);
       try {
         const base = expected === "pkg" ? installed.pkg : installed.root;
         assert.deepEqual(installed.module.factoryResources(throwingResolve),
           { agents: join(base, "node_modules", "feature-factory", "agents"),
             cli: join(base, "node_modules", "feature-factory", "bin", "factory.js") },
-          `the walk must find a ${layout} dependency from the extension's own location`);
+          `the walk must find a ${layout} dependency from the script's own location`);
       } finally { installed.cleanup(); }
     }
     // And absence is still an error rather than a wrong path invented from the walk.
-    const missing = await extensionInstalledAt("absent");
+    const missing = await scriptInstalledAt("absent");
     try {
       assert.throws(() => missing.module.factoryResources(throwingResolve),
         /could not resolve its 'feature-factory' dependency/u,
@@ -83,10 +69,10 @@ describe("Prime extension", () => {
 
     // Only when the install genuinely lacks it does this fail -- and then it says what to do.
     assert.throws(() => factoryResources(() => { throw new Error("Cannot find module 'feature-factory'"); }, () => null), (error) => {
-      assert.match(error.message, /could not resolve its 'feature-factory' dependency from .+extensions/u,
+      assert.match(error.message, /could not resolve its 'feature-factory' dependency from .+context\.js/u,
         "the error must name the file resolution was attempted from");
       assert.match(error.message, /npm install -g prime-agent-feature-factory/u, "and the remedy");
-      assert.match(error.message, /loads this extension from `?its installed path/u, "and the other cause");
+      assert.match(error.message, /run this script from `?its installed path/u, "and the other cause");
       assert.match(error.cause.message, /Cannot find module/u, "the original resolver error must survive as the cause");
       return true;
     });
@@ -94,70 +80,36 @@ describe("Prime extension", () => {
       agents: "/opt/prime/node_modules/feature-factory/agents",
       cli: "/opt/prime/node_modules/feature-factory/bin/factory.js",
     });
-    assert.equal(primeSessionId("/tmp/abc/session-42.json", "unused"), "prime-agent:session-42.json");
-    assert.equal(primeSessionId(undefined, "fixed"), "prime-agent:fixed");
   });
 
-  it("returns current-session context through a tool instead of process-global environment", async () => {
-    const runtime = host();
-    featureFactoryExtension(runtime.pi, { resolveFeatureFactory });
-    const tool = runtime.tools.get("feature_factory_context");
-    const result = await tool.execute("call", {}, undefined, undefined, {
-      sessionManager: { getSessionFile: () => "/tmp/sessions/run.jsonl" },
-    });
-    assert.deepEqual(result.details, {
-      sessionId: "prime-agent:run.jsonl",
+  it("prints the install context as one JSON line when run by node, and fails closed without the dependency", async () => {
+    // The skill runs this with `node` and binds every path from its stdout, so the property is the real
+    // process: one JSON object naming readable paths. HOME and cwd are empty temp dirs so an operator's own
+    // profile file cannot leak into the expectation.
+    const scratch = realpathSync(mkdtempSync(join(tmpdir(), "prime-ctx-")));
+    try {
+      const run = (script) => spawnSync(process.execPath, [script], { cwd: scratch, env: { ...process.env, HOME: scratch }, encoding: "utf8" });
+      const printed = run(scriptSource);
+      assert.equal(printed.status, 0, printed.stderr);
+      const payload = JSON.parse(printed.stdout);
+      assert.deepEqual(Object.keys(payload), ["agents", "cli", "dispatch"]);
+      assert.ok(existsSync(payload.cli) && existsSync(join(payload.agents, "work-reviewer.md")), "both paths must exist");
+      assert.equal(payload.dispatch["work-reviewer"].thinking, dispatchProfiles(payload.agents)["work-reviewer"].thinking);
+      assert.equal(printed.stdout.trim().split("\n").length, 1);
+      const missing = await scriptInstalledAt("absent");
+      try {
+        const refused = run(missing.script);
+        assert.deepEqual([refused.status, refused.stdout], [1, ""], "no partial context on stdout");
+        assert.match(refused.stderr, /could not resolve its 'feature-factory' dependency/u);
+      } finally { missing.cleanup(); }
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+    // Shape is reported even when the agent directory is unreadable, so a driver binds one key rather than
+    // branching on its absence.
+    assert.deepEqual(context({ resolveFeatureFactory, profiles: {} }), {
       agents: "/opt/prime/node_modules/feature-factory/agents",
       cli: "/opt/prime/node_modules/feature-factory/bin/factory.js",
-      // Empty because this stub resolver names a directory that does not exist. The shape is still
-      // reported, so a driver binds one key rather than branching on its absence.
       dispatch: {},
     });
-    assert.equal(result.content[0].text, JSON.stringify(result.details));
-  });
-
-  it("memoizes an ephemeral lock identity for each live Prime session", async () => {
-    const runtime = host();
-    featureFactoryExtension(runtime.pi, { resolveFeatureFactory });
-    const tool = runtime.tools.get("feature_factory_context");
-    const firstSession = { getSessionFile: () => undefined };
-    const secondSession = { getSessionFile: () => undefined };
-
-    const first = await tool.execute("one", {}, undefined, undefined, { sessionManager: firstSession });
-    const repeated = await tool.execute("two", {}, undefined, undefined, { sessionManager: firstSession });
-    const other = await tool.execute("three", {}, undefined, undefined, { sessionManager: secondSession });
-
-    assert.equal(repeated.details.sessionId, first.details.sessionId);
-    assert.notEqual(other.details.sessionId, first.details.sessionId);
-  });
-
-  it("registers /feature and forwards its arguments unchanged in a separate text part", async () => {
-    const runtime = host();
-    featureFactoryExtension(runtime.pi, { resolveFeatureFactory });
-    const command = runtime.commands.get("feature");
-    const notifications = [];
-    const ctx = { isIdle: () => true, ui: { notify: (...args) => notifications.push(args) } };
-    const request = "--autonomous  preserve   spacing";
-    await command.handler(request, ctx);
-    assert.deepEqual(notifications, []);
-    assert.equal(runtime.messages.length, 1);
-    assert.match(runtime.messages[0][0].text, /Load and follow the feature skill/u);
-    assert.deepEqual(runtime.messages[0][1], { type: "text", text: request });
-  });
-
-  it("rejects empty invocations and refuses to interrupt an active turn", async () => {
-    const runtime = host();
-    featureFactoryExtension(runtime.pi, { resolveFeatureFactory });
-    const command = runtime.commands.get("feature");
-    const notifications = [];
-    const ui = { notify: (...args) => notifications.push(args) };
-    await command.handler("   ", { isIdle: () => true, ui });
-    await command.handler("ticket-1", { isIdle: () => false, ui });
-    assert.equal(runtime.messages.length, 0);
-    assert.deepEqual(notifications.map(([message, level]) => [message, level]), [
-      ["Usage: /feature [--autonomous | --headless] <request>", "warning"],
-      ["The agent is busy; wait before starting a feature run.", "warning"],
-    ]);
   });
 
   // Prime takes `model` and `thinking` on rlm.spawn and nothing else, so what the operator configures
@@ -208,16 +160,11 @@ describe("Prime extension", () => {
     assert.deepEqual(bad["spec-writer"], {});
   });
 
-  it("carries the dispatch map on feature_factory_context so the driver never reparses frontmatter", async () => {
-    const runtime = host();
+  it("carries the dispatch map in the context so the driver never reparses frontmatter", () => {
     const realResolve = () => fileURLToPath(new URL("../../feature-factory/state/index.js", import.meta.url));
-    featureFactoryExtension(runtime.pi, { resolveFeatureFactory: realResolve, profiles: { reviewer: { model: "p/strong" } } });
-    const tool = runtime.tools.get("feature_factory_context");
-    const ctx = { sessionManager: { getSessionFile: () => "/tmp/sessions/run.jsonl" } };
-    const result = await tool.execute("call-1", {}, undefined, undefined, ctx);
-    assert.equal(result.details.dispatch["work-reviewer"].model, "p/strong");
-    assert.equal(result.details.dispatch["backend-builder"].model, undefined);
-    assert.deepEqual(JSON.parse(result.content[0].text).dispatch, result.details.dispatch);
+    const { dispatch } = context({ resolveFeatureFactory: realResolve, profiles: { reviewer: { model: "p/strong" } } });
+    assert.equal(dispatch["work-reviewer"].model, "p/strong");
+    assert.equal(dispatch["backend-builder"].model, undefined);
   });
 
   it("returns an empty dispatch rather than throwing when the agent directory is unreadable", () => {
@@ -254,8 +201,8 @@ describe("Prime extension", () => {
     assert.throws(() => spawn("x", { name: "a", role: "planning" }), /unexpected keyword argument 'role'/u);
   });
 
-  // Prime registers an extension by path and calls the default export with `pi` alone, so an options
-  // argument is unreachable from a normal install. These exercise the file the extension actually reads.
+  // The skill runs the script with no options, so an options argument is unreachable from a normal
+  // install. These exercise the file the script actually reads.
   it("reads profiles from the project file, then the home file, and prefers the project", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "prime-cfg-")));
     const write = (base, body) => {
@@ -272,11 +219,11 @@ describe("Prime extension", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("registers with no profiles rather than throwing when the config file is malformed", () => {
+  it("reads no profiles rather than throwing when the config file is malformed", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "prime-cfg-bad-")));
     mkdirSync(join(root, dirname(PROFILE_CONFIG_PATH)), { recursive: true });
     writeFileSync(join(root, PROFILE_CONFIG_PATH), "{ not json");
-    // A typo in an optional profile must not take /feature down with it.
+    // A typo in an optional profile must not stop every run before it starts.
     assert.deepEqual(readProfileConfig(root, join(root, "none")), {});
     writeFileSync(join(root, PROFILE_CONFIG_PATH), JSON.stringify(["array", "is", "not", "config"]));
     assert.deepEqual(readProfileConfig(root, join(root, "none")), {});

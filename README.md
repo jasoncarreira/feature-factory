@@ -9,7 +9,7 @@ Four packages:
 | --- | --- |
 | [`packages/feature-factory`](packages/feature-factory) | The host-agnostic factory: the `factory` CLI, the canonical `WORKFLOW.md`, and the agent definitions. Zero dependencies. |
 | [`packages/opencode-feature-factory`](packages/opencode-feature-factory) | The OpenCode adapter: its platform `SKILL.md`, server plugin, and sidebar. Reads run state; never writes it. |
-| [`packages/prime-agent-feature-factory`](packages/prime-agent-feature-factory) | The Prime Agent adapter: its platform `SKILL.md` and `/feature` extension. Currently foreground-only. |
+| [`packages/prime-agent-feature-factory`](packages/prime-agent-feature-factory) | The Prime Agent adapter (Prime 0.10+): its platform `SKILL.md`, install-context script and unattended launcher. |
 | [`packages/opencode2-feature-factory`](packages/opencode2-feature-factory) | The OpenCode 2.0 adapter: its platform `SKILL.md`, server plugin, and CLI sidebar. V1 plugins don't run in 2.0, so it's a separate package. |
 
 The factory owns the workflow contract. Each adapter owns its host-specific `SKILL.md` and ships an
@@ -90,9 +90,10 @@ For Prime Agent:
 prime-agent package install npm:prime-agent-feature-factory
 ```
 
-That command installs the adapter and its `feature-factory` runtime dependency. The Prime adapter
-currently supports foreground `/feature [--autonomous | --headless] <request>` runs only and rejects
-`--background` before creating or changing a run.
+That command installs the adapter and its `feature-factory` runtime dependency. It requires Prime Agent
+0.10 or newer. Run it interactively as `/skill:feature [--autonomous | --headless] <request>`, or unattended
+with the package's `bin/launch.js`. `prime-agent -p` cannot drive a run on Prime 0.10; see
+[OPERATING.md](OPERATING.md). The adapter rejects `--background` before creating or changing a run.
 
 ## Repository command configuration
 

@@ -3,6 +3,35 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.12.0
+
+- `prime-agent-feature-factory` now targets Prime Agent 0.10, the Rust host, and is not supported on 0.9.
+  Prime 0.10 dropped JavaScript extensions, so the adapter's `/feature` command and its
+  `feature_factory_context` tool no longer existed. The skill stopped at its mandated context call. The
+  package is now skill-only.
+  - **Invocation:** a run is invoked as `/skill:feature [--autonomous | --headless] <request>`.
+  - **Install context:** the skill reads it by running the package's `bin/context.js`, which prints the
+    agents directory, the factory CLI and the dispatch profiles. This is the same resolution and profile
+    file as before.
+  - **Session id:** `SESSION_ID` is now the session's durable `sessionId` from its own row in
+    `agent_observe.list_agents()`. It was previously the session file name.
+  - **Manifest:** `pi.extensions` is gone; the manifest declares only `pi.skills`.
+- New `bin/launch.js` starts an unattended Prime run, because `prime-agent -p` can no longer drive one. On
+  0.10, `-p` runs in-process, where `rlm.spawn` has no child runtime and agent messaging doesn't exist.
+  - **Session:** the launcher starts a Prime daemon on its own socket and creates a resident session there
+    with the autonomous budget (600 turns, 200 continuations, 6,000,000 tokens, six hours). It prompts the
+    session with `/skill:feature <arguments>`, prints the socket, the session id and a ready `stop`
+    command, and exits.
+  - **Why a daemon of its own:** a daemon session's environment is the daemon's boot environment, so the
+    run's `GH_TOKEN` and publishing identity only reach it through a daemon started with them.
+  - **Verified:** against a v0.10.0 binary in an isolated daemon, create, prompt and skill expansion with
+    the arguments, then `stop`.
+  - **Not yet verified on 0.10:** self-hosted runs, since the launcher's `--skill` adds a skill and doesn't
+    disable discovery, and a full model-driven run.
+- OPERATING.md's Prime section is rewritten for 0.10. The `-p`, `-e`/`-ne` and `DaemonClient` recipes are
+  gone. It warns that `prime-agent shutdown` stops every daemon in the socket directory, including
+  interactive ones, so a run should be ended with `stop`.
+
 ## 0.11.0
 
 - New `factory handoff <run> <from-slice> <to-slice> --item TEXT ... --reason TEXT --session ID`. It moves a

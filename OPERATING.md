@@ -358,147 +358,87 @@ opencode run --log-level DEBUG --print-logs --auto --dir <repo> \
   --command feature " --autonomous <issue-number>"
 ```
 
-Under Prime Agent 0.9, what is possible depends on whether the target repository is the factory itself.
-This section covers Prime 0.9.8. Prime 0.10, the Rust host, needs adapter 0.12 and a different launch.
+Under Prime Agent, this section describes **Prime 0.10 and later** (the Rust host), which
+`prime-agent-feature-factory` 0.12.0 targets. Earlier adapter versions targeted Prime 0.9 and do not work on
+0.10, and 0.12.0 is neither tested nor supported on 0.9. The forms below were run against a v0.10.0 binary in an isolated daemon.
 
-**An unattended run needs a live client for its whole life, so do not launch it with `-p`.** On 0.9.8 every
-session that is not ACP is *client-owned*: `isClientOwnedDaemonSession` returns `appMode !== "acp" ||
-noSession`. The daemon closes the session the moment its client disconnects, and `-p` disconnects as soon as
-it has printed one response.
+**Still on Prime 0.9.8?** Stay on adapter 0.11.x and launch from a TUI kept alive in tmux, never `-p`, which
+0.9.8 closes when its launcher exits. That recipe, which drove Trellis #136, is in this file as of PR #402
+(`git show 09e36424:OPERATING.md`).
 
-Trellis #136 showed this. Init succeeded and the story specialist started. Two minutes later the worker
-logged `shutdown command received over socket; 2 active session(s) will be closed`, ending both the driver and
-its child, and left `status: running` with a dead lock. An earlier version of this section said `-p` hands off
-to the daemon and survives. That was true on an older 0.9 and is false on 0.9.8.
-
-Keep an interactive session alive in a detached tmux session instead. This form drove Trellis #136 on 0.9.8,
-with the adapter discovered from its global install. The script exports the run's credentials, so the daemon
-the TUI starts on its own socket inherits them. The socket also keeps the run off an operator's daemon, which
-may be carrying hundreds of idle sessions:
-
-```sh
-cat > ~/ff-run.sh <<'SCRIPT'
-#!/bin/zsh
-export FACTORY_PUBLISHING_IDENTITY=<account>
-export GH_TOKEN="$(gh auth token --user <account>)"
-export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper \
-  GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
-cd <repo>
-exec prime-agent --daemon-socket /tmp/prime-agent-$(id -u)/ff-runs.sock \
-  --autonomous --autonomous-max-turns 600 --autonomous-max-continuations 200 \
-  --autonomous-max-tokens 6000000 --autonomous-timeout-ms 21600000
-SCRIPT
-tmux new-session -d -s ff-<issue> -x 220 -y 50 zsh ~/ff-run.sh
-# once the TUI is up:
-tmux send-keys -t ff-<issue> '/autonomous on --max-turns 600 --max-continuations 200 --max-tokens 6000000 --timeout-ms 21600000' Enter
-tmux send-keys -t ff-<issue> '/autonomous status' Enter    # expect 0/600, 0/200, 0/6,000,000, 0/21,600s
-tmux send-keys -t ff-<issue> '/feature --autonomous [--base <branch>] <issue-number>' Enter
-```
-
-- **Budget.** `/autonomous on` sets it explicitly, because whether the CLI budget flags reach an interactive
-  session was not checked. Confirm it with `/autonomous status` before sending the request.
-- **Attach and detach.** `tmux attach -t ff-<issue>` attaches, and Ctrl-b d detaches.
-- **Stopping.** Leaving the TUI (`/exit`, or `tmux kill-session`) closes its client-owned session. The lock then
-  goes stale and the run can be resumed.
-- **Several runs.** Each run gets its own tmux session. Runs under one publishing identity can share the
-  socket. The daemon on it is started by the first TUI, with that script's exports. Whether a later script's
-  exports reach a daemon that is already running was not measured on 0.9.8; on 0.10 they do not. So give
-  each publishing identity its own socket name.
-- **`--base <branch>` is required when the operator checkout is on a detached HEAD.** Without it, admission
-  refuses before creating anything, because the PR base is otherwise the checkout's symbolic branch.
-- **The `tmux extended-keys is off` warning is harmless.** A plain `send-keys … Enter` submits slash commands.
-- **Never accept the TUI's `Update available: v0.10.0. Run /update` prompt during a run.** Prime 0.10 cannot
-  load this adapter version.
-
-**To resume a run whose driver died, send the same request again.** Do not steal the lock by hand. The steal
-must be made under the new driver's own `SESSION_ID`, and the skill does that itself when qualified status
-shows `dead_lock: true`. Verified on #136: the relaunched driver reported "Checking stale lock holder", took
-the lock under its own session id, and resumed.
-
-**A self-hosted run, where the target is this repository, is supported and needs no exception.** An earlier
-version of this section said the opposite and shipped an operator override around it. That was wrong, and the
-error was one flag: `-ne` disables extension *discovery*, exactly as `--help` says, and does **not** suppress an
-explicitly passed `-e`. Pass the in-tree extension and the driver's mandated context call simply succeeds.
-
-Discovery still has to be off, because the installed adapter would hand the driver installed skill, agent and
-CLI paths and this repository's read-scope rule then refuses them. So turn discovery off and name the in-tree
-skill and extension directly:
+**What Prime 0.10 changed, and why the launch is different.**
+- **No extensions.** Prime 0.10 loads no JavaScript extensions, so the `/feature` command and the
+  `feature_factory_context` tool are gone. Invoke the skill as `/skill:feature …`; it reads its install
+  context by running the package's `bin/context.js`.
+- **`-e` and `-ne`** are now `Unknown option` errors.
+- **The library entry point is gone.** `import { DaemonClient } from "prime-agent"` no longer exists.
+- **`-p` cannot drive a run.** It runs the session in-process, where `rlm.spawn` raises `rlm.spawn requires
+  a daemon-backed session` and neither `agent_message` nor `agent_observe` exists. A run started that way
+  stops at its first specialist dispatch, and the skill refuses it before creating anything.
+- **Only a session inside a daemon worker can drive a run.** The package's launcher creates one:
 
 ```sh
-R=<absolute path to this repository>
-prime-agent --autonomous \
-  --autonomous-max-turns 600 --autonomous-max-continuations 200 \
-  --autonomous-max-tokens 6000000 --autonomous-timeout-ms 21600000 \
-  -ne -ns \
-  --skill "$R/packages/prime-agent-feature-factory/skills/feature/SKILL.md" \
-  -e "$R/packages/prime-agent-feature-factory/extensions" \
-  --cwd "$R" -p "/feature --autonomous [--max-retries <n>] <issue-number>" < /dev/null
+export FACTORY_PUBLISHING_IDENTITY=<account> GH_TOKEN=<token for that account>   # plus the helper above
+node "$(npm root -g)/prime-agent-feature-factory/bin/launch.js" --cwd <repo> \
+  -- --autonomous [--base <branch>] <issue-number> < /dev/null
 ```
 
-These flags were verified with `-p` on an earlier 0.9, which 0.9.8 closes when the launcher exits. For an
-unattended self-hosted run on 0.9.8, put `-ne -ns --skill … -e …` on the `exec prime-agent` line of the tmux
-script above instead. That combination has not been run.
+It starts a Prime daemon on a fresh socket of its own (`${TMPDIR:-/tmp}/prime-agent-<uid>/feature-<id>.sock`),
+creates a **resident** session there with the autonomous budget, prompts it with `/skill:feature <arguments>`,
+prints one JSON line with `socket`, `activeSessionId` and a ready `stop` command, and exits. The run carries on
+without it. Anything after `--` is the request exactly as `/skill:feature` would receive it, and its leading
+`--autonomous` selects the run mode.
 
-`feature_factory_context` is present under those flags and returns this tree, which is what makes the run
-legitimate rather than excused. Verified by calling it, not by asking a session whether it exists — a model with
-the repository as its cwd can read the tool's name off disk and report it either way:
+- **A resident session outlives its client.** The default `client_owned` lifecycle dies with the connection,
+  which is also why `--mode acp` cannot detach: closing its stdin cancels the turn.
+- **Why its own daemon.** A daemon session's environment is the daemon's boot environment. The client's is
+  not passed through: only `HERDR_*` pane identity is. So `GH_TOKEN`, `FACTORY_PUBLISHING_IDENTITY` and the
+  credential helper must be in the launcher's environment when it starts that daemon. A long-lived
+  interactive daemon would publish with whatever it booted with, or refuse at the identity guard. A separate
+  daemon also keeps an unattended run off an interactive daemon carrying hundreds of idle sessions.
+  `--socket <path>` reuses a daemon you started yourself with the right environment.
+- **The default budget is 600 turns, 200 continuations, 6,000,000 tokens and six hours.**
+  `--max-turns`, `--max-continuations`, `--max-tokens` and `--timeout-ms` override them; see "Raise every
+  autonomous limit" below.
+- **Detached.** The daemon is started in its own session (`setsid`), so killing the supervising shell or
+  process group does not take the run with it.
 
-```text
-{"sessionId":"prime-agent:01a00a92-....jsonl",
- "agents":".../packages/feature-factory/agents",
- "cli":".../packages/feature-factory/bin/factory.js"}
-```
+**Stop a run with the printed command**, `PRIME_AGENT_DAEMON_SOCKET=<socket> prime-agent stop <activeSessionId>`.
+It stops the session and the children it spawned. **Never end a run with `prime-agent shutdown`**: it stops
+every daemon under the same socket directory, the operator's interactive daemon included. The run's daemon
+stays up and idle after the run terminalizes.
 
-The same probe without `-e` answers `NO_SUCH_TOOL`, so the explicit extension is what supplies it. The skill loads
-from `--skill` alongside it.
+**Self-hosted runs are not yet verified on Prime 0.10.** The launcher's `--skill <path>` adds a skill to the
+session but does not turn discovery off, and a daemon `create` has no setting that does. On a machine where
+the adapter is installed, a run targeting this repository therefore sees two `feature` skills. The installed
+one would hand the driver installed agent and CLI paths, which this repository's read-scope rule refuses.
+Until that is tested, run self-hosted work where the adapter is not installed globally, or under the
+OpenCode adapter.
 
-**What the earlier text got wrong, recorded because it cost a day.** It claimed `-ne` suppressed an explicit
-`-e`, concluded the tool could not exist, and therefore told the driver to proceed on paths supplied in its
-prompt — in direct conflict with the skill's instruction to stop when the tool is absent. A reviewer blocked that
-recipe on the conflict and was right, though neither of us found the real reason: the exception was never
-needed. Two runs were driven under the override before anyone re-tested the flag. The claim had been carried
-from one session to the next in notes and never re-run.
+Judge liveness by `factory status --json` plus a session file that keeps growing, never by
+`prime-agent list`. Daemon logs are at `~/.prime/agent/logs/<socket name>.<hash>.log`. `prime-agent list
+--json` (with `PRIME_AGENT_DAEMON_SOCKET` set to the run's socket) shows the session with its `cwd`,
+`sessionId` and `activity`.
 
-**A `-p` launched session no longer outlives its launcher on 0.9.8,** so the older problem recorded here
-(`list --all` showed a surviving `-p` session that `stop` refused, prime-agent discussion #1485) no longer
-arises. A session created through the daemon protocol with `lifecycle: "resident"` does outlive its client
-and is stoppable with `prime-agent stop <activeSessionId>`. On 0.9.8 the protocol's `create` has no autonomous
-budget, though, and setting one afterwards with a `/autonomous on` prompt has not been tried there. Use the
-tmux form above.
+**Redirect stdin from `/dev/null`.** A supervised launch inherits a pipe that never reaches EOF, and the CLI
+reads stdin for piped input, so it blocks before emitting a byte: hangs until killed, exit 124, zero bytes on
+both streams. Measured on Prime 0.9. The launcher does not read stdin, but its daemon is a Prime process, so
+keep the redirect.
 
-Judge liveness by `factory status --json` plus a heartbeat that advances, never by `prime-agent list` — and see
-the monitoring notes below. Daemon logs, when you need them, are at `~/.prime/agent/logs/daemon.sock.<id>.log`;
-they are not in the socket directory, which is where I first looked and wrongly concluded there were none.
+**Raise every autonomous limit.** Prime's own defaults are
+12 assistant turns, 3 continuations, 80,000 tokens and a 30-minute wall clock. None of those reach Gate 2 on a real issue, and a run that stops on a limit is
+indistinguishable from a stall. The launcher always sends all four of its own, because a budget named at
+create time leaves every unnamed limit **unlimited**, not at Prime's defaults.
 
-On 0.9.8 the launcher's process *is* the run's lifetime: if the TUI's tmux session is gone, so is the driver.
-Judge progress by `run.json` and the session transcript, but judge whether a driver can still exist by its
-client.
+**Daemon health is a precondition, not a detail.** Measured on Prime 0.9: a daemon carrying a dozen idle
+sessions logs `Idle eviction sweep failed: Error: Timed out draining daemon mutations for idle eviction`
+every few minutes, then drops new clients with `Daemon worker client closed`. A fresh daemon per run avoids
+that for the run itself. Check an interactive daemon with `prime-agent doctor --json` before relying on it.
 
-**Redirect stdin from `/dev/null`.** This is for a noninteractive launch (`-p`, or a probe), never for the
-tmux TUI above, which reads its input from `send-keys`. A supervised launch inherits a pipe that never
-reaches EOF, and the CLI reads stdin for piped input, so it blocks before emitting a byte: hangs until killed, exit 124, zero bytes on
-both streams, unaffected by `--verbose`, `--offline`, or disabling extensions, skills and tools.
-
-**Raise every autonomous limit.**
-The defaults are 12 assistant turns, 3 continuations, 80,000 tokens and a 30-minute wall clock.
-None of those reach Gate 2 on a real issue, and a run that stops on a limit is indistinguishable from a stall. The two `--autonomous` spellings are different flags and both are needed: the
-first is Prime's continuation control, the one inside the quoted request is content the skill reads to select the
-run mode.
-
-**Daemon health is a precondition, not a detail.** Sessions accumulate; a daemon carrying a dozen idle ones logs
-`Idle eviction sweep failed: Error: Timed out draining daemon mutations for idle eviction` every few minutes and
-then drops new clients with `Daemon worker client closed`. Launches degrade into the same zero-byte silence as a
-bad invocation, which is how an afternoon disappears. Check with `prime-agent doctor --json`, clear with
-`doctor --fix`, and if that is not enough, `prime-agent shutdown` and let the next invocation start a fresh
-daemon. `prime-agent list --json` shows every session with its `cwd`, which is how to tell a run's session from
-an operator's.
-
-**When a launch produces nothing, ask the session what it has** before theorising about the tool:
-
-```sh
-prime-agent -ne -ns --skill <skill> -p "Is a command named 'feature' registered? \
-  Is a skill named 'feature' loaded? Name any tool starting with feature_" < /dev/null
-```
+**When a launch produces nothing**, read the session rather than theorising about the tool. With the run's
+socket set, `prime-agent list --json` shows whether the session exists and is busy. Its session file (the
+`sessionFile` in that listing) shows whether the prompt arrived as a `<skill name="feature" …>` block with the
+request after it, and what the first cell reported.
 
 The Git credential helper reads the inherited `GH_TOKEN` as its password, while `gh` reads that same
 inherited variable directly. The real identity probe is a read-only network request, so a locally active
