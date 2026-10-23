@@ -37,6 +37,8 @@ export const RUN_KEYS = Object.freeze([
   "base_syncs",
   // Audited moves of a reviewer's requirement from one slice to a later one by `factory handoff`. Absent in older manifests.
   "handoffs",
+  // Operator grants of one more remediation each, by `factory grant-remediation` on a parked run. Absent in older manifests.
+  "remediation_grants",
 ]);
 
 export const RUN_STATUSES = Object.freeze(["running", "completed", "blocked", "partial", "needs-human"]);
@@ -81,7 +83,14 @@ export const BASE_SYNC_KEYS = Object.freeze(["merge_commit", "previous_head", "b
 export const HANDOFF_KEYS = Object.freeze(["id", "from", "to", "items", "reason", "session", "at"]);
 export const REMEDIATION_KEYS = Object.freeze(["slice_id", "finding_ref", "finding_archive", "finding_sha256", "paths", "test_plan", "reason", "session", "at"]);
 // Instruction-level bound, enforced so a fix that finds another defect cannot loop without a human (#344).
+// Each operator grant on a parked run adds one; the human is the loop's exit either way.
 export const REMEDIATION_LIMIT = 2;
+export const REMEDIATION_GRANT_KEYS = Object.freeze(["reason", "session", "at"]);
+export const VALIDATOR_OVERRIDE_KEYS = Object.freeze(["reviewed_head", "reason", "session", "at"]);
+
+export function effectiveRemediationLimit(run) {
+  return REMEDIATION_LIMIT + (run.remediation_grants?.length ?? 0);
+}
 const RETRY_EXTENSION_KEYS = Object.freeze(["scope", "slice_id", "base_ref", "attempt", "previous_limit", "new_limit", "previous_max_retries", "max_retries", "session", "reason", "at", "snapshot_digest", "review_ref", "review_sha256", "evidence_ref", "evidence_sha256"]);
 export const RETRY_EXTENSION_SCOPES = Object.freeze(["slice", "all"]);
 
@@ -92,7 +101,8 @@ export function effectiveRetryLimit(run, slice) {
 export const VALIDATOR_VERDICTS = Object.freeze(["GO", "GO-WITH-NITS", "NO-GO"]);
 // reviewed_head is the fourth field, justified by attack 4: a verdict that does not
 // name the head it judged cannot be refused once that head moves.
-export const VALIDATOR_KEYS = Object.freeze(["verdict", "report", "reviewed_head", "loops"]);
+// `override` is an operator's decision to publish this NO-GO's head anyway; the verdict itself is kept.
+export const VALIDATOR_KEYS = Object.freeze(["verdict", "report", "reviewed_head", "loops", "override"]);
 export const TERMINAL_RESULT_KEYS = Object.freeze(["status", "reason"]);
 
 // Finding 2: an invalid evidence ref was only rejected when consumed at merge, so a
@@ -165,6 +175,7 @@ export function validateRun(run) {
 
   retryExtensions(errors, run);
   remediations(errors, run);
+  auditList(errors, run, "remediation_grants", REMEDIATION_GRANT_KEYS);
   baseSyncs(errors, run);
   handoffs(errors, run);
   gates(errors, run.gates);
@@ -183,7 +194,7 @@ function remediations(errors, run) {
   const value = run.remediations;
   if (value === undefined) return;
   if (!Array.isArray(value)) return void errors.push({ path: "run.remediations", message: "must be an array" });
-  if (value.length > REMEDIATION_LIMIT) errors.push({ path: "run.remediations", message: `exceeds the remediation limit (${REMEDIATION_LIMIT})` });
+  if (value.length > effectiveRemediationLimit(run)) errors.push({ path: "run.remediations", message: `exceeds the remediation limit (${effectiveRemediationLimit(run)})` });
   const slices = Array.isArray(run.slices) ? run.slices : [], first = slices.length - value.length;
   value.forEach((entry, index) => {
     const path = `run.remediations[${index}]`;
@@ -224,6 +235,18 @@ function handoffs(errors, run) {
 }
 
 // Each sync moves the branch point forward from the one before it, so the chain is the run's base history.
+function auditList(errors, run, key, keys) {
+  const value = run[key];
+  if (value === undefined) return;
+  if (!Array.isArray(value)) return void errors.push({ path: `run.${key}`, message: "must be an array" });
+  value.forEach((entry, index) => {
+    const path = `run.${key}[${index}]`;
+    if (!object(errors, entry, path, keys)) return;
+    for (const field of ["reason", "session"]) required(errors, entry, field, path);
+    pattern(errors, entry, "at", ISO, path);
+  });
+}
+
 function baseSyncs(errors, run) {
   const value = run.base_syncs;
   if (value === undefined) return;
@@ -437,6 +460,13 @@ function validator(errors, value) {
   nullableString(errors, value, "report", "run.validator");
   pattern(errors, value, "reviewed_head", SHA, "run.validator");
   nonNegativeInt(errors, value, "loops", "run.validator");
+  if (value.override === undefined || value.override === null) return;
+  // Enforcement: an override publishes the head the NO-GO judged and nothing else, so it must name that head.
+  if (!object(errors, value.override, "run.validator.override", VALIDATOR_OVERRIDE_KEYS)) return;
+  for (const field of ["reason", "session"]) required(errors, value.override, field, "run.validator.override");
+  pattern(errors, value.override, "at", ISO, "run.validator.override");
+  if (value.verdict !== "NO-GO") errors.push({ path: "run.validator.override", message: "may override only a NO-GO verdict" });
+  if (value.override.reviewed_head !== value.reviewed_head) errors.push({ path: "run.validator.override.reviewed_head", message: "must be the head the verdict judged" });
 }
 
 function terminalResult(errors, value, status) {

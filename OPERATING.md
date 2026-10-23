@@ -620,6 +620,20 @@ When a park asks you to move a reviewer's requirement from one slice to a later 
 rather than in decision text. The record is what the receiver's merge and the validator are held to. It
 leaves the run parked and refuses a receiver that has already merged.
 
+**When a park has no in-band route left,** two more operator commands answer it. Both leave the run parked,
+need the same fresh lock and a reason, and are followed by the same explicit resume. Neither is ever the
+driver's to run. Both came from mimirbot epic 3, whose slices all merged and which still could not finish:
+
+- `factory grant-remediation <run-id> --reason <text> --session "$SESSION_ID" --repo <sandbox>` allows one
+  more remediation slice past the limit of 2. Each grant is recorded, and `factory status` shows
+  `remediations` as `{opened, limit, granted}`. A remediation still opens only before Gate 3 does.
+- `factory override-validator <run-id> --reason <text> --session "$SESSION_ID" --repo <sandbox>` publishes
+  the head a validator NO-GO judged, despite the NO-GO. The verdict stays recorded, and the override names
+  that head and your reason. Gate 3 and `factory pr` then accept the verdict for that head only. A commit
+  after the verdict, or any fresh verdict, needs a new verdict and, for another override, a new park. The
+  driver opens the PR with "Published over validator NO-GO by operator override", followed by the
+  findings, the judged head and your reason, so whoever merges sees the NO-GO first.
+
 `decide` leaves the run parked. Read the immutable cumulative artifact named by
 `operator_decision.artifact` in the manifest, not an unreferenced file left by failed publication.
 Its `artifacts/operator-decisions-<sha256hex>.md` name and digest identify recorded bytes, not proof of

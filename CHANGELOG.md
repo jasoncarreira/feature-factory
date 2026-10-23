@@ -3,6 +3,30 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.12.1
+
+- Two operator commands for a parked run whose in-band routes are spent. Mimirbot epic 3 had every slice
+  merged, and Gate 3 still returned NO-GO with both remediations used. `factory remediate` refused at the
+  limit, and publication refused the NO-GO. No operator decision could change either.
+  - **Shared preconditions:** both require the run parked at needs-human, a non-blank `--reason`, and a
+    `--session` that holds a fresh lock on the run, the same as `grant-retry`. That a driver never runs them
+    is a WORKFLOW.md instruction, because the CLI has no operator identity to check.
+  - **`factory grant-remediation <run> --reason --session`** adds one remediation. Grants are recorded in
+    `run.remediation_grants`. `remediate` and the schema both check against the effective limit, 2 plus the
+    number of grants. `factory status` reports `remediations: {opened, limit, granted}`. A remediation still
+    opens only before Gate 3 does.
+  - **`factory override-validator <run> --reason --session`** keeps the recorded NO-GO and adds
+    `validator.override`: the judged head, the reason, the session and the time. Publication then accepts
+    that verdict in place of an approval, and the check that the verdict names the current integration head
+    stays.
+    - **Head binding:** a commit after the verdict refuses publication.
+    - **Fresh verdicts:** a new verdict replaces the record, override included.
+    - **Shape:** the schema allows an override only on a NO-GO, and only naming that verdict's own head.
+    - **Who writes it:** only this command can write one.
+  - WORKFLOW.md and OPERATING.md describe both. The PR for an overridden run leads with "Published over
+    validator NO-GO by operator override", followed by the findings, the judged head and the reason.
+- The production line tripwire rises from 6650 to 6750, as the owner authorized.
+
 ## 0.12.0
 
 - `prime-agent-feature-factory` now targets Prime Agent 0.10, the Rust host, and is not supported on 0.9.

@@ -294,7 +294,8 @@ export function assertPublicationReady({ runDir, state, runId, repo, observeHead
   // name this head either way. The published head stays bound by the test-verifier check below.
   const validator = state.validator;
   if (!validator && state.slices.length > 1) refuse("a multi-slice run requires an approving validator verdict");
-  if (validator && !isApproving(validator.verdict)) refuse("the validator verdict is not an approval");
+  // An operator's override (schema-bound to the verdict's own head) stands in for the approval; the head check stays.
+  if (validator && !isApproving(validator.verdict) && !validator.override) refuse("the validator verdict is not an approval");
   if (validator && head !== validator.reviewed_head) {
     refuse(`the validator judged ${String(validator.reviewed_head).slice(0, 12)} but the integration head is ${head.slice(0, 12)}`);
   }

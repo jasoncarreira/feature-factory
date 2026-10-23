@@ -58,6 +58,7 @@ const envelope = contract({
     max_retries: state.max_retries,
     retry_extensions: state.retry_extensions ?? [],
     remediations: state.remediations ?? [],
+    remediation_grants: state.remediation_grants ?? [],
     base_syncs: state.base_syncs ?? [],
     handoffs: state.handoffs ?? [],
     bootstrap_command: state.bootstrap_command,
@@ -122,6 +123,17 @@ const envelope = contract({
         return;
       }
       if (mode === "handoff") return validateHandoff({ before, after, current, candidate });
+      // Enforcement: an operator's grant or override on a parked run moves the clock and, for a grant, appends one
+      // record. The park stands and resume stays a separate act; an override's own record is the verdict family's.
+      if (mode === "grant-remediation" || mode === "override-validator") {
+        const grows = mode === "grant-remediation" ? ["remediation_grants"] : [];
+        if (after.status !== "needs-human" || Date.parse(after.updated_at) <= Date.parse(before.updated_at)) throw new Error(`${mode} must keep the run parked and move updated_at forwards`);
+        for (const key of Object.keys(before).filter((key) => !["updated_at", ...grows].includes(key))) if (!isDeepStrictEqual(before[key], after[key])) throw new Error(`${mode} cannot change envelope.${key}`);
+        if (grows.length && (after.remediation_grants.length !== before.remediation_grants.length + 1 || !isDeepStrictEqual(after.remediation_grants.slice(0, -1), before.remediation_grants))) throw new Error("grant-remediation must append exactly one grant");
+        const own = mode === "override-validator" ? ["validator"] : [];
+        for (const key of Object.keys(current).filter((key) => !Object.hasOwn(before, key) && !own.includes(key))) if (!isDeepStrictEqual(current[key], candidate[key])) throw new Error(`${mode} cannot change run.${key}`);
+        return;
+      }
       // Enforcement (#387): a base sync on a parked run appends one audit record; the park stands until resume.
       if (mode === "sync-base") {
         if (after.status !== "needs-human" || !isDeepStrictEqual(after.terminal_result, before.terminal_result)) throw new Error("sync-base must preserve the parked envelope and terminal_result");
@@ -166,6 +178,7 @@ const envelope = contract({
     if (!isDeepStrictEqual(before.retry_extensions, after.retry_extensions)) throw new Error("envelope.retry_extensions is immutable outside grant-retry");
     if (!isDeepStrictEqual(before.base_syncs, after.base_syncs)) throw new Error("envelope.base_syncs changes only by sync-base on a parked run");
     if (!isDeepStrictEqual(before.handoffs, after.handoffs)) throw new Error("envelope.handoffs changes only by one handoff append");
+    if (!isDeepStrictEqual(before.remediation_grants, after.remediation_grants)) throw new Error("envelope.remediation_grants changes only by grant-remediation on a parked run");
     if (mode === "remediate" ? !appendsOneRemediation(before, after) : !isDeepStrictEqual(before.remediations, after.remediations)) {
       throw new Error("envelope.remediations changes only by one remediate append");
     }
@@ -517,7 +530,13 @@ const verdict = contract({
   id: "verdict",
   reobserve: checkPublication,
   project: (state) => ({ validator: state.validator ?? null, pr_url: state.pr_url ?? null }),
-  validateTransition: ({ before, after, candidate }) => {
+  validateTransition: ({ mode, before, after, candidate }) => {
+    // Enforcement: an override is added only by `override-validator`, onto the recorded verdict unchanged. A fresh
+    // verdict replaces the whole record, so a new head or a new review always drops the override with it.
+    const override = after.validator?.override ?? null;
+    if (mode === "override-validator") {
+      if (!override || !isDeepStrictEqual(after.validator, { ...before.validator, override }) || before.validator?.override) throw new Error("override-validator must add one override to the recorded verdict");
+    } else if (override && !isDeepStrictEqual(override, before.validator?.override ?? null)) throw new Error("a validator override is recorded only by override-validator");
     if (before.pr_url && before.pr_url !== after.pr_url) {
       // Exactly-once: a run has one PR. Overwriting the URL would hide a second.
       throw new Error("pr_url is immutable once recorded");
