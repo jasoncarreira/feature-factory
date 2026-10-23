@@ -1,24 +1,13 @@
-import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, parse } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join, parse } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-// Bare-specifier resolution is correct when this file is imported by Node, and it is not ours to control
-// when a host loads it some other way.
-//
-// Observed: Prime Agent failed to load this extension with "Cannot find module 'feature-factory'" on an
-// install where the dependency was present, and where the same specifier resolved from this file's own
-// path under Node by both import and require. A path walk finds it in that layout, and the operator
-// confirmed a build carrying this fallback starts where the same install previously failed.
-//
-// Suspected, not proven: Prime loads extensions through jiti created with the HOST's module URL as its
-// root, so a bare specifier is looked up from Prime's directory rather than from this package. Three
-// reproductions of that loader shape here all resolved successfully, so the mechanism is the best
-// explanation for the observations rather than an established cause -- and the fallback is worth having
-// either way, because which resolver is asking is the host's business while where a package manager put
-// a declared dependency is not.
+// Bare-specifier resolution failed under Prime 0.9's extension loader on an install where the dependency
+// was present beside this file ("Cannot find module 'feature-factory'"). Run by `node` it resolves, but
+// where a package manager put a declared dependency is not ours to assume either way, so a path walk from
+// this file's own location is the fallback.
 function resolveFromOwnPath() {
   let dir = dirname(fileURLToPath(import.meta.url));
   const { root } = parse(dir);
@@ -37,15 +26,12 @@ export function factoryResources(resolve = createRequire(import.meta.url).resolv
   } catch (cause) {
     const fallback = findBeside();
     if (fallback) return resourcesFor(fallback);
-    // The host reports "Failed to load extension" and the resolver's bare "Cannot find module
-    // 'feature-factory'", which together tell an operator nothing about what to do. Observed on a global
-    // install whose dependency was present and resolvable when the same specifier was resolved directly
-    // from this file's path -- so the interesting case is not a missing package but a host that loads this
-    // file from somewhere other than where it was installed, and the message has to be able to say so.
+    // The resolver's bare "Cannot find module 'feature-factory'" tells an operator nothing about what to
+    // do, and the likely case is a copy of this file run from somewhere other than where it was installed.
     throw new Error(
       `prime-agent-feature-factory could not resolve its 'feature-factory' dependency from `
       + `${fileURLToPath(import.meta.url)}. Reinstall the adapter so the dependency is installed beside it `
-      + `(npm install -g prime-agent-feature-factory), and check that the host loads this extension from `
+      + `(npm install -g prime-agent-feature-factory), and run this script from `
       + `its installed path rather than a copy, since resolution is relative to this file.`,
       { cause },
     );
@@ -131,14 +117,8 @@ function readAgentFiles(agentsDir) {
   return agents;
 }
 
-export function primeSessionId(sessionFile, fallback = randomUUID()) {
-  return `prime-agent:${sessionFile ? basename(sessionFile) : fallback}`;
-}
-
-// Prime registers an extension by path and calls the default export with `pi` alone -- there is no
-// per-extension options object in `settings.json` or the package manifest. A configuration surface that
-// only a direct call can reach is not configuration, so profiles are read from a file instead, project
-// first and then global, with an explicit `options` argument still winning for tests and `-e` use.
+// Profiles are read from a file, project first and then global: the skill runs this script with no
+// options, so a file is the only configuration surface an operator can reach.
 export const PROFILE_CONFIG_PATH = join(".prime", "agent", "feature-factory.json");
 
 export function readProfileConfig(cwd = process.cwd(), home = homedir(), read = readFileSync) {
@@ -154,7 +134,7 @@ export function readProfileConfig(cwd = process.cwd(), home = homedir(), read = 
       parsed = JSON.parse(bytes);
     } catch {
       // A malformed file is reported and skipped rather than throwing: a typo in an optional profile
-      // must not stop the extension registering, which would take /feature down with it.
+      // must not stop the context from printing, which would stop every run before it starts.
       continue;
     }
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
@@ -162,55 +142,24 @@ export function readProfileConfig(cwd = process.cwd(), home = homedir(), read = 
   return {};
 }
 
-export default function featureFactoryExtension(pi, options = {}) {
-  const resources = factoryResources(options.resolveFeatureFactory);
-  // Resolved once at registration: the agent set and the operator's profiles are both fixed for the
-  // life of the extension, and reading eleven files per dispatch would buy nothing.
+// What the skill reads before any run effect: the installed specialist-agent directory, the factory CLI
+// beside it, and each specialist's spawn profile. Prime 0.10 dropped JavaScript extensions, so this is
+// a script the driver runs with `node` rather than a registered tool; the session identity it once
+// carried now comes from the session itself (see SKILL.md), because no subprocess can know it.
+export function context({ resolveFeatureFactory, ...options } = {}) {
+  const resources = factoryResources(resolveFeatureFactory);
   const configured = options.profiles || options.profile ? options : readProfileConfig();
-  const dispatch = dispatchProfiles(resources.agents, configured);
-  const sessionIds = new WeakMap();
+  return { agents: resources.agents, cli: resources.cli, dispatch: dispatchProfiles(resources.agents, configured) };
+}
 
-  function sessionIdFor(sessionManager) {
-    const existing = sessionIds.get(sessionManager);
-    if (existing) return existing;
-    const sessionId = primeSessionId(sessionManager.getSessionFile());
-    sessionIds.set(sessionManager, sessionId);
-    return sessionId;
+// Through the realpath: `import.meta.url` resolves symlinks and argv does not, so on a symlinked install
+// (macOS /var -> /private/var, or a linked global prefix) a plain comparison is false and the script would
+// exit 0 having printed nothing.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+  try {
+    process.stdout.write(`${JSON.stringify(context())}\n`);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
   }
-
-  pi.registerTool({
-    name: "feature_factory_context",
-    label: "Feature Factory Context",
-    description: "Return the stable Prime session lock identity, the installed specialist-agent directory, and each specialist's spawn profile.",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const sessionId = sessionIdFor(ctx.sessionManager);
-      const payload = { sessionId, agents: resources.agents, cli: resources.cli, dispatch };
-      return {
-        content: [{ type: "text", text: JSON.stringify(payload) }],
-        details: payload,
-      };
-    },
-  });
-
-  pi.registerCommand("feature", {
-    description: "Drive a request through feature-factory",
-    handler: async (args, ctx) => {
-      if (!args.trim()) {
-        ctx.ui.notify("Usage: /feature [--autonomous | --headless] <request>", "warning");
-        return;
-      }
-      if (!ctx.isIdle()) {
-        ctx.ui.notify("The agent is busy; wait before starting a feature run.", "warning");
-        return;
-      }
-      pi.sendUserMessage([
-        {
-          type: "text",
-          text: "Load and follow the feature skill as the active run driver. Treat the next text part as the complete, unchanged /feature invocation arguments.",
-        },
-        { type: "text", text: args },
-      ]);
-    },
-  });
 }

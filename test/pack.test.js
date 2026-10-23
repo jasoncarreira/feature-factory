@@ -363,7 +363,8 @@ describe("what actually ships", () => {
           assert.ok(packed.files.includes(required), `${name} must ship ${required}`);
         }
       }
-      assert.ok(prime.files.includes("extensions/index.js"), "Prime adapter must ship its extension");
+      assert.ok(prime.files.includes("bin/context.js"), "Prime adapter must ship its context script");
+      assert.ok(!prime.files.some((file) => file.startsWith("extensions/")), "Prime 0.10 loads no extensions; none may ship");
       // The host loads the built bundle and does not transform JSX, so shipping source instead of
       // output would fail at load with a syntax error.
       assert.deepEqual(opencode.files.filter((file) => file.endsWith(".jsx")), [],
@@ -425,7 +426,15 @@ describe("what actually ships", () => {
       assert.equal(primeManifest.dependencies["feature-factory"], factory.version,
         "the installed Prime integration must be pinned to the installed factory");
       assert.deepEqual(primeManifest.pi.skills, ["./skills"]);
-      assert.deepEqual(primeManifest.pi.extensions, ["./extensions"]);
+      assert.equal(primeManifest.pi.extensions, undefined, "Prime 0.10 loads no extensions");
+      // The skill binds the agents and CLI from this script's stdout, so run the INSTALLED copy: it must name
+      // the factory npm put beside it, not this checkout.
+      const printed = execFileSync(process.execPath, [join(consumer, "node_modules", "prime-agent-feature-factory", "bin", "context.js")],
+        { cwd: consumer, env: { ...process.env, HOME: consumer }, encoding: "utf8" });
+      assert.deepEqual(Object.entries(JSON.parse(printed)).slice(0, 2).map(([key, value]) => [key, realpathSync(value)]),
+        [["agents", realpathSync(join(consumer, "node_modules", "feature-factory", "agents"))],
+          ["cli", realpathSync(join(consumer, "node_modules", "feature-factory", "bin", "factory.js"))]],
+        "the installed context script must resolve the installed factory");
       assert.deepEqual(factory.exports, { ".": "./state/index.js" },
         "the existing package export must remain sufficient");
       assert.deepEqual(factory.files,
