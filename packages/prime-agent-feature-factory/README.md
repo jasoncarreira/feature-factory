@@ -31,8 +31,9 @@ Unattended, use the launcher, not `prime-agent -p`:
 node "$(npm root -g)/prime-agent-feature-factory/bin/launch.js" --cwd <repo> -- --autonomous <issue-number> < /dev/null
 ```
 
-`-p` cannot drive a run on Prime 0.10. It runs the session in-process, where `rlm.spawn` has no child
-runtime and agent messaging does not exist, so a run would stop at its first specialist dispatch. The
+`-p` cannot drive a run on Prime 0.10. It runs the session in-process. On 0.10.0 `rlm.spawn` has no child
+runtime there and agent messaging does not exist. 0.10.1 runs subagents inline and has agent messaging, but
+`agent_observe`, which the skill needs, exists only in a daemon worker. The skill refuses either way. The
 launcher instead starts a Prime daemon on its own socket, creates a **resident** session there (one that
 outlives the launcher), sets the autonomous budget (600 turns, 200 continuations, 6,000,000 tokens and six
 hours by default; `--max-turns`, `--max-continuations`, `--max-tokens` and `--timeout-ms` override them),
