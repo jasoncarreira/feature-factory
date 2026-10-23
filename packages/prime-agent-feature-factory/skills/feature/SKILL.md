@@ -73,22 +73,24 @@ _context = subprocess.run(["node", os.path.join(SKILL_DIR, "..", "..", "bin", "c
                           stdin=subprocess.DEVNULL, capture_output=True, text=True)
 CONTEXT = json.loads(_context.stdout) if _context.returncode == 0 else None
 _roster = await agent_observe.list_agents()
-SESSION_ID = "prime-agent:" + next(row["sessionId"] for row in _roster["agents"]
-                                   if row.get("isCurrent") and row.get("sessionId"))
+_own = _roster.get("current") or next((row for row in _roster.get("agents", [])
+                                       if row.get("isCurrent")), {})
+SESSION_ID = "prime-agent:" + _own["sessionId"] if _own.get("sessionId") else None
 ```
 
 `CONTEXT` carries `agents`, the installed specialist directory; `cli`, the factory CLI beside it; and
 `dispatch`, mapping each specialist to the `model` and `thinking` it is spawned with. An agent absent from
 that map, or an entry missing a key, means pass nothing for it and inherit. `SESSION_ID` is the session's
 durable `sessionId` from its own roster row, which survives compaction and a daemon restart; the live
-`activeSessionId` does not. Require `agents`, `cli` and `SESSION_ID` to be non-empty strings and the agent
+`activeSessionId` does not. Prime 0.10.1 returns that row as `current` and leaves it out of `agents`;
+0.10.0 marked it `isCurrent` inside `agents`. Require `agents`, `cli` and `SESSION_ID` to be non-empty strings and the agent
 directory and CLI path to be readable before resolver or configuration work, state reads, dispatch, or any
 factory effect.
 
 If `WORKFLOW.md` is unreadable, the script exits nonzero or prints anything but that object, any value is
 invalid, `agent_observe` is unavailable, or RLM subagents are unavailable, stop before creating or changing
-a run. A `prime-agent -p` session is the usual cause of the last two: it runs in-process, with no child
-runtime and no agent messaging, so it can never drive a run. Explain that an unattended run is started as a
+a run. A `prime-agent -p` session is the usual cause of the last two: it runs in-process, with no
+`agent_observe` (and on 0.10.0 no child runtime either), so it can never drive a run. Explain that an unattended run is started as a
 daemon session with the package's `bin/launch.js`, and that the complete `prime-agent-feature-factory`
 package must be installed; never hand-write `run.json` as a fallback.
 

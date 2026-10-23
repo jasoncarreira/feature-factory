@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -34,7 +35,17 @@ describe("Prime package contract", () => {
     // the session's own roster row, and must not mention the tool that no longer exists.
     assert.doesNotMatch(skill, /feature_factory_context/u);
     assert.ok(skill.includes('os.path.join(SKILL_DIR, "..", "..", "bin", "context.js")'), "the skill must run the packaged context script");
-    assert.match(skill, /if row\.get\("isCurrent"\) and row\.get\("sessionId"\)\)/u, "SESSION_ID is the durable id of the current roster row");
+    // SESSION_ID is the durable id of the caller's own roster row: `current` on 0.10.1, the `isCurrent` row of
+    // `agents` on 0.10.0. The skill's own lines are run against both shapes, so the lookup is proven, not spelled.
+    const roster = skill.slice(skill.indexOf("_roster = await"), skill.indexOf("\n```", skill.indexOf("_roster = await")));
+    for (const [shape, value, expected] of [
+      ["0.10.1", { current: { sessionId: "s-own" }, agents: [{ sessionId: "s-parent", relationship: "parent" }] }, "prime-agent:s-own"],
+      ["0.10.0", { agents: [{ sessionId: "s-parent" }, { sessionId: "s-own", isCurrent: true }] }, "prime-agent:s-own"],
+      ["degraded", { current: { sessionId: "" }, agents: [] }, "None"],
+    ]) {
+      const program = `${roster.replace("await agent_observe.list_agents()", `__import__("json").loads(${JSON.stringify(JSON.stringify(value))})`)}\nprint(SESSION_ID)`;
+      assert.equal(execFileSync("python3", ["-c", program], { encoding: "utf8" }).trim(), expected, `${shape} roster`);
+    }
     assert.match(skill, /`activeSessionId` does not/u, "the live id must be named as the wrong one");
     assert.match(skill, /A `prime-agent -p` session is the usual cause/u, "the skill must explain why a -p session cannot run");
     assert.match(skill, /handle = await rlm\.spawn\(prompt, name=NAME, \*\*PROFILE\)/u);

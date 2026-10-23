@@ -48,15 +48,18 @@ the acknowledgement was lost and the run may be working. Check it with `prime-ag
 socket before stopping it or launching again. The launcher never re-sends an unconfirmed prompt, because a
 second one could start a second driver.
 
-The daemon is the launcher's own because a daemon session's environment is the daemon's boot
-environment. The client's is not passed through, so the `GH_TOKEN` and `FACTORY_PUBLISHING_IDENTITY` a run
-needs must be in the launcher's environment when it starts that daemon, and a long-lived interactive daemon
-would not have them. `--socket` reuses a daemon you started yourself. `--skill <path>` adds a skill file
+The `GH_TOKEN` and `FACTORY_PUBLISHING_IDENTITY` a run needs must be in the launcher's environment. The
+launcher sends that environment with the create as `launchEnv`, and Prime 0.10.1 applies it to the session.
+Prime 0.10.0 ignores it and gives a session the daemon's boot environment, which is why the daemon is the
+launcher's own, started with that environment. `--socket` reuses a daemon you started yourself; on 0.10.0 it
+must have booted with the run's environment. Prefer Prime 0.10.1, since 0.10.0's TUI blanks in iTerm2's
+fullscreen view. `--skill <path>` adds a skill file
 to the session; it does not turn discovery off, so where the adapter is also installed the session sees two
 `feature` skills. Which one a self-hosted run then follows is not yet verified on Prime 0.10.
 
-Stop a run with the printed `stop` command. Do not use `prime-agent shutdown`: it stops every daemon under
-the same socket directory, interactive sessions included. The run's daemon stays up, idle, after the run
+Stop a run with the printed `stop` command. Do not use `prime-agent shutdown`: on 0.10.0 it stops every
+daemon under the same socket directory, interactive sessions included, and its narrower 0.10.1 scope was not
+tested here. The run's daemon stays up, idle, after the run
 terminalizes.
 
 The integration drives foreground runs only, and rejects `--background` before creating or changing a run.

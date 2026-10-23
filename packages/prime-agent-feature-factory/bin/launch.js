@@ -9,10 +9,12 @@
 // with the autonomous budget, prompts it with `/skill:feature <arguments>`, prints how to stop it, and
 // exits; `prime-agent stop` ends it.
 //
-// The daemon is this launcher's own, on a fresh socket. A daemon session's environment is the daemon's
-// boot environment -- the client's is not passed through -- so a run needs a daemon started with the
-// `GH_TOKEN` and `FACTORY_PUBLISHING_IDENTITY` this process was given, not the operator's long-lived one.
-// Pass `--socket` to reuse a daemon you started yourself with that environment.
+// The run needs the `GH_TOKEN` and `FACTORY_PUBLISHING_IDENTITY` this process was given. Prime 0.10.1
+// applies a create's `launchEnv` to the session's worker, so it is always sent. Prime 0.10.0 ignores
+// `launchEnv` and gives a session the daemon's boot environment instead, which is one reason the daemon is
+// this launcher's own, started on a fresh socket with this process's environment. The other is keeping
+// a run off an interactive daemon. `--socket` reuses a daemon you started yourself; on 0.10.0 it must
+// have booted with the run's environment.
 import { spawn } from "node:child_process";
 import { mkdirSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -57,16 +59,16 @@ export function freshSocketPath(stamp = `${process.pid.toString(36)}${Date.now()
   throw new Error("no socket path under the 103-byte limit; pass --socket");
 }
 
-// Prime's own daemon launch removes the same inherited worker and lease variables, or a daemon started
-// from inside a Prime session would come up as a worker that never handshakes.
+// Prime's own daemon launch and its `launchEnv` collection remove the same inherited worker and lease
+// variables, or a daemon started from inside a Prime session would come up as a worker that never handshakes.
 export function daemonEnv(env = process.env) {
   return Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith("PRIME_AGENT_INTERNAL_")));
 }
 
-export function createCommand({ cwd, skills, name, budget }) {
+export function createCommand({ cwd, skills, name, budget }, env = process.env) {
   const config = { cwd, autonomous: { enabled: true, ...budget } };
   if (skills.length) config.skills = skills;
-  return { type: "create", lifecycle: "resident", name: name ?? `feature-${Date.now().toString(36)}`, config };
+  return { type: "create", lifecycle: "resident", name: name ?? `feature-${Date.now().toString(36)}`, config, launchEnv: daemonEnv(env) };
 }
 
 function connect(socket) {

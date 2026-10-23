@@ -46,6 +46,8 @@ describe("Prime unattended launch", () => {
       // named budget leaves every unnamed limit unlimited rather than at Prime's defaults.
       assert.equal(create.command.lifecycle, "resident");
       assert.deepEqual(create.command.config, { cwd: root, autonomous: { enabled: true, ...DEFAULT_BUDGET, maxTurns: 7 } });
+      // The run's credentials travel with the create, so a reused daemon on 0.10.1 still publishes as the run.
+      assert.deepEqual(create.command.launchEnv, daemonEnv(process.env), "the launcher's environment, minus Prime's internal variables");
       assert.deepEqual([prompt.command.type, prompt.command.activeSessionId, prompt.command.message],
         ["prompt", "abc123def456", "/skill:feature --autonomous 136"]);
     } finally { await daemon.close(); }
@@ -99,6 +101,8 @@ describe("Prime unattended launch", () => {
       assert.throws(() => parseArgs(argv), message, argv.join(" "));
     }
     assert.deepEqual(createCommand({ cwd: "/r", skills: ["/s/SKILL.md"], name: "n", budget: DEFAULT_BUDGET }).config.skills, ["/s/SKILL.md"]);
+    assert.deepEqual(createCommand({ cwd: "/r", skills: [], name: "n", budget: DEFAULT_BUDGET }, { GH_TOKEN: "t", PRIME_AGENT_INTERNAL_DAEMON_WORKER: "1" }).launchEnv,
+      { GH_TOKEN: "t" }, "launchEnv carries the run's credentials and never a worker identity");
     assert.equal("skills" in createCommand({ cwd: "/r", skills: [], name: "n", budget: DEFAULT_BUDGET }).config, false,
       "no --skill sends no skills key, leaving the session to discovery alone");
     // A daemon started from inside a Prime session would otherwise come up as a worker and never handshake.

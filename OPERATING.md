@@ -360,7 +360,8 @@ opencode run --log-level DEBUG --print-logs --auto --dir <repo> \
 
 Under Prime Agent, this section describes **Prime 0.10 and later** (the Rust host), which
 `prime-agent-feature-factory` 0.12.0 targets. Earlier adapter versions targeted Prime 0.9 and do not work on
-0.10, and 0.12.0 is neither tested nor supported on 0.9. The forms below were run against a v0.10.0 binary in an isolated daemon.
+0.10, and 0.12.0 is neither tested nor supported on 0.9. The forms below were run against v0.10.0 and v0.10.1
+binaries in an isolated daemon. Prefer 0.10.1: 0.10.0's TUI blanks in iTerm2's fullscreen view.
 
 **Still on Prime 0.9.8?** Stay on adapter 0.11.x and launch from a TUI kept alive in tmux, never `-p`, which
 0.9.8 closes when its launcher exits. That recipe, which drove Trellis #136, is in this file as of PR #403
@@ -372,9 +373,10 @@ Under Prime Agent, this section describes **Prime 0.10 and later** (the Rust hos
   context by running the package's `bin/context.js`.
 - **`-e` and `-ne`** are now `Unknown option` errors.
 - **The library entry point is gone.** `import { DaemonClient } from "prime-agent"` no longer exists.
-- **`-p` cannot drive a run.** It runs the session in-process, where `rlm.spawn` raises `rlm.spawn requires
-  a daemon-backed session` and neither `agent_message` nor `agent_observe` exists. A run started that way
-  stops at its first specialist dispatch, and the skill refuses it before creating anything.
+- **`-p` cannot drive a run.** It runs the session in-process. On 0.10.0 `rlm.spawn` raises `rlm.spawn
+  requires a daemon-backed session` there, and neither `agent_message` nor `agent_observe` exists. 0.10.1
+  runs subagents inline under `-p` and has `agent_message`, but still registers `agent_observe` only in a
+  daemon worker. Either way the skill refuses before creating anything.
 - **Only a session inside a daemon worker can drive a run.** The package's launcher creates one:
 
 ```sh
@@ -397,12 +399,15 @@ second one could start a second driver.
 
 - **A resident session outlives its client.** The default `client_owned` lifecycle dies with the connection,
   which is also why `--mode acp` cannot detach: closing its stdin cancels the turn.
-- **Why its own daemon.** A daemon session's environment is the daemon's boot environment. The client's is
-  not passed through: only `HERDR_*` pane identity is. So `GH_TOKEN`, `FACTORY_PUBLISHING_IDENTITY` and the
-  credential helper must be in the launcher's environment when it starts that daemon. A long-lived
-  interactive daemon would publish with whatever it booted with, or refuse at the identity guard. A separate
-  daemon also keeps an unattended run off an interactive daemon carrying hundreds of idle sessions.
-  `--socket <path>` reuses a daemon you started yourself with the right environment.
+- **The run's credentials.** `GH_TOKEN`, `FACTORY_PUBLISHING_IDENTITY` and the credential helper must be in
+  the launcher's environment. The launcher sends that environment as the create's `launchEnv`, minus
+  Prime's internal variables, and 0.10.1 applies it to the session's worker. Verified: a variable the
+  daemon did not boot with reached the worker, and without `launchEnv` it did not. 0.10.0 ignores
+  `launchEnv` and gives a session the daemon's boot environment, apart from `HERDR_*` pane identity.
+- **Why its own daemon.** On 0.10.0 a daemon started with the run's environment is the only way the
+  credentials reach the session. On either version it keeps an unattended run off an interactive daemon
+  carrying hundreds of idle sessions. `--socket <path>` reuses a daemon you started yourself. On 0.10.0
+  that daemon must have booted with the run's environment.
 - **The default budget is 600 turns, 200 continuations, 6,000,000 tokens and six hours.**
   `--max-turns`, `--max-continuations`, `--max-tokens` and `--timeout-ms` override them; see "Raise every
   autonomous limit" below.
@@ -410,8 +415,10 @@ second one could start a second driver.
   process group does not take the run with it.
 
 **Stop a run with the printed command**, `PRIME_AGENT_DAEMON_SOCKET=<socket> prime-agent stop <activeSessionId>`.
-It stops the session and the children it spawned. **Never end a run with `prime-agent shutdown`**: it stops
-every daemon under the same socket directory, the operator's interactive daemon included. The run's daemon
+It stops the session and the children it spawned. **Never end a run with `prime-agent shutdown`**. On 0.10.0
+it stops every daemon under the same socket directory, the operator's interactive daemon included. 0.10.1
+scopes it to the daemon it points at (prime-agent #3601), but the launcher's sockets share that directory and
+the narrower behaviour was not tested here. The run's daemon
 stays up and idle after the run terminalizes.
 
 **Self-hosted runs are not yet verified on Prime 0.10.** The launcher's `--skill <path>` adds a skill to the
