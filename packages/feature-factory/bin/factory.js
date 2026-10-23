@@ -27,7 +27,7 @@ import { resolveSpawnExecutable } from "../core/executable.js";
 import { dispatchInitPublication } from "./init-publication.js";
 import { assertRetryExtensionBindings, dispatchRestore, readRestoreRecord } from "./restore.js";
 import { dispatchSnapshot } from "./snapshot.js";
-import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, REMEDIATION_LIMIT, RETRY_EXTENSION_SCOPES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, effectiveRetryLimit, repositoryRelativePath, validateRun } from "../state/schema.js";
+import { CONTROL_PLANE, SCHEMA_VERSION, GATE_NAMES, GATE_STATUSES, MODES, RETRY_EXTENSION_SCOPES, SLICE_STATUSES, STEP_STATUSES, TERMINAL_STATUSES, effectiveRemediationLimit, effectiveRetryLimit, repositoryRelativePath, validateRun } from "../state/schema.js";
 import {
   claimSessionLock, inspectSessionLock, refreshSessionLock, releaseSessionLock, SESSION_LOCK_FILE, SessionLockHeldError,
 } from "../state/session-lock.js";
@@ -65,6 +65,8 @@ export const COMMANDS = Object.freeze({
   remediate: Object.freeze(["--repo", "--finding", "--path", "--reason", "--session", "--now", "--json"]),
   "sync-base": Object.freeze(["--repo", "--merge-commit", "--review-ref", "--reason", "--now", "--json"]),
   handoff: Object.freeze(["--repo", "--item", "--reason", "--session", "--now", "--json"]),
+  "grant-remediation": Object.freeze(["--repo", "--reason", "--session", "--now", "--json"]),
+  "override-validator": Object.freeze(["--repo", "--reason", "--session", "--now", "--json"]),
 });
 
 const BOOLEAN_FLAGS = new Set(["--json", "--repository-verify"]);
@@ -317,6 +319,22 @@ function assertRunNotParked(runDir, command) {
     throw new CliError(`factory ${command} refuses while run status is needs-human; run factory resume first`);
   }
   return run;
+}
+
+// Instruction, not enforcement, on who acts: the CLI has no operator identity, so the workflow forbids the driver
+// both commands this serves. Enforced: the run is parked, the act gives a reason, and its caller holds the run's lock.
+async function parkedOperatorAct(positional, flags, command, participants, change, report) {
+  if (positional.length !== 1) throw new CliError(`factory ${command} requires exactly <run-id>`);
+  for (const key of ["reason", "session"]) if (typeof flags[key] !== "string" || !flags[key].trim()) throw new CliError(`factory ${command} requires nonblank --${key} <value>`);
+  const [runId] = positional, runDir = runDirFor(flags, runId), current = readRun(runDir), at = stamp(flags);
+  if (current.status !== "needs-human") throw new CliError(`factory ${command} requires current status needs-human; found '${current.status}'`);
+  assertFreshSessionOwner(runDir, runId, flags.session, command);
+  const record = { reason: flags.reason.trim(), session: flags.session, at };
+  const next = await transition(runDir, { participants, apply: (state) => {
+    if (!isDeepStrictEqual(state, current)) throw new CliError(`factory ${command} refused because run state changed after qualification`);
+    return { ...change(state, record), updated_at: at };
+  } });
+  return emit(flags, { run_id: runId, status: next.status, ...report(next) });
 }
 
 function assertFreshSessionOwner(runDir, runId, session, command) {
@@ -933,7 +951,7 @@ const HANDLERS = {
       apply: (state) => {
         if (!isDeepStrictEqual(state, current)) throw new CliError("factory remediate refused because run state changed after qualification");
         if (state.gates.pre_pr) throw new CliError("factory remediate refuses once Gate 3 is open; a finding raised there is the operator's decision at that gate");
-        if ((state.remediations ?? []).length >= REMEDIATION_LIMIT) throw new CliError(`factory remediate reached the run's remediation limit (${REMEDIATION_LIMIT}); park for an operator`);
+        if ((state.remediations ?? []).length >= effectiveRemediationLimit(state)) throw new CliError(`factory remediate reached the run's remediation limit (${effectiveRemediationLimit(state)}); park for an operator`);
         const merged = state.slices.filter((slice) => slice.status === "merged");
         if (merged.length === 0 || state.slices.some((slice) => !["merged", "pending"].includes(slice.status))) {
           throw new CliError("factory remediate requires at least one merged slice and every other slice pending");
@@ -1033,6 +1051,22 @@ const HANDLERS = {
     const overlap = git(wt, ["diff", "--name-only", "-z", sync.previous_base, sync.base]).stdout.split("\0").filter(Boolean)
       .filter((path) => run.slices.some((slice) => unownedPaths([path], slice.paths).length === 0));
     return emit(flags, { run_id: runId, status: run.status, base_sync: sync, branch_point: branchPoint(run), overlap, next_action: "resume explicitly" });
+  },
+
+  // One more remediation for a parked run past its limit (mimirbot epic 3: a NO-GO after both were spent).
+  async ["grant-remediation"](positional, flags) {
+    return parkedOperatorAct(positional, flags, "grant-remediation", [{ familyId: "envelope", mode: "grant-remediation" }],
+      (state, record) => ({ ...state, remediation_grants: [...(state.remediation_grants ?? []), record] }),
+      (next) => ({ remediations: (next.remediations ?? []).length, remediation_limit: effectiveRemediationLimit(next) }));
+  },
+
+  // Publish the head a NO-GO judged anyway. The verdict stays recorded, and the head check still binds publication.
+  async ["override-validator"](positional, flags) {
+    return parkedOperatorAct(positional, flags, "override-validator", [{ familyId: "envelope", mode: "override-validator" }, { familyId: "verdict", mode: "override-validator" }],
+      (state, record) => {
+        if (state.validator?.verdict !== "NO-GO") throw new CliError("factory override-validator requires a recorded NO-GO validator verdict");
+        return { ...state, validator: { ...state.validator, override: { reviewed_head: state.validator.reviewed_head, ...record } } };
+      }, (next) => ({ verdict: next.validator.verdict, override: next.validator.override }));
   },
 
   async ["grant-retry"](positional, flags) {
@@ -1494,12 +1528,13 @@ const HANDLERS = {
       slices: run.slices.map((slice) => ({ id: slice.id, status: slice.status, attempts: slice.attempts,
         extra_attempts: slice.extra_attempts ?? 0, retry_limit: effectiveRetryLimit(run, slice) })),
       retry_extensions: run.retry_extensions ?? [],
+      remediations: { opened: (run.remediations ?? []).length, limit: effectiveRemediationLimit(run), granted: (run.remediation_grants ?? []).length },
       handoffs: run.handoffs ?? [],
       // Same narrowing: the record carries `report`, `reviewed_head` and `loops`, and only the verdict
       // came out. `loops` says whether validation is converging; `reviewed_head` says what it judged.
       validator: run.validator
         ? { verdict: run.validator.verdict, report: run.validator.report ?? null,
-            reviewed_head: run.validator.reviewed_head ?? null, loops: run.validator.loops ?? null }
+            reviewed_head: run.validator.reviewed_head ?? null, loops: run.validator.loops ?? null, override: run.validator.override ?? null }
         : null,
       pr_url: run.pr_url,
       terminal_result: run.terminal_result,
@@ -2146,6 +2181,8 @@ function usage() {
   factory snapshot <run-id> --repo OPERATOR
   factory identity <run-id> [--repo PATH] [--json]
   factory remediate <run-id> --finding REF --path PATH [--path PATH ...] --reason TEXT --session ID [--now ISO]
+  factory grant-remediation <run-id> --reason TEXT --session ID [--now ISO]   (operator, parked run: one more remediation)
+  factory override-validator <run-id> --reason TEXT --session ID [--now ISO]  (operator, parked run: publish the NO-GO's head)
   factory reverify-repair <run-id> <repair-record-id> [--repo PATH] [--now ISO] [--json]
   factory lock <run-id> <claim|steal|release> --session ID [--ttl-ms N]
   factory heartbeat <run-id> --session ID

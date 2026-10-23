@@ -543,7 +543,8 @@ fresh run; an existing run follows these rules solely because its manifest alrea
 - **Gate 2 (brief + plan)**: approve only after `work-reviewer` approves both spec and decomposition,
   every acceptance criterion maps to a slice, and same-wave slices are file-disjoint.
 - **Gate 3 (pre-PR)**: approve only with `review_ready` observed evidence for the integrated branch, and
-  on a GO or GO-WITH-NITS validator verdict **for a multi-slice run**. A NO-GO is a NO-GO. A single-slice
+  on a GO or GO-WITH-NITS validator verdict **for a multi-slice run**. A NO-GO is a NO-GO, unless an operator
+  recorded an override for it on the parked run (see "Operator acts on a parked run"). A single-slice
   run skips the validator exactly as Step 5 specifies, so requiring a verdict here would make the one
   case Step 5 exempts unapprovable; if such a run recorded a verdict anyway, it binds.
 - **Never auto-merge.** Recording the pull request is the last externally publishing side effect an
@@ -1862,7 +1863,7 @@ Route a known post-merge failure before any next-wave action. A production defec
 
 A finding from an independent reviewer at an integrated stage that needs a code change, in production
 source or only in tests, is fixed by a new reviewed slice, not by editing the integration branch. It qualifies when Gate 3 is not yet open, the run is under its
-remediation limit (2), every slice is merged or pending, and the fix lies inside paths merged slices
+remediation limit (2, plus one per operator grant), every slice is merged or pending, and the fix lies inside paths merged slices
 already own. The finding is one of: a `test-verifier` REJECT review, whatever files its required fix touches,
 a failed post-merge repository verify (`evidence/test-verifier.json`), or the validator's NO-GO review
 (`reviews/implementation-validator.json`), each about the current integration head. Anything else, including a fix that needs paths no merged slice owns, is new scope and parks.
@@ -2183,7 +2184,29 @@ with `--finding reviews/implementation-validator.json`; a merged slice still nev
 so the fix is a new reviewed slice. Otherwise it must **park top-level needs-human** naming the finding
 and its root cause: a fix outside paths merged slices own, a run past its remediation limit, or Gate 3
 already open has no in-band route. Parking is the honest outcome and leaves the work recoverable;
-improvising a reopen is not. A test-only fix there touches test files only — never production
+improvising a reopen is not.
+
+#### Operator acts on a parked run
+
+Two commands answer a park that has no in-band route. **The driver never runs either one**: they are the
+operator's, on a run the driver parked. This is instruction, because the CLI cannot tell an operator from
+a driver. What it enforces is that the run is parked, the act gives a reason, and the caller
+holds a fresh lock on the run:
+
+```sh
+factory grant-remediation "$R" --reason "$GRANT_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"
+factory override-validator "$R" --reason "$OVERRIDE_REASON" --session "$SESSION_ID" --repo "$RUN_REPO"
+```
+
+- `grant-remediation` raises the run's remediation limit by one. `factory status` shows `remediations`
+  with `opened`, `limit` and `granted`.
+- `override-validator` keeps the recorded NO-GO and adds an override naming the head that verdict judged.
+  Gate 3 and publication then accept that verdict for that head only: a commit after it, or a fresh
+  validator verdict, drops the override, and Gate 3 needs a new verdict.
+
+After either, the operator resumes the run. On an overridden verdict the PR body leads with
+"Published over validator NO-GO by operator override", followed by the validator's findings, the judged
+head and the override's reason. A test-only fix there touches test files only — never production
 source, never a privileged control-plane path — preserves the property under test or records why it
 cannot, lands as its own commit rather than folded into a merge, and is disclosed in the PR body naming
 the file and the cause. Respect `max_retries`.

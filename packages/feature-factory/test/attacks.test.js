@@ -110,6 +110,10 @@ describe("attack 12 — a malformed record submitted by an agent", () => {
       [(run) => { run.pr_base = ""; }, /run\.pr_base: must be a non-empty string/u],
       [(run) => { run.pr_base = "   "; }, /run\.pr_base: must be a non-empty string/u],
       [(run) => { run.pr_base = 42; }, /run\.pr_base: must be a non-empty string/u],
+      // 0.12.1: an override is bound to a NO-GO and to the head that NO-GO judged, and a grant is an audited record.
+      [(run) => { run.validator = { verdict: "GO", reviewed_head: "a".repeat(40), report: null, loops: 0, override: { reviewed_head: "a".repeat(40), reason: "r", session: "s", at: LATER } }; }, /may override only a NO-GO verdict/u],
+      [(run) => { run.validator = { verdict: "NO-GO", reviewed_head: "a".repeat(40), report: null, loops: 0, override: { reviewed_head: "b".repeat(40), reason: "r", session: "s", at: LATER } }; }, /override\.reviewed_head: must be the head the verdict judged/u],
+      [(run) => { run.remediation_grants = [{ reason: " ", session: "s", at: LATER }]; }, /remediation_grants\[0\]\.reason: must be a non-empty string/u],
     ]) {
       const run = baseRun();
       mutate(run);
@@ -790,6 +794,25 @@ describe("family contracts refuse transitions the schema alone would allow", () 
         assert.deepEqual({ status: next.status, max: next.max_retries, attempts: next.slices[0].attempts,
           extra: next.slices[0].extra_attempts }, { status: "needs-human", max: scope === "all" ? 4 : 3, attempts: 4, extra: scope === "slice" ? 1 : 0 });
       } finally { rmSync(grant.root, { recursive: true, force: true }); }
+    }
+
+    // 0.12.1: only override-validator writes an override, and a grant changes nothing but its own list.
+    const parkedNoGo = { status: "needs-human", terminal_result: { status: "needs-human", reason: "validator NO-GO" },
+      validator: { verdict: "NO-GO", reviewed_head: SHA_A, report: null, loops: 0 } };
+    const override = { reviewed_head: SHA_A, reason: "r", session: "owner-a", at: LATER };
+    for (const [label, mode, change, pattern] of [
+      ["an override under another mode", "record", (state) => ({ ...state, validator: { ...state.validator, override } }), /recorded only by override-validator/u],
+      ["a grant that moves the retry limit", "grant-remediation", (state) => ({ ...state, max_retries: 4, remediation_grants: [{ reason: "r", session: "owner-a", at: LATER }] }), /grant-remediation cannot change envelope\.max_retries/u],
+    ]) {
+      const f = fixture(`operator-act-${mode}`, parkedNoGo);
+      try {
+        const before = bytes(f.runDir);
+        await assert.rejects(transition(f.runDir, {
+          participants: [{ familyId: "envelope", mode: mode === "record" ? "override-validator" : mode }, { familyId: "verdict", mode }],
+          apply: (state) => ({ ...change(state), updated_at: LATER }),
+        }), pattern, label);
+        assert.equal(bytes(f.runDir), before, label);
+      } finally { rmSync(f.root, { recursive: true, force: true }); }
     }
   });
 });

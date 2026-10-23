@@ -3108,6 +3108,8 @@ describe("end to end — a merge is refused through the real CLI", () => {
         }
         writeReview(v.runDir, "implementation-validator", mergeCommit, { verdict: "NO-GO" });
         assert.equal(factory(v.repo, ["lock", RUN, "claim", "--session", "operator", "--branch", "feature"]).ok, true);
+        const grant = (t, session = "operator") => factory(v.repo, ["grant-remediation", RUN, "--reason", "epic 3: a third finding after two fixes", "--session", session, "--now", t]);
+        assert.match(grant(NOW(5)).stderr, /requires current status needs-human; found 'running'/u, "a grant answers a park, never a running run");
         assert.equal(factory(v.repo, ["terminal", RUN, "needs-human", "--reason", "validator NO-GO in production source", "--now", NOW(6)]).ok, true);
         const opened = factory(v.repo, ["remediate", RUN, "--finding", "reviews/implementation-validator.json", "--path", "src/app/thing.ts",
           "--reason", "fix the validator finding", "--session", "operator", "--now", NOW(7)]);
@@ -3121,9 +3123,22 @@ describe("end to end — a merge is refused through the real CLI", () => {
         const tampered = factory(v.operator, ["snapshot", RUN]);
         assert.equal(tampered.ok, false); assert.match(tampered.stderr, /finding archive does not match its recorded digest/u);
         writeFileSync(archive, bytes);
+        // 0.12.1: past the limit of 2 the run parks; each operator grant on the parked run allows one more.
+        const again = (t) => factory(v.repo, ["remediate", RUN, "--finding", "reviews/implementation-validator.json", "--path", "src/app/thing.ts",
+          "--reason", "another validator finding", "--session", "operator", "--now", t]);
+        assert.equal(again("2026-07-30T12:07:10Z").ok, true, "remediation-2 is within the default limit");
+        assert.match(again("2026-07-30T12:07:20Z").stderr, /reached the run's remediation limit \(2\)/u);
+        assert.equal(grant("2026-07-30T12:07:30Z", "someone-else").ok, false, "only the session holding the parked run's lock");
+        assert.equal(grant("2026-07-30T12:07:40Z").ok, true);
+        assert.deepEqual(factory(v.repo, ["status", RUN]).out.remediations, { opened: 2, limit: 3, granted: 1 });
+        assert.equal(again("2026-07-30T12:07:50Z").out?.slice, "remediation-3", "the grant reopens the route the limit closed");
+        assert.equal(grant("2026-07-30T12:07:55Z").ok, true);
         const resumed = factory(v.repo, ["resume", RUN, "--session", "operator", "--now", NOW(8)]);
         assert.equal(resumed.ok, true, resumed.stderr);
         assert.deepEqual([runJson(v.runDir).status, factory(v.repo, ["status", RUN]).out.next], ["running", "dispatch-slice:remediation-1"]);
+        // A grant never reaches past Gate 3: once it is open, a finding there is the operator's decision at that gate.
+        assert.equal(factory(v.repo, ["gate", RUN, "pre_pr", "pending", "--now", NOW(9)]).ok, true);
+        assert.match(again(NOW(10)).stderr, /refuses once Gate 3 is open/u, "budget remains, so the gate is what refuses");
       } finally { cleanupProject(v); }
     }
     // Evidence is checked before the review, so this supplies review_ready evidence
@@ -3445,6 +3460,38 @@ describe("end to end — a PR is recorded once, against the judged head", () => 
       const gate = approveGate(p.repo, "pre_pr", NOW(5));
       assert.equal(gate.ok, false);
       assert.match(gate.stderr, /the validator verdict is not an approval/u);
+
+      // 0.12.1: an operator may publish the judged head over the NO-GO, on a parked run it holds.
+      const override = (session, t) => factory(p.repo, ["override-validator", RUN, "--reason", "findings accepted for this head", "--session", session, "--now", NOW(t)]);
+      const park = (t) => {
+        assert.equal(factory(p.repo, ["lock", RUN, "claim", "--session", "operator", "--branch", "feature"]).ok, true);
+        assert.equal(factory(p.repo, ["terminal", RUN, "needs-human", "--reason", "validator NO-GO", "--now", NOW(t)]).ok, true);
+      };
+      assert.match(override("operator", 6).stderr, /requires current status needs-human; found 'running'/u, "never on a running run");
+      park(6);
+      assert.equal(override("someone-else", 7).ok, false, "only the session holding the parked run's lock");
+      const recorded = override("operator", 7);
+      assert.equal(recorded.ok, true, recorded.stderr);
+      assert.deepEqual([recorded.out.verdict, recorded.out.override.reviewed_head, factory(p.repo, ["status", RUN]).out.validator.override.reason],
+        ["NO-GO", p.head, "findings accepted for this head"], "the NO-GO is kept, and the override names the head it judged");
+      assert.match(override("operator", 8).stderr, /must add one override/u, "one override per verdict");
+      assert.equal(factory(p.repo, ["resume", RUN, "--session", "operator", "--now", NOW(9)]).ok, true);
+      // A commit after the verdict is a head nobody judged: the override does not reach it.
+      writeFileSync(join(p.repo, "late.txt"), "late\n");
+      git(p.repo, "add", "late.txt"); git(p.repo, "commit", "-q", "-m", "late change");
+      assert.match(approveGate(p.repo, "pre_pr", NOW(10)).stderr, /the validator judged [0-9a-f]{12} but the integration head is/u);
+      git(p.repo, "reset", "-q", "--hard", p.head);
+      // A fresh verdict replaces the record, so it never inherits an override.
+      recordValidator(p.repo, p.runDir, p.head, "NO-GO", NOW(11));
+      assert.deepEqual([runJson(p.runDir).validator.override, approveGate(p.repo, "pre_pr", NOW(11)).stderr.match(/not an approval/u)?.[0]],
+        [undefined, "not an approval"]);
+      park(12);
+      assert.equal(override("operator", 13).ok, true);
+      assert.equal(factory(p.repo, ["resume", RUN, "--session", "operator", "--now", NOW(14)]).ok, true);
+      const approved = approveGate(p.repo, "pre_pr", NOW(15));
+      assert.equal(approved.ok, true, approved.stderr);
+      const published = factory(p.repo, ["pr", RUN, "--url", "https://example.test/pr/1", "--now", NOW(16)]);
+      assert.equal(published.ok, true, published.stderr);
     } finally { cleanupProject(p); }
   });
 });
@@ -3612,6 +3659,11 @@ describe("the holistic validator is required only when there is something holist
     // Skipping is permitted; ignoring is not. A recorded NO-GO blocks either way.
     assert.match(refusal([slice("one")], { verdict: "NO-GO", reviewed_head: HEAD, report: null, loops: 1 }),
       /the validator verdict is not an approval/u);
+    // 0.12.1: an operator override stands in for the approval and nothing else; the head it judged still binds.
+    const override = { reviewed_head: HEAD, reason: "accepted", session: "operator", at: "2026-07-30T12:00:00Z" };
+    assert.doesNotMatch(refusal([slice("one")], { verdict: "NO-GO", reviewed_head: HEAD, report: null, loops: 1, override }) ?? "", /validator/u);
+    assert.match(refusal([slice("one")], { verdict: "NO-GO", reviewed_head: "d".repeat(40), report: null, loops: 1, override: { ...override, reviewed_head: "d".repeat(40) } }),
+      /the validator judged d{12} but the integration head is/u);
     // And a recorded approval is still bound to the head it judged.
     assert.match(refusal([slice("one")], { verdict: "GO", reviewed_head: "d".repeat(40), report: null, loops: 1 }),
       /but the integration head is/u);

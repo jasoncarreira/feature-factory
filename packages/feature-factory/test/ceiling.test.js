@@ -32,6 +32,9 @@ const CLI_COMMANDS = [
   "slices-seed", "slice", "observe", "validator", "pr", "reverify-repair", "effective-push", "identity", "remediate", "sync-base",
   // 0.11.0: one audited move of a reviewer's requirement to a later, unmerged slice.
   "handoff",
+  // 0.12.1: two operator acts on a parked run past its in-band routes (mimirbot epic 3): one more remediation,
+  // and publishing a NO-GO's judged head anyway.
+  "grant-remediation", "override-validator",
 ];
 
 const RUN_JSON_KEYS = [
@@ -44,6 +47,8 @@ const RUN_JSON_KEYS = [
   "base_syncs",
   // 0.11.0: requirements moved to a later slice, each owed by that slice's review and the validator's.
   "handoffs",
+  // 0.12.1: operator grants, each raising the run's remediation limit by one.
+  "remediation_grants",
   // The operator's answer to a parked run: the one channel into a park, since resume carries no message
   // and every other write is refused there.
   "operator_decision",
@@ -126,6 +131,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     assert.deepEqual(COMMANDS.snapshot, ["--repo", "--json"]);
     assert.deepEqual(COMMANDS["amend-paths"], ["--repo", "--add", "--reason", "--session", "--now", "--json"]);
     assert.deepEqual(COMMANDS.handoff, ["--repo", "--item", "--reason", "--session", "--now", "--json"]);
+    for (const command of ["grant-remediation", "override-validator"]) assert.deepEqual(COMMANDS[command], ["--repo", "--reason", "--session", "--now", "--json"], command);
     assert.deepEqual(COMMANDS["reverify-repair"], ["--repo", "--now", "--json"]);
     assert.deepEqual(COMMANDS["effective-push"], []);
     assert.deepEqual(MODES, ["interactive", "headless", "autonomous"]);
@@ -780,7 +786,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 28, "twenty-eight: handoff history (0.11.0) is the twenty-eighth field");
+    assert.equal(RUN_KEYS.length, 29, "twenty-nine: remediation grants (0.12.1) are the twenty-ninth field");
   });
 
   it("registers exactly the declared families", () => {
@@ -1389,7 +1395,10 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // 6484 -> 6576 for 0.11.0: `factory handoff` moves a reviewer's requirement from one slice to a later, unmerged one,
     // and the receiver's merge and an approving validator verdict each refuse until their review names it (mimirbot
     // epic 3: five parks, and agent's five attempts, spent on requirements no attempt could meet from its base).
-    assert.equal(total, 6576, "a requirement handed to a later slice is owed at that slice's merge: 6576 production lines");
+    // 6576 -> 6663 for 0.12.1: two operator acts on a parked run whose in-band routes are spent (mimirbot epic 3, every
+    // slice merged): `grant-remediation` raises the remediation limit by one, and `override-validator` publishes the
+    // head a NO-GO judged, still bound to that head. Shared preconditions, schema, contracts and status.
+    assert.equal(total, 6663, "a parked run past its routes can be granted a remediation or published over a NO-GO: 6663 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
@@ -1429,9 +1438,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // publishing-identity guard runs in the CLI rather than depending on the host's shell tool; issue #367
     // authorizes 6000 for a committed max_retries default, landed inside #365's cap; issue #372 authorizes 6100
     // so slice observation runs the repository verify; issue #376 authorizes 6150 so verify runs on a freshly
-    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice; issue #381 authorizes 6450 to persist test output; issue #387 authorizes 6550 for base sync; Jason authorized 6650 for 0.11.0's `factory handoff` (6576 at landing).
+    // bootstrapped tree, and for the rework of #374 on top of it; issue #344 authorizes 6300 for the remediation slice; issue #381 authorizes 6450 to persist test output; issue #387 authorizes 6550 for base sync; Jason authorized 6650 for 0.11.0's `factory handoff` (6576 at landing), and 6750 for 0.12.1's operator grant and override (6663 at landing).
     // Nothing was trimmed or padded to fit either ledger.
-    assert.ok(total <= 6650, `production source is ${total} lines; the 0.11.0 handoff tripwire is 6650`);
+    assert.ok(total <= 6750, `production source is ${total} lines; the 0.12.1 operator-act tripwire is 6750`);
   });
 
   it("keeps the test budget within the attack catalogue's scale", () => {
