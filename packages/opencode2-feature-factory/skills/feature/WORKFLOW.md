@@ -2201,8 +2201,9 @@ factory override-validator "$R" --reason "$OVERRIDE_REASON" --session "$SESSION_
 - `grant-remediation` raises the run's remediation limit by one. `factory status` shows `remediations`
   with `opened`, `limit` and `granted`.
 - `override-validator` keeps the recorded NO-GO and adds an override naming the head that verdict judged.
-  Gate 3 and publication then accept that verdict for that head only: a commit after it, or a fresh
-  validator verdict, drops the override, and Gate 3 needs a new verdict.
+  Gate 3 and publication then accept that verdict for that head only. A commit after it leaves the
+  override recorded but unusable, because publication refuses the moved head. A fresh validator verdict
+  replaces the record, override included. Either way Gate 3 needs a new verdict.
 
 After either, the operator resumes the run. On an overridden verdict the PR body leads with
 "Published over validator NO-GO by operator override", followed by the validator's findings, the judged
