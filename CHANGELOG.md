@@ -13,9 +13,11 @@ version across the workspace, with each adapter pinning the exact factory versio
     dependency would have left a marketplace install without its CLI. A test pins the copy to the source.
   - **Session identity:** the skill binds `SESSION_ID` as `claude-code:${CLAUDE_SESSION_ID}`, which Claude
     Code substitutes when the skill loads. No hook or context script is needed.
-  - **Enforced tool separation:** Claude Code applies each subagent's `tools` list, so on this host a
-    reviewer cannot edit what it reviews. A test pins that no specialist lists the Agent tool, which is what
-    keeps delegation one level deep.
+  - **Enforced tool lists:** Claude Code applies each subagent's `tools` list, so the reviewer and
+    validator have no Edit or Write tool. They keep Bash, so not editing code stays an instruction. A test
+    pins that no specialist lists the Agent tool, which is what keeps delegation one level deep.
+  - **Verified live:** an unattended run on a scratch repository dispatched ten specialists in the
+    foreground, on the models their frontmatter names, with no permission denials, and completed with a PR.
   - **Launcher:** `launcher/launch.js` starts a detached `claude -p` with `--setting-sources project`,
     `--strict-mcp-config` and `--permission-prompts none`. Without those, a run inherited the operator's
     permission settings and MCP connectors in testing.

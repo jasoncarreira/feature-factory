@@ -475,7 +475,10 @@ the mode:
 
 Verified on Claude Code 2.1.310: the plugin loads its eleven subagents and the skill, the substituted CLI path and
 session id are the real ones, and a run reaches init, claims its lock as `claude-code:<session id>`, and parks
-on the identity guard when no `GH_TOKEN` is inherited. A full run with specialist dispatch is not yet verified.
+on the identity guard when no `GH_TOKEN` is inherited. With one, an autonomous run of a three-criterion issue on a
+scratch repository completed in four minutes for $4.71: ten foreground dispatches on the models their files name
+(Opus 5.5 for spec, plan and review, Sonnet 5.5 for research, build and test), no permission denials, and a
+published PR. Its plan had one slice, so a parallel wave is not yet verified.
 
 The Git credential helper reads the inherited `GH_TOKEN` as its password, while `gh` reads that same
 inherited variable directly. The real identity probe is a read-only network request, so a locally active

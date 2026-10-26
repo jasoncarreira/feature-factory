@@ -70,10 +70,13 @@ by trying it:
   skill loads. It survives compaction and `claude --resume`, so `SESSION_ID` is
   `claude-code:<session id>`.
 - **Specialists:** each is a plugin subagent, `feature-factory:<name>`, dispatched with the Agent tool in
-  the foreground. A parallel wave is several Agent calls in one message.
-- **Tool separation is enforced.** Claude Code applies each subagent file's `tools` list, so a reviewer
-  cannot edit what it reviews. None lists the Agent tool, which is what keeps delegation one level deep:
-  Claude Code otherwise lets a subagent spawn its own.
+  the foreground, so the driver holds every result before it reconciles. A parallel wave is several Agent
+  calls in one message.
+- **Tool lists are enforced; read-only is instructed.** Claude Code applies each subagent file's `tools`
+  list, so the reviewer and validator have no Edit or Write tool. Both keep Bash, for tests and their report
+  artifacts, so that they edit no code is the workflow's instruction rather than a sandbox. None lists the
+  Agent tool, which is what keeps delegation one level deep: Claude Code otherwise lets a subagent spawn
+  its own.
 - **Model and effort** come from each subagent's frontmatter. `model: sonnet` and `model: opus` are family
   names that Claude Code resolves to that family's current model, so a new model reaches every run with no
   release. `ANTHROPIC_DEFAULT_OPUS_MODEL` and its `SONNET` and `HAIKU` counterparts pin a version.
