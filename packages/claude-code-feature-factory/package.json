@@ -1,0 +1,36 @@
+{
+  "name": "claude-code-feature-factory",
+  "version": "0.13.0",
+  "description": "Claude Code plugin for feature-factory: the feature skill, the specialist subagents and the bundled factory CLI.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasoncarreira/feature-factory.git",
+    "directory": "packages/claude-code-feature-factory"
+  },
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "feature-factory"
+  ],
+  "files": [
+    ".claude-plugin",
+    "agents",
+    "launcher",
+    "skills",
+    "vendor",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "sync:workflow": "node ../../scripts/sync-workflows.js claude-code-feature-factory",
+    "vendor": "node scripts/vendor.js",
+    "pretest": "npm run sync:workflow && npm run vendor",
+    "test": "node --test test/*.test.js",
+    "prepack": "npm run sync:workflow && npm run vendor"
+  }
+}

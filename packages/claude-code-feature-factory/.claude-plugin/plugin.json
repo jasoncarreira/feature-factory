@@ -1,0 +1,9 @@
+{
+  "name": "feature-factory",
+  "version": "0.13.0",
+  "description": "Drive a feature from request to an observed, tested pull request with feature-factory's durable workflow, approval gates and specialist subagents.",
+  "author": { "name": "Jason Carreira", "url": "https://github.com/jasoncarreira" },
+  "license": "MIT",
+  "homepage": "https://github.com/jasoncarreira/feature-factory#readme",
+  "repository": "https://github.com/jasoncarreira/feature-factory"
+}

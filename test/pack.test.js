@@ -30,10 +30,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const PACKAGES = ["feature-factory", "opencode-feature-factory", "prime-agent-feature-factory", "opencode2-feature-factory"];
+const PACKAGES = ["feature-factory", "opencode-feature-factory", "prime-agent-feature-factory", "opencode2-feature-factory", "claude-code-feature-factory"];
 // The OpenCode 1.x and 2.0 adapters cannot share one consumer: their `@opentui/solid` peer ranges do not
-// overlap. The 2.0 adapter is installed into its own consumer below.
-const INSTALLED = PACKAGES.filter((name) => name !== "opencode2-feature-factory");
+// overlap. The 2.0 adapter is installed into its own consumer below. The Claude Code plugin carries its own
+// copy of the CLI and depends on nothing, so it is checked from its tarball rather than installed.
+const INSTALLED = PACKAGES.filter((name) => name !== "opencode2-feature-factory" && name !== "claude-code-feature-factory");
 const PACKED_BOOTSTRAP_COMMAND = "node -e \"const f=require('fs');f.writeFileSync('packed-bootstrap-cwd',process.cwd());console.log('packed-bootstrap-out');console.error('packed-bootstrap-err')\"";
 const CONFIG_SCHEMA = `{
   "resolve": "<non-empty shell command>",
@@ -297,6 +298,7 @@ describe("what actually ships", () => {
       const opencode = pack("opencode-feature-factory", dir);
       const prime = pack("prime-agent-feature-factory", dir);
       const opencode2 = pack("opencode2-feature-factory", dir);
+      const claudeCode = pack("claude-code-feature-factory", dir);
 
       // The three packages release in lockstep from 0.7.0. Before that they drifted — 0.3.6, 0.5.6 and
       // 0.1.0 — and an adapter pinning an exact factory version means a half-applied bump publishes an
@@ -319,7 +321,7 @@ describe("what actually ships", () => {
         "the host-neutral factory must not ship a platform skill");
       const agents = factory.files.filter((file) => file.startsWith("agents/"));
       assert.equal(agents.length, 11, `feature-factory must ship all eleven agents, packed ${agents.length}`);
-      for (const [name, { files }] of [["feature-factory", factory], ["opencode-feature-factory", opencode], ["prime-agent-feature-factory", prime], ["opencode2-feature-factory", opencode2]]) {
+      for (const [name, { files }] of [["feature-factory", factory], ["opencode-feature-factory", opencode], ["prime-agent-feature-factory", prime], ["opencode2-feature-factory", opencode2], ["claude-code-feature-factory", claudeCode]]) {
         assert.deepEqual(files.filter((file) => file.startsWith(".factory/")), [],
           `${name} must not package operator-owned .factory content`);
         const repositoryCommandAssets = files.filter((file) => /(^|\/)(?:(?:factory[-_.]|generated[-_.])?(?:config|resolver)|config-resolver)(?:[./_-]|$)/u.test(file));
@@ -364,6 +366,14 @@ describe("what actually ships", () => {
         }
       }
       assert.ok(prime.files.includes("bin/context.js"), "Prime adapter must ship its context script");
+      // The plugin's manifest, its registered subagents and the CLI it bundles are packed by prepack, not
+      // committed, so only the tarball proves they ship. `bin/` would be put on the Bash PATH, so none may.
+      for (const required of [".claude-plugin/plugin.json", "skills/feature/SKILL.md", "skills/feature/WORKFLOW.md", "launcher/launch.js",
+        "agents/work-reviewer.md", "vendor/feature-factory/bin/factory.js", "vendor/feature-factory/WORKFLOW.md", "vendor/feature-factory/package.json", "README.md", "LICENSE"]) {
+        assert.ok(claudeCode.files.includes(required), `claude-code-feature-factory must ship ${required}`);
+      }
+      assert.equal(claudeCode.files.filter((file) => file.startsWith("agents/")).length, 11, "the plugin must register all eleven agents");
+      assert.ok(!claudeCode.files.some((file) => file.startsWith("bin/")), "a plugin bin/ directory is put on the Bash PATH");
       assert.ok(!prime.files.some((file) => file.startsWith("extensions/")), "Prime 0.10 loads no extensions; none may ship");
       // The host loads the built bundle and does not transform JSX, so shipping source instead of
       // output would fail at load with a syntax error.
@@ -372,7 +382,7 @@ describe("what actually ships", () => {
 
       // Tests are not a release artifact. Shipping them doubles the tarball and invites a consumer to
       // run a suite against their own repository.
-      for (const { files } of [factory, opencode, prime, opencode2]) {
+      for (const { files } of [factory, opencode, prime, opencode2, claudeCode]) {
         assert.deepEqual(files.filter((file) => file.includes("test/")), []);
       }
 

@@ -7,7 +7,7 @@ const source = resolve(root, "packages/feature-factory/WORKFLOW.md");
 const bytes = readFileSync(source);
 if (bytes.length === 0) throw new Error(`empty canonical workflow: ${source}`);
 const integrations = process.argv.slice(2);
-if (integrations.length === 0) integrations.push("opencode-feature-factory", "prime-agent-feature-factory", "opencode2-feature-factory");
+if (integrations.length === 0) integrations.push("opencode-feature-factory", "prime-agent-feature-factory", "opencode2-feature-factory", "claude-code-feature-factory");
 for (const integration of integrations) {
   const skill = resolve(root, "packages", integration, "skills/feature/SKILL.md");
   if (!existsSync(skill)) throw new Error(`missing platform skill: ${skill}`);

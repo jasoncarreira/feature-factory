@@ -95,6 +95,18 @@ That command installs the adapter and its `feature-factory` runtime dependency. 
 with the package's `bin/launch.js`. `prime-agent -p` cannot drive a run on Prime 0.10; see
 [OPERATING.md](OPERATING.md). The adapter rejects `--background` before creating or changing a run.
 
+For Claude Code, from the marketplace in this repository:
+
+```text
+/plugin marketplace add jasoncarreira/feature-factory
+/plugin install feature-factory@feature-factory
+```
+
+The plugin `claude-code-feature-factory` bundles its own copy of the factory CLI, so it has no
+dependency to install. Run it interactively as `/feature-factory:feature [--autonomous | --headless]
+<request>`, or unattended with the package's `launcher/launch.js`, which starts an isolated, detached
+`claude -p` session; see its [README](packages/claude-code-feature-factory/README.md).
+
 ## Repository command configuration
 
 A repository operator may provide optional `$O/.factory.json`, where `O` is the physically
