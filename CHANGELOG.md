@@ -3,6 +3,28 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.13.0
+
+- A fifth package, `claude-code-feature-factory`: a Claude Code plugin with the `feature` skill, the eleven
+  specialists as plugin subagents, and an unattended launcher.
+  - **Bundled CLI:** the plugin carries a byte-for-byte copy of what `feature-factory` publishes, under
+    `vendor/feature-factory`, rather than depending on it. Claude Code installs a marketplace plugin's npm
+    dependencies only from a lockfile shipped beside its manifest, and npm never publishes one, so a
+    dependency would have left a marketplace install without its CLI. A test pins the copy to the source.
+  - **Session identity:** the skill binds `SESSION_ID` as `claude-code:${CLAUDE_SESSION_ID}`, which Claude
+    Code substitutes when the skill loads. No hook or context script is needed.
+  - **Enforced tool lists:** Claude Code applies each subagent's `tools` list, so the reviewer and
+    validator have no Edit or Write tool. They keep Bash, so not editing code stays an instruction. A test
+    pins that no specialist lists the Agent tool, which is what keeps delegation one level deep.
+  - **Verified live:** an unattended run on a scratch repository dispatched ten specialists in the
+    foreground, on the models their frontmatter names, with no permission denials, and completed with a PR.
+  - **Launcher:** `launcher/launch.js` starts a detached `claude -p` with `--setting-sources project`,
+    `--strict-mcp-config` and `--permission-prompts none`. Without those, a run inherited the operator's
+    permission settings and MCP connectors in testing.
+  - **Marketplace:** `.claude-plugin/marketplace.json` at the repository root lists the plugin with an npm
+    source pinned to the release, so `/plugin marketplace add jasoncarreira/feature-factory` installs it.
+- Every package moves to 0.13.0 in lockstep. Nothing in the factory or the other adapters changed.
+
 ## 0.12.1
 
 - Two operator commands for a parked run whose in-band routes are spent. Mimirbot epic 3 had every slice

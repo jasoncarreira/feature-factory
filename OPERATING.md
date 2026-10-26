@@ -453,6 +453,33 @@ socket set, `prime-agent list --json` shows whether the session exists and is bu
 `sessionFile` in that listing) shows whether the prompt arrived as a `<skill name="feature" …>` block with the
 request after it, and what the first cell reported.
 
+Under Claude Code, `claude-code-feature-factory` launches unattended with its own launcher:
+
+```sh
+GH_TOKEN=… FACTORY_PUBLISHING_IDENTITY=<account> \
+  node "$(npm root -g)/claude-code-feature-factory/launcher/launch.js" --cwd <repo> -- --autonomous <issue-number>
+```
+
+It starts `claude -p` detached in its own process group and prints the session id, pid, log path and a
+`stop` command; the stream-JSON transcript in that log is where to read a run. Unlike Prime 0.10, `-p` can
+drive a run here, because the Agent tool works in a print session. The launcher's flags matter more than
+the mode:
+
+- **`--setting-sources project`:** without it a `-p` run inherits your user permission settings. A Bash
+  command the run was never allowed ran in testing because the operator's own settings allowed it.
+- **`--strict-mcp-config`:** without it your MCP connectors load, and a connector's instructions reached a
+  subagent's context.
+- **`--permission-prompts none`:** anything not allowed is denied within seconds and listed in the
+  transcript's `permission_denials`, so a Claude Code run cannot hang on a prompt the way an OpenCode run
+  can.
+
+Verified on Claude Code 2.1.310: the plugin loads its eleven subagents and the skill, the substituted CLI path and
+session id are the real ones, and a run reaches init, claims its lock as `claude-code:<session id>`, and parks
+on the identity guard when no `GH_TOKEN` is inherited. With one, an autonomous run of a three-criterion issue on a
+scratch repository completed in four minutes for $4.71: ten foreground dispatches on the models their files name
+(Opus 5.5 for spec, plan and review, Sonnet 5.5 for research, build and test), no permission denials, and a
+published PR. Its plan had one slice, so a parallel wave is not yet verified.
+
 The Git credential helper reads the inherited `GH_TOKEN` as its password, while `gh` reads that same
 inherited variable directly. The real identity probe is a read-only network request, so a locally active
 machine account, cached login, or successful `gh auth status` is not a prepared environment. Credential
