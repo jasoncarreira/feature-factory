@@ -493,6 +493,12 @@ describe("family contracts refuse transitions the schema alone would allow", () 
     // 0.11.0: a handoff is owed at its receiver's merge, so no transition but one handoff append may drop or rewrite one.
     ["handoffs cannot be dropped", (state) => ({ ...state, updated_at: LATER, handoffs: [] }), /handoffs changes only by one handoff append/u, WITH_HANDOFF],
     ["handoffs cannot be rewritten", (state) => ({ ...state, updated_at: LATER, handoffs: [{ ...HANDOFF, to: "be", from: "fe" }] }), /handoffs changes only by one handoff append/u, WITH_HANDOFF],
+    // 0.14.0: the configured MCP servers are what every dispatch prompt names, so the list init recorded holds
+    // for the life of the run: no transition replaces, removes or adds one, and the schema refuses a bad entry.
+    ["configured MCP servers cannot be replaced", (state) => ({ ...state, updated_at: LATER, mcp_servers: ["other"] }), /envelope\.mcp_servers is immutable/u, { mcp_servers: ["trellis"] }],
+    ["configured MCP servers cannot be removed", (state) => { const next = { ...state, updated_at: LATER }; delete next.mcp_servers; return next; }, /envelope\.mcp_servers is immutable/u, { mcp_servers: ["trellis"] }],
+    ["MCP servers cannot be configured after init", (state) => ({ ...state, updated_at: LATER, mcp_servers: ["trellis"] }), /envelope\.mcp_servers is immutable/u],
+    ["MCP server names must be non-empty strings", (state) => ({ ...state, updated_at: LATER, mcp_servers: ["trellis", " "] }), /run\.mcp_servers[\s\S]*must be an array of non-empty strings/u, { mcp_servers: ["trellis"] }],
     ["updated_at cannot move backwards", (state) => ({ ...state, updated_at: "2026-07-29T00:00:00.000Z" }), /cannot move backwards/u],
     ["a gate cannot open already approved", (state) => ({ ...state, updated_at: LATER, gates: { ...state.gates, brief: { status: "approved", at: LATER, artifact: null } } }), /must open as pending/u],
     ["a decided gate cannot be re-decided", (state) => ({ ...state, updated_at: LATER, gates: { story: { status: "approved", at: LATER, artifact: "artifacts/story.md" } } }), null],
@@ -544,7 +550,7 @@ describe("family contracts refuse transitions the schema alone would allow", () 
     } finally { rmSync(f.root, { recursive: true, force: true }); }
 
     const result = { status: "needs-human", reason: "external cause" };
-    for (const [label, mode, apply, pattern] of [
+    for (const [label, mode, apply, pattern, overrides] of [
       ["undefined mode", undefined, (state) => ({ ...state, updated_at: LATER }), /must be resumed before any transition/u],
       ["terminalize mode", "terminalize", (state) => ({ ...state, updated_at: LATER, terminal_result: { ...result, reason: "rewritten" } }), /must be resumed before any transition/u],
       ["other envelope mode", "annotate", (state) => ({ ...state, updated_at: LATER }), /must be resumed before any transition/u],
@@ -558,8 +564,10 @@ describe("family contracts refuse transitions the schema alone would allow", () 
       ["handoff changes envelope", "handoff", (state) => ({ ...state, ...WITH_HANDOFF, updated_at: LATER, max_retries: 9 }), /handoff cannot change envelope\.max_retries/u],
       ["handoff unparks", "handoff", (state) => ({ ...state, ...WITH_HANDOFF, updated_at: LATER, status: "running" }), /handoff must preserve status/u],
       ["sync-base changes progress", "sync-base", (state) => ({ ...state, updated_at: LATER, base_syncs: [BASE_SYNC], gates: {} }), /sync-base cannot change run\.gates/u],
+      ["resume replaces MCP servers", "resume-needs-human", (state) => ({ ...state, updated_at: LATER, status: "running", mcp_servers: ["other"] }), /resume-needs-human cannot change envelope\.mcp_servers/u, { mcp_servers: ["trellis"] }],
+      ["sync-base removes MCP servers", "sync-base", (state) => { const next = { ...state, updated_at: LATER, base_syncs: [BASE_SYNC] }; delete next.mcp_servers; return next; }, /sync-base cannot change envelope\.mcp_servers/u, { mcp_servers: ["trellis"] }],
     ]) {
-      const parked = fixture(`parked-${label.replaceAll(" ", "-")}`, { status: "needs-human", terminal_result: result });
+      const parked = fixture(`parked-${label.replaceAll(" ", "-")}`, { status: "needs-human", terminal_result: result, ...overrides });
       try {
         const before = bytes(parked.runDir);
         const participants = mode ? [{ familyId: "envelope", mode }] : [];

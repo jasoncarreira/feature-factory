@@ -500,7 +500,9 @@ the mode:
 - **`--strict-mcp-config`:** without it your MCP connectors load, and a connector's instructions reached a
   subagent's context. It also hides the repository's `.mcp.json`, so the launcher passes back the servers
   `.factory.json` names in `mcp_servers` with `--mcp-config` and allows them, and prints them as
-  `mcp_servers`. A claude.ai connector cannot be loaded this way; name a server `.mcp.json` defines.
+  `mcp_servers`. A claude.ai connector cannot be loaded this way; name a server `.mcp.json` defines. An
+  entry that matches nothing, or a missing or unreadable `.mcp.json`, is printed as `mcp_warnings` and on
+  stderr. The run starts anyway, so read the warning before trusting what its specialists were told.
 - **`--permission-prompts none`:** anything not allowed is denied within seconds and listed in the
   transcript's `permission_denials`, so a Claude Code run cannot hang on a prompt the way an OpenCode run
   can.

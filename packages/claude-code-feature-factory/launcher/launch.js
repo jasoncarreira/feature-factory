@@ -30,16 +30,31 @@ export const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), ".."
 export const ALLOWED_TOOLS = Object.freeze(["Agent", "Bash", "Edit", "Glob", "Grep", "Read", "TodoWrite", "Write"]);
 
 // The `.mcp.json` servers whose names match an `mcp_servers` entry of `.factory.json` in `cwd`, where `*`
-// matches any run of characters and case is ignored. Either file absent or unreadable means none: the CLI
-// validates `.factory.json` at init and reports a bad one there, so the launcher does not second-guess it.
+// matches any run of characters and case is ignored, and a warning for each way a named server failed to
+// load. No `.factory.json`, or none naming servers, is an intentional empty selection and warns nothing.
+// Instruction, not enforcement: the run still starts, because a missing server costs the specialists a tool,
+// not the run its evidence. The warning is what tells the operator that every dispatch prompt will name a
+// server this run does not have. A malformed `.factory.json` is the CLI's to refuse at init.
 export function projectMcpServers(cwd) {
-  const json = (name) => { try { return JSON.parse(readFileSync(join(cwd, name), "utf8")); } catch { return null; } };
-  const patterns = json(".factory.json")?.mcp_servers;
-  const defined = json(".mcp.json")?.mcpServers;
-  if (!Array.isArray(patterns) || !defined || typeof defined !== "object") return {};
-  const matchers = patterns.filter((entry) => typeof entry === "string").map((entry) =>
-    new RegExp(`^${entry.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join(".*")}$`, "iu"));
-  return Object.fromEntries(Object.entries(defined).filter(([name]) => matchers.some((matcher) => matcher.test(name))));
+  const read = (name) => {
+    try { return { value: JSON.parse(readFileSync(join(cwd, name), "utf8")) }; } catch (error) {
+      return error?.code === "ENOENT" ? { missing: true } : { error: `${name} is unreadable or not JSON (${error.message})` };
+    }
+  };
+  const patterns = read(".factory.json").value?.mcp_servers;
+  if (!Array.isArray(patterns) || !patterns.length) return { servers: {}, warnings: [] };
+  const named = `.factory.json names ${patterns.map((entry) => `'${entry}'`).join(", ")}`;
+  const project = read(".mcp.json");
+  const defined = project.value?.mcpServers;
+  if (!defined || typeof defined !== "object" || Array.isArray(defined)) {
+    const why = project.missing ? "there is no .mcp.json" : project.error ?? ".mcp.json has no mcpServers object";
+    return { servers: {}, warnings: [`${named} in mcp_servers, but ${why}; no MCP server was loaded`] };
+  }
+  const matcher = (entry) => new RegExp(`^${String(entry).split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join(".*")}$`, "iu");
+  const servers = Object.fromEntries(Object.entries(defined).filter(([name]) => patterns.some((entry) => matcher(entry).test(name))));
+  const warnings = patterns.filter((entry) => !Object.keys(defined).some((name) => matcher(entry).test(name)))
+    .map((entry) => `mcp_servers entry '${entry}' matches no server in .mcp.json`);
+  return { servers, warnings };
 }
 
 export function parseArgs(argv) {
@@ -86,7 +101,7 @@ export function launch(options, pluginRoot = PLUGIN_ROOT) {
   const cli = join(pluginRoot, "vendor", "feature-factory", "bin", "factory.js");
   if (!existsSync(cli)) throw new Error(`no bundled factory CLI at ${cli}; run \`npm run vendor\` in ${pluginRoot}`);
   const sessionId = randomUUID();
-  const mcpServers = projectMcpServers(options.cwd);
+  const { servers: mcpServers, warnings } = projectMcpServers(options.cwd);
   const log = options.log ?? join(tmpdir(), `feature-factory-${sessionId}.jsonl`);
   mkdirSync(dirname(log), { recursive: true });
   const fd = openSync(log, "a");
@@ -96,7 +111,8 @@ export function launch(options, pluginRoot = PLUGIN_ROOT) {
     child.once("error", () => {});
     child.unref();
     if (!child.pid) throw new Error(`could not start '${options.claude}'`);
-    return { sessionId, pid: child.pid, log, cwd: options.cwd, mcp_servers: Object.keys(mcpServers), stop: `kill -TERM -- -${child.pid}` };
+    return { sessionId, pid: child.pid, log, cwd: options.cwd, mcp_servers: Object.keys(mcpServers),
+      ...(warnings.length ? { mcp_warnings: warnings } : {}), stop: `kill -TERM -- -${child.pid}` };
   } finally {
     closeSync(fd);
   }
@@ -107,7 +123,9 @@ export function launch(options, pluginRoot = PLUGIN_ROOT) {
 // exit 0 having printed nothing.
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
-    process.stdout.write(`${JSON.stringify(launch(parseArgs(process.argv.slice(2))))}\n`);
+    const handle = launch(parseArgs(process.argv.slice(2)));
+    for (const warning of handle.mcp_warnings ?? []) process.stderr.write(`warning: ${warning}\n`);
+    process.stdout.write(`${JSON.stringify(handle)}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

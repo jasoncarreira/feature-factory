@@ -59,7 +59,9 @@ by trying it:
   nobody allowed for the run can run anyway.
 - `--strict-mcp-config`: without it your MCP connectors and their instructions reach every subagent. The
   servers `.factory.json` names in `mcp_servers` are passed back from the repository's `.mcp.json` with
-  `--mcp-config` and allowed, and the launcher prints them as `mcp_servers`.
+  `--mcp-config` and allowed, and the launcher prints them as `mcp_servers`. An entry that matches no
+  `.mcp.json` server, or a missing or unreadable `.mcp.json`, is printed as `mcp_warnings` and on stderr:
+  the run still starts, but its dispatch prompts would name a server it does not have.
 - `--permission-prompts none`: anything not allowed is denied at once rather than waiting for an answer
   nobody will give. A run never hangs on a prompt; a denial shows in the transcript.
 - `--permission-mode acceptEdits` with `Agent`, `Bash`, `Edit`, `Glob`, `Grep`, `Read`, `TodoWrite` and

@@ -19,7 +19,10 @@ version across the workspace, with each adapter pinning the exact factory versio
   shared agent files and the other adapters are unchanged.
 - **The Claude Code launcher loads the named servers.** `--strict-mcp-config` hides the repository's
   `.mcp.json`, so the launcher passes the matching servers back with `--mcp-config`, allows their tools,
-  and prints them.
+  and prints them. An `mcp_servers` entry that matches no `.mcp.json` server, or a missing or unreadable
+  `.mcp.json`, prints as `mcp_warnings` and on stderr, so a run is not silently told to use a server it lacks.
+- Tests pin the manifest guarantees directly: a bad `run.mcp_servers` entry is refused, and no transition,
+  running or parked, replaces, removes or adds the recorded list.
 - **Verified live on all four hosts** with a marker server whose calls only it could answer: Claude Code
   2.1.319 plugin subagents (through the launcher's flags), OpenCode 1.18.33 and 2.0.28 specialists with the
   factory's own permissions, and a Prime 0.10.2 `rlm.spawn` child. OpenCode and Prime specialists already

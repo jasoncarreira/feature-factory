@@ -139,8 +139,26 @@ describe("Claude Code plugin contract", () => {
       // Exact names and `*` patterns, case-insensitive; a literal `.` is not a wildcard, and an unnamed server stays out.
       writeFileSync(join(dir, ".factory.json"), JSON.stringify({ resolve: "r", verify: "v", mcp_servers: ["trellis", "*HONEY*", "a.b"] }));
       writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { trellis: { command: "t" }, "honeycomb-personal": { url: "u" }, axb: { command: "x" }, other: { command: "o" } } }));
-      assert.deepEqual(Object.keys(projectMcpServers(dir)), ["trellis", "honeycomb-personal"]);
-      assert.deepEqual(projectMcpServers(join(dir, "missing")), {}, "no config means no servers");
+      const selected = projectMcpServers(dir);
+      assert.deepEqual(Object.keys(selected.servers), ["trellis", "honeycomb-personal"]);
+      // A named server that did not load is reported, so a run is not told to use a server it lacks; naming
+      // none is an intentional empty selection and is silent.
+      assert.deepEqual(selected.warnings, ["mcp_servers entry 'a.b' matches no server in .mcp.json"]);
+      assert.deepEqual(projectMcpServers(join(dir, "missing")), { servers: {}, warnings: [] }, "no config means no servers and no warning");
+      const nowhere = mkdtempSync(join(tmpdir(), "ff-claude-mcp-"));
+      try {
+        writeFileSync(join(nowhere, ".factory.json"), JSON.stringify({ resolve: "r", verify: "v", mcp_servers: ["trellis"] }));
+        for (const [mcpJson, why] of [[null, /there is no \.mcp\.json/u], ["{ not json", /\.mcp\.json is unreadable or not JSON/u], ["{}", /\.mcp\.json has no mcpServers object/u]]) {
+          if (mcpJson === null) rmSync(join(nowhere, ".mcp.json"), { force: true }); else writeFileSync(join(nowhere, ".mcp.json"), mcpJson);
+          const { servers, warnings } = projectMcpServers(nowhere);
+          assert.deepEqual(servers, {});
+          assert.equal(warnings.length, 1);
+          assert.match(warnings[0], /^\.factory\.json names 'trellis' in mcp_servers, but /u);
+          assert.match(warnings[0], why);
+        }
+        writeFileSync(join(nowhere, ".factory.json"), JSON.stringify({ resolve: "r", verify: "v" }));
+        assert.deepEqual(projectMcpServers(nowhere), { servers: {}, warnings: [] }, "a config naming no servers is silent");
+      } finally { rmSync(nowhere, { recursive: true, force: true }); }
       const handle = launch({ ...parseArgs(["--cwd", dir, "--claude", stub, "--log", log, "--", "x"]) }, new URL("..", import.meta.url).pathname);
       assert.match(handle.sessionId, /^[0-9a-f-]{36}$/u);
       assert.equal(handle.stop, `kill -TERM -- -${handle.pid}`);
@@ -148,6 +166,7 @@ describe("Claude Code plugin contract", () => {
       const argv = readFileSync(join(dir, "argv"), "utf8").split("\n");
       assert.equal(argv[argv.indexOf("--session-id") + 1], handle.sessionId);
       assert.deepEqual(handle.mcp_servers, ["trellis", "honeycomb-personal"]);
+      assert.deepEqual(handle.mcp_warnings, ["mcp_servers entry 'a.b' matches no server in .mcp.json"]);
       assert.deepEqual(Object.keys(JSON.parse(argv[argv.indexOf("--mcp-config") + 1]).mcpServers), handle.mcp_servers);
       assert.ok(argv[0].endsWith(dir.split("/").pop()), "the session runs in --cwd");
       assert.match(readFileSync(log, "utf8"), /streamed/u, "output goes to the log");
