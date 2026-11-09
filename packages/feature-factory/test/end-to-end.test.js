@@ -569,7 +569,15 @@ describe("end to end — a merge is refused through the real CLI", () => {
       { resolve: "true", verify: "true" },
       { resolve: "true", verify: "true", publish: "true" },
       { resolve: "true", verify: "true", max_retries: 5 },
+      { resolve: "true", verify: "true", mcp_servers: [] },
+      { resolve: "true", verify: "true", mcp_servers: ["trellis", "*honeycomb*"] },
     ]) assert.doesNotThrow(() => parseRepositoryConfig(JSON.stringify(config)));
+    assert.deepEqual(parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", mcp_servers: ["trellis"] })).mcpServers, ["trellis"]);
+    for (const mcp_servers of ["trellis", [""], ["  "], [7], [null], null, {}]) {
+      assert.throws(() => parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", mcp_servers })),
+        (error) => error instanceof RepositoryConfigError
+          && error.message === "invalid .factory.json: entry 'mcp_servers' must be an array of non-empty strings");
+    }
     for (const max_retries of [0, -1, 2.5, "5", null]) {
       assert.throws(() => parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", max_retries })),
         (error) => error instanceof RepositoryConfigError

@@ -31,6 +31,9 @@ export const RUN_KEYS = Object.freeze([
   // later edit of the same filename. See the check in `slices-seed`.
   "plan_digest",
   "bootstrap_command", "bootstrap_exit",
+  // The `.factory.json` MCP server names, recorded at init so dispatch prompts name the same servers for
+  // the life of the run. Absent when none are configured, and in older manifests.
+  "mcp_servers",
   // Audited fix slices opened after merges by `factory remediate` (#344). Absent in older manifests.
   "remediations",
   // Audited merges of the PR base into the integration branch by `factory sync-base` (#387). Absent in older manifests.
@@ -165,6 +168,9 @@ export function validateRun(run) {
   for (const key of ["issue_key", "pr_base", "pr_url", "plan_digest", "publishing_identity"]) optionalString(errors, run, key, "run");
   if (Object.hasOwn(run, "pr_draft") && typeof run.pr_draft !== "boolean") {
     errors.push({ path: "run.pr_draft", message: "must be a boolean" });
+  }
+  if (Object.hasOwn(run, "mcp_servers") && (!Array.isArray(run.mcp_servers) || !run.mcp_servers.every(stringValue))) {
+    errors.push({ path: "run.mcp_servers", message: "must be an array of non-empty strings" });
   }
   if (Object.hasOwn(run, "bootstrap_command") !== Object.hasOwn(run, "bootstrap_exit")) {
     errors.push({ path: "run.bootstrap_command", message: "must be present exactly when bootstrap_exit is present" });

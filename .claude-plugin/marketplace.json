@@ -6,7 +6,7 @@
     {
       "name": "feature-factory",
       "description": "Drive a feature from request to an observed, tested pull request with approval gates and specialist subagents.",
-      "source": { "source": "npm", "package": "claude-code-feature-factory", "version": "0.13.0" }
+      "source": { "source": "npm", "package": "claude-code-feature-factory", "version": "0.14.0" }
     }
   ]
 }

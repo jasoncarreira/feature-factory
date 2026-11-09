@@ -1510,6 +1510,7 @@ const HANDLERS = {
       park_snapshot: run.status === "needs-human" ? observedParkSnapshot(resolve(flags.repo ?? process.cwd()), runId, runDir) : null,
       restore: readRestoreRecord(runDir, run),
       pr_draft: run.pr_draft ?? true,
+      mcp_servers: run.mcp_servers ?? [],
       lock: lock.state, dead_lock: run.status === "running" && lock.state === "stale",
       lock_session: lock.owner?.session ?? null,
       // The whole gate record, not just its status. `at` and `artifact` were dropped here while sitting
@@ -2032,7 +2033,8 @@ export async function dispatchInit(positional, flags, operations = INIT_OPERATIO
   try {
     // An explicit `--max-retries` outranks the committed `.factory.json` default, which outranks 3.
     const configuredRetries = flags.maxRetries === undefined && config?.maxRetries ? { max_retries: config.maxRetries } : {};
-    run = validateRun({ ...candidate, ...configuredRetries, pr_base: prBase, pr_draft: config?.prDraft ?? true, ...bootstrapEvidence });
+    const configuredServers = config?.mcpServers ? { mcp_servers: config.mcpServers } : {};
+    run = validateRun({ ...candidate, ...configuredRetries, ...configuredServers, pr_base: prBase, pr_draft: config?.prDraft ?? true, ...bootstrapEvidence });
   } catch (error) {
     throw new CliError(`final manifest validation failed for sandbox '${S}'; sandbox was retained`, { cause: error });
   }

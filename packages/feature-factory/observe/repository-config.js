@@ -21,7 +21,7 @@ export function parseRepositoryConfig(bytes) {
   // not. It is optional now and consumed when present, so the key means what it says either way.
   const requiredKeys = ["resolve", "verify"];
   const optionalCommandKeys = ["publish"];
-  const allowedKeys = [...requiredKeys, ...optionalCommandKeys, "pr_draft", "verify_timeout_ms", "bootstrap", "bootstrap_timeout_ms", "max_retries"];
+  const allowedKeys = [...requiredKeys, ...optionalCommandKeys, "pr_draft", "verify_timeout_ms", "bootstrap", "bootstrap_timeout_ms", "max_retries", "mcp_servers"];
   if (!config || typeof config !== "object" || Array.isArray(config)
     || Object.keys(config).some((keyName) => !allowedKeys.includes(keyName))) {
     throw new RepositoryConfigError("invalid .factory.json");
@@ -59,8 +59,17 @@ export function parseRepositoryConfig(bytes) {
   if (Object.hasOwn(config, "max_retries") && (!Number.isSafeInteger(config.max_retries) || config.max_retries <= 0)) {
     throw new RepositoryConfigError("invalid .factory.json: entry 'max_retries' must be a positive integer");
   }
+  // The MCP servers specialists are told to use, by the name each host gives them; `*` matches any run of
+  // characters. Instruction, not enforcement: an extra server cannot make a run claim success it did not
+  // earn, so no host is required to deny the rest. A present value is still checked, for the same reason
+  // as `max_retries`.
+  if (Object.hasOwn(config, "mcp_servers") && (!Array.isArray(config.mcp_servers)
+    || config.mcp_servers.some((name) => typeof name !== "string" || !name.trim()))) {
+    throw new RepositoryConfigError("invalid .factory.json: entry 'mcp_servers' must be an array of non-empty strings");
+  }
   const parsed = { command: config.verify, timeoutMs: config.verify_timeout_ms ?? DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS,
-    prDraft: config.pr_draft ?? true, ...(Object.hasOwn(config, "max_retries") ? { maxRetries: config.max_retries } : {}) };
+    prDraft: config.pr_draft ?? true, ...(Object.hasOwn(config, "max_retries") ? { maxRetries: config.max_retries } : {}),
+    ...(Object.hasOwn(config, "mcp_servers") ? { mcpServers: config.mcp_servers } : {}) };
   return hasBootstrap ? { ...parsed, bootstrapCommand: config.bootstrap,
     bootstrapTimeoutMs: config.bootstrap_timeout_ms ?? DEFAULT_BOOTSTRAP_TIMEOUT_MS } : parsed;
 }

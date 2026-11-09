@@ -50,6 +50,7 @@ const envelope = contract({
     worktree: state.worktree,
     pr_base: state.pr_base,
     pr_draft: state.pr_draft,
+    mcp_servers: state.mcp_servers ?? [],
     created_at: state.created_at,
     updated_at: state.updated_at,
     terminal_result: state.terminal_result ?? null,
@@ -175,6 +176,7 @@ const envelope = contract({
     for (const key of ["run_id", "created_at", "pr_base", "pr_draft", "mode", "max_parallel_slices", "max_retries"]) {
       if (before[key] !== after[key]) throw new Error(`envelope.${key} is immutable`);
     }
+    if (!isDeepStrictEqual(before.mcp_servers, after.mcp_servers)) throw new Error("envelope.mcp_servers is immutable");
     if (!isDeepStrictEqual(before.retry_extensions, after.retry_extensions)) throw new Error("envelope.retry_extensions is immutable outside grant-retry");
     if (!isDeepStrictEqual(before.base_syncs, after.base_syncs)) throw new Error("envelope.base_syncs changes only by sync-base on a parked run");
     if (!isDeepStrictEqual(before.handoffs, after.handoffs)) throw new Error("envelope.handoffs changes only by one handoff append");

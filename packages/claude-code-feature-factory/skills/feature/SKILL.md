@@ -155,10 +155,12 @@ read-only status command allowed by the canonical contract. State changes always
 
 Each canonical specialist is a subagent this plugin registers as `feature-factory:<name>`, so the
 workflow's `story-reader` is `subagent_type: "feature-factory:story-reader"`. Its role instructions,
-`tools`, `model` and `effort` come from its own file under `AGENTS`, and Claude Code applies them. The
-`tools` list is enforced as a tool list, not as read-only file access: the reviewer and validator have no
-Edit or Write tool but do have Bash, which they need for tests and their report artifacts. That neither
-edits the code it judges is the canonical read-only rule, an instruction.
+`disallowedTools`, `model` and `effort` come from its own file under `AGENTS`, and Claude Code applies
+them. Each specialist inherits this session's tools, the project's MCP servers included, minus that
+denylist: every one is denied Agent, and a read-only role is also denied Edit and Write. That is a tool
+list, not read-only file access: the reviewer and validator keep Bash, which they need for tests and their
+report artifacts. That neither edits the code it judges is the canonical read-only rule, an instruction.
+When status reports `mcp_servers`, the canonical *Project MCP servers* rule says how the prompt names them.
 
 1. Compose a bounded task prompt containing the exact run and repository paths, the single assigned
    task, allowed files, required tests, and the canonical read-only rule. Ticket bodies, review
@@ -175,7 +177,7 @@ edits the code it judges is the canonical read-only rule, an instruction.
    serially in the required order.
 
 Dispatch only to those eleven subagents, never to `general-purpose`, `Explore`, or any other agent type.
-Delegation stays one level deep: no specialist file lists the Agent tool, which is what keeps a child
+Delegation stays one level deep: every specialist file denies the Agent tool, which is what keeps a child
 from spawning its own.
 
 ## Gates and completion

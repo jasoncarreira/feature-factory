@@ -1,6 +1,6 @@
 {
   "name": "claude-code-feature-factory",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Claude Code plugin for feature-factory: the feature skill, the specialist subagents and the bundled factory CLI.",
   "type": "module",
   "license": "MIT",
