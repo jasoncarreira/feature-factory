@@ -4,7 +4,8 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ALLOWED_TOOLS, claudeArgs, launch, parseArgs } from "../launcher/launch.js";
+import { ALLOWED_TOOLS, claudeArgs, launch, parseArgs, projectMcpServers } from "../launcher/launch.js";
+import { withDeniedTools } from "../scripts/agent-tools.js";
 
 const here = (path) => new URL(`../${path}`, import.meta.url);
 const read = (path) => readFileSync(here(path), "utf8");
@@ -52,15 +53,23 @@ describe("Claude Code plugin contract", () => {
     assert.deepEqual(tree(here("agents/")), tree(new URL("agents/", factoryRoot)).filter((name) => name.endsWith(".md")));
     for (const name of tree(here("agents/"))) {
       const text = read(`agents/${name}`);
-      assert.equal(text, readFileSync(new URL(`agents/${name}`, factoryRoot), "utf8"), `agents/${name}`);
-      // ENFORCEMENT: delegation one level deep holds only because no specialist may call the Agent tool;
-      // Claude Code otherwise lets a subagent spawn its own. Frontmatter `model` must be a family name it
-      // resolves, so a tier never reaches a host that needs an exact id.
+      const source = readFileSync(new URL(`agents/${name}`, factoryRoot), "utf8");
+      // The shared file with only its tool line rewritten, so the specialists inherit the project's MCP servers.
+      assert.equal(text, withDeniedTools(source), `agents/${name}`);
+      // ENFORCEMENT: delegation one level deep holds only because every specialist is denied the Agent tool;
+      // Claude Code otherwise lets a subagent spawn its own. An allowlist would also hide every MCP server,
+      // so none remains. A role the shared file gives no Edit or Bash is denied it here. Frontmatter
+      // `model` must be a family name Claude Code resolves, so a tier never reaches a host that needs an exact id.
       const front = text.slice(4, text.indexOf("\n---", 4));
-      const tools = /^tools:\s*(.+)$/mu.exec(front)?.[1].split(/,\s*/u) ?? [];
-      assert.ok(tools.length > 0 && !tools.includes("Agent") && !tools.includes("Task"), `${name} tools: ${tools}`);
+      const granted = /^tools:\s*(.+)$/mu.exec(source)[1].split(/,\s*/u);
+      const denied = /^disallowedTools:\s*(.+)$/mu.exec(front)?.[1].split(/,\s*/u) ?? [];
+      assert.doesNotMatch(front, /^tools:/mu, `${name} keeps an allowlist`);
+      for (const tool of ["Agent", "Task", "Bash", "Edit", "Write", "Skill", "SendMessage"]) {
+        assert.equal(denied.includes(tool), !granted.includes(tool), `${name} ${granted.includes(tool) ? "keeps" : "is denied"} ${tool}`);
+      }
       assert.match(front, /^model: (?:sonnet|opus|haiku|fable)$/mu, `${name} model`);
     }
+    assert.throws(() => withDeniedTools("---\nname: x\n---\nbody\n"), /must declare `tools:`/u, "an agent with no tool line would inherit Agent");
   });
 
   it("binds the canonical workflow, session and CLI through Claude Code's substitutions", () => {
@@ -76,6 +85,8 @@ describe("Claude Code plugin contract", () => {
       ["foreground dispatch", /Never set `run_in_background`/u],
       ["parallel wave", /every Agent call of the wave in one message/u],
       ["no generic agents", /never to `general-purpose`, `Explore`/u],
+      ["inherited tools", /every one is denied Agent, and a read-only role is also denied Edit and Write/u],
+      ["mcp rule", /canonical \*Project MCP servers\* rule/u],
       ["background placement", /reject an exact case-sensitive first `--background`/u],
       ["retry refusal", /--max-retries must be a positive integer; no run created\./u],
       ["closed order", /closed pre-context order:\s+canonical workflow load; placement rejection/u],
@@ -111,6 +122,12 @@ describe("Claude Code plugin contract", () => {
       ["--output-format", "stream-json"], ["--model", "sonnet"]]) assert.equal(flag(name), value, name);
     assert.ok(args.includes("--strict-mcp-config"));
     assert.ok(!claudeArgs({ request: "x" }, "sid").includes("--model"), "no model flag unless one is asked for");
+    assert.ok(!args.includes("--mcp-config"), "no MCP server unless .factory.json names one");
+    // `--strict-mcp-config` hides .mcp.json, so the named servers come back explicitly and are allowed by
+    // their tool prefix; without the allow rule `--permission-prompts none` refuses every call to them.
+    const served = claudeArgs({ request: "x", mcpServers: { trellis: { command: "t" }, "claude.ai x": { url: "u" } } }, "sid");
+    assert.deepEqual(JSON.parse(served[served.indexOf("--mcp-config") + 1]), { mcpServers: { trellis: { command: "t" }, "claude.ai x": { url: "u" } } });
+    assert.equal(served[served.indexOf("--allowedTools") + 1], [...ALLOWED_TOOLS, "mcp__trellis", "mcp__claude_ai_x"].join(","));
 
     // The real spawn, against a stub `claude` that records its argv and outlives the launcher.
     const dir = mkdtempSync(join(tmpdir(), "ff-claude-launch-"));
@@ -119,12 +136,38 @@ describe("Claude Code plugin contract", () => {
       writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$PWD" "$@" > ${JSON.stringify(join(dir, "argv"))}\necho streamed\n`);
       chmodSync(stub, 0o755);
       const log = join(dir, "run.jsonl");
+      // Exact names and `*` patterns, case-insensitive; a literal `.` is not a wildcard, and an unnamed server stays out.
+      writeFileSync(join(dir, ".factory.json"), JSON.stringify({ resolve: "r", verify: "v", mcp_servers: ["trellis", "*HONEY*", "a.b"] }));
+      writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { trellis: { command: "t" }, "honeycomb-personal": { url: "u" }, axb: { command: "x" }, other: { command: "o" } } }));
+      const selected = projectMcpServers(dir);
+      assert.deepEqual(Object.keys(selected.servers), ["trellis", "honeycomb-personal"]);
+      // A named server that did not load is reported, so a run is not told to use a server it lacks; naming
+      // none is an intentional empty selection and is silent.
+      assert.deepEqual(selected.warnings, ["mcp_servers entry 'a.b' matches no server in .mcp.json"]);
+      assert.deepEqual(projectMcpServers(join(dir, "missing")), { servers: {}, warnings: [] }, "no config means no servers and no warning");
+      const nowhere = mkdtempSync(join(tmpdir(), "ff-claude-mcp-"));
+      try {
+        writeFileSync(join(nowhere, ".factory.json"), JSON.stringify({ resolve: "r", verify: "v", mcp_servers: ["trellis"] }));
+        for (const [mcpJson, why] of [[null, /there is no \.mcp\.json/u], ["{ not json", /\.mcp\.json is unreadable or not JSON/u], ["{}", /\.mcp\.json has no mcpServers object/u]]) {
+          if (mcpJson === null) rmSync(join(nowhere, ".mcp.json"), { force: true }); else writeFileSync(join(nowhere, ".mcp.json"), mcpJson);
+          const { servers, warnings } = projectMcpServers(nowhere);
+          assert.deepEqual(servers, {});
+          assert.equal(warnings.length, 1);
+          assert.match(warnings[0], /^\.factory\.json names 'trellis' in mcp_servers, but /u);
+          assert.match(warnings[0], why);
+        }
+        writeFileSync(join(nowhere, ".factory.json"), JSON.stringify({ resolve: "r", verify: "v" }));
+        assert.deepEqual(projectMcpServers(nowhere), { servers: {}, warnings: [] }, "a config naming no servers is silent");
+      } finally { rmSync(nowhere, { recursive: true, force: true }); }
       const handle = launch({ ...parseArgs(["--cwd", dir, "--claude", stub, "--log", log, "--", "x"]) }, new URL("..", import.meta.url).pathname);
       assert.match(handle.sessionId, /^[0-9a-f-]{36}$/u);
       assert.equal(handle.stop, `kill -TERM -- -${handle.pid}`);
       for (const deadline = Date.now() + 5000; Date.now() < deadline && !readFileSync(log, "utf8").includes("streamed");) execFileSync("sleep", ["0.1"]);
       const argv = readFileSync(join(dir, "argv"), "utf8").split("\n");
       assert.equal(argv[argv.indexOf("--session-id") + 1], handle.sessionId);
+      assert.deepEqual(handle.mcp_servers, ["trellis", "honeycomb-personal"]);
+      assert.deepEqual(handle.mcp_warnings, ["mcp_servers entry 'a.b' matches no server in .mcp.json"]);
+      assert.deepEqual(Object.keys(JSON.parse(argv[argv.indexOf("--mcp-config") + 1]).mcpServers), handle.mcp_servers);
       assert.ok(argv[0].endsWith(dir.split("/").pop()), "the session runs in --cwd");
       assert.match(readFileSync(log, "utf8"), /streamed/u, "output goes to the log");
       // Without the bundled CLI nothing is started.

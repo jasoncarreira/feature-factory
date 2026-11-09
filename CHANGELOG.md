@@ -3,6 +3,32 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.14.0
+
+- **Project MCP servers for every driver (#407).** `.factory.json` takes an optional `mcp_servers`: the MCP
+  servers specialists should use, each by the name its host gives it, with `*` matching any run of
+  characters. `init` records it in `run.json`, immutably, and `status` reports it (`[]` when absent). The
+  canonical workflow's new *Project MCP servers* rule has every dispatch prompt name the servers and tell
+  the specialist to pass its own worktree to any workspace or path argument, so a code-aware server
+  describes the specialist's checkout rather than another one. The list is instruction: an extra server
+  cannot make a run claim success it did not earn, so no host denies the ones it does not name.
+- **Claude Code specialists inherit MCP tools.** A `tools:` allowlist also hides every MCP server, so
+  `npm run vendor` now rewrites each shared agent file's allowlist as a `disallowedTools:` denylist: the
+  Agent tool always, Edit, Write or Bash where the role lacks them, and Claude Code's session tools. A test
+  pins that every specialist denies Agent and that each role keeps exactly the role tools it declares. The
+  shared agent files and the other adapters are unchanged.
+- **The Claude Code launcher loads the named servers.** `--strict-mcp-config` hides the repository's
+  `.mcp.json`, so the launcher passes the matching servers back with `--mcp-config`, allows their tools,
+  and prints them. An `mcp_servers` entry that matches no `.mcp.json` server, or a missing or unreadable
+  `.mcp.json`, prints as `mcp_warnings` and on stderr, so a run is not silently told to use a server it lacks.
+- Tests pin the manifest guarantees directly: a bad `run.mcp_servers` entry is refused, and no transition,
+  running or parked, replaces, removes or adds the recorded list.
+- **Verified live on all four hosts** with a marker server whose calls only it could answer: Claude Code
+  2.1.319 plugin subagents (through the launcher's flags), OpenCode 1.18.33 and 2.0.28 specialists with the
+  factory's own permissions, and a Prime 0.10.2 `rlm.spawn` child. OpenCode and Prime specialists already
+  had project MCP servers; only Claude Code needed code. OPERATING.md has the setup for each host.
+- Every package moves to 0.14.0 in lockstep.
+
 ## 0.13.0
 
 - A fifth package, `claude-code-feature-factory`: a Claude Code plugin with the `feature` skill, the eleven

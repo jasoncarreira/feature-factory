@@ -86,7 +86,7 @@ value stops the run instead of publishing under whatever credential the host hap
 it from `gh`, the token, stored authentication, or Git configuration: an expectation read from the
 credential being checked would always match.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; then invalid `max_retries`.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; then invalid `mcp_servers`.
 
 The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, `.factory.json entry 'verify_timeout_ms' must be a positive integer`, `.factory.json entry 'publish' must be a non-empty string`, and `.factory.json entry 'max_retries' must be a positive integer`.
 
@@ -272,6 +272,36 @@ privileged-path policy rather than by being unversioned. It was `.factory/config
 proved unusable — `.factory/` is gitignored, so the declaration could not be committed and never reached
 a sandbox clone. A feature run
 does not create, write, merge, archive, or package it.
+
+### Project MCP servers
+
+`mcp_servers` in `.factory.json` names the MCP servers specialists should use, such as a code-intelligence
+server, by the name each host gives them; `*` matches any run of characters:
+
+```json
+{ "resolve": "…", "verify": "…", "mcp_servers": ["trellis"] }
+```
+
+The factory holds names, not definitions. Each server is configured in the host, the same way you would for
+an interactive session, under the name the list uses. Every dispatch prompt then names the servers and tells
+the specialist to pass its own worktree to any workspace or path argument, so a code-aware server describes
+the specialist's checkout, uncommitted edits included, and not yours. Make that argument required in the
+server where you can: a call that omits it then fails instead of answering about another tree.
+
+| Host | Where the server is defined | What the adapter does |
+|---|---|---|
+| Claude Code | the repository's `.mcp.json` | Specialists inherit the session's tools minus a denylist, so they reach every server the session has. The launcher loads only the `.mcp.json` servers the list matches, alongside `--strict-mcp-config`, and allows their tools. |
+| OpenCode 1 | the `mcp` block of `opencode.json` | Nothing: specialists already inherit MCP tools, without a permission prompt. |
+| OpenCode 2 | `mcp.servers` in `opencode.json` (`oc2 mcp add`) | Nothing: the same. |
+| Prime 0.10 | `prime-agent mcp add`, user-level only | Nothing: an `rlm.spawn` child calls servers through its `mcp` helper. |
+
+All four were verified live in November 2026 with a marker server whose calls only it could answer. On Prime,
+give `mcp add` an absolute command path: a bare `node` resolved to a mise shim that failed under a daemon
+started with a different HOME, and the server never came up.
+
+The list is instruction. An extra server cannot make a run claim success it did not earn, so no host denies
+the servers it does not name. OpenCode could (`"<server>_*": "deny"` works per agent on both versions);
+Claude Code honours no wildcard in `disallowedTools`, and Prime's spawn takes no tool settings.
 
 ### Publishing one repository as two identities
 
@@ -468,7 +498,11 @@ the mode:
 - **`--setting-sources project`:** without it a `-p` run inherits your user permission settings. A Bash
   command the run was never allowed ran in testing because the operator's own settings allowed it.
 - **`--strict-mcp-config`:** without it your MCP connectors load, and a connector's instructions reached a
-  subagent's context.
+  subagent's context. It also hides the repository's `.mcp.json`, so the launcher passes back the servers
+  `.factory.json` names in `mcp_servers` with `--mcp-config` and allows them, and prints them as
+  `mcp_servers`. A claude.ai connector cannot be loaded this way; name a server `.mcp.json` defines. An
+  entry that matches nothing, or a missing or unreadable `.mcp.json`, is printed as `mcp_warnings` and on
+  stderr. The run starts anyway, so read the warning before trusting what its specialists were told.
 - **`--permission-prompts none`:** anything not allowed is denied within seconds and listed in the
   transcript's `permission_denials`, so a Claude Code run cannot hang on a prompt the way an OpenCode run
   can.

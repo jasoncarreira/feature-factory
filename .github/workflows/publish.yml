@@ -8,7 +8,7 @@ name: Publish Package
 #   opencode-feature-factory-v0.3.0
 #   prime-agent-feature-factory-v0.1.0
 #   opencode2-feature-factory-v0.10.17
-#   claude-code-feature-factory-v0.13.0
+#   claude-code-feature-factory-v0.14.0
 on:
   push:
     tags:

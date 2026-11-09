@@ -57,7 +57,11 @@ by trying it:
 
 - `--setting-sources project`: without it a `-p` run inherits your user permission settings, so a tool
   nobody allowed for the run can run anyway.
-- `--strict-mcp-config`: without it your MCP connectors and their instructions reach every subagent.
+- `--strict-mcp-config`: without it your MCP connectors and their instructions reach every subagent. The
+  servers `.factory.json` names in `mcp_servers` are passed back from the repository's `.mcp.json` with
+  `--mcp-config` and allowed, and the launcher prints them as `mcp_servers`. An entry that matches no
+  `.mcp.json` server, or a missing or unreadable `.mcp.json`, is printed as `mcp_warnings` and on stderr:
+  the run still starts, but its dispatch prompts would name a server it does not have.
 - `--permission-prompts none`: anything not allowed is denied at once rather than waiting for an answer
   nobody will give. A run never hangs on a prompt; a denial shows in the transcript.
 - `--permission-mode acceptEdits` with `Agent`, `Bash`, `Edit`, `Glob`, `Grep`, `Read`, `TodoWrite` and
@@ -72,11 +76,15 @@ by trying it:
 - **Specialists:** each is a plugin subagent, `feature-factory:<name>`, dispatched with the Agent tool in
   the foreground, so the driver holds every result before it reconciles. A parallel wave is several Agent
   calls in one message.
-- **Tool lists are enforced; read-only is instructed.** Claude Code applies each subagent file's `tools`
-  list, so the reviewer and validator have no Edit or Write tool. Both keep Bash, for tests and their report
-  artifacts, so that they edit no code is the workflow's instruction rather than a sandbox. None lists the
-  Agent tool, which is what keeps delegation one level deep: Claude Code otherwise lets a subagent spawn
-  its own.
+- **Specialists inherit tools minus a denylist; read-only is instructed.** `npm run vendor` rewrites each
+  shared agent file's `tools:` allowlist as `disallowedTools:`, because an allowlist also hides every MCP
+  server. A specialist inherits the session's tools, the project's MCP servers included, and is denied the
+  Agent tool, every Claude Code session tool its role was not given, and Edit, Write or Bash where the shared
+  file withholds them. So the reviewer and validator have no Edit or Write tool, but keep Bash for tests and
+  their report artifacts: that they edit no code is the workflow's instruction rather than a sandbox. The
+  Agent denial is what keeps delegation one level deep: Claude Code otherwise lets a subagent spawn its own.
+  Wildcards are not honoured in the list, so a Claude Code release that adds a session tool reaches the
+  specialists until `scripts/agent-tools.js` names it.
 - **Model and effort** come from each subagent's frontmatter. `model: sonnet` and `model: opus` are family
   names that Claude Code resolves to that family's current model, so a new model reaches every run with no
   release. `ANTHROPIC_DEFAULT_OPUS_MODEL` and its `SONNET` and `HAIKU` counterparts pin a version.

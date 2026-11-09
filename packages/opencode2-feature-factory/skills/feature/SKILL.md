@@ -260,7 +260,7 @@ The optional repository-owned file is `$O/.factory.json`:
 
 The root must be a JSON object with the two required own properties `resolve` and `verify`,
 plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`,
-`bootstrap_timeout_ms`, and `max_retries`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
+`bootstrap_timeout_ms`, `max_retries`, and `mcp_servers`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
 command must be non-empty. `publish` was required and invoked nowhere until this release, so every
 consumer wrote a command that could not run. It is optional now and contributes only the file candidate
 to the one Step 6 publishing selection. Inherited `FACTORY_PUBLISHING_COMMAND` or the default may win, so
@@ -272,9 +272,11 @@ when present and defaults to `true` when absent. Both timeout values must be pos
 safe integers when present, and `bootstrap_timeout_ms` is valid only with a declared `bootstrap`.
 `verify_timeout_ms` and `bootstrap_timeout_ms` each independently default to `900000` milliseconds;
 neither timeout shares or consumes the other's budget. A present `max_retries` must be a positive integer. It is the run's attempt budget when `init` runs
-without `--max-retries`, which still outranks it; omission leaves the default `3`.
+without `--max-retries`, which still outranks it; omission leaves the default `3`. A present `mcp_servers`
+must be an array of non-empty strings; `init` records it as `run.json` `mcp_servers`, fixed for the life of the
+run, and qualified status reports it (`[]` when absent). The *Project MCP servers* rule says what it changes.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; then invalid `max_retries`.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; then invalid `mcp_servers`.
 
 Do not use the obsolete summary “Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.” because it omits the earlier `pr_draft` check.
 

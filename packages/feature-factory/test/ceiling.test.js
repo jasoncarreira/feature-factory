@@ -55,6 +55,8 @@ const RUN_JSON_KEYS = [
   // 0.8.0: the account a run publishes as, resolved at init from the flag or the environment and
   // never from a checked-in file. Read by every publication guard as the compared expectation.
   "publishing_identity",
+  // 0.14.0: the `.factory.json` MCP servers, recorded at init and reported by status for dispatch prompts.
+  "mcp_servers",
   // the four justified additions. base_commit was dropped: it was written and never
   // read, which is the standard a durable field has to meet. plan_digest meets it: the seed reads
   // it and refuses on mismatch, which is the only thing binding the plan a human approved to the
@@ -786,7 +788,7 @@ describe("ceiling — scope cannot grow without editing this file", () => {
 
   it("declares exactly the declared run.json top-level keys", () => {
     assert.deepEqual([...RUN_KEYS].sort(), [...RUN_JSON_KEYS].sort());
-    assert.equal(RUN_KEYS.length, 29, "twenty-nine: remediation grants (0.12.1) are the twenty-ninth field");
+    assert.equal(RUN_KEYS.length, 30, "thirty: the configured MCP servers (0.14.0) are the thirtieth field");
   });
 
   it("registers exactly the declared families", () => {
@@ -1398,7 +1400,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // 6576 -> 6663 for 0.12.1: two operator acts on a parked run whose in-band routes are spent (mimirbot epic 3, every
     // slice merged): `grant-remediation` raises the remediation limit by one, and `override-validator` publishes the
     // head a NO-GO judged, still bound to that head. Shared preconditions, schema, contracts and status.
-    assert.equal(total, 6663, "a parked run past its routes can be granted a remediation or published over a NO-GO: 6663 production lines");
+    // 6663 -> 6682 for 0.14.0: `.factory.json` `mcp_servers`, validated, recorded at init, immutable, and reported by
+    // status, so every driver can name the project's MCP servers in dispatch prompts (#407).
+    assert.equal(total, 6682, "the configured MCP servers are recorded and reported: 6682 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
