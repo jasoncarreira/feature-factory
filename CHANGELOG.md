@@ -3,6 +3,21 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.14.1
+
+- **OpenCode 2: the factory's agents no longer wait on approvals nobody can give.** Assigning an agent's
+  `permissions` replaces the host's default rules, which begin by allowing everything. The adapter's rule
+  lists had no such baseline, so on OpenCode 2.2.7 every action they did not name asked for approval: the
+  driver's `skill (feature)` and the specialists' `read`, `glob`, `grep` and MCP calls. A daemon session
+  has nobody to answer an ask, so Worklink #2126's driver hung loading its skill until a startup watchdog
+  stopped it. Every rule list now starts from the host's own `*` allow, and the factory's rules after it
+  still win: the reviewer and validator cannot edit, the drivers dispatch only the eleven specialists, and
+  no agent reads outside the workspace. Verified live without `--auto`, and pinned by a test that resolves
+  the rules the way the host does.
+- The 0.14.0 note that OpenCode 2 specialists already reached project MCP servers was verified with `--auto`,
+  which answers every ask; it holds from 0.14.1.
+- Every package moves to 0.14.1 in lockstep.
+
 ## 0.14.0
 
 - **Project MCP servers for every driver (#407).** `.factory.json` takes an optional `mcp_servers`: the MCP

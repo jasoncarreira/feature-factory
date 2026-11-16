@@ -60,6 +60,14 @@ export function modelRef(model, variant) {
 
 const rule = (action, effect, resource = "*") => ({ action, resource, effect });
 
+// The baseline every rule list starts from. Assigning `permissions` replaces the host's default rules, and
+// those begin with this same allow, so without it every action no rule names -- `read`, `glob`, `grep`,
+// `skill`, each MCP tool -- falls back to `ask`. `--auto` answers an ask, which is how the gap passed every
+// probe; a daemon session has nobody to answer one, so a run waits forever. Worklink #2126 died that way,
+// its driver stuck loading the `feature` skill (0.14.1). The rules after it narrow it: the host applies the
+// last rule that matches, so a later `deny` wins.
+const BASELINE = rule("*", "allow");
+
 // Enforcement, not instruction: who may edit is derived from what each agent declares. A reviewer that
 // can change the code it judges breaks the separation the chain is built on. Every specialist is denied
 // `subagent`, because one level of orchestration is a property of the chain, and `external_directory`,
@@ -68,6 +76,7 @@ export function specialistPermissions(tools) {
   const declared = String(tools ?? "").split(",").map((entry) => entry.trim().toLowerCase());
   const has = (name) => declared.includes(name);
   return [
+    BASELINE,
     rule("edit", has("edit") || has("write") ? "allow" : "deny"),
     rule("shell", has("bash") ? "allow" : "deny"),
     rule("webfetch", has("webfetch") ? "allow" : "deny"),
@@ -81,6 +90,7 @@ export function specialistPermissions(tools) {
 // `subagent` resource is the target agent id, so here it is enforced.
 export function driverPermissions() {
   return [
+    BASELINE,
     rule("edit", "allow"),
     rule("shell", "allow"),
     rule("webfetch", "allow"),

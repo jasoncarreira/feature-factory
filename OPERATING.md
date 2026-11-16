@@ -292,10 +292,13 @@ server where you can: a call that omits it then fails instead of answering about
 |---|---|---|
 | Claude Code | the repository's `.mcp.json` | Specialists inherit the session's tools minus a denylist, so they reach every server the session has. The launcher loads only the `.mcp.json` servers the list matches, alongside `--strict-mcp-config`, and allows their tools. |
 | OpenCode 1 | the `mcp` block of `opencode.json` | Nothing: specialists already inherit MCP tools, without a permission prompt. |
-| OpenCode 2 | `mcp.servers` in `opencode.json` (`oc2 mcp add`) | Nothing: the same. |
+| OpenCode 2 | `mcp.servers` in `opencode.json` (`oc2 mcp add`) | Nothing from 0.14.1: specialists inherit MCP tools. Before it, every unnamed tool asked for approval. |
 | Prime 0.10 | `prime-agent mcp add`, user-level only | Nothing: an `rlm.spawn` child calls servers through its `mcp` helper. |
 
-All four were verified live in November 2026 with a marker server whose calls only it could answer. On Prime,
+All four were verified live in November 2026 with a marker server whose calls only it could answer. The first
+OpenCode 2 probe ran with `--auto`, which approves every ask, and so missed that the adapter's agents asked for
+`read`, `grep`, `skill` and every MCP tool; a daemon session waited forever on the first one (Worklink #2126).
+0.14.1 was verified without `--auto`, on OpenCode 2.2.7. Probe the way the run will execute. On Prime,
 give `mcp add` an absolute command path: a bare `node` resolved to a mise shim that failed under a daemon
 started with a different HOME, and the server never came up.
 
