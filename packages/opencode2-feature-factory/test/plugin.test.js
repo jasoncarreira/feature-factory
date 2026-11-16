@@ -92,6 +92,20 @@ describe("OpenCode 2.0 plugin", () => {
       assert.deepEqual(agent(driver).permissions.filter((rule) => rule.action === "subagent" && rule.effect === "allow").map((rule) => rule.resource), SPECIALISTS);
     }
     for (const id of SPECIALISTS) assert.equal(effect(id, "subagent"), "deny", `${id} may not delegate`);
+    // ENFORCEMENT: an action no rule matches is an `ask`, and a daemon session has nobody to answer one.
+    // Worklink #2126's driver waited forever on `skill (feature)`, and without `--auto` a specialist's read,
+    // glob, grep and MCP calls asked too (verified on OpenCode 2.2.7, 0.14.1). This resolves rules the way the
+    // host does, last match wins with `*` as a wildcard, so each tool the probe saw ask must resolve to allow
+    // while the denies above still win.
+    const glob = (pattern, value) => new RegExp(`^${pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/gu, "\\$&")).join(".*")}$`, "u").test(value);
+    const resolved = (id, action, resource) => agent(id).permissions.filter((rule) => glob(rule.action, action) && glob(rule.resource, resource)).at(-1)?.effect ?? "ask";
+    for (const id of ours) {
+      for (const [action, resource] of [["read", "README.md"], ["glob", "*.md"], ["grep", "hello"], ["skill", "feature"], ["trellis_search", "*"]]) {
+        assert.equal(resolved(id, action, resource), "allow", `${id} ${action} (${resource}) would wait on an approval`);
+      }
+      assert.equal(resolved(id, "external_directory", "/elsewhere"), "deny", `${id} external_directory`);
+    }
+    assert.deepEqual([resolved("work-reviewer", "edit", "src/a.js"), resolved("feature-factory", "subagent", "general"), resolved("feature-factory", "subagent", "spec-writer")], ["deny", "deny", "allow"]);
 
     assert.deepEqual(state.skills.map((skill) => [skill.id, skill.path]), [["feature", join(pkg, "skills", "feature", "SKILL.md")]]);
     assert.equal(state.skills[0].content, readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8"));

@@ -58,6 +58,10 @@ running without specialists.
 
 Each agent's `permissions` are derived from what it declares, and a project can't override them:
 
+- Every list starts by allowing everything, as the host's own agents do, and the rules below narrow it. The
+  host applies the last rule that matches, and an action no rule matches waits for an approval, which a
+  daemon session never gets: before 0.14.1 a driver hung loading its own skill, and specialists could not
+  read a file or call an MCP server without `--auto`.
 - A specialist can edit only if it declares `Edit` or `Write`, so `work-reviewer` and
   `implementation-validator` can't change the code they judge.
 - No specialist can dispatch a subagent.
