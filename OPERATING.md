@@ -334,6 +334,29 @@ advisory.
 malformed: the optional property set is closed. A tracked file cannot hold two values for one repository
 published from two environments, which is exactly why the value moved out of it.
 
+### Where a host starts the driver
+
+A host that launches run drivers, such as a daemon, a queue or a supervisor, has two rules. It starts the driver in the operator checkout, and it lets the driver run `factory init` itself.
+The run's sandbox is then created inside that checkout, at `.factory-sandboxes/<run>`. Every adapter in this
+repository assumes that layout.
+
+Worklink #2126 stalled because of two departures from those rules, made together:
+
+- **The driver started in the sandbox.** The driver takes the operator checkout `O` to be the checkout it
+  starts in, so in the sandbox `O` was the sandbox itself. The resume guard requires the feature branch to
+  be absent from `O`. It found the run's own branch there and refused, as it should.
+- **The host initialized the run.** The driver then only ever resumes a run it did not create. In the
+  workflow's handoff, the receiving driver derives the run ID and initializes the run itself.
+
+Do not confine the driver to the sandbox, even with `O` passed in, because the driver must write to `O`. It
+publishes a parked run to `$O/.factory/.parked/<run>`. After the pull request is recorded, it archives the
+sandbox and removes it, working from `O`. Confine the driver to the operator checkout instead; the sandbox
+sits inside it. A host that needs the sandbox path should read `sandbox_path` from
+`factory status <run> --json` after init, not compute it in advance.
+
+This rule is instruction, not enforcement. A driver started in the wrong place cannot produce a false green,
+because the guard above stops the run before it has any effect.
+
 ### Launch command
 
 The parent shell, launcher, or supervisor must inject and export a nonempty `GH_TOKEN` for the declared
