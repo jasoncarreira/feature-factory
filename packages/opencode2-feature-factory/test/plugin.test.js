@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import plugin, { commandText, factoryResources } from "../plugin/index.js";
-import { SPECIALISTS, agentDefinitions, modelRef, resolvedModel } from "../plugin/agents.js";
+import { SPECIALISTS, agentDefinitions, modelRef, parseFrontmatter, resolvedModel } from "../plugin/agents.js";
 import { createBackgroundTool, rejection } from "../plugin/background.js";
 import { runCommands } from "../tui/commands.js";
 
@@ -106,6 +106,23 @@ describe("OpenCode 2.0 plugin", () => {
       assert.equal(resolved(id, "external_directory", "/elsewhere"), "deny", `${id} external_directory`);
     }
     assert.deepEqual([resolved("work-reviewer", "edit", "src/a.js"), resolved("feature-factory", "subagent", "general"), resolved("feature-factory", "subagent", "spec-writer")], ["deny", "deny", "allow"]);
+    // The whole restriction matrix through the same resolver, because an exact-action lookup would miss a later
+    // rule whose wildcard overrides it. Each specialist edits, runs commands and fetches exactly as its shared
+    // agent file declares, and delegates to nobody; each driver may do all three and dispatch exactly the
+    // eleven specialists, never itself, the other driver, or a host agent.
+    for (const id of SPECIALISTS) {
+      const declared = String(parseFrontmatter(readFileSync(join(root, "agents", `${id}.md`), "utf8")).meta.tools).split(",").map((tool) => tool.trim());
+      for (const [action, tools] of [["edit", ["Edit", "Write"]], ["shell", ["Bash"]], ["webfetch", ["WebFetch"]]]) {
+        assert.equal(resolved(id, action, "x"), tools.some((tool) => declared.includes(tool)) ? "allow" : "deny", `${id} ${action}`);
+      }
+      for (const target of [...ours, ...BUILTIN]) assert.equal(resolved(id, "subagent", target), "deny", `${id} may not dispatch ${target}`);
+    }
+    for (const driver of ["feature-factory", "run-orchestrator"]) {
+      for (const action of ["edit", "shell", "webfetch"]) assert.equal(resolved(driver, action, "x"), "allow", `${driver} ${action}`);
+      for (const target of [...ours, ...BUILTIN]) {
+        assert.equal(resolved(driver, "subagent", target), SPECIALISTS.includes(target) ? "allow" : "deny", `${driver} dispatching ${target}`);
+      }
+    }
 
     assert.deepEqual(state.skills.map((skill) => [skill.id, skill.path]), [["feature", join(pkg, "skills", "feature", "SKILL.md")]]);
     assert.equal(state.skills[0].content, readFileSync(join(pkg, "skills", "feature", "SKILL.md"), "utf8"));
