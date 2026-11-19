@@ -526,6 +526,29 @@ describe("end to end — a merge is refused through the real CLI", () => {
         }
       } finally { cleanupProject(sv); }
     }
+    // A ratified entry that is the configured verify itself runs once and answers both, bootstrap first; a spelling
+    // the shell could parse differently (two spaces) keeps the two separate runs.
+    const counted = mkdtempSync(join(tmpdir(), "ff-shared-verify-"));
+    writeFileSync(join(counted, "count.js"), "require('fs').appendFileSync(process.argv[2], 'x');\n");
+    for (const [gap, runs] of [[" ", "x"], ["  ", "xx"]]) {
+      const command = `node${gap}${join(counted, "count.js")} ${join(counted, `scope-${gap.length}`)}`;
+      const sv = project(`shared-verify-${gap.length}`, { sliceVerify: true, testPlan: [command], verify: command,
+        bootstrap: "node -e \"require('fs').appendFileSync('.factory/boot','x')\"", bootstrapMarker: ".factory/boot" });
+      try {
+        const { basePoint } = buildSlice(sv.repo);
+        assert.equal(factory(sv.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+        const observed = factory(sv.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+          "--attempt", "1", "--test-cmd", command, "--now", NOW(3)]);
+        assert.equal(observed.ok, true, observed.stderr);
+        assert.deepEqual([observed.out.review_ready, observed.out.repository_verify], [true, "exit 0"]);
+        assert.equal(readFileSync(join(counted, `scope-${gap.length}`), "utf8"), runs, "one execution when the test is the verify");
+        assert.equal(readFileSync(join(sv.repo, ".factory", "boot"), "utf8"), "x", "the verify's bootstrap still runs once");
+        const evidence = JSON.parse(readFileSync(join(sv.runDir, "evidence", "be-thing.json"), "utf8"));
+        assert.equal(evidence.repository_verify.cmd, command);
+        if (runs === "x") assert.equal(evidence.repository_verify.log_path, evidence.tests.log_path, "the shared run's log answers both");
+      } finally { cleanupProject(sv); }
+    }
+    rmSync(counted, { recursive: true, force: true });
     // #376, the 0.10.7 regression: slices build in their own worktrees, which never received bootstrap output,
     // so a verify needing it failed every slice. Every earlier row built in the sandbox root, where init had
     // bootstrapped -- which is how it shipped. Bootstrap now runs in the slice worktree before its verify.

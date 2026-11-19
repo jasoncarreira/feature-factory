@@ -59,6 +59,10 @@ From the worktree, compile and run the narrowest relevant tests:
 Use the repo's own build and test commands, scoped as narrowly as they allow — a compile or
 type-check step, then the specific test class or file you touched, not the full suite. If the
 build fails, fix it before reporting; never hand back code that does not compile.
+Do not run the repository's `verify` command or its full suite, even when your slice's ratified
+`test_plan` entry is one: the orchestrator runs both on your commit before review, so a run of your own
+costs the same time again and proves nothing that observation will not. Run the ratified entry yourself
+only when it is targeted.
 
 ## Commit
 

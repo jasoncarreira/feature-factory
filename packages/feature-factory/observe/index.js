@@ -288,7 +288,7 @@ export function privilegedPaths(filesChanged) {
     || PRIVILEGED_EXACT.includes(file));
 }
 
-export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, testTimeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, repositoryVerify = null, reused = null, logs = null, options = {} }) {
+export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktree, status, blockedReason = null, claim = null, testCommand = null, skipReason = null, shellCommand = false, testTimeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, repositoryVerify = null, testIsVerify = false, reused = null, logs = null, options = {} }) {
   // Cleanliness is established before anything else is observed, because every later
   // fact - the diff, the commit, and above all the test result - is only about the
   // recorded commit if the tree has nothing uncommitted in it.
@@ -299,7 +299,17 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   // `reused` carries a slice's green repository verify for a merge whose tree is byte-identical (#374).
   // Run-local logs, named by commit as well as attempt: the post-merge test-verifier restarts attempts per merge.
   const logFor = (kind) => (logs && observation.commit ? { runDir: logs.runDir, ref: `${logs.prefix}.${observation.commit.slice(0, 12)}.${kind}.log` } : null);
-  const tests = cleanliness.clean && reused ? reused.tests : cleanliness.clean
+  // Efficiency, not enforcement: when the ratified test command is the configured verify itself, one execution
+  // answers both, run exactly as the verify runs -- bootstrap first, through the shell, under the verify's timeout.
+  // The caller sets `testIsVerify` only for a spelling argv and the shell parse identically, so the result is
+  // the one each would have produced; a second run cost Mimir a full suite on every slice attempt.
+  const shared = Boolean(testIsVerify && repositoryVerify && cleanliness.clean && !reused);
+  const sharedRefusal = shared ? repositoryVerify.prepare?.() ?? null : null;
+  const tests = shared ? (sharedRefusal
+    ? { cmd: repositoryVerify.command, exit: null, observed: false, skipped_reason: null }
+    : runTests(worktree, repositoryVerify.command, { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs,
+      stdio: ["ignore", 2, 2], log: logFor("test") }))
+    : cleanliness.clean && reused ? reused.tests : cleanliness.clean
     ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand, timeoutMs: testTimeoutMs, log: logFor("test"),
       // Output to stderr, stdin inherited: `slice merged --json` and `observe --json` stay one JSON object.
       ...(shellCommand ? { stdio: ["inherit", 2, 2] } : {}) })
@@ -312,10 +322,12 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   // verify does not run and the refusal is the evidence's blocked reason.
   // Bootstrap is the verify's own first step (#376 review): it runs only when the verify will, and after the
   // ratified test, so nothing the test does can remove its output before the verify reads it.
-  const eligible = repositoryVerify && cleanliness.clean && !(tests.observed && tests.exit !== 0);
-  const bootstrapRefusal = eligible ? repositoryVerify.prepare?.() ?? null : null;
+  const eligible = !shared && repositoryVerify && cleanliness.clean && !(tests.observed && tests.exit !== 0);
+  const bootstrapRefusal = shared ? sharedRefusal : eligible ? repositoryVerify.prepare?.() ?? null : null;
   const verifyRuns = eligible && !bootstrapRefusal;
-  const verified = !repositoryVerify ? null : verifyRuns
+  const verified = !repositoryVerify ? null : shared
+    ? (({ skipped_reason, ...verify }) => verify)(tests)
+    : verifyRuns
     ? (({ skipped_reason, ...verify }) => verify)(runTests(worktree, repositoryVerify.command,
       { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs, stdio: ["ignore", 2, 2], log: logFor("verify") }))
     : { cmd: repositoryVerify.command, exit: null, observed: false };
