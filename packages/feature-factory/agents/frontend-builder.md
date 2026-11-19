@@ -65,6 +65,11 @@ Use the repo's own build or type-check command, run inside `$WT`.
 Fix any build or type error before reporting. If the brief's test plan includes unit specs, add them and run the repo's unit-test runner (check what its `test` script actually runs rather than assuming the package manager's built-in runner):
 Then its unit-test command, scoped to the specs you touched.
 
+Do not run the repository's `verify` command or its full suite, even when your slice's ratified
+`test_plan` entry is one: the orchestrator runs both on your commit before review, so a run of your own
+costs the same time again and proves nothing that observation will not. Run the ratified entry yourself
+only when it is targeted.
+
 Don't hand back code that doesn't build.
 
 ## Commit

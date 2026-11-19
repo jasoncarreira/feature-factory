@@ -22,7 +22,7 @@ import { assertPublicationReady, REVIEW_KEYS } from "../observe/review.js";
 import { parseRepositoryConfig, RepositoryConfigError } from "../observe/repository-config.js";
 import { FAMILY_CONTRACTS } from "../core/contracts.js";
 import { assertRemediationBindings } from "../bin/restore.js";
-import { resolveSpawnExecutable } from "../core/executable.js";
+import { resolveSpawnExecutable, shellRunsSameExecutable } from "../core/executable.js";
 import { initFresh, seedLegacyRun } from "./init-fixture.js";
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "factory.js");
@@ -526,6 +526,39 @@ describe("end to end — a merge is refused through the real CLI", () => {
         }
       } finally { cleanupProject(sv); }
     }
+    // A ratified entry that is the configured verify itself runs once and answers both, bootstrap first, executed as
+    // argv. A spelling the shell could split differently (two spaces) keeps the two separate runs, as does a builtin
+    // that shadows an executable (`test`); a failure answers both;
+    // a bootstrap refusal (here, only once the slice exists) runs nothing.
+    const counted = mkdtempSync(join(tmpdir(), "ff-shared-verify-"));
+    writeFileSync(join(counted, "count.js"), "require('fs').appendFileSync(process.argv[2], 'x'); process.exit(Number(process.argv[3] ?? 0));\n");
+    const boot = "node -e \"require('fs').appendFileSync('.factory/boot','x')\"";
+    for (const [name, command, bootstrap, ready, verifyOut, runs, booted] of [
+      ["once", (scope) => `node ${join(counted, "count.js")} ${scope}`, boot, true, "exit 0", "x", "x"],
+      ["two-space", (scope) => `node  ${join(counted, "count.js")} ${scope}`, boot, true, "exit 0", "xx", "x"],
+      ["shadowed", () => "test -n x", boot, true, "exit 0", null, "x"],
+      ["failing", (scope) => `node ${join(counted, "count.js")} ${scope} 3`, boot, false, "exit 3", "x", "x"],
+      ["refused", (scope) => `node ${join(counted, "count.js")} ${scope}`, "node -e \"process.exit(require('fs').existsSync('src/app/thing.ts')?4:0)\"", false, "not run", null, null],
+    ]) {
+      const scope = join(counted, `scope-${name}`), cmd = command(scope);
+      const sv = project(`shared-verify-${name}`, { sliceVerify: true, testPlan: [cmd], verify: cmd, bootstrap, bootstrapMarker: ".factory/boot" });
+      try {
+        const { basePoint } = buildSlice(sv.repo);
+        assert.equal(factory(sv.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+        const observed = factory(sv.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+          "--attempt", "1", "--test-cmd", cmd, "--now", NOW(3)]);
+        assert.equal(observed.ok, true, observed.stderr);
+        assert.deepEqual([observed.out.review_ready, observed.out.repository_verify], [ready, verifyOut], name);
+        assert.equal(existsSync(scope) ? readFileSync(scope, "utf8") : null, runs, `${name}: one execution when the test is the verify`);
+        const marker = join(sv.repo, ".factory", "boot");
+        assert.equal(existsSync(marker) ? readFileSync(marker, "utf8") : null, booted, `${name}: the verify's bootstrap runs once`);
+        const evidence = JSON.parse(readFileSync(join(sv.runDir, "evidence", "be-thing.json"), "utf8"));
+        assert.equal(evidence.repository_verify.cmd, cmd);
+        if (name === "once" || name === "failing") assert.equal(evidence.repository_verify.log_path, evidence.tests.log_path, "the shared run's log answers both");
+        if (name === "shadowed" || name === "two-space") assert.notEqual(evidence.repository_verify.log_path, evidence.tests.log_path, `${name}: two runs`);
+      } finally { cleanupProject(sv); }
+    }
+    rmSync(counted, { recursive: true, force: true });
     // #376, the 0.10.7 regression: slices build in their own worktrees, which never received bootstrap output,
     // so a verify needing it failed every slice. Every earlier row built in the sandbox root, where init had
     // bootstrapped -- which is how it shipped. Bootstrap now runs in the slice worktree before its verify.
@@ -653,6 +686,12 @@ describe("end to end — a merge is refused through the real CLI", () => {
     for (const argv0 of ["tool", "./tool", "C:\\tools\\tool.exe"]) {
       assert.deepEqual(resolveSpawnExecutable(argv0, { platform: "win32", cwd: "C:\\repo", env: { Path: "C:\\bin" } }),
         { ok: false, reason: "unsupported-platform", platform: "win32" }, `win32 refuses ${argv0} rather than mis-resolving it`);
+    }
+    // A slice test shares its run with the verify only when `sh` would run the same executable (review of #412): a
+    // builtin shadowing an executable (`printf`, `test`), a builtin alone (`exit`), or a keyword keeps two runs.
+    for (const shadowed of ["printf", "test"]) assert.equal(resolveSpawnExecutable(shadowed).ok, true, `${shadowed} is also an executable here`);
+    for (const [argv0, same] of [["node", true], [process.execPath, true], ["printf", false], ["test", false], ["exit", false], ["if", false], ["-x", false]]) {
+      assert.equal(shellRunsSameExecutable(argv0, { cwd: tmpdir() }), same, `${argv0}: shell runs the argv executable`);
     }
 
     const p = upToReview("clean");

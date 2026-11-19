@@ -47,7 +47,7 @@ Resolve every ambiguity so builders don't have to. Follow the repository's agent
 **Cross-cutting:**
 - Feature flag needed? Name the repo's flag mechanism and its guard
 - Auth/role gating
-- Test plan: unit tests, and acceptance (which criterion maps to which test, and at what level)
+- Test plan: unit tests, and acceptance (which criterion maps to which test, and at what level). Name each test by its file path, existing or to be created, so the decomposer can turn the mapping into a targeted command.
 - **Class-wide work:** convert the research inventory into a closed implementation matrix — one row per sink/call site, each assigned an exact primitive/policy, a compatibility (preserve/migrate) or explicit exclusion decision, and a mapped test. No sink is left to the builder to discover.
 - **One term per concept:** define each new domain term once in the brief and reuse the codebase's and the
   contract's existing terms for existing concepts; never introduce a second name for something that already

@@ -43,6 +43,19 @@ An independently-implementable unit of the brief with:
   decision somebody made rather than one that happened. Commands use the existing shell-free whitespace
   tokenizer: do not rely on pipelines, shell expansion, environment assignment, or quote-aware parsing.
   `observe` executes each ratified command as argv with no shell, so every `test_plan` entry must be one directly executable command; builders may run focused suites separately.
+  **Scope each entry to its slice, and leave the full suite to `verify`.** Read `.factory.json` in the
+  sandbox. When it declares `verify`, `observe` already runs that command on every slice's commit, and the
+  merge runs it again on the integration branch, reusing the slice's result only when the merged tree is
+  byte-identical. So a slice's entry is the narrowest command that proves the slice: the test files its
+  criteria map to, plus the tests of every caller, fixture or contract its change affects (rule 6). Do not
+  name the full suite, or a script that runs it, as a slice entry; each repetition costs a full suite run
+  on every attempt and proves nothing `verify` does not. A slice that genuinely needs the whole suite names
+  the `verify` command itself, spelled exactly as `.factory.json` has it, and observation runs it once for
+  both. When the targeted tests need a mode the
+  repository selects through the environment, name the repository's own entry point that sets the mode and
+  takes test paths; where none exists, use the narrowest script that does and name the missing entry point
+  in the plan. Without a declared `verify`, the slice entries are the only suite the merged branch is held
+  to, so keep a broader command wherever the change could break tests outside its mapped files.
 
 **The original `paths` prefix and `test_plan` are ratified when the plan is seeded and cannot be changed
 afterwards.** Every later ownership check judges against the current persisted paths. The seeded prefix

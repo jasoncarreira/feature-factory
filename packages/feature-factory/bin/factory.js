@@ -23,7 +23,7 @@ import { archiveReviewAttempt, publishAttemptArchive, qualifyAttemptArchive } fr
 import { hasRetryGrantTransaction, prepareRetryGrantTransaction, reconcileRetryGrantTransaction } from "../state/retry-grant-transaction.js";
 import { writeProtectedFileAtomic, writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
-import { resolveSpawnExecutable } from "../core/executable.js";
+import { resolveSpawnExecutable, shellRunsSameExecutable } from "../core/executable.js";
 import { dispatchInitPublication } from "./init-publication.js";
 import { assertRetryExtensionBindings, dispatchRestore, readRestoreRecord } from "./restore.js";
 import { dispatchSnapshot } from "./snapshot.js";
@@ -459,10 +459,10 @@ function branchPoint(run) {
   return base;
 }
 
-async function writeObservedEvidence({ repo, runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify = null, reused = null }) {
+async function writeObservedEvidence({ repo, runDir, runId, subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify = null, testIsVerify = false, reused = null }) {
   const evidence = buildEvidence({
     subject, attempt, branch, baseRef, worktree, status, blockedReason, claim, runId,
-    testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify, reused,
+    testCommand, skipReason, shellCommand, testTimeoutMs, repositoryVerify, testIsVerify, reused,
     logs: { runDir, prefix: `evidence/logs/${subject}.attempt-${attempt}` },
   });
   const ancestry = observeAncestry(worktree, baseRef, "HEAD");
@@ -593,6 +593,11 @@ function sameTree(worktree, left, right) {
   const [a, b] = [tree(left), tree(right)];
   return a.ok && b.ok && a.stdout.trim() === b.stdout.trim();
 }
+
+// Words of ordinary characters separated by single spaces, the first not an assignment: a spelling that argv tokenizing
+// and `sh` split into the same words (no quote, glob, `$`, or `~`). Same words are not the same program, so sharing
+// also requires `shellRunsSameExecutable` for the first word. The shared run executes those words as argv.
+const PLAIN_COMMAND = /^(?![^ ]*=)[\w./:@%+,=-]+(?: [\w./:@%+,=-]+)*$/u;
 
 function reusableSliceVerify({ runDir, runId, ref, worktree, mergeCommit, command }) {
   let evidence;
@@ -1467,6 +1472,8 @@ const HANDLERS = {
       testTimeoutMs: flags.repositoryVerify ? repositoryVerify.timeoutMs : undefined,
       repositoryVerify: sliceVerify && { command: sliceVerify.command, timeoutMs: sliceVerify.timeoutMs,
         prepare: () => bootstrapBeforeVerify(worktree, sliceVerify, "slice observation") },
+      testIsVerify: Boolean(sliceVerify && flags.testCmd === sliceVerify.command && PLAIN_COMMAND.test(flags.testCmd)
+        && shellRunsSameExecutable(flags.testCmd.split(" ")[0], { cwd: worktree })),
     });
     return emit(flags, {
       run_id: runId, subject, evidence_ref: evidenceRef(subject),

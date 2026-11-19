@@ -703,6 +703,14 @@ describe("ceiling — scope cannot grow without editing this file", () => {
       ["work-reviewer", "definition, naming both locations. Block only when it causes a real defect or contradicts the contract;", "the slice reviewer's concept check is bounded"],
       ["work-reviewer", "Taste in naming or abstraction is never a finding on its own.", "naming taste is never a finding"],
       ["spec-writer", "**One term per concept:** define each new domain term once in the brief and reuse the codebase's and the", "the brief defines each term once"],
+      // Instruction: a slice suite that repeats `verify` costs an hour per attempt on mimir, and observation still
+      // runs `verify` on every slice commit and merge, so narrowing these cannot produce a false green.
+      ["work-decomposer", "**Scope each entry to its slice, and leave the full suite to `verify`.**", "slice test_plan entries must be targeted"],
+      ["work-decomposer", "name the full suite, or a script that runs it, as a slice entry; each repetition costs a full suite run", "a slice entry must not repeat verify"],
+      ["work-decomposer", "the `verify` command itself, spelled exactly as `.factory.json` has it, and observation runs it once for", "a whole-suite slice names verify itself"],
+      ["backend-builder", "Do not run the repository's `verify` command or its full suite, even when your slice's ratified", "the backend builder leaves the full suite to observation"],
+      ["frontend-builder", "Do not run the repository's `verify` command or its full suite, even when your slice's ratified", "the frontend builder leaves the full suite to observation"],
+      ["spec-writer", "Name each test by its file path, existing or to be created, so the decomposer can turn the mapping", "the brief names test files"],
     ]) assert.ok((byName.get(name) ?? "").includes(fragment), `${name}: ${why}`);
     // Review of #371: the first draft called internal schemas a non-blocking note in one bullet and required
     // unrequested schemas removed in another, so one artifact could be approved or rejected. Missing depth is
@@ -1402,7 +1410,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // head a NO-GO judged, still bound to that head. Shared preconditions, schema, contracts and status.
     // 6663 -> 6682 for 0.14.0: `.factory.json` `mcp_servers`, validated, recorded at init, immutable, and reported by
     // status, so every driver can name the project's MCP servers in dispatch prompts (#407).
-    assert.equal(total, 6682, "the configured MCP servers are recorded and reported: 6682 production lines");
+    // 6682 -> 6719: a slice whose ratified test is the configured `verify` itself runs it once for both, as argv, when
+    // `sh` would run the same executable.
+    assert.equal(total, 6719, "a slice test that is the verify runs once: 6719 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
