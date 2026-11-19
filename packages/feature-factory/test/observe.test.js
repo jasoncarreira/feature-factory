@@ -187,6 +187,23 @@ describe("attack 1 — an agent claims a test pass that never ran", () => {
       assert.deepEqual(argvResult, {
         cmd: "node --version", exit: 0, observed: true, skipped_reason: null,
       });
+
+      // Review of #412: a test that is the verify runs once, as argv under the verify's timeout and after its
+      // bootstrap, so a shell builtin (`exit 0`) fails to execute instead of passing for both fields through `sh`.
+      const sharedCalls = [];
+      let prepared = 0;
+      const shared = buildEvidence({
+        subject: "be-thing", runId: "app-1", attempt: 1, branch: "slice", baseRef: f.base, worktree: f.root,
+        status: "completed", testCommand: ["exit", "0"], testIsVerify: true,
+        repositoryVerify: { command: "exit 0", timeoutMs: explicitTimeoutMs, prepare: () => { prepared += 1; return null; } },
+        options: { runner(command, args, options) {
+          if (command === "exit" || command === "exit 0") sharedCalls.push({ command, options });
+          return spawnSync(command, args, options);
+        } },
+      });
+      assert.deepEqual(sharedCalls.map(({ command, options }) => [command, options.shell, options.timeout]), [["exit", false, explicitTimeoutMs]]);
+      assert.equal(prepared, 1, "the verify's bootstrap runs once, before the shared run");
+      assert.deepEqual([shared.tests.observed, shared.repository_verify.observed, shared.review_ready], [false, false, false]);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 

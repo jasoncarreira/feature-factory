@@ -1410,8 +1410,8 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // head a NO-GO judged, still bound to that head. Shared preconditions, schema, contracts and status.
     // 6663 -> 6682 for 0.14.0: `.factory.json` `mcp_servers`, validated, recorded at init, immutable, and reported by
     // status, so every driver can name the project's MCP servers in dispatch prompts (#407).
-    // 6682 -> 6699: a slice whose ratified test is the configured `verify` itself runs it once for both.
-    assert.equal(total, 6699, "a slice test that is the verify runs once: 6699 production lines");
+    // 6682 -> 6701: a slice whose ratified test is the configured `verify` itself runs it once for both, as argv.
+    assert.equal(total, 6701, "a slice test that is the verify runs once: 6701 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body

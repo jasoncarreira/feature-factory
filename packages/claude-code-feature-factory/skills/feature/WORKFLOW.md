@@ -1641,9 +1641,9 @@ Per slice:
    ratified test command, and records the result as `repository_verify`. A declared `bootstrap` runs in
    the slice worktree, which never received init's bootstrap output, immediately before that verify and
    only when it will run; a bootstrap refusal is the evidence's blocked reason and the verify does not run. When the ratified command is
-   the `verify` string itself, spelled with single spaces and no shell syntax, observation runs it once, as the
-   verify runs (bootstrap first), and records that one result as both `tests` and `repository_verify`, sharing one
-   `log_path`. A failing repository verify makes the slice not `review_ready`, the
+   the `verify` string itself, spelled with single spaces and no shell syntax, observation runs it once, after
+   the verify's bootstrap and under its timeout but executed as the ratified test's argv, and records that one result
+   as both `tests` and `repository_verify`, sharing one `log_path`. A failing repository verify makes the slice not `review_ready`, the
    same as a failing test, so the review rejects and the slice retries; an empty `test_plan` does not
    waive it. Its output is persisted, as is the ratified test's: both `tests` and `repository_verify`
    record `log_path` (a run-local log of stdout and stderr in order, under `evidence/logs/`), `log_bytes`,

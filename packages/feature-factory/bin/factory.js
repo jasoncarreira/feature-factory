@@ -594,8 +594,8 @@ function sameTree(worktree, left, right) {
   return a.ok && b.ok && a.stdout.trim() === b.stdout.trim();
 }
 
-// Words of ordinary characters separated by single spaces, the first not an assignment: the only spelling that
-// argv tokenizing and `sh` parse the same way, so one execution can stand for both (no quote, glob, `$`, or `~`).
+// Words of ordinary characters separated by single spaces, the first not an assignment: a spelling that argv tokenizing
+// and `sh` split into the same words (no quote, glob, `$`, or `~`). The shared run executes those words as argv.
 const PLAIN_COMMAND = /^(?![^ ]*=)[\w./:@%+,=-]+(?: [\w./:@%+,=-]+)*$/u;
 
 function reusableSliceVerify({ runDir, runId, ref, worktree, mergeCommit, command }) {

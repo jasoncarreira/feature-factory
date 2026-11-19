@@ -192,7 +192,7 @@ function captureOutput(log, env, spawn) {
     log_truncated: size > LOG_CAP_BYTES, tail, ...(Number.isInteger(result?.status) ? {} : { signal: result?.signal ?? null, timed_out: timedOut }) } };
 }
 
-export function runTests(worktree, command, { runner = spawnSync, skipReason = null, shellCommand = false, timeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, stdio = "inherit", env = process.env, log = null } = {}) {
+export function runTests(worktree, command, { runner = spawnSync, skipReason = null, shellCommand = false, timeoutMs = DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS, stdio = "inherit", env = process.env, log = null, argvTimeoutMs = undefined } = {}) {
   if (!command) {
     // Finding 1: defaulting a skip reason let omission manufacture review readiness.
     // Tests must be observed green or explicitly skipped with a caller-declared reason;
@@ -201,7 +201,8 @@ export function runTests(worktree, command, { runner = spawnSync, skipReason = n
   }
   const spawn = (fd) => (shellCommand
     ? runner(command, [], { cwd: worktree, shell: true, stdio: fd === undefined ? stdio : [Array.isArray(stdio) ? stdio[0] : stdio, fd, fd], env, timeout: timeoutMs })
-    : runner(command[0], command.slice(1), fd === undefined ? { cwd: worktree, encoding: "utf8", shell: false } : { cwd: worktree, shell: false, stdio: ["ignore", fd, fd], env }));
+    : runner(command[0], command.slice(1), { ...(fd === undefined ? { cwd: worktree, encoding: "utf8", shell: false } : { cwd: worktree, shell: false, stdio: ["ignore", fd, fd], env }),
+      ...(argvTimeoutMs ? { timeout: argvTimeoutMs } : {}) }));
   const { result, fields } = log ? captureOutput(log, env, spawn) : { result: spawn(), fields: {} };
   const exit = Number.isInteger(result?.status) ? result.status : null;
   return { cmd: shellCommand ? command : command.join(" "), exit, observed: exit !== null, skipped_reason: null, ...fields };
@@ -300,15 +301,16 @@ export function buildEvidence({ subject, runId, attempt, branch, baseRef, worktr
   // Run-local logs, named by commit as well as attempt: the post-merge test-verifier restarts attempts per merge.
   const logFor = (kind) => (logs && observation.commit ? { runDir: logs.runDir, ref: `${logs.prefix}.${observation.commit.slice(0, 12)}.${kind}.log` } : null);
   // Efficiency, not enforcement: when the ratified test command is the configured verify itself, one execution
-  // answers both, run exactly as the verify runs -- bootstrap first, through the shell, under the verify's timeout.
-  // The caller sets `testIsVerify` only for a spelling argv and the shell parse identically, so the result is
-  // the one each would have produced; a second run cost Mimir a full suite on every slice attempt.
+  // answers both -- bootstrap first and under the verify's timeout, as the verify runs, but executed as argv, as the
+  // ratified test runs. The caller sets `testIsVerify` only for a spelling both parse into the same words. A first
+  // word only the shell would interpret (`exit 0`, `:`, `exec`) then fails to execute, which is what the test
+  // observed before; running it through the shell instead credited both fields with a pass (review of #412).
+  // A second run cost Mimir a full suite on every slice attempt.
   const shared = Boolean(testIsVerify && repositoryVerify && cleanliness.clean && !reused);
   const sharedRefusal = shared ? repositoryVerify.prepare?.() ?? null : null;
   const tests = shared ? (sharedRefusal
     ? { cmd: repositoryVerify.command, exit: null, observed: false, skipped_reason: null }
-    : runTests(worktree, repositoryVerify.command, { ...options, shellCommand: true, timeoutMs: repositoryVerify.timeoutMs,
-      stdio: ["ignore", 2, 2], log: logFor("test") }))
+    : runTests(worktree, testCommand, { ...options, argvTimeoutMs: repositoryVerify.timeoutMs, log: logFor("test") }))
     : cleanliness.clean && reused ? reused.tests : cleanliness.clean
     ? runTests(worktree, testCommand, { ...options, skipReason, shellCommand, timeoutMs: testTimeoutMs, log: logFor("test"),
       // Output to stderr, stdin inherited: `slice merged --json` and `observe --json` stay one JSON object.
