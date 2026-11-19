@@ -3,6 +3,25 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.14.2
+
+- **Slices test what they change, and the full suite runs where it already does.** On Mimir a slice's ratified
+  test was a script that ran the whole suite four times. Observation then ran the configured `verify`, the core
+  suite again, on the same commit, and the builder had run the full script itself, so a slice attempt spent
+  over an hour on verification. The work-decomposer now reads `.factory.json`. When `verify` is declared, each
+  slice's `test_plan` is the narrowest command that proves the slice and the tests its change affects. A slice
+  that needs the whole suite names `verify` itself. Builders no longer run `verify` or the full suite, because
+  observation runs both. The spec-writer's test plan names tests by file path.
+  `verify` still holds the integration branch after every merge, and Gate 3 stays fresh.
+- **A slice test that is the verify runs once.** When a slice's ratified command is exactly the configured `verify`,
+  observation runs it once and records that one result as both `tests` and `repository_verify`, with a shared log.
+  The run happens after the verify's bootstrap and under its timeout.
+  - The command must be plain words, and `sh` must run the same executable that the shell-free spawn resolves.
+  - A builtin keeps two runs, including one that shadows an executable, such as `printf` or `test`.
+- `OPERATING.md` gains *Where a host starts the driver*. A host starts the driver in the operator checkout and
+  lets it run `factory init` itself; Worklink #2126 stalled because it did neither.
+- Every package moves to 0.14.2 in lockstep.
+
 ## 0.14.1
 
 - **OpenCode 2: the factory's agents no longer wait on approvals nobody can give.** Assigning an agent's
