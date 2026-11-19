@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import { posix } from "node:path";
 
@@ -26,4 +27,19 @@ export function resolveSpawnExecutable(argv0, options = {}) {
     } catch {}
   }
   return { ok: false, reason: "not-executable", source: direct ? "its direct path" : source };
+}
+
+// Whether `sh` would run the very executable a shell-free spawn of argv0 runs. `command -v` prints a path for an
+// external command and only the bare word for a builtin, reserved word, or function, and a builtin can shadow an
+// executable of the same name with different behaviour: GNU `printf --version` exits 0 and the `sh` builtin rejects
+// it (review of #412). Anything the probe cannot establish answers false, which keeps two separate executions.
+export function shellRunsSameExecutable(argv0, options = {}) {
+  if (!argv0 || argv0.startsWith("-")) return false;
+  const found = resolveSpawnExecutable(argv0, options);
+  if (!found.ok) return false;
+  const cwd = options.cwd ?? process.cwd();
+  const probe = (options.spawn ?? spawnSync)("/bin/sh", ["-c", 'command -v "$1"', "sh", argv0],
+    { cwd, env: options.env ?? process.env, encoding: "utf8" });
+  const named = probe.status === 0 ? String(probe.stdout ?? "").trim() : "";
+  return named.includes("/") && posix.resolve(cwd, named) === found.path;
 }

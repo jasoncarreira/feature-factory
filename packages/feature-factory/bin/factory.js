@@ -23,7 +23,7 @@ import { archiveReviewAttempt, publishAttemptArchive, qualifyAttemptArchive } fr
 import { hasRetryGrantTransaction, prepareRetryGrantTransaction, reconcileRetryGrantTransaction } from "../state/retry-grant-transaction.js";
 import { writeProtectedFileAtomic, writeProtectedJsonAtomic } from "../core/atomic-write.js";
 import { enforceEffectivePushTarget } from "../core/effective-push.js";
-import { resolveSpawnExecutable } from "../core/executable.js";
+import { resolveSpawnExecutable, shellRunsSameExecutable } from "../core/executable.js";
 import { dispatchInitPublication } from "./init-publication.js";
 import { assertRetryExtensionBindings, dispatchRestore, readRestoreRecord } from "./restore.js";
 import { dispatchSnapshot } from "./snapshot.js";
@@ -595,7 +595,8 @@ function sameTree(worktree, left, right) {
 }
 
 // Words of ordinary characters separated by single spaces, the first not an assignment: a spelling that argv tokenizing
-// and `sh` split into the same words (no quote, glob, `$`, or `~`). The shared run executes those words as argv.
+// and `sh` split into the same words (no quote, glob, `$`, or `~`). Same words are not the same program, so sharing
+// also requires `shellRunsSameExecutable` for the first word. The shared run executes those words as argv.
 const PLAIN_COMMAND = /^(?![^ ]*=)[\w./:@%+,=-]+(?: [\w./:@%+,=-]+)*$/u;
 
 function reusableSliceVerify({ runDir, runId, ref, worktree, mergeCommit, command }) {
@@ -1471,7 +1472,8 @@ const HANDLERS = {
       testTimeoutMs: flags.repositoryVerify ? repositoryVerify.timeoutMs : undefined,
       repositoryVerify: sliceVerify && { command: sliceVerify.command, timeoutMs: sliceVerify.timeoutMs,
         prepare: () => bootstrapBeforeVerify(worktree, sliceVerify, "slice observation") },
-      testIsVerify: Boolean(sliceVerify && flags.testCmd === sliceVerify.command && PLAIN_COMMAND.test(flags.testCmd)),
+      testIsVerify: Boolean(sliceVerify && flags.testCmd === sliceVerify.command && PLAIN_COMMAND.test(flags.testCmd)
+        && shellRunsSameExecutable(flags.testCmd.split(" ")[0], { cwd: worktree })),
     });
     return emit(flags, {
       run_id: runId, subject, evidence_ref: evidenceRef(subject),
