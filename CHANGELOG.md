@@ -3,6 +3,24 @@
 Repository-only change record. Every package is pre-1.0 and, from 0.7.0, releases in lockstep: one
 version across the workspace, with each adapter pinning the exact factory version it ships beside.
 
+## 0.14.3
+
+- **`verify` can run on CI.** Projects are moving their full suite to CI because local runs queue on a shared
+  lock. `verify` was already one shell command whose exit status is all the factory reads, so it can hand the suite
+  to a script that pushes the commit and waits for CI. Two optional `.factory.json` keys make that workable:
+  - `verify_unavailable_exit` (1 to 255; `75` suggested) is the exit status meaning the verify could not run, such
+    as CI being unreachable. At slice observation it refuses without spending the slice's attempt, and the same
+    attempt is observed again once CI is back. After a merge it takes the existing unavailable path: one more
+    execution, then an orderly stop that a later invocation reconciles. Without the key, that exit is an ordinary
+    failure, as before.
+  - `verify_scope: "integration"` skips the verify at slice observation, and runs it after a merge, replay, or
+    base sync only once every slice is merged, so a run costs one full verify instead of one per slice and merge.
+    Slices still run their ratified tests locally, and Gate 3 still requires every slice merged.
+  - OPERATING.md's new "Running `verify` on CI" section is the contract a project's script must meet. Above all, it
+    reports on the exact sha it was given, never "the latest run on the branch", which is the one way this setup
+    can report a false pass (#414).
+- A `.factory.json` carrying either key is invalid on 0.14.2 and earlier, so add them only after pinning 0.14.3.
+
 ## 0.14.2
 
 - **Slices test what they change, and the full suite runs where it already does.** On Mimir a slice's ratified
