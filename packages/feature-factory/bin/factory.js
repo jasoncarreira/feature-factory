@@ -150,7 +150,8 @@ function qualifyFinding(runDir, run, ref, integration) {
     } else if (ref === evidenceRef("test-verifier")) {
       // Only the canonical repository-verify failure, not any test-verifier observation that happened to fail.
       const verify = readRepositoryConfig(integration.worktree, { optional: true });
-      bound = verify !== null && classifyRepositoryVerifyEvidence(runDir, { runId: run.run_id, run, integration, verifyCommand: verify.command }).kind === "failed";
+      bound = verify !== null && classifyRepositoryVerifyEvidence(runDir, { runId: run.run_id, run, integration, verifyCommand: verify.command,
+        unavailableExit: verify.unavailableExit }).kind === "failed";
     } else if (ref === "reviews/implementation-validator.json") {
       // The canonical validator review, never the free-form `run.validator.report` path, which is not run-local.
       bound = readValidatorReview(runDir, head).verdict === "NO-GO";
@@ -540,6 +541,9 @@ function classifyRepositoryVerifyEvidence(runDir, context) {
   if (evidence.tests.observed === true && evidence.tests.exit === 0 && evidence.review_ready === true) {
     return { kind: "green", evidence };
   }
+  // The configured `verify_unavailable_exit` means the verify could not run (a CI it waits on was unreachable): the
+  // same retry and orderly exhaustion as no exit status, never a failure the merge is refused for.
+  if (evidence.tests.observed === true && evidence.tests.exit === context.unavailableExit) return { kind: "unavailable", evidence };
   if (evidence.tests.observed === true && Number.isInteger(evidence.tests.exit)) {
     return { kind: "failed", evidence };
   }
@@ -549,7 +553,8 @@ function classifyRepositoryVerifyEvidence(runDir, context) {
   return { kind: "unknown", evidence };
 }
 
-function repositoryVerifyRefusal(mergeCommit, evidence) {
+function repositoryVerifyRefusal(mergeCommit, evidence, unavailableExit) {
+  if (unavailableExit !== undefined && evidence.tests?.exit === unavailableExit) return `factory config entry 'verify' was unavailable twice after recorded merge ${mergeCommit} (exit ${unavailableExit}, its verify_unavailable_exit); merged slice remains recorded; stop before advancing.`;
   if (evidence.tests?.observed === true && Number.isInteger(evidence.tests.exit) && evidence.tests.exit !== 0) {
     return `factory config entry 'verify' failed after recorded merge ${mergeCommit} with exit status ${evidence.tests.exit}; merged slice remains recorded; stop before advancing.`;
   }
@@ -599,6 +604,10 @@ function sameTree(worktree, left, right) {
 // also requires `shellRunsSameExecutable` for the first word. The shared run executes those words as argv.
 const PLAIN_COMMAND = /^(?![^ ]*=)[\w./:@%+,=-]+(?: [\w./:@%+,=-]+)*$/u;
 
+// Instruction, not enforcement: `verify_scope: "integration"` runs the post-merge verify only once every slice is
+// merged. Gate 3 requires every slice merged, so publication still waits on that verify; only the intermediate runs go.
+const verifyDeferred = (run, verify) => verify?.scope === "integration" && !run.slices.every((slice) => slice.status === "merged");
+
 function reusableSliceVerify({ runDir, runId, ref, worktree, mergeCommit, command }) {
   let evidence;
   try { evidence = readEvidence(runDir, ref, { runId }); } catch { return null; }
@@ -625,12 +634,12 @@ async function runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeComm
       testTimeoutMs: verify.timeoutMs, reused: attempt === 1 ? reused : null,
     });
     const classified = classifyRepositoryVerifyEvidence(runDir, {
-      runId, run, integration: attemptIntegration, verifyCommand: verify.command,
+      runId, run, integration: attemptIntegration, verifyCommand: verify.command, unavailableExit: verify.unavailableExit,
     });
     if (classified.kind === "green") return evidence;
     if (classified.kind === "failed") throw new CliError(repositoryVerifyRefusal(mergeCommit, classified.evidence));
     if (classified.kind === "unknown") throw new CliError(repositoryVerifyUnknownRefusal(mergeCommit));
-    if (attempt === 2) throw new CliError(repositoryVerifyRefusal(mergeCommit, evidence));
+    if (attempt === 2) throw new CliError(repositoryVerifyRefusal(mergeCommit, evidence, verify.unavailableExit));
     attemptIntegration = repositoryVerifyRetrySafety(repo, run, mergeCommit);
   }
   return null;
@@ -651,7 +660,7 @@ async function verifyRecordedMerge({ repo, runDir, runId, mergeCommit, sliceEvid
     }
     throw error;
   }
-  if (verify === null) return null;
+  if (verify === null || verifyDeferred(run, verify)) return null;
   const reused = sliceEvidenceRef && reusableSliceVerify({ runDir, runId, ref: sliceEvidenceRef,
     worktree: integration.worktree, mergeCommit, command: verify.command });
   return runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit, verify, integration, reused });
@@ -1041,12 +1050,13 @@ const HANDLERS = {
       if (error instanceof RepositoryConfigError) refuse(`factory config entry 'verify' unavailable: ${error.message}`);
       throw error;
     }
-    let classified = verify && classifyRepositoryVerifyEvidence(runDir, { runId, run, integration, verifyCommand: verify.command });
+    let classified = verify && !verifyDeferred(run, verify)
+      && classifyRepositoryVerifyEvidence(runDir, { runId, run, integration, verifyCommand: verify.command, unavailableExit: verify.unavailableExit });
     // A crash between the record and the verify leaves no evidence, or readable evidence for an earlier head; neither
     // judged this merge. Unreadable evidence stays unknown and never re-executes.
     const stale = classified?.evidence ? classified.evidence.commit !== merge : !existsSync(join(runDir, evidenceRef("test-verifier")));
     if (classified?.kind === "unknown" && (stale || !recorded)) classified = { kind: "unavailable" };
-    if (classified?.kind === "failed") throw new CliError(repositoryVerifyRefusal(merge, classified.evidence));
+    if (classified?.kind === "failed") throw new CliError(repositoryVerifyRefusal(merge, classified.evidence, verify.unavailableExit));
     if (classified?.kind === "unknown") throw new CliError(repositoryVerifyUnknownRefusal(merge));
     if (classified?.kind === "unavailable") {
       await runRepositoryVerifyAttempts({ repo, runDir, runId, run, mergeCommit: merge, verify, integration: repositoryVerifyRetrySafety(repo, run, merge) });
@@ -1220,11 +1230,11 @@ const HANDLERS = {
           }
           throw error;
         }
-        if (verify !== null) {
+        if (verify !== null && !verifyDeferred(current, verify)) {
           const classified = classifyRepositoryVerifyEvidence(runDir, {
-            runId, run: current, integration, verifyCommand: verify.command,
+            runId, run: current, integration, verifyCommand: verify.command, unavailableExit: verify.unavailableExit,
           });
-          if (classified.kind === "failed") throw new CliError(repositoryVerifyRefusal(existing.merge_commit, classified.evidence));
+          if (classified.kind === "failed") throw new CliError(repositoryVerifyRefusal(existing.merge_commit, classified.evidence, verify.unavailableExit));
           if (classified.kind === "unknown") {
             throw new CliError(repositoryVerifyUnknownRefusal(existing.merge_commit));
           }
@@ -1456,6 +1466,7 @@ const HANDLERS = {
         if (error instanceof RepositoryConfigError) throw new CliError(error.message);
         throw error;
       }
+      if (sliceVerify?.scope === "integration") sliceVerify = null;
     }
     const skipReason = slice && slice.test_plan.length === 0
       ? `test_plan for '${subject}' was approved empty at slices-seed`
@@ -1475,6 +1486,11 @@ const HANDLERS = {
       testIsVerify: Boolean(sliceVerify && flags.testCmd === sliceVerify.command && PLAIN_COMMAND.test(flags.testCmd)
         && shellRunsSameExecutable(flags.testCmd.split(" ")[0], { cwd: worktree })),
     });
+    // Instruction delivered as a refusal, not a false-green guard (the evidence is already not review_ready): a verify
+    // that could not run is no finding about the slice, and reviewing it as one spends a retry on unchanged work.
+    if (sliceVerify?.unavailableExit !== undefined && evidence.repository_verify?.exit === sliceVerify.unavailableExit) {
+      throw new CliError(`factory config entry 'verify' was unavailable for slice '${subject}' attempt ${attempt} (exit ${sliceVerify.unavailableExit}, its verify_unavailable_exit); this is not a review finding, so do not review or retry the slice; observe it again once the verify can run, or park the run needs-human.`);
+    }
     return emit(flags, {
       run_id: runId, subject, evidence_ref: evidenceRef(subject),
       review_ready: evidence.review_ready, files_changed: evidence.files_changed.length,

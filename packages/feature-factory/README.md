@@ -48,8 +48,8 @@ resolved Git top level:
 }
 ```
 
-The root has two required properties, `resolve` and `verify`, and seven optional properties: `publish`,
-`pr_draft`, `verify_timeout_ms`, `bootstrap`, `bootstrap_timeout_ms`, `max_retries`, and `mcp_servers`. Required commands and any present
+The root has two required properties, `resolve` and `verify`, and nine optional properties: `publish`,
+`pr_draft`, `verify_timeout_ms`, `verify_unavailable_exit`, `verify_scope`, `bootstrap`, `bootstrap_timeout_ms`, `max_retries`, and `mcp_servers`. Required commands and any present
 `publish` or `bootstrap` are non-empty strings. There is no `publishing_identity` key, and a file carrying one is malformed because the
 optional set is closed. A present `pr_draft` must be a JSON boolean and omission means `true`. Both timeouts are
 positive safe integers. `bootstrap_timeout_ms` requires `bootstrap`.
@@ -74,9 +74,9 @@ value stops the run instead of publishing under whatever credential the host hap
 it from `gh`, the token, stored authentication, or Git configuration: an expectation read from the
 credential being checked would always match.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; then invalid `mcp_servers`.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; invalid `mcp_servers`; invalid `verify_unavailable_exit`; then invalid `verify_scope`.
 
-The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, `.factory.json entry 'verify_timeout_ms' must be a positive integer`, `.factory.json entry 'max_retries' must be a positive integer`, and `.factory.json entry 'mcp_servers' must be an array of non-empty strings`.
+The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, `.factory.json entry 'verify_timeout_ms' must be a positive integer`, `.factory.json entry 'max_retries' must be a positive integer`, `.factory.json entry 'mcp_servers' must be an array of non-empty strings`, `.factory.json entry 'verify_unavailable_exit' must be an integer from 1 to 255`, and `.factory.json entry 'verify_scope' must be "slice" or "integration"`.
 
 A present invalid, unreadable, incomplete, wrong-type, whitespace-only, or unknown-property config refuses closed.
 

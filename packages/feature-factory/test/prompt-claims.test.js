@@ -159,7 +159,7 @@ const RESUME_ORDER = [
 ];
 
 const BOOTSTRAP_POLICY_FRAGMENTS = [
-  "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; then invalid `mcp_servers`.",
+  "Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; invalid `mcp_servers`; invalid `verify_unavailable_exit`; then invalid `verify_scope`.",
   "Configured `bootstrap` is consumed only by CLI-owned fresh init and explicit resume; the workflow consumer validates it but never executes it itself.",
   "When both bootstrap keys are absent, init and resume are exact no-ops for bootstrap: no execution, manifest fields, output, or response-shape change.",
   "Bootstrap cleanliness examines tracked worktree and index paths only; untracked dependency output is ignored.",
@@ -178,7 +178,7 @@ const BOOTSTRAP_POLICY_CONTRACTS = [
   ...BOOTSTRAP_POLICY_FRAGMENTS.map((fragment, index) => [
     `fragment-${index}`, fragment, (text) => text.includes(fragment),
   ]),
-  ["schema-optionals", "`bootstrap_timeout_ms`, `max_retries`, and `mcp_servers`.", (text) => /root must be a JSON object with the two required own properties `resolve` and `verify`,\s+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`,\s+`bootstrap_timeout_ms`, `max_retries`, and `mcp_servers`\./u.test(text)],
+  ["schema-optionals", "`bootstrap_timeout_ms`, `max_retries`, and `mcp_servers`.", (text) => /root must be a JSON object with the two required own properties `resolve` and `verify`,\s+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `verify_unavailable_exit`, `verify_scope`, `bootstrap`,\s+`bootstrap_timeout_ms`, `max_retries`, and `mcp_servers`\./u.test(text)],
   ["schema-max-retries-default", "without `--max-retries`, which still outranks it; omission leaves the default `3`.", (text) => /A present `max_retries` must be a positive integer\. It is the run's attempt budget when `init` runs\s+without `--max-retries`, which still outranks it; omission leaves the default `3`\./u.test(text)],
   // 0.8.0 removed `publishing_identity` from the file. The optional set is closed, so a file still carrying
   // it is malformed -- pinned here because a reader who only saw the key disappear might assume it is ignored.

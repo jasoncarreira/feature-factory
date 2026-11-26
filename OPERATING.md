@@ -65,8 +65,8 @@ resolved Git top level of the invocation checkout:
 }
 ```
 
-The root object has two required properties, `resolve` and `verify`, and six optional properties:
-`publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`, `bootstrap_timeout_ms`, and `max_retries`. Required commands and
+The root object has two required properties, `resolve` and `verify`, and nine optional properties:
+`publish`, `pr_draft`, `verify_timeout_ms`, `verify_unavailable_exit`, `verify_scope`, `bootstrap`, `bootstrap_timeout_ms`, `max_retries`, and `mcp_servers`. Required commands and
 any present `publish` or `bootstrap` are non-empty strings. There is no `publishing_identity` key, and a file carrying one is malformed
 because the optional set is closed. A present `pr_draft` must be a JSON boolean and omission means `true`.
 Both timeouts must be positive safe integers. `bootstrap_timeout_ms`
@@ -86,9 +86,9 @@ value stops the run instead of publishing under whatever credential the host hap
 it from `gh`, the token, stored authentication, or Git configuration: an expectation read from the
 credential being checked would always match.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; then invalid `mcp_servers`.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; invalid `mcp_servers`; invalid `verify_unavailable_exit`; then invalid `verify_scope`.
 
-The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, `.factory.json entry 'verify_timeout_ms' must be a positive integer`, `.factory.json entry 'publish' must be a non-empty string`, and `.factory.json entry 'max_retries' must be a positive integer`.
+The named forms are `.factory.json entry 'pr_draft' must be a boolean`, `.factory.json entry 'bootstrap' must be a non-empty string`, `.factory.json entry 'bootstrap_timeout_ms' requires a declared bootstrap command`, `.factory.json entry 'bootstrap_timeout_ms' must be a positive integer`, `.factory.json entry 'verify_timeout_ms' must be a positive integer`, `.factory.json entry 'publish' must be a non-empty string`, `.factory.json entry 'max_retries' must be a positive integer`, `.factory.json entry 'verify_unavailable_exit' must be an integer from 1 to 255`, and `.factory.json entry 'verify_scope' must be "slice" or "integration"`.
 
 `resolve`, `bootstrap`, and `verify` are consumed now, and the run's recorded `publishing_identity` is compared at the publication guards. Step 6 resolves one selection: a nonblank inherited `FACTORY_PUBLISHING_COMMAND` selects its exact string; that variable set blank or whitespace selects the default; when it is unset, configured `publish` wins if present; otherwise the default wins. Only a selected nondefault command replaces PR creation, after the factory-owned exact push and post-push identity guard.
 Effective push-target capture and comparison are active through the package-owned `factory effective-push` command; they are not deferred to configured `publish`.
@@ -272,6 +272,28 @@ privileged-path policy rather than by being unversioned. It was `.factory/config
 proved unusable — `.factory/` is gitignored, so the declaration could not be committed and never reached
 a sandbox clone. A feature run
 does not create, write, merge, archive, or package it.
+
+### Running `verify` on CI
+
+`verify` is one shell command and the factory reads only its exit status, so it may hand the suite to CI
+instead of running it locally. Two optional keys exist for that, and the script is the repository's. This is
+instruction: the factory cannot see inside the script, so what makes its exit honest is the script's own work.
+
+- `verify_unavailable_exit` names the exit status that means "CI could not be reached or did not run", as
+  distinct from "the tests failed". At slice observation it refuses without spending the slice's attempt; after
+  a merge it takes the unavailable path, one more execution and then an orderly stop that a later invocation
+  reconciles. Pick a status the suite never exits with on its own; `75` (`EX_TEMPFAIL`) is the usual choice.
+- `verify_scope: "integration"` skips the verify at slice observation and runs it once, after the merge that
+  integrates the last slice, so a run costs one CI run instead of one per slice and merge. Each slice still runs
+  its ratified `test_plan` locally. A slice that breaks something only the full suite covers is then found after
+  review, at the top, where it becomes a remediation slice or parks the run.
+
+The script must report on the exact commit it was given. It runs with `HEAD` at the slice or merge commit, and the
+sandbox's push URL is the operator checkout's real remote, so it can push `HEAD` to a branch only it uses, wait for
+the required checks on that commit's sha, exit `0` only when every one passed, and delete the branch. Waiting on
+"the latest run for the branch" instead of the run for that sha can report a stale green, which is the one way
+this setup produces a false pass. Give `verify_timeout_ms` room for CI queueing, and push the commits a run
+would land anyway, because the branch is briefly visible to anyone who can see the remote.
 
 ### Project MCP servers
 

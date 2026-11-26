@@ -601,7 +601,7 @@ The optional repository-owned file is `$O/.factory.json`:
 ```
 
 The root must be a JSON object with the two required own properties `resolve` and `verify`,
-plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`,
+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `verify_unavailable_exit`, `verify_scope`, `bootstrap`,
 `bootstrap_timeout_ms`, `max_retries`, and `mcp_servers`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
 command must be non-empty. `publish` was required and invoked nowhere until this release, so every
 consumer wrote a command that could not run. It is optional now and contributes only the file candidate
@@ -617,8 +617,11 @@ neither timeout shares or consumes the other's budget. A present `max_retries` m
 without `--max-retries`, which still outranks it; omission leaves the default `3`. A present `mcp_servers`
 must be an array of non-empty strings; `init` records it as `run.json` `mcp_servers`, fixed for the life of the
 run, and qualified status reports it (`[]` when absent). The *Project MCP servers* rule says what it changes.
+A present `verify_unavailable_exit` must be an integer from 1 to 255: the exit status by which `verify` says it
+could not run, such as a CI service it waits on being unreachable. A present `verify_scope` must be `"slice"`, the
+default, or `"integration"`. Slice observation and the post-merge verify below say what each changes.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; then invalid `mcp_servers`.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; invalid `mcp_servers`; invalid `verify_unavailable_exit`; then invalid `verify_scope`.
 
 Do not use the obsolete summary “Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.” because it omits the earlier `pr_draft` check.
 
@@ -780,7 +783,7 @@ Effective push-target capture and comparison are active through the package-owne
 | Entry | Declared input | Return shape | Failure meaning | Current behavior |
 |---|---|---|---|---|
 | `bootstrap` | Exact configured string as one shell command with `shell: true`, inherited environment and stdin, cwd exactly the selected sandbox, and child stdout and stderr both routed to CLI stderr. Each execution receives its own `bootstrap_timeout_ms`, independently `900000` when omitted. | Numeric exit status or unavailable `null`; output is visible on CLI stderr and never parsed | Clean zero succeeds; dirty or unobservable tracked state outranks unavailable or nonzero exit | Invoked by the CLI once during configured fresh init, again on every explicit configured resume, and immediately before every configured `verify` execution in the tree that verify runs in: the slice worktree during slice observation, and the integration worktree for post-merge verify, its replay, and direct repository verification. Never invoked by the resolver, effective push, publication, or a replay that reuses recorded verify evidence. |
-| `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are routed to CLI stderr, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status means unavailable | Invoked after each newly recorded merge through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
+| `verify` | Ordinary shell step in the exact integration-worktree cwd with inherited environment; no structured stdin or factory-specific payload is defined. Each attempt receives the full configured `verify_timeout_ms`, silently `900000` when omitted. | Exit status is authoritative; stdout and stderr are routed to CLI stderr, informational, and unparsed | Zero means success; non-zero means repository verification failed; no numeric child status, or an exit equal to `verify_unavailable_exit`, means unavailable | Invoked after each newly recorded merge (with `verify_scope: "integration"`, only once every slice is merged) through `observe --repository-verify`, with at most two executions in that merge invocation. The timeout and retry never apply to resolver, slice, or Gate 3 commands. |
 | `publish` | Optional file candidate for the one Step 6 publishing selection. A nonblank inherited `FACTORY_PUBLISHING_COMMAND` selects its exact string; the same variable set empty or to whitespace selects the default; when the variable is unset this entry is selected if present, otherwise the default. A selected nondefault command runs as one shell step in `RUN_REPO` cwd, with no stdin or positional arguments and inherited environment plus exact `PR_BASE`, `FEATURE_BRANCH`, `PR_DRAFT`, `PR_TITLE`, and absolute `PR_BODY_FILE`. | Exit status is authoritative; the last nonempty stdout line must be an absolute HTTPS URL and becomes `PR_URL` | Zero plus that URL is recordable; any other result is indeterminate and parks before `factory pr` | The resolved selection replaces only `gh pr create`, after the factory-owned exact push and post-push identity guard. `factory pr` is unchanged and still records the URL. |
 | `publishing_identity` | No runtime input; read the value `status` reports for the run, recorded at init from `--publishing-identity` or the inherited `FACTORY_PUBLISHING_IDENTITY` | Exact case-sensitive string compared with the observed login | Absent at init refuses before any sandbox exists; mismatch or unobservable identity parks the run | Active at the three mandatory guards below; only a manifest written before 0.8.0 can report `null` and skip them. |
 
@@ -1655,6 +1658,12 @@ Per slice:
    When a merge's tree is byte-identical to the slice commit whose repository verify passed, the
    post-merge verify reuses that result instead of running again, and its evidence names the slice commit
    in `reused_from`; any other merge, such as one after a sibling merged, runs the verify as before.
+   With `verify_scope: "integration"` in `.factory.json`, slice observation does not run `verify` and records
+   `repository_verify` as null; the verify runs once every slice is merged, on the integrated top, instead of on
+   each slice and each intermediate merge. When `verify` exits with the configured `verify_unavailable_exit`,
+   observation keeps the evidence, which is not `review_ready`, and refuses, naming the slice and attempt.
+   That is not a review finding: do not review, reject, or retry the slice. Observe the same attempt again once
+   the verify can run, or park the run for an operator with the refusal as its reason.
 
    `BUILDER_REPORT` is a path and not the report. Write the builder's returned report to
    `BUILDER_REPORT=".factory/$R/artifacts/$SLICE_ID-builder-attempt-$SLICE_ATTEMPT.json"` and pass that path,
@@ -1756,7 +1765,9 @@ Per slice:
    runs that unchanged ordinary shell command in `INTEGRATION_WORKTREE` with inherited environment and
    stdio and writes canonical `evidence/test-verifier.json` against `BRANCH_POINT`. Each execution gets
    the full configured `verify_timeout_ms`, silently `900000` when omitted. No output is captured or
-   parsed. Numeric exit status is authoritative; no numeric child status is canonical `unavailable`.
+   parsed. Numeric exit status is authoritative; no numeric child status is canonical `unavailable`, and so is an
+   exit equal to a configured `verify_unavailable_exit`, whose second execution refuses as `was unavailable twice`.
+   With `verify_scope: "integration"`, a merge, its replay, and a base sync run nothing until every slice is merged.
    An absent config preserves the old response and emits nothing new.
 
    One merge or replay CLI invocation executes attempt 1. `green` succeeds; `failed` reproduces the

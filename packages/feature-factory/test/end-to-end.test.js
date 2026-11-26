@@ -284,7 +284,7 @@ function snapshotCleanupFault(operator, runId) {
 }
 
 // A repository with an integration branch and one slice branched from its head.
-function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], additionalSlices = [], verify = null, sliceVerify = false, verifyTimeout = undefined, bootstrap = undefined, bootstrapTimeout = undefined, bootstrapMarker = null, publish = "true", configBytes = null, maxRetries = null } = {}) {
+function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy = false, paths = ["src/app/"], additionalSlices = [], verify = null, sliceVerify = false, verifyTimeout = undefined, bootstrap = undefined, bootstrapTimeout = undefined, bootstrapMarker = null, publish = "true", configBytes = null, maxRetries = null, verifyConfig = {} } = {}) {
   const operator = mkdtempSync(join(tmpdir(), `ff-e2e-${name}-`));
   git(operator, "init", "-q", "-b", "main");
   git(operator, "config", "user.email", "t@example.com");
@@ -304,7 +304,7 @@ function project(name, { seed = true, testPlan = [PASSING_TEST_COMMAND], legacy 
     const command = typeof verify === "function" ? verify(operator) : verify;
     const config = {
       resolve: "true", verify: sliceVerify ? command : `[ "$(git rev-parse --abbrev-ref HEAD)" != feature ] || { ${command}; }`,
-      publish,
+      publish, ...verifyConfig,
     };
     if (verifyTimeout !== undefined) config.verify_timeout_ms = verifyTimeout;
     if (bootstrap !== undefined) config.bootstrap = typeof bootstrap === "function" ? bootstrap(operator) : bootstrap;
@@ -526,6 +526,46 @@ describe("end to end — a merge is refused through the real CLI", () => {
         }
       } finally { cleanupProject(sv); }
     }
+    // `verify_unavailable_exit` at slice observation: the refusal says the evidence is no finding, the attempt is not
+    // spent, and the same attempt observed again once the verify can run is review_ready. Unconfigured, 75 is a failure.
+    for (const configured of [true, false]) {
+      const up = (operator) => join(operator, "ci-up");
+      const u = project(`slice-unavailable-${configured}`, { sliceVerify: true, verifyConfig: configured ? { verify_unavailable_exit: 75 } : {},
+        verify: (operator) => `node -e "process.exit(require('fs').existsSync('${up(operator)}')?0:75)"` });
+      try {
+        const { basePoint } = buildSlice(u.repo);
+        assert.equal(factory(u.repo, ["slice", RUN, "be-thing", "running", "--worktree", ".", "--branch", "slice", "--now", NOW(2)]).ok, true);
+        const observe = (at) => factory(u.repo, ["observe", RUN, "be-thing", "--worktree", ".", "--base", basePoint,
+          "--attempt", "1", "--test-cmd", PASSING_TEST_COMMAND, "--now", NOW(at)]);
+        const down = observe(3);
+        assert.equal(down.ok, !configured, down.stderr);
+        if (configured) assert.match(down.stderr, /unavailable for slice 'be-thing' attempt 1 \(exit 75, its verify_unavailable_exit\); this is not a review finding/u);
+        assert.equal(JSON.parse(readFileSync(join(u.runDir, "evidence", "be-thing.json"), "utf8")).review_ready, false);
+        assert.deepEqual([runJson(u.runDir).slices[0].status, runJson(u.runDir).slices[0].attempts], ["running", 1]);
+        writeFileSync(up(u.operator), "");
+        assert.equal(observe(4).out.review_ready, true);
+      } finally { cleanupProject(u); }
+    }
+    // `verify_scope: "integration"`: slice observation never runs the verify, and a merge runs it only once every slice
+    // is merged. A second, unmerged slice defers it, replay included; the last merge executes it rather than reusing.
+    for (const [name, additionalSlices, runs] of [
+      ["deferred", [{ id: "be-other", stack: "backend", paths: ["src/other/"], depends_on: [], acceptance: ["AC2"], test_plan: [] }], ""],
+      ["last", [], "x"],
+    ]) {
+      const count = (operator) => join(operator, "verify-count");
+      const s = upToReview(`verify-scope-${name}`, undefined, { sliceVerify: true, additionalSlices, verifyConfig: { verify_scope: "integration" },
+        verify: (operator) => `node -e "require('fs').appendFileSync('${count(operator)}','x')"` });
+      try {
+        assert.equal(JSON.parse(readFileSync(join(s.runDir, "evidence", "be-thing.json"), "utf8")).repository_verify, null, name);
+        const mergeCommit = mergeIntoFeature(s.repo);
+        for (const at of [4, 5]) {
+          const merged = factory(s.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(at)]);
+          assert.equal(merged.ok, true, `${name}: ${merged.stderr}`);
+        }
+        assert.equal(existsSync(count(s.operator)) ? readFileSync(count(s.operator), "utf8") : "", runs, name);
+        assert.equal(existsSync(join(s.runDir, "evidence", "test-verifier.json")), runs !== "", name);
+      } finally { cleanupProject(s); }
+    }
     // A ratified entry that is the configured verify itself runs once and answers both, bootstrap first, executed as
     // argv. A spelling the shell could split differently (two spaces) keeps the two separate runs, as does a builtin
     // that shadows an executable (`test`); a failure answers both;
@@ -604,12 +644,25 @@ describe("end to end — a merge is refused through the real CLI", () => {
       { resolve: "true", verify: "true", max_retries: 5 },
       { resolve: "true", verify: "true", mcp_servers: [] },
       { resolve: "true", verify: "true", mcp_servers: ["trellis", "*honeycomb*"] },
+      { resolve: "true", verify: "true", verify_unavailable_exit: 75, verify_scope: "integration" },
+      { resolve: "true", verify: "true", verify_unavailable_exit: 255, verify_scope: "slice" },
     ]) assert.doesNotThrow(() => parseRepositoryConfig(JSON.stringify(config)));
     assert.deepEqual(parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", mcp_servers: ["trellis"] })).mcpServers, ["trellis"]);
     for (const mcp_servers of ["trellis", [""], ["  "], [7], [null], null, {}]) {
       assert.throws(() => parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", mcp_servers })),
         (error) => error instanceof RepositoryConfigError
           && error.message === "invalid .factory.json: entry 'mcp_servers' must be an array of non-empty strings");
+    }
+    assert.deepEqual([{ verify_unavailable_exit: 75, verify_scope: "integration" }, {}].map((keys) => {
+      const parsed = parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", ...keys }));
+      return [parsed.unavailableExit, parsed.scope];
+    }), [[75, "integration"], [undefined, "slice"]]);
+    for (const [key, value, message] of [
+      ...[0, 256, -1, 2.5, "75", null].map((value) => ["verify_unavailable_exit", value, "an integer from 1 to 255"]),
+      ...["", "every", "Integration", null, 1].map((value) => ["verify_scope", value, "\"slice\" or \"integration\""]),
+    ]) {
+      assert.throws(() => parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", [key]: value })),
+        (error) => error instanceof RepositoryConfigError && error.message === `invalid .factory.json: entry '${key}' must be ${message}`, `${key}=${value}`);
     }
     for (const max_retries of [0, -1, 2.5, "5", null]) {
       assert.throws(() => parseRepositoryConfig(JSON.stringify({ resolve: "true", verify: "true", max_retries })),
@@ -1046,6 +1099,30 @@ describe("end to end — a merge is refused through the real CLI", () => {
       assert.equal(readFileSync(join(retry.runDir, "reviews", "be-thing.json"), "utf8"), review);
       assert.equal(readFileSync(join(retry.runDir, "evidence", "be-thing.json"), "utf8"), sliceEvidence);
     } finally { cleanupProject(retry); }
+
+    // `verify_unavailable_exit` after a merge takes the unavailable path -- a second execution, then orderly
+    // exhaustion that a later replay reconciles -- never the failure refusal. Unconfigured, 75 fails with no retry.
+    for (const [name, configured, upAt, mergedOk, runs] of [
+      ["retried", true, 2, true, "xx"], ["exhausted", true, 3, false, "xx"], ["unconfigured", false, 2, false, "x"],
+    ]) {
+      const count = (operator) => join(operator, "verify-count");
+      const u = upToReview(`verify-unavailable-${name}`, undefined, { verifyConfig: configured ? { verify_unavailable_exit: 75 } : {},
+        verify: (operator) => `node -e "const f=require('fs');f.appendFileSync('${count(operator)}','x');process.exit(f.readFileSync('${count(operator)}','utf8').length<${upAt}?75:0)"` });
+      try {
+        const mergeCommit = mergeIntoFeature(u.repo, { sibling: true });
+        const merge = (at) => factory(u.repo, ["slice", RUN, "be-thing", "merged", "--merge-commit", mergeCommit, "--now", NOW(at)]);
+        const merged = merge(4);
+        assert.equal(merged.ok, mergedOk, `${name}: ${merged.stderr}`);
+        assert.equal(readFileSync(count(u.operator), "utf8"), runs, name);
+        if (name === "unconfigured") assert.match(merged.stderr, /failed after recorded merge [0-9a-f]+ with exit status 75/u);
+        if (name === "exhausted") {
+          assert.equal(merged.stderr.trim(), `factory config entry 'verify' was unavailable twice after recorded merge ${mergeCommit} (exit 75, its verify_unavailable_exit); merged slice remains recorded; stop before advancing.`);
+          assert.equal(runJson(u.runDir).status, "running");
+          assert.equal(merge(5).ok, true, "a later replay executes again once the verify can run");
+          assert.equal(readFileSync(count(u.operator), "utf8"), "xxx");
+        }
+      } finally { cleanupProject(u); }
+    }
 
     const dirty = upToReview("verify-dirty", undefined, {
       verify: (operator) => `node -e "const f=require('fs');f.appendFileSync('${join(operator, "verify-count")}','x');f.writeFileSync('src/app/thing.ts','dirty');setTimeout(()=>{},10000)"`,
