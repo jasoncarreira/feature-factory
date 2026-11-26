@@ -1,6 +1,6 @@
 {
   "name": "prime-agent-feature-factory",
-  "version": "0.14.2",
+  "version": "0.14.3",
   "description": "Prime Agent integration for feature-factory: the feature skill and its install-context script.",
   "type": "module",
   "license": "MIT",
@@ -24,7 +24,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "feature-factory": "0.14.2"
+    "feature-factory": "0.14.3"
   },
   "pi": {
     "skills": [
