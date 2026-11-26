@@ -259,7 +259,7 @@ The optional repository-owned file is `$O/.factory.json`:
 ```
 
 The root must be a JSON object with the two required own properties `resolve` and `verify`,
-plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `bootstrap`,
+plus only the optional own properties `publish`, `pr_draft`, `verify_timeout_ms`, `verify_unavailable_exit`, `verify_scope`, `bootstrap`,
 `bootstrap_timeout_ms`, `max_retries`, and `mcp_servers`. `resolve`, `verify`, `publish`, and `bootstrap` are command strings; every present
 command must be non-empty. `publish` was required and invoked nowhere until this release, so every
 consumer wrote a command that could not run. It is optional now and contributes only the file candidate
@@ -275,8 +275,11 @@ neither timeout shares or consumes the other's budget. A present `max_retries` m
 without `--max-retries`, which still outranks it; omission leaves the default `3`. A present `mcp_servers`
 must be an array of non-empty strings; `init` records it as `run.json` `mcp_servers`, fixed for the life of the
 run, and qualified status reports it (`[]` when absent). The *Project MCP servers* rule says what it changes.
+A present `verify_unavailable_exit` must be an integer from 1 to 255: the exit status by which `verify` says it
+could not run, such as a CI service it waits on being unreachable. A present `verify_scope` must be `"slice"`, the
+default, or `"integration"`. Slice observation and the post-merge verify below say what each changes.
 
-Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; then invalid `mcp_servers`.
+Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `pr_draft`; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; missing or invalid required entries; invalid `publish`; invalid `max_retries`; invalid `mcp_servers`; invalid `verify_unavailable_exit`; then invalid `verify_scope`.
 
 Do not use the obsolete summary “Validation refuses the first matching defect in this order: unreadable or invalid JSON, a non-object root, or unknown keys; invalid `bootstrap`; `bootstrap_timeout_ms` without `bootstrap`; invalid `bootstrap_timeout_ms`; invalid `verify_timeout_ms`; then missing or invalid required entries.” because it omits the earlier `pr_draft` check.
 

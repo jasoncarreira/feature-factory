@@ -21,7 +21,7 @@ export function parseRepositoryConfig(bytes) {
   // not. It is optional now and consumed when present, so the key means what it says either way.
   const requiredKeys = ["resolve", "verify"];
   const optionalCommandKeys = ["publish"];
-  const allowedKeys = [...requiredKeys, ...optionalCommandKeys, "pr_draft", "verify_timeout_ms", "bootstrap", "bootstrap_timeout_ms", "max_retries", "mcp_servers"];
+  const allowedKeys = [...requiredKeys, ...optionalCommandKeys, "pr_draft", "verify_timeout_ms", "verify_unavailable_exit", "verify_scope", "bootstrap", "bootstrap_timeout_ms", "max_retries", "mcp_servers"];
   if (!config || typeof config !== "object" || Array.isArray(config)
     || Object.keys(config).some((keyName) => !allowedKeys.includes(keyName))) {
     throw new RepositoryConfigError("invalid .factory.json");
@@ -67,9 +67,19 @@ export function parseRepositoryConfig(bytes) {
     || config.mcp_servers.some((name) => typeof name !== "string" || !name.trim()))) {
     throw new RepositoryConfigError("invalid .factory.json: entry 'mcp_servers' must be an array of non-empty strings");
   }
+  // Instruction, not enforcement: both decide when `verify` runs and what a run does while it cannot; neither
+  // can make an unrun verify read green. A present value is still checked, for the same reason as `max_retries`.
+  const unavailable = config.verify_unavailable_exit;
+  if (Object.hasOwn(config, "verify_unavailable_exit") && !(Number.isSafeInteger(unavailable) && unavailable >= 1 && unavailable <= 255)) {
+    throw new RepositoryConfigError("invalid .factory.json: entry 'verify_unavailable_exit' must be an integer from 1 to 255");
+  }
+  if (Object.hasOwn(config, "verify_scope") && !["slice", "integration"].includes(config.verify_scope)) {
+    throw new RepositoryConfigError("invalid .factory.json: entry 'verify_scope' must be \"slice\" or \"integration\"");
+  }
   const parsed = { command: config.verify, timeoutMs: config.verify_timeout_ms ?? DEFAULT_REPOSITORY_VERIFY_TIMEOUT_MS,
     prDraft: config.pr_draft ?? true, ...(Object.hasOwn(config, "max_retries") ? { maxRetries: config.max_retries } : {}),
-    ...(Object.hasOwn(config, "mcp_servers") ? { mcpServers: config.mcp_servers } : {}) };
+    ...(Object.hasOwn(config, "mcp_servers") ? { mcpServers: config.mcp_servers } : {}),
+    ...(Object.hasOwn(config, "verify_unavailable_exit") ? { unavailableExit: unavailable } : {}), scope: config.verify_scope ?? "slice" };
   return hasBootstrap ? { ...parsed, bootstrapCommand: config.bootstrap,
     bootstrapTimeoutMs: config.bootstrap_timeout_ms ?? DEFAULT_BOOTSTRAP_TIMEOUT_MS } : parsed;
 }

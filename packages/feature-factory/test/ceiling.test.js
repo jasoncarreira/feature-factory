@@ -1412,7 +1412,9 @@ describe("ceiling — scope cannot grow without editing this file", () => {
     // status, so every driver can name the project's MCP servers in dispatch prompts (#407).
     // 6682 -> 6719: a slice whose ratified test is the configured `verify` itself runs it once for both, as argv, when
     // `sh` would run the same executable.
-    assert.equal(total, 6719, "a slice test that is the verify runs once: 6719 production lines");
+    // 6719 -> 6745: `.factory.json` `verify_unavailable_exit` (a verify that could not run spends no attempt and takes
+    // the unavailable path after a merge) and `verify_scope: "integration"` (one verify, once every slice is merged).
+    assert.equal(total, 6745, "verify can run on CI: 6745 production lines");
     // **How this number may move.** An operator authorization recorded in the issue body, written before the
     // run starts, permits the raise to land in the same change as the work it serves. The requirement was never
     // that a raise occupy its own pull request -- separation was a proxy for deliberateness, and the issue body
